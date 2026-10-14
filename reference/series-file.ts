@@ -1,4 +1,4 @@
-// Reference implementation of the series-file encryption in PROPOSAL.md §6.
+// Reference implementation of the series-file encryption in PROPOSAL.md §9.
 // WebCrypto only; runs in Bun, Deno, Node 20+ and browsers.
 
 export const RECORD_PLAINTEXT = 65520; // bytes of plaintext per full record
