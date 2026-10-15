@@ -65,14 +65,14 @@ def run_case(fmt: str, case: dict, template: str, timeout: float) -> dict:
         if p.returncode != 0:
             res.update(outcome="fail", reason=f"exit {p.returncode}")
             return res
-        oracle = np.load(npy)
-        data = out.read_bytes() if out.exists() else b""
-        if len(data) != oracle.nbytes:
-            res.update(outcome="fail", reason=f"wrote {len(data)} bytes, expected {oracle.nbytes} "
+        oracle = np.load(npy, mmap_mode="r")
+        size = out.stat().st_size if out.exists() else 0
+        if size != oracle.nbytes:
+            res.update(outcome="fail", reason=f"wrote {size} bytes, expected {oracle.nbytes} "
                                               f"({oracle.dtype} {list(oracle.shape)})")
             return res
-        cand = np.frombuffer(data, dtype=oracle.dtype).reshape(oracle.shape)
-        cmp = compare(cand, oracle, int(case["max_abs"]))
+        cand = np.memmap(out, dtype=oracle.dtype, mode="r", shape=oracle.shape) if size else np.zeros(oracle.shape, oracle.dtype)
+        cmp = compare(cand, oracle, case["max_abs"])
         res.update(cmp)
         res["outcome"] = "pass" if cmp["ok"] else "fail"
         return res

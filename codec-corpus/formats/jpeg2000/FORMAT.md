@@ -2,7 +2,7 @@
 
 **Crate:** `shl-codec-jpeg2000`
 
-**Specifications:** ITU-T T.800 | ISO/IEC 15444-1 (Part 1 only); DICOM PS3.5 A.4.4 (raw codestream; a JP2 wrapper occasionally appears in the wild)
+**Specifications:** ITU-T T.800 | ISO/IEC 15444-1; ITU-T T.801 | ISO/IEC 15444-2 Annex J (multiple component transformations, for .92 and .93); DICOM PS3.5 8.2.4 and A.4.4 (raw codestream; a JP2 wrapper occasionally appears in the wild)
 
 ## Corpus
 
@@ -10,6 +10,8 @@
 |---|---|
 | `1.2.840.10008.1.2.4.90` | 20 |
 | `1.2.840.10008.1.2.4.91` | 17 |
+| `1.2.840.10008.1.2.4.92` | 4 |
+| `1.2.840.10008.1.2.4.93` | 3 |
 
 Sources: generated 18, pydicom 19. Multi-frame cases: 3. Ground truth from seeds: 9.
 
@@ -174,6 +176,51 @@ The cases pass today only because `max_abs` is 215–220 (the pylibjpeg vs openj
 
 `idc-j2kr-mono2-u16of16-*-rarecyte-*` (four cases) use 33 quality layers, and hayro 0.4.1 capped layers at 32 ("failed to parse COD marker"). The cap has no other basis: layers are counted in a `u8`. Vendored hayro patch 1 raises it to 255, and all four cases now pass exactly. Regression test `thirty_three_quality_layers`. The standard allows up to 65,535 layers; a codestream with more than 255 is refused as invalid.
 
+## JPEG 2000 Part 2 multi-component (.92, .93)
+
+DICOM allows only the Annex J multiple component transformations under these syntaxes (PS3.5 A.4.4). The codestream's Rsiz announces the capability, COD's SGcod is 2 (array-based), and CBD, MCT, MCC and MCO marker segments describe the transformation. Vendored hayro patch 11 implements it ([vendor/README.md](../../../codecs/shl-codec-jpeg2000/vendor/README.md)).
+
+**Decoded:**
+- array-based decorrelation and dependency transformations, reversible (integer) and irreversible (f32);
+- offset arrays, 16/32-bit integer and 32/64-bit float array elements, MCT and MCC series (Zmct, Zmcc);
+- several MCO stages, component collections with permuted input and output lists, null components;
+- output components from CBD, with no DC level shift (Annex J);
+- reduced-resolution decode: the transformation is applied to the reduced components.
+
+**Refused as unsupported (exit 3):** the wavelet-based transformation (J.3.2; no sample exists), any other Part 2 capability bit in Rsiz, these marker segments in a tile-part header, subsampled components, Part 2 inside a JP2/JPX wrapper. A Part 1 codestream (Rsiz without the capability) that carries these marker segments is refused too.
+
+**Volumes.** PS3.5 A.4.4 lets the frames of a multi-frame image be the components of one codestream, or of one codestream per component collection, each in its own fragments. `decode_frames` decodes such a codestream into its frames, and `codestreams` groups fragments into codestreams. When a .92/.93 file has fewer codestreams than frames, `shl-dicom-decode` decodes it this way, whole; a frame range is cut from the whole volume.
+
+**No reference decoder exists.** OpenJPEG 2.5.4 and Grok refuse a COD with SGcod above 1 ("Invalid multiple component transformation"), including the codestreams OpenJPEG's own encoder writes. That encoder (`opj_set_MCT`) codes wrong components: its custom transform writes integers into the float buffer of the 9/7 path. `opj_compress -m` is not in its option list. Kakadu implements Annex J, but its demo binaries may not be used beyond demonstration, so they are not used here.
+
+**Cases** are made by [`scripts/sources/j2k_part2.py`](../../scripts/sources/j2k_part2.py) from pydicom test images (MIT):
+- the forward transformations of Annex J are written there;
+- OpenJPEG codes the transformed components as plain signed components (`j2k_part2/opj_mc_enc.c`);
+- the script adds the Part 2 marker segments to the main header.
+
+The reversible (.92) cases take the seed as ground truth. The reference `j2k-part2` in `ref_decode.py` strips the Part 2 marker segments, decodes the components with OpenJPEG, and applies Annex J in numpy, separately from the Rust code. It reproduces every reversible seed exactly. For the irreversible cases it is the oracle.
+
+| Case | Covers |
+|---|---|
+| `gen-part2-US1_UNCR-rev-decorrelation` | reversible decorrelation (SERM steps), MCT series, offsets |
+| `gen-part2-SC_rgb_16bit-rev-dependency` | reversible dependency, 16-bit RGB, 32-bit and f64 arrays |
+| `gen-part2-SC_rgb-two-stages` | two stages, permuted collections, an offset-only collection, MCC series |
+| `gen-part2-CT_small-rev-offset` | signed monochrome, offset only |
+| `gen-part2-US1_UNCR-irr-decorrelation`, `-cr20` (.93) | irreversible decorrelation (YCbCr), 9/7, all bits and 20:1 |
+| `gen-part2-SC_rgb-irr-dependency` (.93) | irreversible dependency, f32 and f64 arrays |
+
+`--volumetric` also makes `gen-part2-emri_small-volume` (10 frames, one codestream) and `gen-part2-emri_small-volume-2-codestreams` (two collections). Both are registered and pass exactly.
+
+**Ruling: max_abs 2 on the irreversible decorrelation cases.** The reference transforms OpenJPEG's components after they are rounded to integers. Rounding each component by up to 0.5, times the 1.402 and 1.772 coefficients of the inverse matrix, moves an output by up to 2. Our decoder transforms the unrounded components. 3.8% (all bits) and 6.4% (20:1) of samples differ, nearly all by 1. The components themselves agree with OpenJPEG within 1.
+
+**Interpretation of the standard.** The text of T.801 (06/2021) has misprints in the reversible equations. The decoder follows the normative inverse equations:
+- J-4/J-5: subtract floor(S / t) from the adjusted component, and negate at the last step by the sign of t_N(N−1);
+- J-15: add floor(S_i / t_ii);
+- J-5: the sum leaves out the adjusted component;
+- J-11: default offsets of 0, not 1.
+
+The forward equations the generator uses are their exact inverses, and round-trip tests check both.
+
 ## STATUS
 
 Phase 2, 2026-10-14; reduced-resolution decode and this update 2026-10-15.
@@ -186,7 +233,7 @@ cd ../codec-corpus && uv run python scripts/check.py --name j2k --format jpeg200
   --candidate "../codecs/target/j2k/release/shl-dicom-decode {in} {out}" --quiet
 ```
 
-**jpeg2000: 167/167 pass** (2026-10-15; the table below is the October 14 count of 166), and no case is disputed. By source:
+**jpeg2000: 177/177 pass** (2026-10-15, with the 9 Part 2 cases; the table below is the October 14 count of 166), and no case is disputed. By source:
 
 | Source | Cases |
 |---|---|
@@ -255,9 +302,15 @@ The `decode_scaled` target (2026-10-15) drives `decode_frame_scaled` through bot
 | 3 (7 min, 4 workers) | – | **4**, all on hayro's reduced path: an empty tile at the reduced level, a tile-part COD with fewer levels than the reduction, and subsampled components indexed from the full-size tile origin (fixed in patch 10) | 0 | 0 |
 | 4 (10 min, 4 workers, after the fixes) | about 446,000 (3,833 edges) | 0 | 0 | 0 |
 
+Part 2 (2026-10-15): bit 6 of the first byte makes the `decode` target call `decode_frames` with one sample per pixel, so a codestream may hold several frames. Seeds added: the Part 2 corpus codestreams and the `tests/data/part2-*` fixtures.
+
+| Run | Execs | Crashes | Timeouts | OOMs |
+|---|---|---|---|---|
+| 5 (10 min, 4 workers) | 194,246 (3,469 edges) | 0 | 0 | 0 |
+
 A first attempt also stopped on an overflow in the harness itself (SIZ width × height × components in `u64`), fixed with saturating multiplication in both targets. The four inputs are `tests/data/reduced-fuzz-*.bin`, regression test `reduced_decode_fuzz_findings_do_not_panic`.
 
-**Checks.** `cargo test` passes: 14 unit tests and 5 regression tests in `tests/regressions.rs`. The two corpus-backed regression tests compare with the oracle and skip if frames are not extracted. Also clean:
+**Checks.** `cargo test` passes: 14 unit tests, 5 regression tests in `tests/regressions.rs`, 9 Part 2 tests in `tests/part2.rs`, and hayro's own tests (7 of them for patch 11). The two corpus-backed regression tests compare with the oracle and skip if frames are not extracted. Also clean:
 - `cargo clippy -p shl-codec-jpeg2000 -p shl-codec-htj2k -p hayro-jpeg2000 --all-targets -D warnings`;
 - `cargo build --target wasm32-unknown-unknown` for both crates, with rustup stable 1.97.
 
@@ -289,6 +342,7 @@ Current figures are in [htj2k PERF.md, Phase 2d](../htj2k/PERF.md#phase-2d-ht-de
 - **POC** (progression order change) is refused as unsupported (exit 3) by hayro 0.4.1, and so is **RGN** after patch 3. Upstream master supports both; neither appears in the corpus.
 - **Tile-level MCT:** colour is decided from the main-header COD. Hayro also applies the first tile's MCT flag to every tile. A codestream whose tiles differ in MCT would be wrong. This is legal, but none is known.
 - **Subsampling** other than 4:2:2 and 4:2:0 chroma, or with an odd image offset: exit 3.
+- **Part 2:** see [its section](#jpeg-2000-part-2-multi-component-92-93) for what is refused.
 - **Precision above 16 bits** is refused: exit 3 with Bits Allocated 32, exit 2 when it exceeds Bits Allocated.
 - **Silent truncation:** in lenient mode, hayro stops reading a tile's packets at the first malformed packet header and returns what it has, without an error, as OpenJPEG does with truncated codestreams. That is why the stuffed-bit bug was silent. A strict-mode decode would report such errors, but would also refuse files the references read.
 - **Reduced resolution:** see the Unsupported list in [Reduced-resolution decode](#reduced-resolution-decode).

@@ -13,7 +13,7 @@ The results below are from `check.py --name quirks`, run against `shl-dicom-deco
 | Fail | 18 |
 | Unsupported (exit 3) | 2 |
 | Crash or timeout | 0 |
-| Not registered | 33 (see [Files not registered](#files-not-registered)) |
+| Not registered | 13 (see [Files not registered](#files-not-registered)) |
 
 Of the 18 failures:
 - 5 are oracle errors where our decoder is right: [Oracle disputes](#oracle-disputes).
@@ -88,27 +88,16 @@ The two `oob-monochrome` Orthanc files (Rows × Columns 46341² and 65535² with
 
 | What it is | File (case id it would have) | Transfer syntax | Why skipped | Our decoder today |
 |---|---|---|---|---|
-| H.264 video | `ext-orthanc-Issue42`, `ext-fodicom-test_720`, `ext-issue-fo-dicom_1216-…845` | .4.102 | not in TRANSFER_SYNTAXES | exit 3, "unsupported: transfer syntax 1.2.840.10008.1.2.4.102" |
-| MPEG-2 video | `ext-fodicom-ETIAM_video_002` | .4.100 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| Retired JPEG full progression | `ext-cs3d-CTImage.dcm_JPEGProcess10_12…` | .4.55 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| Retired JPEG spectral selection | `ext-cs3d-CTImage.dcm_JPEGProcess6_8…` | .4.53 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| JPEG XL lossless (grey and colour) | `ext-cs3d-*JPEGXLLossless*` | .4.110 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| JPEG XL JPEG recompression, multi-frame | `ext-dcm4che-will-jxl` | .4.111 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| Encapsulated Uncompressed | `ext-cs3d-CTImage.dcm_EncapsulatedUncompressed…` | .1.98 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| Deflated Image Frame Compression (grey and RGB) | `ext-cs3d-*DeflatedImageFrameCompression*` | .8.1 | not in TRANSFER_SYNTAXES | exit 3, UID only |
-| GE private implicit VR big endian | `ext-gdcm-GE_DLX-8-MONO2-PrivateSyntax`, `ext-gdcm-PrivateGEImplicitVRBigEndianTransferSyntax16Bits` | 1.2.840.113619.5.2 | not in TRANSFER_SYNTAXES | exit 2, "data set is implicit VR but the transfer syntax says explicit VR". This message is misleading: it should name the GE private syntax (census tier 2). |
+| H.264 video | `ext-orthanc-Issue42`, `ext-fodicom-test_720`, `ext-issue-fo-dicom_1216-…845` | .4.102 | not in TRANSFER_SYNTAXES | exit 3, "MPEG-4 AVC / H.264 video (1.2.840.10008.1.2.4.102) is not supported; …" |
+| MPEG-2 video | `ext-fodicom-ETIAM_video_002` | .4.100 | not in TRANSFER_SYNTAXES | exit 3, "MPEG-2 video (Main Profile / Main Level) … is not supported; …" |
 | Elscint private compression (PMSCT_RLE1, lossless Rice) | `ext-gdcm-ELSCINT1_PMSCT_RLE1`, `ext-gdcm-ELSCINT1_LOSSLESS_RICE`, `ext-orthanc-2020-09-12-ELSCINT1-PMSCT_RLE1` | .1.2.1 | no (7FE0,0010); pixels are in private tag (07A1,100A) | exit 2, "no Pixel Data". This could name the Elscint private compression. |
-| Float Pixel Data parametric map | `ext-cs3d-paramap-float` | .1.2.1 | no (7FE0,0010) | exit 2, "missing Bits Stored". Float Pixel Data has no Bits Stored (pydicom #2135); census tier 2. |
-| ACR-NEMA 1.0/2.0 or no Part 10 meta | `ext-gdcm-CR-MONO1-10-chest`, `-FUJI-10-MONO1-ACR_NEMA_2`, `-TOSHIBA_MRT150-16-MONO2-ACR_NEMA_2`, `-US-IRAD-NoPreambleStartWith0003`, `-KODAK-12-MONO1-Odd_Terminated_Sequence`, `-MR_ELSCINT1_00e1_1042_SQ_feff_00e0_Item` | none | no Transfer Syntax UID; `register` reads `file_meta.TransferSyntaxUID` | exit 0 (decoded; no oracle to compare against) |
-| ACR-NEMA without Photometric Interpretation | `ext-gdcm-SIEMENS_GBS_III-16-ACR_NEMA_1.acr`, `ext-gdcm-LIBIDO-24-ACR_NEMA-Rectangle` | none | as above | exit 2, "missing Photometric Interpretation". ACR-NEMA had no such element; MONOCHROME2 is the usual default. |
-| No meta, Bits Allocated 12 | `ext-fodicom-GH340` | none | as above | exit 2, "Bits Allocated 12" |
 | JPEG with Rows/Columns empty or missing | `ext-gdcm-JPEGNote_empty`, `ext-gdcm-JPEGNote_missing` | .4.50 | `describe()` needs Rows | exit 2, "missing Columns". GDCM reads the size from the JPEG header. |
 | Encapsulated Pixel Data without a closing delimiter | `ext-issue-dicom-rs_607-Anonymised.dic` (dicom-rs PR #607) | .4.70 | pydicom finds no Pixel Data | exit 0 (decoded; dicom-rs supports this too) |
 | CP-246 undefined-length SQ as UN, big-endian items | `ext-fodicom-GH177_…_BigEndian_undefined_length` | unreadable by pydicom | — | exit 0 |
 | Bad private sequence | `ext-fodicom-GH626` | .1.2 | pydicom finds no Pixel Data | exit 2, "truncated: needed 337256453 bytes" |
 | Truncated file with multi-valued Rows | `ext-dcm4che-3gb-bulk-data-truncated` | .1.2.1 | `describe()` fails | exit 2, "truncated" (no large allocation) |
 
-`register` cannot take a file without a Part 10 meta, yet the CLI supports bare data sets. A coordinator change is needed to test them: `register` and `ref_decode` would need an implicit-LE guess, as pydicom's `force=True` reader makes. Every unsupported-syntax message gives only the UID. The census tier 3 asks for a message that names the encoding ("MPEG-2 video", "JPEG XL", …).
+Files without a Part 10 meta, Float Pixel Data, the GE private syntax, Encapsulated Uncompressed, Deflated Image Frame Compression, the retired JPEG processes and JPEG XL used to be listed here; they are now registered and pass (formats/uncompressed/FORMAT.md rules 16–19, jpeg-dct, jpeg-xl). A refused syntax is named in the message ("MPEG-2 video …").
 
 ## Where the files came from
 

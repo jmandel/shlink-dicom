@@ -8,6 +8,7 @@
 //! `jdcolor.c`.
 
 use crate::bits::{extend, BitReader};
+use crate::coef::{self, CoefPlane};
 use crate::huffman::HuffTable;
 use crate::idct;
 use crate::markers::{Frame, Scan, Tables, ZIGZAG};
@@ -45,6 +46,12 @@ pub(crate) fn block_sizes(f: &Frame, scale_log2: u8) -> Vec<usize> {
 
 pub(crate) struct DctDecoder<T> {
     planes: Vec<Plane<T>>,
+    /// Coefficient-buffered frames (progressive, arithmetic, hierarchical): the coefficients,
+    /// transformed in `finish` (or by `hier`). None for sequential Huffman frames, whose blocks
+    /// are transformed as they are decoded.
+    pub(crate) coefs: Option<Vec<CoefPlane>>,
+    /// Quantisation tables latched at each component's first scan (buffered frames).
+    pub(crate) latched: Vec<Option<[u16; 64]>>,
     /// Output scale is 1/2^scale_log2 (0 for a full decode).
     scale_log2: u8,
     /// libjpeg's post-IDCT range-limit table, indexed by `value & (len - 1)`.
@@ -55,18 +62,24 @@ pub(crate) struct DctDecoder<T> {
 }
 
 impl<T: Sample> DctDecoder<T> {
-    pub(crate) fn new(f: &Frame, scale_log2: u8) -> Result<Self> {
+    /// `buffered`: keep coefficients until `finish` (needed by every process except sequential
+    /// Huffman). `samples`: allocate the sample planes (false for hierarchical frames, which
+    /// `hier` reconstructs from the coefficients).
+    pub(crate) fn new(f: &Frame, scale_log2: u8, buffered: bool, samples: bool) -> Result<Self> {
         let (mx, my) = f.mcus(8);
         let mut planes = Vec::with_capacity(f.comps.len());
         for (c, bs) in f.comps.iter().zip(block_sizes(f, scale_log2)) {
             let stride = mx * c.h * bs;
             let rows = my * c.v * bs;
-            let n = stride.checked_mul(rows).ok_or_else(|| invalid("image too large"))?;
+            let n = if samples { stride.checked_mul(rows).ok_or_else(|| invalid("image too large"))? } else { 0 };
             planes.push(Plane { data: vec![T::default(); n], stride, quant: None, bs });
         }
+        let coefs = if buffered { Some(coef::planes(f)?) } else { None };
         let max: i32 = (1 << f.precision) - 1;
         Ok(Self {
             planes,
+            coefs,
+            latched: vec![None; f.comps.len()],
             scale_log2,
             range: idct::range_table(max),
             pass1_bits: if f.precision == 8 { 2 } else { 1 },
@@ -76,6 +89,17 @@ impl<T: Sample> DctDecoder<T> {
     }
 
     pub(crate) fn decode_scan(&mut self, data: &[u8], scan: &Scan, t: &Tables, f: &Frame) -> Result<()> {
+        if let Some(coefs) = self.coefs.as_mut() {
+            for sc in &scan.comps {
+                if self.latched[sc.index].is_none() {
+                    // libjpeg latches the quantisation table at the component's first scan.
+                    let tq = f.comps[sc.index].tq;
+                    self.latched[sc.index] =
+                        Some(t.quant[tq].ok_or_else(|| invalid("component uses an undefined quantisation table"))?);
+                }
+            }
+            return coef::decode_scan(coefs, data, scan, t, f);
+        }
         // At 1/8 with every component on 1×1 blocks only DC values are used, so AC coefficients
         // are decoded (they must be, to find the next block) but not stored.
         if scan.comps.iter().all(|sc| self.planes[sc.index].bs == 1) {
@@ -178,7 +202,32 @@ impl<T: Sample> DctDecoder<T> {
         }
     }
 
-    pub(crate) fn finish(self, f: &Frame, t: &Tables, photometric: Photometric, bps: usize) -> Result<Image> {
+    /// Inverse-transform every buffered block into the sample planes.
+    fn transform_buffered(&mut self, f: &Frame, t: &Tables) {
+        let Some(coefs) = self.coefs.take() else { return };
+        for (ci, cp) in coefs.iter().enumerate() {
+            // A component no scan included keeps zero coefficients (mid-grey, as libjpeg).
+            let q = self.latched[ci].or(t.quant[f.comps[ci].tq]).unwrap_or([0; 64]).map(i32::from);
+            let bs = self.planes[ci].bs;
+            let mut blk = [0i32; 64];
+            for by in 0..cp.bh {
+                for bx in 0..cp.bw {
+                    let Some(b) = cp.block(bx, by) else { continue };
+                    let mut has_ac = false;
+                    for (o, &c) in blk.iter_mut().zip(b.iter()) {
+                        *o = i32::from(c);
+                    }
+                    for &c in &b[1..] {
+                        has_ac |= c != 0;
+                    }
+                    self.idct_into(ci, has_ac, &blk, &q, bx * bs, by * bs);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn finish(mut self, f: &Frame, t: &Tables, photometric: Photometric, bps: usize) -> Result<Image> {
+        self.transform_buffered(f, t);
         let s = self.scale_log2;
         // libjpeg's output size: ceil(X · min_size / 8), which is ceil(X / 2^s).
         let (w, h) = (f.width.div_ceil(1 << s), f.height.div_ceil(1 << s));
@@ -200,6 +249,25 @@ impl<T: Sample> DctDecoder<T> {
         // not convert again even if the dataset says YBR (Adobe transform 0 overrides the label).
         Ok(Image { width: w, height: h, components: n, data: sink.into_data(), rgb: n == 3, retry_cornell: false, bad_codes: 0 })
     }
+}
+
+/// Upsample, colour-convert and output a hierarchical image whose components are already
+/// reconstructed: `comps[ci]` is component `ci` of `f` at its `comp_size`, clamped.
+pub(crate) fn render<T: Sample>(f: &Frame, comps: Vec<Vec<T>>, t: &Tables, photometric: Photometric, bps: usize) -> Result<Image> {
+    let n = f.comps.len();
+    let planes: Vec<Plane<T>> = comps
+        .into_iter()
+        .enumerate()
+        .map(|(ci, data)| Plane { data, stride: f.comp_size(ci).0, quant: None, bs: 8 })
+        .collect();
+    let ups: Vec<Upsampler> = (0..n).map(|ci| Upsampler::new(f, ci)).collect::<Result<_>>()?;
+    let (w, h) = (f.width, f.height);
+    let max: i32 = (1 << f.precision) - 1;
+    let ycc = n == 3 && is_ycc(t, photometric);
+    let mut sink = Sink::new(w, h, n, bps)?;
+    let job = RowJob { planes: &planes, ups: &ups, w, h, ycc, bps, max };
+    Kernels::detect().rows(&job, &mut sink);
+    Ok(Image { width: w, height: h, components: n, data: sink.into_data(), rgb: n == 3, retry_cornell: false, bad_codes: 0 })
 }
 
 /// Upsampling, colour conversion and output of every row: the second half of decoding.

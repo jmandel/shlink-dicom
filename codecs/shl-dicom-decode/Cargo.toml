@@ -18,4 +18,5 @@ shl-codec-jpeg = { path = "../shl-codec-jpeg" }
 shl-codec-jpeg-ls = { path = "../shl-codec-jpeg-ls" }
 shl-codec-jpeg2000 = { path = "../shl-codec-jpeg2000" }
 shl-codec-htj2k = { path = "../shl-codec-htj2k" }
+shl-codec-jpegxl = { path = "../shl-codec-jpegxl" }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

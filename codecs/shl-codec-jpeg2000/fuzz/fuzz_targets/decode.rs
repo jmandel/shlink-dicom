@@ -4,7 +4,9 @@
 //!   the wrapped decoder;
 //! - low bit 1: a fixed 64x64 frame, so any SIZ, including oversize ones, meets the header
 //!   check with a mismatch;
-//! - the other bits pick Bits Allocated, Pixel Representation and the photometric.
+//! - bits 1-5 pick Bits Allocated, Pixel Representation and the photometric;
+//! - bit 6: `decode_frames` with one sample per pixel, so a JPEG 2000 Part 2 codestream may
+//!   hold several frames (its components).
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use shl_codec_common::{FrameInfo, Photometric};
@@ -39,7 +41,12 @@ fuzz_target!(|data: &[u8]| {
         planar_configuration: 0,
         transfer_syntax: String::new(),
     };
-    if let Ok(f) = shl_codec_jpeg2000::decode_frame(cs, &info) {
+    if sel & 0x40 != 0 {
+        let info = FrameInfo { samples_per_pixel: 1, ..info };
+        if let Ok((n, f)) = shl_codec_jpeg2000::decode_frames(cs, &info) {
+            assert_eq!(Some(f.data.len()), info.frame_bytes().map(|b| b * n));
+        }
+    } else if let Ok(f) = shl_codec_jpeg2000::decode_frame(cs, &info) {
         assert_eq!(Some(f.data.len()), info.frame_bytes());
     }
 });

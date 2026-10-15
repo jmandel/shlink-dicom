@@ -18,7 +18,7 @@ source record and a quirk tag. Files whose transfer syntax is outside common.TRA
 that pydicom cannot read as Part 10 (no Transfer Syntax UID), are not registered; they are listed
 in skipped.json next to the cache for the report.
 
-Usage:  uv run python scripts/sources/quirks.py [--cache DIR] [--only SOURCE]
+Usage:  uv run python scripts/sources/quirks.py [--cache DIR] [--only SOURCE] [--id CASE_ID ...]
 """
 
 from __future__ import annotations
@@ -212,6 +212,7 @@ CASES: list[tuple[str, str, str, list[str]]] = [
     ("gdcm", "US-IRAD-NoPreambleStartWith0003.dcm", "no preamble, starts with group 0003", ["no-meta"]),
     ("gdcm", "TOSHIBA_MRT150-16-MONO2-ACR_NEMA_2.dcm", "ACR-NEMA 2.0 file (Toshiba)", ["acr-nema"]),
     ("gdcm", "LIBIDO-24-ACR_NEMA-Rectangle.dcm", "ACR-NEMA 24-bit Libido file", ["acr-nema"]),
+    ("gdcm", "gdcm-ACR-LibIDO.acr", "ACR-NEMA LIBIDO file: Rows and Columns stored swapped", ["acr-nema"]),
     ("gdcm", "MR_ELSCINT1_00e1_1042_SQ_feff_00e0_Item.dcm", "byte-swapped item tag (FEFF,00E0) in an Elscint SQ, no meta", ["no-meta"]),
     # ---------------- pylibjpeg-data ----------------
     ("pylibjpeg", "ljdata/ds/JPEG2000Lossless/966.dcm", "J2K with an invalid COM marker mid-codestream (pydicom #966)", ["j2k-bad-marker"]),
@@ -381,6 +382,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", type=Path, default=Path.home() / ".cache" / "shl-quirks")
     ap.add_argument("--only")
+    ap.add_argument("--id", action="append", help="register only these case ids (repeatable)")
     a = ap.parse_args()
     import pydicom
 
@@ -392,6 +394,8 @@ def main() -> None:
             continue
         lp = local_path(a.cache, src, path)
         cid = case_id(src, path)
+        if a.id and cid not in a.id:
+            continue
         if not lp.exists():
             skipped.append({"id": cid, "path": str(lp), "reason": "not downloaded", "quirk": quirk})
             continue
@@ -424,6 +428,8 @@ def main() -> None:
         save_cases(fmt, [entry])
         registered.append({"id": cid, "format": fmt})
         print(f"{fmt:14} {cid}")
+    if a.id:
+        return   # a partial run leaves the full run's lists alone
     (a.cache / "skipped.json").write_text(json.dumps(skipped, indent=2) + "\n")
     (a.cache / "registered.json").write_text(json.dumps(registered, indent=2) + "\n")
     print(f"registered {len(registered)}, skipped {len(skipped)} (see {a.cache / 'skipped.json'})")

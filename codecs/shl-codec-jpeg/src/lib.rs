@@ -1,19 +1,26 @@
-//! JPEG decoder for DICOM: baseline and extended DCT (8 and 12-bit, Huffman; T.81 processes 1, 2, 4)
-//! and lossless (process 14, selection values 1–7, 2–16 bits, point transform).
+//! JPEG decoder for DICOM: every process of ITU-T T.81. Baseline and extended DCT (8 and 12-bit),
+//! spectral selection and full progression, lossless (selection values 1–7, 2–16 bits, point
+//! transform), Huffman or arithmetic coding, and hierarchical images (DHP/EXP, differential frames).
 //!
 //! Owned by the jpeg format agent; see codec-corpus/AGENTS.md and codec-corpus/formats/jpeg-*/.
 //! The DCT path reproduces IJG libjpeg's default decoder (`jidctint` integer IDCT, fancy upsampling,
-//! fixed-point YCbCr→RGB tables) so output matches dcmtk and gdcm.
+//! fixed-point YCbCr→RGB tables) so output matches dcmtk, gdcm and libjpeg-turbo. Sequential Huffman
+//! frames are transformed block by block as they are decoded (`dct`); progressive, arithmetic and
+//! hierarchical frames first fill a coefficient buffer (`coef`, `phuff`, `arith`, `hier`).
 // Unsafe code is confined to `simd.rs` (the AVX2 dispatch call); see its module docs.
 #![deny(unsafe_code)]
 
+mod arith;
 mod bits;
+mod coef;
 mod dct;
+mod hier;
 mod huffman;
 mod idct;
 mod lossless;
 mod markers;
 mod out;
+mod phuff;
 mod simd;
 
 /// The corpus loader shared with `tests/` (used by `simd::tests`).

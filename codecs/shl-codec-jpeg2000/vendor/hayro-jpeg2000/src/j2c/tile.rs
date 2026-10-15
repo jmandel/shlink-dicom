@@ -28,6 +28,8 @@ pub(crate) struct Tile<'a> {
     pub(crate) progression_order: ProgressionOrder,
     pub(crate) num_layers: u8,
     pub(crate) mct: bool,
+    /// shl patch 11: the SGcod multiple component transformation byte.
+    pub(crate) mct_type: u8,
 }
 
 /// A tile part where packet headers and packet data are interleaved.
@@ -118,6 +120,7 @@ impl<'a> Tile<'a> {
             component_infos: header.component_infos.clone(),
             progression_order: header.global_coding_style.progression_order,
             mct: header.global_coding_style.mct,
+            mct_type: header.global_coding_style.mct_type,
             num_layers: header.global_coding_style.num_layers,
         }
     }
@@ -210,6 +213,7 @@ fn parse_tile_part<'a>(
                 let cod = codestream::cod_marker(reader).ok_or(MarkerError::ParseFailure("COD"))?;
 
                 tile.mct = cod.mct;
+                tile.mct_type = cod.mct_type;
                 tile.num_layers = cod.num_layers;
                 tile.progression_order = cod.progression_order;
 
@@ -791,6 +795,7 @@ mod tests {
             tile_x_offset: 0,
             tile_y_offset: 0,
             component_sizes: vec![component_size_info_0, component_size_info_1],
+            capabilities: 0,
             x_shrink_factor: 1,
             y_shrink_factor: 1,
             x_resolution_shrink_factor: 1,
@@ -811,6 +816,7 @@ mod tests {
                 progression_order: ProgressionOrder::LayerResolutionComponentPosition,
                 num_layers: 0,
                 mct: false,
+                mct_type: 0,
                 component_parameters: CodingStyleComponent {
                     flags: CodingStyleFlags::default(),
                     parameters: CodingStyleParameters {
@@ -831,6 +837,7 @@ mod tests {
             high_throughput: false,
             ht_set: crate::j2c::codestream::HtSet::NoCap,
             defer_level_shift: false,
+            part2: None,
         };
 
         let tile_0_0 = Tile::new(0, &header);

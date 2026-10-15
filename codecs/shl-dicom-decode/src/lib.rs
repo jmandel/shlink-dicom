@@ -6,33 +6,48 @@
 //! YBR_FULL_422 converted to RGB. This is what pydicom's `pixel_array(raw=False)` returns.
 //!
 //! Native pixel data is handled here; encapsulated pixel data is split into frames and each frame
-//! is passed to the codec crate for its transfer syntax ([`codec_for`]).
+//! is passed to the codec for its transfer syntax ([`codec_for`]): a codec crate, or for the two
+//! encapsulated syntaxes that hold native frames (.1.98 and .8.1) the `unwrapped` module.
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod encaps;
+mod float;
 mod infer;
 mod parse;
 mod pixel;
+mod retired;
 mod scale;
+mod unwrapped;
 
 use std::fmt;
 
 pub use infer::Inference;
 use infer::{CodestreamInfo, Layout};
 
-use parse::{Attributes, PixelValue, Syntax, TS_DEFLATED_LE, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_IMPLICIT_LE};
+use parse::{
+    Attributes, PixelValue, Syntax, TS_DEFLATED_LE, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_GE_PRIVATE, TS_IMPLICIT_LE,
+};
 use shl_codec_common::{scaled_extent, ColorOut, DecodeError, DecodeFn, DecodeScaledFn, DecodedFrame, FrameInfo, Photometric};
 
 /// Transfer syntax UID -> codec. Complete from the start so format agents never edit it.
 pub fn codec_for(transfer_syntax: &str) -> Option<DecodeFn> {
     Some(match transfer_syntax {
+        unwrapped::TS_ENCAPSULATED_UNCOMPRESSED => unwrapped::decode_encapsulated_uncompressed,
+        unwrapped::TS_DEFLATED_IMAGE_FRAME => unwrapped::decode_deflated_frame,
         "1.2.840.10008.1.2.5" => shl_codec_rle::decode_frame,
-        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" | "1.2.840.10008.1.2.4.57" | "1.2.840.10008.1.2.4.70" => {
-            shl_codec_jpeg::decode_frame
-        }
+        // Every JPEG process (T.81): baseline, extended, progressive, arithmetic, lossless and
+        // hierarchical. The codec reads the process from the SOF marker.
+        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" | "1.2.840.10008.1.2.4.52" | "1.2.840.10008.1.2.4.53"
+        | "1.2.840.10008.1.2.4.54" | "1.2.840.10008.1.2.4.55" | "1.2.840.10008.1.2.4.56" | "1.2.840.10008.1.2.4.57"
+        | "1.2.840.10008.1.2.4.58" | "1.2.840.10008.1.2.4.59" | "1.2.840.10008.1.2.4.60" | "1.2.840.10008.1.2.4.61"
+        | "1.2.840.10008.1.2.4.62" | "1.2.840.10008.1.2.4.63" | "1.2.840.10008.1.2.4.64" | "1.2.840.10008.1.2.4.65"
+        | "1.2.840.10008.1.2.4.66" | "1.2.840.10008.1.2.4.70" => shl_codec_jpeg::decode_frame,
         "1.2.840.10008.1.2.4.80" | "1.2.840.10008.1.2.4.81" => shl_codec_jpeg_ls::decode_frame,
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" => shl_codec_jpeg2000::decode_frame,
+        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" => {
+            shl_codec_jpeg2000::decode_frame
+        }
+        "1.2.840.10008.1.2.4.110" | "1.2.840.10008.1.2.4.111" | "1.2.840.10008.1.2.4.112" => shl_codec_jpegxl::decode_frame,
         "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203" => {
             shl_codec_htj2k::decode_frame
         }
@@ -45,8 +60,14 @@ pub fn codec_for(transfer_syntax: &str) -> Option<DecodeFn> {
 pub fn scaled_codec_for(transfer_syntax: &str) -> Option<DecodeScaledFn> {
     Some(match transfer_syntax {
         // Lossless JPEG (.57, .70) has no reduced decode; the codec would return Unsupported.
-        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" => shl_codec_jpeg::decode_frame_scaled,
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" => shl_codec_jpeg2000::decode_frame_scaled,
+        // The codec returns Unsupported for processes it has no reduced decode for.
+        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" | "1.2.840.10008.1.2.4.52" | "1.2.840.10008.1.2.4.53"
+        | "1.2.840.10008.1.2.4.54" | "1.2.840.10008.1.2.4.55" | "1.2.840.10008.1.2.4.56" | "1.2.840.10008.1.2.4.59"
+        | "1.2.840.10008.1.2.4.60" | "1.2.840.10008.1.2.4.61" | "1.2.840.10008.1.2.4.62" | "1.2.840.10008.1.2.4.63"
+        | "1.2.840.10008.1.2.4.64" => shl_codec_jpeg::decode_frame_scaled,
+        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" => {
+            shl_codec_jpeg2000::decode_frame_scaled
+        }
         "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203" => {
             shl_codec_htj2k::decode_frame_scaled
         }
@@ -95,7 +116,12 @@ impl From<DecodeError> for Error {
 /// Decoded pixels in canonical form (CONTRACT.md).
 #[derive(Debug, Clone)]
 pub struct Canonical {
+    /// Frames in `data`: all of them, or the requested range ([`decode_frames`]).
     pub frames: u32,
+    /// Index of the first frame in `data` within the instance (0 unless a range was requested).
+    pub first_frame: u32,
+    /// Number of Frames of the instance.
+    pub total_frames: u32,
     pub rows: u32,
     pub columns: u32,
     pub samples_per_pixel: u16,
@@ -104,6 +130,9 @@ pub struct Canonical {
     pub bits_stored: u16,
     /// Pixel Representation 1: samples are two's complement.
     pub signed: bool,
+    /// Float or Double Float Pixel Data: samples are IEEE 754 f32 (Bits Allocated 32) or f64
+    /// (Bits Allocated 64), little-endian.
+    pub float: bool,
     /// Photometric Interpretation of `data`: "RGB" after a YBR conversion, otherwise as declared.
     pub photometric: String,
     pub transfer_syntax: String,
@@ -129,7 +158,21 @@ pub fn decode_file(bytes: &[u8]) -> Result<Canonical, Error> {
 /// [`decode_file`] with a different codec table, for tests and for trying candidate codec crates
 /// without touching the dispatch in [`codec_for`].
 pub fn decode_file_with(bytes: &[u8], codecs: impl Fn(&str) -> Option<DecodeFn>) -> Result<Canonical, Error> {
-    decode_inner(bytes, codecs, None)
+    decode_inner(bytes, codecs, None, None)
+}
+
+/// Decode frames `first..first + count` only (`count` 0: every frame from `first`), at
+/// 1/2^`scale_log2` size (0: full size). The pixels are byte-identical to the same frames of
+/// [`decode_file`] or [`decode_file_scaled`]. Encapsulated frames outside the range are never
+/// decoded, and native data is copied only for the range where its layout allows (otherwise
+/// decoded whole and sliced). `first_frame` and `total_frames` of the result say where the
+/// frames sit in the instance.
+pub fn decode_frames(bytes: &[u8], first: usize, count: usize, scale_log2: u8) -> Result<Canonical, Error> {
+    let range = Some((first, count));
+    if scale_log2 == 0 {
+        return decode_inner(bytes, codec_for, None, range);
+    }
+    decode_inner(bytes, codec_for, Some((scale_log2, &scaled_codec_for)), range)
 }
 
 /// Decode every frame at 1/2^`scale_log2` of its size in each direction (CONTRACT.md,
@@ -149,17 +192,45 @@ pub fn decode_file_scaled_with(
     scaled_codecs: impl Fn(&str) -> Option<DecodeScaledFn>,
 ) -> Result<Canonical, Error> {
     if scale_log2 == 0 {
-        return decode_inner(bytes, codecs, None);
+        return decode_inner(bytes, codecs, None, None);
     }
-    decode_inner(bytes, codecs, Some((scale_log2, &scaled_codecs)))
+    decode_inner(bytes, codecs, Some((scale_log2, &scaled_codecs)), None)
 }
 
 type ScaledTable<'a> = &'a dyn Fn(&str) -> Option<DecodeScaledFn>;
 
+/// `range`: (first, count) of the frames to decode, count 0 meaning "to the end"; None for all.
 fn decode_inner(
     bytes: &[u8],
     codecs: impl Fn(&str) -> Option<DecodeFn>,
     scaled: Option<(u8, ScaledTable<'_>)>,
+    range: Option<(usize, usize)>,
+) -> Result<Canonical, Error> {
+    let mut c = decode_range(bytes, codecs, scaled, range)?;
+    if range.is_none() {
+        c.total_frames = c.frames;
+    }
+    Ok(c)
+}
+
+/// Resolve a requested frame range against Number of Frames.
+fn frame_range(range: Option<(usize, usize)>, total: usize) -> Result<(usize, usize), Error> {
+    let Some((first, count)) = range else { return Ok((0, total)) };
+    let count = if count == 0 { total.saturating_sub(first) } else { count };
+    match first.checked_add(count) {
+        Some(end) if end <= total && count > 0 => Ok((first, count)),
+        _ => Err(Error::Invalid(format!(
+            "frames {first}..{} requested, the instance has {total}",
+            first.saturating_add(count)
+        ))),
+    }
+}
+
+fn decode_range(
+    bytes: &[u8],
+    codecs: impl Fn(&str) -> Option<DecodeFn>,
+    scaled: Option<(u8, ScaledTable<'_>)>,
+    range: Option<(usize, usize)>,
 ) -> Result<Canonical, Error> {
     let prepared = parse::prepare(bytes)?;
     let ts = match &prepared.transfer_syntax {
@@ -171,24 +242,37 @@ fn decode_inner(
             Syntax { little: false, .. } => TS_EXPLICIT_BE.to_string(),
         },
     };
-    let native = matches!(ts.as_str(), TS_IMPLICIT_LE | TS_EXPLICIT_LE | TS_EXPLICIT_BE | TS_DEFLATED_LE);
-    // Refuse syntaxes without a codec before reading the data set: some (GE private big endian)
-    // are not readable by the rules below, and the message should name the encoding.
+    let native = is_native(&ts);
+    // Refuse syntaxes without a codec before reading the data set, so the message names the
+    // encoding.
     let codec = if native {
         None
     } else {
         Some(codecs(&ts).ok_or_else(|| Error::Unsupported(unsupported_syntax(&ts)))?)
     };
     let attrs = parse::read_dataset(&prepared.dataset, prepared.syntax)?;
+    // How attribute values are encoded, and how native samples are: the GE private syntax has a
+    // little endian data set with big endian Pixel Data.
     let little = ts != TS_EXPLICIT_BE;
+    let pixel_little = little && ts != TS_GE_PRIVATE;
 
     let Some(pixel) = attrs.pixel.as_ref() else {
-        if attrs.float_pixel_data {
-            return Err(Error::Unsupported("float pixel data not supported (Float or Double Float Pixel Data)".into()));
+        if let Some((data, bits)) = attrs.float_pixel {
+            if !native {
+                return Err(Error::Invalid(format!("Float Pixel Data under the encapsulated transfer syntax {ts}")));
+            }
+            let total = number_of_frames(&attrs)?;
+            let (first, count) = frame_range(range, total)?;
+            let full = float::decode(&attrs, data, bits, little, pixel_little, &ts, total, first, count)?;
+            return match scaled {
+                None => Ok(full),
+                Some((s, _)) => float::downsample(full, s),
+            };
         }
         return Err(Error::Invalid("no Pixel Data (7FE0,0010)".into()));
     };
     let frames_n = number_of_frames(&attrs)?;
+    let (first, count) = frame_range(range, frames_n)?;
 
     if native {
         let PixelValue::Native { data, vr } = pixel else {
@@ -196,7 +280,7 @@ fn decode_inner(
         };
         let hints = Hints { native_len: Some(data.len()), codestream: None };
         let img = Image::from_attributes(&attrs, little, &ts, frames_n, &hints)?;
-        let full = decode_native(&img, data, *vr, little)?;
+        let full = decode_native_range(&img, data, *vr, pixel_little, first, count)?;
         return match scaled {
             None => Ok(full),
             Some((s, _)) => downsample_canonical(&img, full, s),
@@ -218,6 +302,30 @@ fn decode_inner(
             }
         }
     };
+    // JPEG 2000 Part 2 (.92, .93): the frames of a volume may be the components of one
+    // codestream, or of one codestream per component collection (PS3.5 A.4.4). Such a volume is
+    // decoded whole; a frame range is cut from it.
+    if matches!(ts.as_str(), "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93") {
+        let streams = shl_codec_jpeg2000::codestreams(fragments.iter().map(|f| f.data));
+        if !streams.is_empty() && streams.len() < frames_n {
+            let hints = Hints { native_len: None, codestream: streams.first().and_then(|f| infer::peek_codestream(&ts, f)) };
+            let mut img = Image::from_attributes(&attrs, little, &ts, frames_n, &hints)?;
+            if let Some(n) = note {
+                img.notes.push(Inference::new("PixelData", "tolerated", n.clone()));
+            }
+            let mut full = decode_volume(&img, &streams)?;
+            if count != frames_n {
+                let fb = full.data.len() / frames_n.max(1);
+                full.data = full.data.get(fb * first..fb * (first + count)).map(<[u8]>::to_vec).unwrap_or_default();
+                full.frames = u32::try_from(count).map_err(|_| Error::Unsupported("too many frames".into()))?;
+                full.first_frame = u32::try_from(first).map_err(|_| Error::Unsupported("too many frames".into()))?;
+            }
+            return match scaled {
+                None => Ok(full),
+                Some((s, _)) => downsample_canonical(&img, full, s),
+            };
+        }
+    }
     let extended = attrs.extended_offsets.zip(attrs.extended_lengths);
     let frames = encaps::split_frames(basic_offsets, fragments, extended, frames_n, little)?;
     let hints = Hints { native_len: None, codestream: frames.first().and_then(|f| infer::peek_codestream(&ts, f)) };
@@ -225,9 +333,13 @@ fn decode_inner(
     if let Some(n) = note {
         img.notes.push(Inference::new("PixelData", "tolerated", n.clone()));
     }
+    let selected = frames.get(first..first + count).unwrap_or(&[]);
+    img.frames = count;
+    img.first_frame = first;
+    img.total_frames = frames_n;
     match scaled {
-        None => decode_encapsulated(&img, &frames, codec),
-        Some((s, table)) => decode_encapsulated_scaled(&img, &frames, codec, table(&ts), s),
+        None => decode_encapsulated(&img, selected, codec),
+        Some((s, table)) => decode_encapsulated_scaled(&img, selected, codec, table(&ts), s),
     }
 }
 
@@ -267,7 +379,18 @@ struct Image {
     planar_configuration: u16,
     /// Native 3-sample data with no usable Planar Configuration: decided from the pixels.
     planar_unknown: bool,
+    /// Palette tables, for ARGB.
+    palette_descriptors: [Option<Vec<u8>>; 3],
+    palette_data: [Option<Vec<u8>>; 3],
+    /// Attribute values are little endian.
+    little: bool,
+    /// Native ACR-NEMA Bits Allocated 12: two samples packed in three bytes, unpacked into
+    /// `bits_allocated` 16.
+    packed12: bool,
+    /// Frames to decode, starting at `first_frame` of the instance's `total_frames`.
     frames: usize,
+    first_frame: usize,
+    total_frames: usize,
     transfer_syntax: String,
     /// Inferences made so far.
     notes: Vec<Inference>,
@@ -295,8 +418,33 @@ impl Image {
         // Samples per Pixel and Photometric Interpretation: each can stand in for the other.
         let pm_text = a.photometric.map(parse::trim_text).unwrap_or_default();
         let pm_declared = (!pm_text.is_empty()).then(|| Photometric::parse(&pm_text));
-        let samples_per_pixel = match us(a.samples_per_pixel, little, "Samples per Pixel")? {
+        let mut ba_attr = us(a.bits_allocated, little, "Bits Allocated")?;
+        let spp_attr = us(a.samples_per_pixel, little, "Samples per Pixel")?;
+        // ACR-NEMA forms that GDCM reads: Bits Allocated 12 packs two samples in three bytes;
+        // Bits Allocated 24 with no Samples per Pixel is one 8-bit RGB pixel.
+        let packed12 = native && ba_attr == Some(12);
+        if packed12 {
+            notes.push(Inference::new(
+                "BitsAllocated",
+                16,
+                "12: ACR-NEMA packed samples (two in three bytes), unpacked into 16 bits as GDCM does",
+            ));
+            ba_attr = Some(16);
+        }
+        let rgb24 = native
+            && ba_attr == Some(24)
+            && spp_attr.is_none()
+            && matches!(pm_declared, None | Some(Photometric::Rgb));
+        if rgb24 {
+            notes.push(Inference::new("BitsAllocated", 8, "24 with no Samples per Pixel: ACR-NEMA 24-bit RGB, read as GDCM reads it"));
+            ba_attr = Some(8);
+        }
+        let samples_per_pixel = match spp_attr {
             Some(v) => v,
+            None if rgb24 => {
+                notes.push(Inference::new("SamplesPerPixel", 3, "missing; Bits Allocated 24 is one 8-bit RGB pixel"));
+                3
+            }
             None => {
                 let (v, why) = match (cs.filter(|c| matches!(c.components, 1 | 3)), pm_declared) {
                     (Some(c), _) => (c.components, format!("missing; the codestream {} has {} component(s)", c.source, c.components)),
@@ -315,13 +463,18 @@ impl Image {
                     (None, Some(Photometric::Monochrome1 | Photometric::Monochrome2 | Photometric::PaletteColor)) => {
                         (1, format!("missing; Photometric Interpretation {pm_text} has 1 sample"))
                     }
+                    (None, _) if retired::Model::parse(&pm_text).is_some() => {
+                        let n = retired::Model::parse(&pm_text).map_or(1, retired::Model::samples);
+                        (n, format!("missing; Photometric Interpretation {pm_text} has {n} samples"))
+                    }
                     _ => (1, "missing; 1 assumed, as GDCM does".to_string()),
                 };
                 notes.push(Inference::new("SamplesPerPixel", v, why));
                 v
             }
         };
-        if samples_per_pixel != 1 && samples_per_pixel != 3 {
+        let four = samples_per_pixel == 4 && native && retired::Model::parse(&pm_text).is_some_and(|m| m.samples() == 4);
+        if samples_per_pixel != 1 && samples_per_pixel != 3 && !four {
             return Err(Error::Invalid(format!("Samples per Pixel {samples_per_pixel}")));
         }
         let photometric_str = match pm_declared {
@@ -345,10 +498,10 @@ impl Image {
             Some(_) => pm_text,
         };
         let photometric = Photometric::parse(&photometric_str);
+        let argb = photometric_str == "ARGB";
 
         // Bits Allocated: for encapsulated data an impossible or missing value is replaced by
         // the container for the codestream's precision (e.g. GDCM's FUJI file says 0xFFFF).
-        let ba_attr = us(a.bits_allocated, little, "Bits Allocated")?;
         let from_codestream = cs.and_then(|c| infer::container_bits(c.precision).map(|b| (b, c)));
         let mut bits_allocated = match (ba_attr, from_codestream) {
             (Some(b @ (1 | 8 | 16 | 32)), _) => b,
@@ -402,6 +555,17 @@ impl Image {
                 }
             }
             _ => return Err(Error::Invalid("missing required element (0028,0010) Rows or (0028,0011) Columns".into())),
+        };
+
+        // ACR-NEMA files written by LIBIDO store Rows and Columns the other way round; GDCM
+        // swaps them on reading.
+        let libido = native && a.recognition_code.is_some_and(|v| parse::trim_text(v).starts_with("ACRNEMA_LIBIDO"));
+        let (rows, columns) = if libido && rows != columns {
+            notes.push(Inference::new("Rows", columns, format!("{rows}; LIBIDO writes Rows and Columns swapped (Recognition Code ACRNEMA_LIBIDO), as GDCM reads it")));
+            notes.push(Inference::new("Columns", rows, format!("{columns}; swapped with Rows")));
+            (columns, rows)
+        } else {
+            (rows, columns)
         };
 
         if bits_allocated == 0 {
@@ -459,7 +623,15 @@ impl Image {
         // impossible there, the decoder decides from the pixels (`decode_native`).
         let mut planar_unknown = false;
         let planar_configuration = match us(a.planar_configuration, little, "Planar Configuration")? {
-            _ if samples_per_pixel != 3 => 0,
+            _ if samples_per_pixel == 1 => 0,
+            None if samples_per_pixel == 4 => {
+                notes.push(Inference::new("PlanarConfiguration", 0, format!("missing; {photometric_str} read as interleaved")));
+                0
+            }
+            None if rgb24 => {
+                notes.push(Inference::new("PlanarConfiguration", 0, "missing; ACR-NEMA 24-bit RGB is interleaved"));
+                0
+            }
             Some(v @ (0 | 1)) => v,
             declared => {
                 let what = declared.map_or("missing".to_string(), |v| format!("{v} is not a valid value"));
@@ -491,7 +663,13 @@ impl Image {
             photometric_str,
             planar_configuration,
             planar_unknown,
+            packed12,
+            palette_descriptors: a.palette_descriptors.map(|v| v.filter(|_| argb).map(<[u8]>::to_vec)),
+            palette_data: a.palette_data.map(|v| v.filter(|_| argb).map(<[u8]>::to_vec)),
+            little,
             frames,
+            first_frame: 0,
+            total_frames: frames,
             transfer_syntax: ts.to_string(),
             notes,
         })
@@ -572,14 +750,18 @@ impl Image {
     }
 
     fn canonical(&self, data: Vec<u8>, photometric: String) -> Result<Canonical, Error> {
+        let n = |v: usize| u32::try_from(v).map_err(|_| Error::Unsupported("too many frames".into()));
         Ok(Canonical {
-            frames: u32::try_from(self.frames).map_err(|_| Error::Unsupported("too many frames".into()))?,
+            frames: n(self.frames)?,
+            first_frame: n(self.first_frame)?,
+            total_frames: n(self.total_frames)?,
             rows: self.rows,
             columns: self.columns,
             samples_per_pixel: self.samples_per_pixel,
             bits_allocated: self.bits_allocated,
             bits_stored: self.bits_stored,
             signed: self.pixel_representation == 1,
+            float: false,
             photometric,
             transfer_syntax: self.transfer_syntax.clone(),
             data,
@@ -588,16 +770,55 @@ impl Image {
     }
 }
 
+/// [`decode_native`] for frames `first..first + count`. Where each frame's bytes can be cut out of
+/// the Pixel Data on their own, only those are copied; otherwise (bit-packed samples, a word swap,
+/// a Planar Configuration decided from the first frame) the whole image is decoded and sliced.
+fn decode_native_range(
+    img: &Image,
+    raw: &[u8],
+    vr: Option<[u8; 2]>,
+    little: bool,
+    first: usize,
+    count: usize,
+) -> Result<Canonical, Error> {
+    if first == 0 && count == img.frames {
+        return decode_native(img, raw, vr, little);
+    }
+    let bps = img.bps();
+    let separable = img.bits_allocated != 1 && !img.packed12 && !img.planar_unknown && (little || bps != 1);
+    let frame_bytes = img.frame_samples()?.saturating_mul(bps);
+    let stored = if is_422(img.photometric) { frame_bytes / 3 * 2 } else { frame_bytes };
+    let mut c = if separable {
+        let total = stored.saturating_mul(img.frames);
+        if raw.len() < total {
+            // Same refusal as a whole decode.
+            return decode_native(img, raw, vr, little);
+        }
+        let part = raw.get(stored * first..stored * (first + count)).unwrap_or(&[]);
+        decode_native(&Image { frames: count, ..img.clone() }, part, vr, little)?
+    } else {
+        let mut whole = decode_native(img, raw, vr, little)?;
+        whole.data = whole.data.get(frame_bytes * first..frame_bytes * (first + count)).map(<[u8]>::to_vec).unwrap_or_default();
+        whole
+    };
+    c.frames = u32::try_from(count).map_err(|_| Error::Unsupported("too many frames".into()))?;
+    c.first_frame = u32::try_from(first).map_err(|_| Error::Unsupported("too many frames".into()))?;
+    c.total_frames = u32::try_from(img.frames).map_err(|_| Error::Unsupported("too many frames".into()))?;
+    Ok(c)
+}
+
 /// Native (uncompressed) pixel data, as pydicom's `_as_array_native` + reshape + corrections.
 fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> Result<Canonical, Error> {
     let bps = img.bps();
     let total_samples =
         img.frame_samples()?.checked_mul(img.frames).ok_or_else(|| Error::Unsupported("image too large".into()))?;
-    let ybr422 = img.photometric == Photometric::YbrFull422;
+    let ybr422 = is_422(img.photometric);
 
     // Bytes the declared image needs. YBR_FULL_422 stores 2 samples per pixel instead of 3.
     let needed = if img.bits_allocated == 1 {
         total_samples.div_ceil(8)
+    } else if img.packed12 {
+        total_samples.div_ceil(2).saturating_mul(3)
     } else {
         let frame_bytes = img
             .frame_samples()?
@@ -621,22 +842,30 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
     let stored = raw.get(..needed).unwrap_or(&[]);
     // One-pass YBR_FULL_422 -> RGB is valid when nothing has to happen between the expansion and
     // the colour conversion: interleaved, unsigned 8-bit, no bits to mask.
-    let fused_ybr422 = bps == 1
+    let fused_ybr422 = img.photometric == Photometric::YbrFull422
+        && bps == 1
         && img.bits_allocated == 8
         && img.bits_stored == 8
         && img.pixel_representation == 0
         && img.samples_per_pixel == 3
         && img.planar_configuration == 0;
     let mut photometric = img.photometric;
+    let mut expanded = false;
     let mut data = if img.bits_allocated == 1 {
         pixel::unpack_bits(raw, total_samples)?
+    } else if img.packed12 {
+        pixel::unpack_12(stored, total_samples)?
     } else if little && ybr422 && fused_ybr422 {
         // The usual case: expand and convert to RGB in one pass, straight from the file bytes.
         photometric = Photometric::Rgb;
         pixel::ybr_422_to_rgb(stored)?
     } else if little && ybr422 {
-        // Expand straight from the file bytes, without an intermediate copy.
-        photometric = Photometric::YbrFull;
+        // Expand straight from the file bytes, without an intermediate copy. YBR_PARTIAL_422
+        // keeps its name, meaning "expanded" from here on.
+        if photometric == Photometric::YbrFull422 {
+            photometric = Photometric::YbrFull;
+        }
+        expanded = true;
         pixel::expand_ybr_422(stored, bps)?
     } else {
         let mut d = Vec::new();
@@ -657,6 +886,8 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
     if photometric == Photometric::YbrFull422 {
         data = pixel::expand_ybr_422(&data, bps)?;
         photometric = Photometric::YbrFull;
+    } else if photometric == Photometric::YbrPartial422 && !expanded {
+        data = pixel::expand_ybr_422(&data, bps)?;
     }
 
     let resolved;
@@ -679,6 +910,31 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
         pixel::fix_unused_bits(&mut data, bps, img.bits_stored, img.pixel_representation == 1);
     }
 
+    if let Some(model) = retired::Model::parse(&img.photometric_str) {
+        if img.pixel_representation != 0 || img.bits_allocated == 1 {
+            return Err(Error::Unsupported(format!(
+                "{} with Pixel Representation {} and Bits Allocated {}: only unsigned 8, 16 and 32-bit samples are converted",
+                img.photometric_str, img.pixel_representation, img.bits_allocated
+            )));
+        }
+        if usize::from(img.samples_per_pixel) != usize::from(model.samples()) {
+            return Err(Error::Invalid(format!("{} with Samples per Pixel {}", img.photometric_str, img.samples_per_pixel)));
+        }
+        let palette = (model == retired::Model::Argb)
+            .then(|| retired::Palette::read(
+                img.palette_descriptors.each_ref().map(|v| v.as_deref()),
+                img.palette_data.each_ref().map(|v| v.as_deref()),
+                img.little,
+                img.bits_stored,
+            ))
+            .flatten();
+        if model == retired::Model::Argb && palette.is_none() {
+            return Err(Error::Invalid("ARGB without readable Palette Color Lookup Tables".into()));
+        }
+        let rgb = retired::to_rgb(model, &data, bps, img.bits_stored, palette.as_ref());
+        let out = Image { samples_per_pixel: 3, ..img.clone() };
+        return out.canonical(rgb, "RGB".into());
+    }
     let out_photometric = if photometric == Photometric::Rgb && img.photometric != Photometric::Rgb {
         "RGB".to_string() // converted by the one-pass YBR_FULL_422 path
     } else {
@@ -687,10 +943,28 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
     img.canonical(data, out_photometric)
 }
 
-/// Convert YBR_FULL / YBR_FULL_422 samples to RGB as pydicom does (8-bit only). Returns the
+fn is_422(p: Photometric) -> bool {
+    matches!(p, Photometric::YbrFull422 | Photometric::YbrPartial422)
+}
+
+/// Convert YBR_FULL / YBR_FULL_422 samples to RGB as pydicom does, and YBR_PARTIAL_422 (already
+/// expanded to three samples) by the inverse of its PS3.3 equations; 8-bit only. Returns the
 /// photometric interpretation of the result.
 fn to_rgb_if_ybr(img: &Image, photometric: Photometric, data: &mut [u8]) -> Result<String, Error> {
     match photometric {
+        Photometric::YbrPartial422 if img.samples_per_pixel == 3 => {
+            if img.bits_allocated != 8 || img.pixel_representation != 0 {
+                return Err(Error::Unsupported(format!(
+                    "{} with {} bits allocated (colour conversion is defined for unsigned 8-bit only)",
+                    img.photometric_str, img.bits_allocated
+                )));
+            }
+            retired::ybr_partial_to_rgb(data);
+            Ok("RGB".into())
+        }
+        Photometric::YbrPartial420 if img.samples_per_pixel == 3 => Err(Error::Unsupported(
+            "YBR_PARTIAL_420 outside a codestream: the standard defines it only inside MPEG-2, H.264 and HEVC streams".into(),
+        )),
         Photometric::YbrFull | Photometric::YbrFull422 if img.samples_per_pixel == 3 => {
             if img.bits_allocated != 8 || img.pixel_representation != 0 {
                 return Err(Error::Unsupported(format!(
@@ -705,28 +979,100 @@ fn to_rgb_if_ybr(img: &Image, photometric: Photometric, data: &mut [u8]) -> Resu
     }
 }
 
-/// Decode each frame with the codec and normalise it to canonical form.
+/// Decode each frame with the codec and normalise it to canonical form. Outside wasm, a large
+/// multi-frame image is decoded on several threads, each taking a contiguous run of frames and
+/// writing into its part of the output; the result and any error are those of a serial decode.
 fn decode_encapsulated(img: &Image, frames: &[std::borrow::Cow<'_, [u8]>], codec: DecodeFn) -> Result<Canonical, Error> {
+    let info = img.frame_info();
+    let expected = info.frame_bytes().ok_or_else(|| Error::Unsupported("image too large".into()))?;
+    let total = expected.checked_mul(frames.len()).ok_or_else(|| Error::Unsupported("image too large".into()))?;
+    let mut out = pixel::alloc(total)?;
+    let decode_run = |first: usize, run: &[std::borrow::Cow<'_, [u8]>], dst: &mut [u8]| -> Result<String, Error> {
+        let mut photometric = img.photometric_str.clone();
+        for ((k, cs), slot) in run.iter().enumerate().zip(dst.chunks_exact_mut(expected.max(1))) {
+            let decoded = codec(cs, &info)?;
+            if decoded.data.len() != expected {
+                return Err(Error::Invalid(format!(
+                    "frame {}: codec returned {} bytes, expected {expected}",
+                    first + k,
+                    decoded.data.len()
+                )));
+            }
+            photometric = normalise_frame(img, decoded, cs, slot)?;
+        }
+        Ok(photometric)
+    };
+    let threads = decode_threads(frames.len(), total);
+    let out_photometric = if threads <= 1 || expected == 0 {
+        decode_run(0, frames, &mut out)?
+    } else {
+        let per = frames.len().div_ceil(threads);
+        let results: Vec<Result<String, Error>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = frames
+                .chunks(per)
+                .zip(out.chunks_mut(per * expected))
+                .enumerate()
+                .map(|(i, (run, dst))| scope.spawn(move || decode_run(i * per, run, dst)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(Error::Invalid("a decoder thread panicked".into()))))
+                .collect()
+        });
+        // The first error in frame order, as a serial decode would report.
+        let mut last = img.photometric_str.clone();
+        for r in results {
+            last = r?;
+        }
+        last
+    };
+    img.canonical(out, out_photometric)
+}
+
+/// JPEG 2000 Part 2 codestreams that each hold several frames, as their components.
+fn decode_volume(img: &Image, streams: &[Vec<u8>]) -> Result<Canonical, Error> {
     let info = img.frame_info();
     let expected = info.frame_bytes().ok_or_else(|| Error::Unsupported("image too large".into()))?;
     let mut out: Vec<u8> = Vec::new();
     let mut out_photometric = img.photometric_str.clone();
-    for (index, cs) in frames.iter().enumerate() {
-        let decoded = codec(cs, &info)?;
-        if decoded.data.len() != expected {
-            return Err(Error::Invalid(format!(
-                "frame {index}: codec returned {} bytes, expected {expected}",
-                decoded.data.len()
-            )));
+    let mut count = 0usize;
+    for cs in streams {
+        let (n, decoded) = shl_codec_jpeg2000::decode_frames(cs, &info)?;
+        if expected == 0 || decoded.data.len() != n.saturating_mul(expected) {
+            return Err(Error::Invalid(format!("codestream gave {} bytes for {n} frame(s)", decoded.data.len())));
         }
-        out_photometric = normalise_into(img, decoded, cs, expected, frames.len(), &mut out)?;
+        count += n;
+        if count > img.frames {
+            return Err(Error::Invalid(format!("codestreams hold more than the {} frames", img.frames)));
+        }
+        for frame in decoded.data.chunks_exact(expected) {
+            let one = DecodedFrame { data: frame.to_vec(), planar: decoded.planar, color: decoded.color };
+            out_photometric = normalise_into(img, one, cs, expected, img.frames, &mut out)?;
+        }
+    }
+    if count != img.frames {
+        return Err(Error::Invalid(format!("codestreams hold {count} frames, Number of Frames is {}", img.frames)));
     }
     img.canonical(out, out_photometric)
 }
 
-/// Append one decoded frame of `img` (`expected` bytes) to `out` in canonical form: planar
-/// interleave, Bits Stored, colour. `frames`: how many frames `out` will hold, for its first
-/// allocation. Returns the photometric interpretation of the result.
+/// Threads for decoding `frames` frames into `bytes` of output: one in wasm and for small
+/// images, otherwise up to the machine's parallelism (at most 8), with at least 8 MB each.
+fn decode_threads(frames: usize, bytes: usize) -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (frames, bytes);
+        1
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+        cpus.min(frames).min(bytes / (8 << 20)).max(1)
+    }
+}
+
+/// Append one decoded frame of `img` (`expected` bytes) to `out` in canonical form (see
+/// [`normalise_frame`]). `frames`: how many frames `out` will hold, for its first allocation.
 fn normalise_into(
     img: &Image,
     decoded: DecodedFrame,
@@ -735,23 +1081,30 @@ fn normalise_into(
     frames: usize,
     out: &mut Vec<u8>,
 ) -> Result<String, Error> {
-    let bps = img.bps();
     if out.is_empty() {
         let total = expected.saturating_mul(frames);
         out.try_reserve_exact(total)
             .map_err(|_| Error::Unsupported(format!("cannot allocate {total} bytes for decoded pixels")))?;
     }
-    // The frame is normalised in place at the end of the output buffer.
     let start = out.len();
+    out.resize(start + expected, 0);
+    normalise_frame(img, decoded, cs, out.get_mut(start..).unwrap_or(&mut []))
+}
+
+/// Write one decoded frame of `img` into `dst` (exactly one frame long) in canonical form: planar
+/// interleave, Bits Stored, colour. Returns the photometric interpretation of the result.
+fn normalise_frame(img: &Image, decoded: DecodedFrame, cs: &[u8], dst: &mut [u8]) -> Result<String, Error> {
+    let bps = img.bps();
+    if decoded.data.len() != dst.len() {
+        return Err(Error::Invalid(format!("codec returned {} bytes, expected {}", decoded.data.len(), dst.len())));
+    }
     if decoded.planar && img.samples_per_pixel > 1 {
-        out.resize(start + expected, 0);
-        let dst = out.get_mut(start..).unwrap_or(&mut []);
         pixel::interleave_into(&decoded.data, dst, usize::from(img.samples_per_pixel), bps)?;
     } else {
-        out.extend_from_slice(&decoded.data);
+        dst.copy_from_slice(&decoded.data);
     }
     drop(decoded.data);
-    let data = out.get_mut(start..).unwrap_or(&mut []);
+    let data = dst;
     if img.bits_allocated != 1 {
         let signed = img.pixel_representation == 1;
         if is_jpeg2000(&img.transfer_syntax) {
@@ -770,8 +1123,10 @@ fn normalise_into(
     Ok(match decoded.color {
         ColorOut::Rgb => "RGB".into(),
         ColorOut::AsDeclared => match img.photometric {
-            Photometric::YbrFull | Photometric::YbrFull422 => to_rgb_if_ybr(img, img.photometric, data)?,
-            Photometric::YbrPartial420 | Photometric::YbrPartial422 | Photometric::YbrIct | Photometric::YbrRct
+            Photometric::YbrFull | Photometric::YbrFull422 | Photometric::YbrPartial422 => {
+                to_rgb_if_ybr(img, img.photometric, data)?
+            }
+            Photometric::YbrPartial420 | Photometric::YbrIct | Photometric::YbrRct
                 if img.samples_per_pixel == 3 =>
             {
                 return Err(Error::Unsupported(format!(
@@ -786,6 +1141,8 @@ fn normalise_into(
 
 /// Box-downsample every frame of a full-size canonical result (the fallback for native data).
 fn downsample_canonical(img: &Image, full: Canonical, s: u8) -> Result<Canonical, Error> {
+    // The canonical samples per pixel (3 for the retired 4-sample colour models).
+    let img = &Image { samples_per_pixel: full.samples_per_pixel, ..img.clone() };
     let small = img.scaled(s);
     let frame_bytes = img.frame_samples()?.saturating_mul(img.bps());
     let mut out = Vec::new();
@@ -888,11 +1245,16 @@ fn decode_encapsulated_scaled(
     small.canonical(out, out_photometric)
 }
 
+/// Transfer syntaxes whose Pixel Data is stored native (not encapsulated).
+pub fn is_native(ts: &str) -> bool {
+    matches!(ts, TS_IMPLICIT_LE | TS_EXPLICIT_LE | TS_EXPLICIT_BE | TS_DEFLATED_LE | TS_GE_PRIVATE)
+}
+
 fn is_jpeg2000(ts: &str) -> bool {
     matches!(
         ts,
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202"
-            | "1.2.840.10008.1.2.4.203"
+        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93"
+            | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
     )
 }
 
@@ -930,9 +1292,6 @@ fn unsupported_syntax(ts: &str) -> String {
         }
         "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" => "JPEG 2000 Part 2 multi-component",
         "1.2.840.10008.1.2.4.94" | "1.2.840.10008.1.2.4.95" => "JPIP referenced pixel data",
-        "1.2.840.10008.1.2.1.98" => "Encapsulated Uncompressed Explicit VR Little Endian",
-        "1.2.840.10008.1.2.8.1" => "Deflated Image Frame Compression",
-        "1.2.840.113619.5.2" => "GE private Implicit VR Big Endian",
         "1.2.840.10008.1.2.6.1" => "RFC 2557 MIME encapsulation",
         "1.2.840.10008.1.2.7.1" | "1.2.840.10008.1.2.7.2" | "1.2.840.10008.1.2.7.3" => "SMPTE ST 2110 video",
         _ => return format!("transfer syntax {ts} is not supported"),

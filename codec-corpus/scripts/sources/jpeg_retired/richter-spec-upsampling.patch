@@ -1,0 +1,22 @@
+diff --git a/control/linemerger.cpp b/control/linemerger.cpp
+index ec0f42b..50b509c 100644
+--- a/control/linemerger.cpp
++++ b/control/linemerger.cpp
+@@ -256,7 +256,7 @@ struct Line *LineMerger::GetNextLowpassLine(UBYTE comp)
+     last[0]    = last[-1];
+     do {
+       *dst++   =  src[0];
+-      *dst++   = (src[0] + src[1]) >> 1;
++      *dst++   = ((src[0] + src[1]) >> (COLOR_BITS + 1)) << COLOR_BITS; // T.81 J.1.1.2: truncate
+     } while(++src < last);
+   } else {
+     memcpy(xline->m_pData,line->m_pData,m_pulPixelWidth[comp] * sizeof(LONG));
+@@ -314,7 +314,7 @@ struct Line *LineMerger::GetNextExpandedLowPassLine(UBYTE comp)
+       // Odd line. Final output is composed of: This line (which is the next) 
+       // merged with the previous plus the difference.
+       do {
+-        *dst = (*src1++ + *src2++) >> 1;
++        *dst = ((*src1++ + *src2++) >> (COLOR_BITS + 1)) << COLOR_BITS; // T.81 J.1.1.2: truncate
+       } while(++dst < end);
+       //
+       // Release the old buffered line which is no longer required

@@ -41,7 +41,7 @@ impl Ds {
             self.u32(value.len() as u32);
         } else {
             self.out.extend_from_slice(vr);
-            if matches!(vr, b"OB" | b"OW" | b"SQ" | b"UN" | b"OV" | b"UT") {
+            if matches!(vr, b"OB" | b"OW" | b"OF" | b"OD" | b"OL" | b"SQ" | b"UN" | b"OV" | b"UT") {
                 self.out.extend_from_slice(&[0, 0]);
                 self.u32(value.len() as u32);
             } else {
@@ -424,7 +424,13 @@ fn mutated_files_never_panic() {
                 }
             }
         }
-        let _ = decode_file_with(&f, |ts| (ts == RLE).then_some(zero_codec as shl_codec_common::DecodeFn));
+        let _ = decode_file_with(&f, |ts| match ts {
+            RLE => Some(zero_codec as shl_codec_common::DecodeFn),
+            // The in-crate codecs for native frames run for real.
+            "1.2.840.10008.1.2.1.98" | "1.2.840.10008.1.2.8.1" => shl_dicom_decode::codec_for(ts),
+            _ => None,
+        });
+        let _ = shl_dicom_decode::decode_frames(&f, (rnd() % 4) as usize, (rnd() % 3) as usize, (rnd() % 3) as u8);
     }
 }
 
@@ -568,22 +574,47 @@ fn refusals_name_the_reason() {
         panic!("MPEG-2 must be unsupported")
     };
     assert!(m.starts_with("MPEG-2 video") && m.contains("(1.2.840.10008.1.2.4.100)"), "{m}");
-    let Err(Error::Unsupported(m)) = decode_file(&part10("1.2.840.113619.5.2", &[0xAB; 16], true)) else {
-        panic!("GE private syntax must be unsupported")
-    };
-    assert!(m.contains("GE private"), "{m}");
+}
 
-    // Float Pixel Data without Bits Stored or Pixel Representation.
+#[test]
+fn ge_private_syntax_has_big_endian_pixels() {
+    let mut ds = Ds::new(Enc::ImplicitLe);
+    ds.image(1, "MONOCHROME2", None, None, 1, 2, 16, 12, 0);
+    ds.elem(0x7FE0, 0x0010, b"OW", &[0x01, 0x02, 0x0A, 0xBC]);
+    let out = decode_file(&part10("1.2.840.113619.5.2", &ds.out, true)).unwrap();
+    assert_eq!(u16s(&out.data), [0x0102, 0x0ABC & 0x0FFF]);
+}
+
+#[test]
+fn float_pixel_data_keeps_stored_values() {
+    // Float Pixel Data: no Bits Stored or Pixel Representation; Bits Allocated inferred when absent.
+    let vals = [1.5f32, -2.25, f32::NAN, 7.0];
+    let le: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
     let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.us(0x0028, 0x0002, 1);
+    ds.text(0x0028, 0x0008, b"IS", "2");
+    ds.us(0x0028, 0x0010, 1);
+    ds.us(0x0028, 0x0011, 2);
+    ds.elem(0x7FE0, 0x0008, b"OF", &le);
+    let file = part10(EXPLICIT_LE, &ds.out, true);
+    let out = decode_file(&file).unwrap();
+    assert!(out.float && out.bits_allocated == 32 && out.frames == 2);
+    assert_eq!(out.data, le);
+    assert!(out.inferred.iter().any(|i| i.attribute == "BitsAllocated"));
+    // Frame range: frame 1 alone.
+    let one = shl_dicom_decode::decode_frames(&file, 1, 1, 0).unwrap();
+    assert_eq!((one.frames, one.first_frame, one.total_frames), (1, 1, 2));
+    assert_eq!(one.data, le[8..]);
+
+    // Double Float Pixel Data in Explicit VR Big Endian: swapped per 8-byte sample.
+    let mut ds = Ds::new(Enc::ExplicitBe);
     ds.us(0x0028, 0x0002, 1);
     ds.us(0x0028, 0x0010, 1);
     ds.us(0x0028, 0x0011, 1);
-    ds.us(0x0028, 0x0100, 32);
-    ds.elem(0x7FE0, 0x0008, b"OF", &[0; 4]);
-    let Err(Error::Unsupported(m)) = decode_file(&part10(EXPLICIT_LE, &ds.out, true)) else {
-        panic!("float pixel data must be unsupported")
-    };
-    assert!(m.starts_with("float pixel data not supported"), "{m}");
+    ds.us(0x0028, 0x0100, 64);
+    ds.elem(0x7FE0, 0x0009, b"OD", &(-3.5f64).to_be_bytes());
+    let out = decode_file(&part10(EXPLICIT_BE, &ds.out, true)).unwrap();
+    assert_eq!(out.data, (-3.5f64).to_le_bytes());
 }
 
 #[test]

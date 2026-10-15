@@ -100,6 +100,8 @@ fn scaled_matches_full_decode_downsampled() {
                         }
                         continue;
                     }
+                    // Float data is averaged in f64 (float.rs has its own test).
+                    (Ok(f), Ok(_)) if f.float => continue,
                     (Ok(f), Ok(sc)) => (f, sc),
                     (a, b) => {
                         failures.push(format!("{name}/{case} 1/{}: full {:?} but scaled {:?}", 1 << s, a.as_ref().err(), b.err()));
@@ -124,7 +126,7 @@ fn scaled_matches_full_decode_downsampled() {
                 let reduced = scaled_codec_for(&full.transfer_syntax).is_some() && full.photometric != "PALETTE COLOR";
                 let wavelet = matches!(
                     full.transfer_syntax.as_str(),
-                    "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
+                    "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
                 );
                 if reduced && wavelet {
                     let mean = got.iter().zip(&want).map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / got.len() as f64;
@@ -139,7 +141,17 @@ fn scaled_matches_full_decode_downsampled() {
                     // (colour more so: chroma is upsampled or not at a different stage). A sanity
                     // bound against gross errors (channel order, offsets); exactness is checked
                     // against libjpeg-turbo at codec level.
-                    let mean = got.iter().zip(&want).map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / got.len() as f64;
+                    // Only complete blocks: an encoder may pad partial edge blocks with anything,
+                    // and a reduced decode of such a block reflects the padding (libjpeg-turbo
+                    // gives the same values; formats/jpeg-dct/scaled/check_scaled.py).
+                    let (h, w, spp) = (full.rows as usize, full.columns as usize, usize::from(full.samples_per_pixel));
+                    let (oh, ow) = (h.div_ceil(n as usize), w.div_ceil(n as usize));
+                    let complete = |i: &usize| {
+                        let (y, x) = ((i / spp / ow) % oh, (i / spp) % ow);
+                        (y + 1) * n as usize <= h && (x + 1) * n as usize <= w
+                    };
+                    let diffs: Vec<f64> = (0..got.len()).filter(complete).map(|i| (got[i] - want[i]).abs() as f64).collect();
+                    let mean = diffs.iter().sum::<f64>() / diffs.len().max(1) as f64;
                     let range = (1i64 << full.bits_stored.min(16)) as f64;
                     let bound = if full.samples_per_pixel == 1 { range / 64.0 } else { range / 8.0 };
                     if mean > bound {

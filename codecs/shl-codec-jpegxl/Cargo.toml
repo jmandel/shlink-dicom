@@ -1,0 +1,9 @@
+[package]
+name = "shl-codec-jpegxl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shl-codec-common = { path = "../shl-codec-common" }
+jxl-oxide = { version = "0.12.6", default-features = false }

@@ -2,16 +2,24 @@
 
 **Crate:** `shl-codec-jpeg (shared with jpeg-lossless; one owner)`
 
-**Specifications:** ITU-T T.81 | ISO/IEC 10918-1 (processes 1, 2, 4: baseline 8-bit, extended 12-bit, Huffman); DICOM PS3.5 A.4.1, §8.2.1
+**Specifications:** ITU-T T.81 | ISO/IEC 10918-1, every DCT process: baseline and extended (1–5), spectral selection and full progression (6–13), Huffman or arithmetic coding, and hierarchical (16–27, Annex J); DICOM PS3.5 A.4.1, §8.2.1
 
 ## Corpus
 
 | Transfer syntax | Cases |
 |---|---|
-| `1.2.840.10008.1.2.4.50` | 18 |
-| `1.2.840.10008.1.2.4.51` | 8 |
+| `.50` baseline | 109 |
+| `.51` extended | 31 |
+| `.52` extended, arithmetic | 14 |
+| `.53` spectral selection | 11 |
+| `.54` spectral selection, arithmetic | 6 |
+| `.55` full progression | 11 |
+| `.56` full progression, arithmetic | 7 |
+| `.59`–`.64` hierarchical (sequential, spectral selection, progressive; Huffman and arithmetic) | 23 |
 
-Sources: generated 7, local 2, pydicom 17. Multi-frame cases: 2. Ground truth from seeds: 0.
+Sources: generated 80, IDC 73, external 39, pydicom 17, local 2, repair 1.
+
+The only real files in the retired syntaxes are two cornerstone3D test images (`ext-cs3d-CTImage.dcm_JPEGProcess6_8…53`, `…10_12…55`; MIT): 12-bit CT, SOF2 with 3 and 6 scans. The rest are encoded by [`scripts/sources/jpeg_retired.py`](../../scripts/sources/jpeg_retired.py) from the corpus seeds, with three encoders: Thomas Richter's libjpeg (`jpeg`, every process), libjpeg-turbo's `cjpeg` (`-arithmetic`, `-progressive`, `-scans` for spectral selection without successive approximation) and dcmtk's `dcmcjpeg +es/+ep`. They cover 8 and 12-bit grey, 4:2:0 and 4:4:4 colour, restart intervals, and two- and three-level hierarchies. No file was found in gdcmData, pylibjpeg-data, the pydicom test data or dcm4che's test data; the NEMA WG4 server returns 404, and DCMTK ships no test images.
 
 Expected to be refused (exit 2): `pydicom-SC_rgb_jpeg`.
 
@@ -27,6 +35,19 @@ Expected to be refused (exit 2): `pydicom-SC_rgb_jpeg`.
 ## Candidate crates
 
 `jpeg-decoder` (8-bit; 12-bit no), `zune-jpeg` (8-bit, fast), `oxiarc-jpeg` (claims extended and lossless; small user base), and the in-repo `crates/shl-dicom-core/src/jpeg12.rs` (hand-written 12-bit; reuse or replace).
+
+## References for the retired processes
+
+pydicom refuses these syntaxes, so `ref_decode.py` gives the codestreams to the libraries directly (`applicable()` lists `libjpeg-turbo`, `libjpeg-richter`, `dcmtk` for them):
+
+| Process | libjpeg-turbo 3.2 (imagecodecs) | Richter libjpeg (pylibjpeg-libjpeg 2.4) | dcmtk 3.6 `dcmdjpeg` |
+|---|---|---|---|
+| progressive and spectral selection, Huffman | yes | yes | yes |
+| arithmetic, sequential and progressive | yes | yes | no |
+| arithmetic lossless | no ("omitted at compile time") | yes | no |
+| hierarchical (any) | no (marker DHP unsupported) | yes, with a non-standard upsampler (below); refuses 16-bit | no |
+
+Each was checked by decoding streams of every process. libjpeg-turbo and dcmtk are the IJG family this decoder reproduces; Richter's IDCT and colour conversion differ by 1–3.
 
 ## Decision
 
@@ -77,14 +98,22 @@ Markers win when present, as in pylibjpeg and gdcm. dcmtk's default (`+cp`) foll
 
 **Truncated or damaged entropy data** is handled the way libjpeg handles it. Past the end of data, or past an unexpected marker, the reader supplies zero bits. At a restart point it resynchronises to the next RSTn marker. Only a corrupt Huffman code is `Invalid`. To stop a short stream from forcing a huge allocation, a frame is refused as `Invalid` when the codestream is shorter than the minimum the frame needs (2 bits per DCT block). Frames with no DHT segment (Motion-JPEG style) use the T.81 K.3 tables, as libjpeg-turbo does.
 
+**Hierarchical upsampling (T.81 J.1.1.2).** The standard expands a reference by inserting the truncated mean of the two neighbours, horizontally first and then vertically between the expanded rows, repeating the last column and row. This decoder does exactly that. Richter's libjpeg keeps the half from the horizontal step and truncates once, so where both directions are interpolated it gives floor((a+b+c+d)/4) instead of floor((floor((a+b)/2) + floor((c+d)/2))/2), 1 higher in about a quarter of those samples. Evidence: on lossless hierarchical streams from the T.81 encoder in `jpeg_retired/hier_lossless.py`, this decoder returns the seed exactly, and Richter differs by 1 only at samples interpolated both ways, matching the floor-of-four-mean model sample for sample. Richter's encoder also produces lossless hierarchical streams its own decoder does not invert, so it is not used for `.65`/`.66`.
+
+**Lossy hierarchical tolerance.** Richter is the only reference for `.59`–`.64`. Each case's `max_abs_override` is set by `jpeg_retired.py --tolerances`, before and independently of this decoder: (how far Richter's output moves when only its upsampler is made T.81's, `jpeg_retired/richter-spec-upsampling.patch`, on that file) + (Richter against IJG on the non-hierarchical `richter-arith` twin of the same seed and sampling). That gives 3 for grey (2 + 1) and 6 for 4:2:0 colour (3 + 3). Measured: 0 to 2 for grey and 5 for colour.
+
+**Progressive block smoothing.** libjpeg smooths blocks whose low-frequency coefficients are not fully refined. With a complete scan script (every corpus file) nothing is unrefined at the end and libjpeg does not smooth; this decoder never smooths, so an incomplete progressive file would differ from libjpeg in its unrefined blocks.
+
 ## STATUS
 
-**check.py:** jpeg-dct pass=139/139 (corpus of October 2026).
+**check.py:** jpeg-dct pass=212/212. Every non-hierarchical case is bit-identical to libjpeg-turbo or dcmtk (its oracle; Richter differs by 1–3). Hierarchical cases are within the tolerance above.
 
-**Exactness:** bit-identical to dcmtk (IJG 6b) on all 25 decodable cases, and to gdcm on the 19 it can decode.
+**Coding processes:** sequential Huffman decodes each block straight to samples. Progressive (Huffman, as libjpeg-turbo's `jdphuff.c`: DC first and refinement, AC first with end-of-band runs, AC refinement), arithmetic (T.81 Annex D and F.2.4, as `jdarith.c`, including DAC conditioning and restart handling) and hierarchical frames go through a buffer of quantised coefficients, which the same IDCT, upsampling and colour code turns into samples. Hierarchical images (DHP, EXP, differential DCT frames with unpredicted DC and no level shift, Annex J) are reconstructed in integers without clamping until the final image.
+
+**Exactness:** bit-identical to dcmtk (IJG 6b) on the baseline and extended cases, and to gdcm on the 19 it can decode.
 
 **Tests:**
-- `cargo test -p shl-codec-jpeg` covers unit tests (bit reader, Huffman, IDCT, range limit, upsampling, colour) and `tests/corpus.rs`. The corpus test needs `extract_frames.py` output first.
+- `cargo test -p shl-codec-jpeg` covers unit tests (bit reader, Huffman, IDCT, range limit, upsampling, colour, QM table) and `tests/corpus.rs`. The corpus test needs `extract_frames.py` output first. It fails today only on `ext-gdcm-DCMTK_JPEGExt_12Bits` (Bits Allocated 12, which the CLI infers as 16 before calling the codec; the codec-level test passes the raw 12).
 - `cargo clippy --all-targets -D warnings` is clean.
 - The `wasm32-unknown-unknown` release build succeeds. Build it with the rustup stable toolchain, because the system Rust has no wasm32 std.
 
@@ -92,20 +121,15 @@ Markers win when present, as in pylibjpeg and gdcm. dcmtk's default (`+cp`) foll
 - 640×480 4:2:2 colour (`color3d_jpeg_baseline`): 0.88 ms per frame natively and 1.56 ms in wasm with simd128, against 0.82 ms for libjpeg-turbo.
 - 2320×2920 12-bit mono (`local-wrist-lateral`): 18.3 ms natively, against 31.8 ms for libjpeg-turbo.
 
-The IDCT, upsampling and colour conversion use AVX2 (chosen at run time) or wasm simd128, bit-identical to the scalar code. See [PERF.md](PERF.md) for each step, reference decoders and wasm.
+The IDCT, upsampling and colour conversion use AVX2 (chosen at run time) or wasm simd128, bit-identical to the scalar code. See [PERF.md](PERF.md) for each step, reference decoders and wasm. The coefficient-buffered processes did not change baseline speed (minimum of 15 runs, alternated with the previous build, within the machine's noise).
 
-**Reduced-resolution decode** (`decode_frame_scaled`, CONTRACT.md "Reduced-resolution decode"): 1/2, 1/4 and 1/8 for baseline and extended DCT, 8 and 12-bit, through the `jidctred.c` reduced IDCTs. Lossless JPEG returns Unsupported.
-- **Checked against libjpeg-turbo 3.2.0's own scaled decode** with [`scaled/check_scaled.py`](scaled/check_scaled.py), which builds the small oracle [`scaled/turbo_scaled.c`](scaled/turbo_scaled.c) against the system library. 402 of 405 case-scale pairs are byte-identical, 8-bit and 12-bit alike. The other 3 are `ext-gdcm-PHILIPS_Gyroscan-12-Jpeg_Extended_Process_2_4`, which libjpeg-turbo refuses ("Bogus Huffman table definition"); this decoder accepts it at full size under an existing ruling.
-- **12-bit against a block average of the full decode:** within 1.0 on every complete block with no sample clamped to 0 or 4095. The reduced IDCTs are the exact block average of the 8×8 transform before rounding (unit test `reduced_idct_is_block_average`). Blocks with clamped samples differ by up to about 40 (`local-wrist-*` at 1/2), because the full decode clips ringing before the average and the reduced decode does not. Partial edge blocks average the encoder's padding.
+**Reduced-resolution decode** (`decode_frame_scaled`, CONTRACT.md "Reduced-resolution decode"): 1/2, 1/4 and 1/8 for baseline, extended, progressive and arithmetic DCT, 8 and 12-bit, through the `jidctred.c` reduced IDCTs. Lossless and hierarchical JPEG return Unsupported.
+- **Checked against libjpeg-turbo 3.2.0's own scaled decode** with [`scaled/check_scaled.py`](scaled/check_scaled.py), which builds the small oracle [`scaled/turbo_scaled.c`](scaled/turbo_scaled.c) against the system library. Every case-scale pair libjpeg-turbo decodes is byte-identical, 8-bit and 12-bit, progressive and arithmetic included. `ext-gdcm-PHILIPS_Gyroscan-12-Jpeg_Extended_Process_2_4` is refused by libjpeg-turbo ("Bogus Huffman table definition"); this decoder accepts it at full size under an existing ruling.
+- **12-bit against a block average of the full decode:** within 1.0 on every complete block with no sample clamped to 0 or 4095. The reduced IDCTs are the exact block average of the 8×8 transform before rounding (unit test `reduced_idct_is_block_average`). Blocks with clamped samples differ by up to about 40 (`local-wrist-*` at 1/2), because the full decode clips ringing before the average and the reduced decode does not. Partial edge blocks average the encoder's padding (Richter's encoder pads far from edge replication: up to 1357 on the 65×31 12-bit seed).
 - **Speed:** see [PERF.md](PERF.md#reduced-resolution-decode).
-- **Full-size output** is unchanged: the same bytes on every corpus frame before and after, and check.py stays at 100%.
-- **Fuzzing:** the `decode_scaled` target in `shl-codec-jpeg/fuzz` ran 10 minutes × 4 workers (about 273,000 executions, 906 coverage edges), then again for 5 minutes × 4 workers after the SIMD kernels were added (about 145,000 executions), with no findings. It is seeded with corpus frames under 300 KB, and the first byte also picks the scale (1/2 to 1/16).
 
 **Not supported:** these return `Unsupported` (exit 3):
-- progressive (SOF2; `.55` is retired);
-- arithmetic coding;
-- hierarchical processes;
 - a height given by DNL;
 - fractional sampling ratios.
 
-**Fuzzing:** no panics, hangs or OOMs in about 1.7 million libFuzzer executions over 15 minutes. Details are in the [jpeg-lossless STATUS](../jpeg-lossless/FORMAT.md#status), which covers the shared crate.
+**Fuzzing:** see the [jpeg-lossless STATUS](../jpeg-lossless/FORMAT.md#status), which covers the shared crate.

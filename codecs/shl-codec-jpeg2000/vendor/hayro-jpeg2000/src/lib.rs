@@ -215,6 +215,14 @@ impl<'a> Image<'a> {
         self.header.component_infos[0].size_info.precision
     }
 
+    /// shl patch 11: when the codestream uses a Part 2 multiple component transformation
+    /// (T.801 Annex J), the reconstructed image components it produces, from CBD, as
+    /// (precision, signed); `decode` returns that many components, with no DC level shift
+    /// applied. `None` for every other codestream.
+    pub fn multi_component_output(&self) -> Option<Vec<(u8, bool)>> {
+        self.header.part2.as_ref().map(|p| p.outputs.iter().map(|o| (o.precision, o.signed)).collect())
+    }
+
     /// Decode the image and return its decoded components.
     pub fn decode<'b>(
         &'a self,

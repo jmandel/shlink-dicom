@@ -1,19 +1,22 @@
 # uncompressed
 
-**Crate:** none; handled in `shl-dicom-decode` (phase 0)
+**Crate:** none; handled in `shl-dicom-decode` (`lib.rs`, `float.rs`, `unwrapped.rs`, `retired.rs`)
 
-**Specifications:** DICOM PS3.5 §8 (native pixel data), §7.3 (byte order), Annex A.1–A.5 (transfer syntaxes, including Deflated)
+**Specifications:** DICOM PS3.5 §8 (native pixel data), §7.3 (byte order), Annex A.1–A.5 (transfer syntaxes, including Deflated), A.4.11 and A.4.13 (Encapsulated Uncompressed, Deflated Image Frame Compression); PS3.3 C.7.6.3 (Image Pixel module, including Float and Double Float Pixel Data, and the retired photometric interpretations up to the 2003 edition)
 
 ## Corpus
 
 | Transfer syntax | Cases |
 |---|---|
-| `1.2.840.10008.1.2` | 46 |
-| `1.2.840.10008.1.2.1` | 159 |
+| `1.2.840.10008.1.2` | 57 |
+| `1.2.840.10008.1.2.1` | 202 |
 | `1.2.840.10008.1.2.1.99` | 12 |
-| `1.2.840.10008.1.2.2` | 23 |
+| `1.2.840.10008.1.2.2` | 25 |
+| `1.2.840.10008.1.2.1.98` | 10 |
+| `1.2.840.10008.1.2.8.1` | 11 |
+| `1.2.840.113619.5.2` | 2 |
 
-Sources: external quirk sets 89, IDC 72, pydicom 61, generated 18. Multi-frame cases: 47. Ground truth from seeds: 18.
+Sources: external quirk sets 104, IDC 80, pydicom 61, generated 56, repaired copies 10, stripped copies 8. Multi-frame cases: 58. Ground truth from seeds: 18. Ten cases have no Part 10 meta (tag `no-part10-meta`).
 
 The four Deflated cases were added in phase 0: `pydicom-image_dfl` (pydicom's test file, which `discover.py` skipped because the uncompressed budget of 60 was already used) and `gen-synth-{u16-3frame-32x32,rgb8-60x40,s12-40x40}-deflate` (seeds re-saved by pydicom as Deflated Explicit VR Little Endian, truth = seed). They were registered by calling `discover.register` and `generate.register` from a one-off script, because neither script can express them yet. To make them reproducible, the coordinator should add a `pydicom-deflate` encoder for these seeds to `generate.py` and either raise the `discover.py` budget or allow-list `image_dfl.dcm`.
 
@@ -27,7 +30,10 @@ Expected to be refused (exit 2): `pydicom-MR_truncated` and the two Orthanc `oob
 - Planar Configuration 1 (colour planes stored separately) and uncompressed YBR_FULL (convert to RGB).
 - Odd-length pixel data with a trailing pad byte; a frame count that doesn't divide the data evenly.
 - Deflated Explicit VR Little Endian (1.2.840.10008.1.2.1.99): the whole dataset after the file meta is raw deflate (no zlib header).
-- YBR_FULL_422 native data stores two samples per pixel (Y1 Y2 Cb Cr per pixel pair), so a frame holds 2/3 of the bytes an RGB frame would.
+- YBR_FULL_422 and YBR_PARTIAL_422 native data store two samples per pixel (Y1 Y2 Cb Cr per pixel pair), so a frame holds 2/3 of the bytes an RGB frame would.
+- Float and Double Float Pixel Data (7FE0,0008/0009) replace Pixel Data and have no Bits Stored or Pixel Representation.
+- Encapsulated Uncompressed and Deflated Image Frame frames each start on a byte boundary, also for Bits Allocated 1, where native data packs frames back to back.
+- The GE private syntax has a little endian data set and big endian Pixel Data.
 
 ## Candidate crates
 
@@ -63,9 +69,9 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
    - Samples per Pixel other than 1 or 3;
    - Pixel Representation other than 0 or 1;
    - Planar Configuration other than 0 or 1 on native 3-sample data;
-   - on native data, Bits Allocated present but not 1, 8, 16 or 32, for example 12. That may be packed 12-bit data, and the length alone cannot tell.
+   - on native data, Bits Allocated present but not 1, 8, 16 or 32, except the ACR-NEMA forms of rule 19.
 
-   Bits Allocated 24, 40, 48 or 64 is unsupported (exit 3), because the contract has no sample type for them.
+   Other Bits Allocated values (24 with Samples per Pixel present, 40, 48, 64) are unsupported (exit 3), because the contract has no integer sample type for them.
 4. **Explicit VR Big Endian:**
    - 16- and 32-bit samples are byte-swapped.
    - 8-bit samples in an **OW** element are swapped pairwise first. pydicom's `be_swap_ow` handles the same layout, which some big endian writers produce.
@@ -75,13 +81,13 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
 7. **YBR_FULL_422 (native).** Each Y1 Y2 Cb Cr group is expanded to two YBR_FULL pixels, over the whole buffer, as pydicom does: a pair may span rows. YBR_FULL is then converted to RGB.
    - The conversion matches pydicom's `_convert_YBR_FULL_to_RGB` bit for bit: float32, matrix entries computed in float64 and stored as float32, `floor(x + 0.5)`, then a clamp to 0–255.
    - Only unsigned 8-bit YBR is converted. pydicom raises an error for other widths, so we return unsupported (exit 3).
-8. **Colour spaces that are not converted.** YBR_PARTIAL_*, YBR_ICT and YBR_RCT are not converted for native data, because pydicom does not convert them. They are not valid for native transfer syntaxes anyway. PALETTE COLOR stays as indices and MONOCHROME1 is not inverted.
+8. **Colour spaces.** YBR_PARTIAL_422 and the retired ARGB, CMYK and HSV are converted to RGB (rule 20). YBR_PARTIAL_420 on native data is unsupported (exit 3): the standard defines it only inside MPEG-2, H.264 and HEVC streams. YBR_ICT and YBR_RCT are left as they are, since they belong to JPEG 2000. PALETTE COLOR stays as indices and MONOCHROME1 is not inverted.
 9. **Encoding that contradicts the transfer syntax is invalid.** For example, an implicit VR data set in a file whose meta declares an explicit syntax.
    - pydicom's `dcmread` switches encoding with a warning. Its pixel path, gdcm and dcmtk all refuse such a file; that is why `pydicom-SC_rgb_jpeg` in jpeg-dct is expect=error.
    - So we refuse it too (exit 2).
    - The check is on the first element of the top-level data set, which is where pydicom's `_is_implicit_vr` decides.
    - Single elements written in implicit VR inside an explicit VR data set are a different matter; see ruling 11.
-10. **Bare data sets** (no meta) are read with the encoding guessed from the first element, the way pydicom guesses: a known VR at bytes 4–6 means explicit, and a group ≥ 1024 read little-endian means big endian. Data sets that start with the group 0002 meta but have no preamble or `DICM` are read as Part 10.
+10. **Bare data sets** (no meta) are read with the encoding guessed from the first element, the way pydicom's `dcmread(force=True)` guesses: a known VR at bytes 4–6 means explicit, and a group ≥ 1024 read little-endian means big endian. Data sets that start with the group 0002 meta but have no preamble or `DICM` are read as Part 10. `discover.register` and `ref_decode.read` give such a file the transfer syntax pydicom guessed, so it is registered and decoded by the references like any other (tag `no-part10-meta`).
 11. **One element in implicit VR inside an explicit VR data set** is re-read as implicit, and reading goes on. pydicom decides this per element, in `data_element_generator`:
     - if the two VR bytes are outside `AA`..`ZZ` (byte-wise), it assumes implicit VR for that element (`assume_implicit_vr_switch`), so the VR bytes and the 2 bytes after them are a 4-byte length;
     - VR bytes inside that range but not a known VR are read as explicit with a 2-byte length.
@@ -99,14 +105,8 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
 
     The named syntaxes are:
     - video: MPEG-2, H.264 and HEVC;
-    - JPEG XL;
-    - the retired progressive, arithmetic-coded and hierarchical JPEG processes;
-    - JPEG 2000 Part 2 and JPIP;
-    - Encapsulated Uncompressed and Deflated Image Frame Compression;
-    - RFC 2557 and SMPTE ST 2110;
-    - the GE private Implicit VR Big Endian syntax.
-
-    Float and Double Float Pixel Data without integer Pixel Data are refused with "float pixel data not supported", before any check for Bits Stored.
+    - JPIP;
+    - RFC 2557 and SMPTE ST 2110.
 
 15. **Inference rules.** Each fills in one attribute and records why. Evidence comes from the codestream header (JPEG and JPEG-LS SOF, JPEG 2000 SIZ), from the Pixel Data length, or from the pixels themselves.
 
@@ -127,15 +127,38 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
     | Rows or Columns | native, one of them missing | the only value that makes the Pixel Data length fit exactly (or with 1 pad byte) | consistency check on the length |
     | Pixel Data (encapsulated) | after at least one fragment: fewer than 8 stray bytes, a non-item tag where the delimiter belongs, or a last fragment that claims at most 2 bytes more than remain | the fragments read so far | CENSUS.md, tolerance list: "odd-length last fragment, fragment length off by one, garbage terminator". A larger overrun is a truncated file and is still refused. |
 
+    | Bits Allocated | native, 12 | 16, each pair of samples unpacked from three bytes | ACR-NEMA packing (rule 19) |
+    | Bits Allocated, Samples per Pixel, Planar Configuration | native, Bits Allocated 24 with no Samples per Pixel | 8, 3, 0 | ACR-NEMA 24-bit RGB (rule 19) |
+    | Rows, Columns | native, Recognition Code `ACRNEMA_LIBIDO*` | swapped | rule 19 |
+    | Samples per Pixel | missing, ARGB, CMYK or HSV | 4, 4, 3 | the colour model |
+    | Planar Configuration | missing, 4-sample data | 0 | |
+
     **Left as refusals, and why:**
     - **Native Pixel Data shorter than the image.** Missing samples cannot be inferred, and padding them would invent pixels. Examples: `pydicom-MR_truncated`, the Orthanc `oob-monochrome` files.
     - **Excess native data that would hold extra whole frames when Number of Frames is absent.** pydicom returns the extra frames, but no file in the 6,000-file sweep or the corpus does this. Ignoring the excess, as now, is the conservative reading.
     - **Planar Configuration when neither reading is clearly smoother**, or the image is too small to judge.
-    - **Native Bits Allocated 12** (see rule 3).
     - **Rows and Columns both missing on native data.** Many sizes fit any given length.
-    - **Float and Double Float Pixel Data** (exit 3). The contract has no float sample type.
 
+16. **Float and Double Float Pixel Data.** The canonical form is the stored IEEE 754 values, f32 or f64 little endian (CONTRACT.md, "Float pixel data"). Bits Allocated is 32 or 64 by the element; a missing or different declared value is inferred from it. Samples per Pixel 1 or 3, Planar Configuration as for integer data, Explicit VR Big Endian swapped per sample. Float Pixel Data under an encapsulated transfer syntax is invalid. Oracle: pydicom, and GDCM agrees on all four cases (cornerstone3D `paramap-float` and three IDC Parametric Maps, highdicom 0.27.0).
+17. **Encapsulated Uncompressed (.1.98) and Deflated Image Frame Compression (.8.1).** Each frame is one fragment (or the fragments PS3.5 A.4 frame splitting gives) holding the native frame bytes, raw-deflated (RFC 1951, no zlib header) for .8.1, with an optional pad byte. Bits Allocated 1 frames start on a byte boundary. The frames then follow the native rules (4:2:2 expansion, planar, Bits Stored, colour). A frame that does not hold or inflate to its native size is invalid. pydicom 3.0.2 refuses both syntaxes, so the reference `pydicom:unwrapped` unwraps or inflates the frames in Python and has pydicom decode them as Explicit VR Little Endian. The 18 generated cases (`scripts/sources/unwrapped.py`) take their oracle from their native source case (`oracle_case`); the three cornerstone3D files equal their Explicit VR siblings (`CTImage.dcm_Deflated…1.2.1.99`, two families, and the uncompressed `ColorImage.dcm`).
+18. **GE private Implicit VR Big Endian (1.2.840.113619.5.2).** The data set (and in `ext-gdcm-GE_DLX-8-MONO2-PrivateSyntax` the meta too) is implicit VR little endian; Pixel Data samples are big endian, so 16-bit samples are swapped and 8-bit ones are not. Oracle: GDCM's own reader (`gdcm-native`), which pydicom cannot reach because it refuses the syntax.
+19. **ACR-NEMA forms that GDCM reads.** All are native and are reported as inferences.
+    - Bits Allocated 12: two samples in three bytes, `b0 | (b1 & 0x0F) << 8` and `b1 >> 4 | b2 << 4`, unpacked into 16 bits (`ext-fodicom-GH340`).
+    - Bits Allocated 24 with no Samples per Pixel: one interleaved 8-bit RGB pixel (`ext-gdcm-LIBIDO-24-ACR_NEMA-Rectangle`).
+    - Recognition Code (0008,0010) `ACRNEMA_LIBIDO*`: Rows and Columns are stored swapped (`ext-gdcm-gdcm-ACR-LibIDO.acr`, `ext-gdcm-LIBIDO-24-ACR_NEMA-Rectangle`).
+    - No Photometric Interpretation: MONOCHROME2 for one sample (`ext-gdcm-SIEMENS_GBS_III-16-ACR_NEMA_1.acr`; its oracle is a repaired copy, since GDCM aborts on its rescale values).
+
+    pydicom refuses all four; the oracle is `gdcm-native` or the repaired copy.
+20. **YBR_PARTIAL_422 and the retired colour models.** No real files are known; 20 cases are generated from RGB seeds (`scripts/sources/retired_photometrics.py`). The standard defines the models but no RGB conversion for HSV and CMYK, and pydicom and GDCM convert none of them, so DCMTK's dcm2img (`dcmtk-color`, the only reader that implements them) is the reference. `retired.rs` has the formulas:
+    - HSV: Foley's hexcone algorithm as DCMTK computes it, hue 0..=max covering 0°–360°. Exact against DCMTK.
+    - CMYK: R, G, B = max − C/M/Y − K, at least 0. Exact against DCMTK wherever C + K ≤ max (DCMTK wraps around above that).
+    - ARGB: where alpha > 0 the Palette Color Lookup Tables indexed by alpha give the colour, scaled to Bits Stored; elsewhere RGB as stored. Exact against DCMTK when the tables are as deep as the samples; DCMTK does not rescale the RGB planes to a deeper table, which is not meaningful.
+    - YBR_PARTIAL_422: expanded like YBR_FULL_422, then the exact inverse of the PS3.3 C.7.6.3.1.2 equations, rounded half up, 8-bit only. DCMTK uses 4-digit coefficients and truncates, so it differs by up to 2; ours is closer to the seed RGB (mean |diff| 0.46 against 0.69 on `pydicom-US1_UNCR`). Ruling: max_abs 2.
+
+    Signed data in these models is unsupported (exit 3).
 ## STATUS
+
+**Coverage round (decoders agent, 2026-10-15). uncompressed: pass=319 / 319.** New: Float and Double Float Pixel Data, Encapsulated Uncompressed, Deflated Image Frame Compression, the GE private syntax, files without a Part 10 meta, the ACR-NEMA forms of rule 19, YBR_PARTIAL_422 and the retired colour models (rules 16–20). 64 cases added. `--frames A-B` decodes a frame range; `scripts/check_frames.py` checks every multi-frame case's range against its whole decode (222 cases, all identical).
 
 **Inference round (foundation agent, 2026-10-15). uncompressed: pass=255 / 255.** It added 12 cases:
 - 8 `strip-pc-*`: 7 decode and 1 is refused as too small;
@@ -215,6 +238,6 @@ Bench medians (ms), before → after:
 | uncompressed RGB cine | 2.76 → 1.59 | 2.83 → 1.62 |
 
 Known gaps:
-- Float and Double Float Pixel Data are unsupported (exit 3).
-- Bits Allocated other than 1, 8, 16 or 32 is unsupported.
+- Bits Allocated other than 1, 8, 16 or 32 (and the ACR-NEMA 12 and 24) is unsupported.
+- YBR_PARTIAL_422 is converted for 8-bit samples only, and ARGB, CMYK and HSV for unsigned samples only.
 - Nothing is read after the top-level Pixel Data element.

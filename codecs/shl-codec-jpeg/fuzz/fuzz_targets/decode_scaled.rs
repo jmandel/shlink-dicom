@@ -7,7 +7,12 @@ use libfuzzer_sys::fuzz_target;
 use shl_codec_common::{FrameInfo, Photometric};
 
 fn sof(d: &[u8]) -> Option<(u8, u32, u32, u16)> {
-    let i = d.windows(2).position(|w| w[0] == 0xFF && matches!(w[1], 0xC0 | 0xC1 | 0xC3))?;
+    // A hierarchical image's DHP gives the image size; otherwise the first SOFn.
+    let is_frame = |m: u8| matches!(m, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF);
+    let i = d
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] == 0xDE)
+        .or_else(|| d.windows(2).position(|w| w[0] == 0xFF && is_frame(w[1])))?;
     let s = d.get(i + 4..i + 10)?;
     Some((s[0], u32::from(u16::from_be_bytes([s[1], s[2]])), u32::from(u16::from_be_bytes([s[3], s[4]])), u16::from(s[5])))
 }

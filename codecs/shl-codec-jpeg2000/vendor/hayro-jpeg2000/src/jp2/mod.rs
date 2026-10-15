@@ -117,6 +117,11 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
 
     let mut image_boxes = image_boxes.ok_or(FormatError::InvalidBox)?;
     let parsed_codestream = parsed_codestream.ok_or(FormatError::MissingCodestream)?;
+    // shl patch 11: JPX colour handling after a Part 2 multiple component transformation is
+    // not implemented.
+    if parsed_codestream.header.part2.is_some() {
+        return Err(FormatError::Unsupported.into());
+    }
 
     if let Some(palette) = image_boxes.palette.as_ref()
         && image_boxes.component_mapping.is_none()

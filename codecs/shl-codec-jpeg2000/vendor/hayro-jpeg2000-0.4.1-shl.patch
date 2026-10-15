@@ -1,6 +1,6 @@
 diff -ruN a/src/error.rs b/src/error.rs
---- a/src/error.rs	2026-10-15 09:15:46.837090447 -0500
-+++ b/src/error.rs	2026-10-15 09:15:46.840064049 -0500
+--- a/src/error.rs	2026-10-15 11:39:09.456225065 -0500
++++ b/src/error.rs	2026-10-15 11:39:09.460641967 -0500
 @@ -106,6 +106,10 @@
      InvalidProgressionIterator,
      /// Unexpected end of data.
@@ -21,7 +21,7 @@ diff -ruN a/src/error.rs b/src/error.rs
      }
  }
 diff -ruN a/src/integration.rs b/src/integration.rs
---- a/src/integration.rs	2026-10-15 09:15:46.837181269 -0500
+--- a/src/integration.rs	2026-10-15 11:39:09.456540031 -0500
 +++ b/src/integration.rs	1969-12-31 18:00:00.000000000 -0600
 @@ -1,342 +0,0 @@
 -//! Integration with the [image] crate
@@ -367,8 +367,8 @@ diff -ruN a/src/integration.rs b/src/integration.rs
 -    true
 -}
 diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
---- a/src/j2c/build.rs	2026-10-15 09:15:46.837464726 -0500
-+++ b/src/j2c/build.rs	2026-10-15 09:15:46.840477462 -0500
+--- a/src/j2c/build.rs	2026-10-15 11:39:09.457410870 -0500
++++ b/src/j2c/build.rs	2026-10-15 11:39:09.461034119 -0500
 @@ -26,6 +26,16 @@
  ) -> Result<()> {
      let mut component_samples = vec![];
@@ -405,9 +405,13 @@ diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
  
  pub(crate) struct Segment<'a> {
 diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
---- a/src/j2c/codestream.rs	2026-10-15 09:15:46.837538025 -0500
-+++ b/src/j2c/codestream.rs	2026-10-15 09:15:46.840265691 -0500
-@@ -9,7 +9,9 @@
+--- a/src/j2c/codestream.rs	2026-10-15 11:39:09.457659641 -0500
++++ b/src/j2c/codestream.rs	2026-10-15 11:39:09.460812700 -0500
+@@ -6,10 +6,13 @@
+ use super::DecodeSettings;
+ use super::bitplane::BITPLANE_BIT_SIZE;
+ use super::build::SubBandType;
++use super::mct2;
  use crate::error::{MarkerError, Result, ValidationError, bail, err};
  use crate::reader::BitReader;
  
@@ -418,7 +422,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  const MAX_RESOLUTION_COUNT: u8 = 32;
  const MAX_PRECINCT_EXPONENT: u8 = 31;
  
-@@ -22,6 +24,47 @@
+@@ -22,6 +25,50 @@
      pub(crate) skipped_resolution_levels: u8,
      /// Whether strict mode is enabled for decoding.
      pub(crate) strict: bool,
@@ -428,6 +432,9 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
 +    pub(crate) ht_set: HtSet,
 +    /// shl patch 8: `DecodeSettings::defer_level_shift`.
 +    pub(crate) defer_level_shift: bool,
++    /// shl patch 11: the Part 2 multiple component transformation (T.801 Annex J), when the
++    /// codestream uses one. It replaces the DC level shift.
++    pub(crate) part2: Option<super::mct2::Part2Transform>,
 +}
 +
 +/// shl patch 5: the T.814 code-block set signalled by CAP Ccap15 bits 15-14 (Table A.2).
@@ -466,7 +473,23 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  }
  
  #[derive(Debug, Clone)]
-@@ -53,6 +96,7 @@
+@@ -46,6 +93,15 @@
+     let mut size_data = size_marker(reader)?;
+     size_data.num_tiles()?;
+ 
++    // shl patch 11: of the Part 2 capabilities (T.801 Table A.2), only the multiple component
++    // transformation is decoded; any other would be decoded wrongly, so it is refused.
++    let rsiz = size_data.capabilities;
++    let part2_mct = rsiz & mct2::RSIZ_PART2 != 0 && rsiz & mct2::RSIZ_MCT != 0;
++    if rsiz & mct2::RSIZ_PART2 != 0 && rsiz & 0x7FFF & !mct2::RSIZ_MCT != 0 {
++        bail!(MarkerError::Unsupported);
++    }
++    let mut part2_markers = mct2::Part2Header::default();
++
+     let mut cod = None;
+     let mut qcd = None;
+ 
+@@ -53,6 +109,7 @@
      let mut cod_components = vec![None; num_components as usize];
      let mut qcd_components = vec![None; num_components as usize];
      let mut ppm_markers = vec![];
@@ -474,7 +497,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  
      loop {
          match reader.peek_marker().ok_or(MarkerError::Invalid)? {
-@@ -82,8 +126,9 @@
+@@ -82,8 +139,9 @@
                      .ok_or(MarkerError::ParseFailure("QCC"))? = Some(qcc);
              }
              markers::RGN => {
@@ -486,7 +509,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
              }
              markers::TLM => {
                  reader.read_marker()?;
-@@ -97,6 +142,15 @@
+@@ -97,10 +155,31 @@
                  reader.read_marker()?;
                  ppm_markers.push(ppm_marker(reader).ok_or(MarkerError::ParseFailure("PPM"))?);
              }
@@ -502,7 +525,55 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
              markers::CRG => {
                  reader.read_marker()?;
                  skip_marker_segment(reader);
-@@ -143,8 +197,15 @@
+             }
++            // shl patch 11: CBD, MCT, MCC and MCO (T.801 A.3.6-A.3.9), only in a codestream
++            // whose Rsiz announces the multiple component transformation.
++            m @ (markers::CBD | markers::MCT | markers::MCC | markers::MCO) if part2_mct => {
++                reader.read_marker()?;
++                let data = marker_segment_body(reader).ok_or(MarkerError::ParseFailure("MCT"))?;
++                match m {
++                    markers::CBD => part2_markers.read_cbd(data)?,
++                    markers::MCT => part2_markers.read_mct(data)?,
++                    markers::MCC => part2_markers.read_mcc(data)?,
++                    _ => part2_markers.read_mco(data)?,
++                }
++            }
+             (0x30..=0x3F) => {
+                 // "All markers with the marker code between 0xFF30 and 0xFF3F
+                 // have no marker segment parameters. They shall be skipped by
+@@ -117,6 +196,31 @@
+     let cod = cod.ok_or(MarkerError::Missing("COD"))?;
+     let qcd = qcd.ok_or(MarkerError::Missing("QCD"))?;
+ 
++    // shl patch 11: SGcod 2 (array-based) selects the Part 2 transformation; the wavelet-based
++    // one (4, 6) is not implemented. Values above 1 mean nothing in a Part 1 codestream.
++    let part2 = match cod.mct_type {
++        0 | 1 => None,
++        mct2::COD_MCT_ARRAY if part2_mct => {
++            match &part2_markers.mco {
++                Some(stages) if !stages.is_empty() => {}
++                // No stages: no transformation, and CBD alone cannot be honoured.
++                _ => bail!(MarkerError::Unsupported),
++            }
++            Some(part2_markers.transform(size_data.component_sizes.len())?)
++        }
++        t if part2_mct && t & mct2::COD_MCT_WAVELET != 0 => bail!(MarkerError::Unsupported),
++        _ => bail!(MarkerError::Unsupported),
++    };
++    if let Some(p) = &part2 {
++        // Every input of a collection must have the same size (J.2.3); hayro spreads
++        // subsampled components over the full grid, so only full-size ones are accepted.
++        if size_data.component_sizes.iter().any(|c| c.horizontal_resolution != 1 || c.vertical_resolution != 1)
++            || p.outputs.iter().any(|o| u32::from(o.precision) > BITPLANE_BIT_SIZE)
++        {
++            bail!(MarkerError::Unsupported);
++        }
++    }
++
+     let component_infos: Vec<ComponentInfo> = size_data
+         .component_sizes
+         .iter()
+@@ -143,8 +247,15 @@
          .map(|c| c.num_resolution_levels())
          .min()
          .unwrap();
@@ -520,7 +591,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
              let width_log = size_data
                  .image_width()
                  .checked_div(target_width)
-@@ -156,11 +217,10 @@
+@@ -156,11 +267,10 @@
                  .and_then(|v| v.checked_ilog2())
                  .unwrap_or(0);
  
@@ -534,17 +605,18 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  
      // If the user defined a maximum resolution level that is lower than the
      // maximum available one, the final image needs to be shrinked further.
-@@ -180,6 +240,9 @@
+@@ -180,6 +290,10 @@
              .collect(),
          skipped_resolution_levels,
          strict: settings.strict,
 +        high_throughput: settings.high_throughput,
 +        ht_set,
 +        defer_level_shift: settings.defer_level_shift,
++        part2,
      };
  
      validate(&header)?;
-@@ -353,6 +416,27 @@
+@@ -353,6 +467,27 @@
      }
  }
  
@@ -572,7 +644,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  /// Code-block style flags (Table A.19).
  #[derive(Debug, Clone, Copy, Default)]
  pub(crate) struct CodeBlockStyle {
-@@ -361,6 +445,10 @@
+@@ -361,6 +496,10 @@
      pub(crate) termination_on_each_pass: bool,
      pub(crate) vertically_causal_context: bool,
      pub(crate) segmentation_symbols: bool,
@@ -583,7 +655,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  }
  
  impl CodeBlockStyle {
-@@ -373,6 +461,9 @@
+@@ -373,6 +512,9 @@
              // The predictable termination flag is only informative and
              // can therefore be ignored.
              segmentation_symbols: (value & 0x20) != 0,
@@ -593,19 +665,56 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
          }
      }
  }
-@@ -758,11 +849,6 @@
+@@ -416,6 +558,8 @@
+     pub(crate) progression_order: ProgressionOrder,
+     pub(crate) num_layers: u8,
+     pub(crate) mct: bool,
++    /// shl patch 11: the SGcod multiple component transformation byte (T.801 Table A.8).
++    pub(crate) mct_type: u8,
+     // This is the default used for all components, if not overridden by COC.
+     pub(crate) component_parameters: CodingStyleComponent,
+ }
+@@ -460,6 +604,8 @@
+     pub(crate) tile_y_offset: u32,
+     /// Component information (SSiz/XRSiz/YRSiz).
+     pub(crate) component_sizes: Vec<ComponentSizeInfo>,
++    /// shl patch 11: Rsiz, the capabilities.
++    pub(crate) capabilities: u16,
+     /// Shrink factor in the x direction. See the comment in the parsing method.
+     pub(crate) x_shrink_factor: u32,
+     /// Shrink factor in the y direction. See the comment in the parsing method.
+@@ -586,7 +732,7 @@
+     // Length.
+     let _ = reader.read_u16()?;
+     // Decoder capabilities.
+-    let _ = reader.read_u16()?;
++    let capabilities = reader.read_u16()?;
+ 
+     let xsiz = reader.read_u32()?;
+     let ysiz = reader.read_u32()?;
+@@ -661,6 +807,7 @@
+         tile_x_offset: xto_siz,
+         tile_y_offset: yto_siz,
+         component_sizes: components,
++        capabilities,
+         x_shrink_factor,
+         y_shrink_factor,
+         x_resolution_shrink_factor: 1,
+@@ -758,9 +905,10 @@
      })
  }
  
 -/// RGN marker (A.6.3).
 -fn rgn_marker(reader: &mut BitReader<'_>) -> Option<()> {
 -    skip_marker_segment(reader)
--}
--
++/// shl patch 11: the parameters of a marker segment (after its length field).
++fn marker_segment_body<'a>(reader: &mut BitReader<'a>) -> Option<&'a [u8]> {
++    let length = reader.read_u16()?.checked_sub(2)?;
++    reader.read_bytes(usize::from(length))
+ }
+ 
  pub(crate) fn skip_marker_segment(reader: &mut BitReader<'_>) -> Option<()> {
-     let length = reader.read_u16()?.checked_sub(2)?;
-     reader.skip_bytes(length as usize)?;
-@@ -780,7 +866,6 @@
+@@ -780,12 +928,12 @@
  
      let num_layers = reader.read_u16()?;
  
@@ -613,7 +722,22 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
      if num_layers == 0 || num_layers > MAX_LAYER_COUNT as u16 {
          return None;
      }
-@@ -937,6 +1022,10 @@
+ 
+-    let mct = reader.read_byte()? == 1;
++    let mct_type = reader.read_byte()?;
++    let mct = mct_type == 1;
+ 
+     let coding_style_parameters = coding_style_parameters(reader, &coding_style_flags)?;
+ 
+@@ -793,6 +941,7 @@
+         progression_order,
+         num_layers: num_layers as u8,
+         mct,
++        mct_type,
+         component_parameters: CodingStyleComponent {
+             flags: coding_style_flags,
+             parameters: coding_style_parameters,
+@@ -937,6 +1086,10 @@
      pub(crate) const COD: u8 = 0x52;
      /// Coding component - 'COC'.
      pub(crate) const COC: u8 = 0x53;
@@ -624,23 +748,44 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
      /// Region-of-interest - 'RGN'.
      pub(crate) const RGN: u8 = 0x5E;
      /// Quantization default - 'QCD'.
+@@ -966,6 +1119,12 @@
+     pub(crate) const CRG: u8 = 0x63;
+     /// Comment - 'COM'.
+     pub(crate) const COM: u8 = 0x64;
++    /// shl patch 11: Part 2 (T.801 Table A.12) component bit depth, multiple component
++    /// transformation definition, collection and ordering.
++    pub(crate) const CBD: u8 = 0x78;
++    pub(crate) const MCT: u8 = 0x74;
++    pub(crate) const MCC: u8 = 0x75;
++    pub(crate) const MCO: u8 = 0x77;
+ 
+     pub(crate) fn to_string(marker: u8) -> &'static str {
+         match marker {
 diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
---- a/src/j2c/decode.rs	2026-10-15 09:15:46.837617746 -0500
-+++ b/src/j2c/decode.rs	2026-10-15 09:15:46.840544690 -0500
-@@ -43,6 +43,12 @@
+--- a/src/j2c/decode.rs	2026-10-15 11:39:09.457865200 -0500
++++ b/src/j2c/decode.rs	2026-10-15 11:39:09.461089685 -0500
+@@ -43,6 +43,20 @@
  
      ctx.reset(header, &tiles[0])?;
  
 +    // shl patch 8: without MCT, the DC level shift is added while each tile is stored,
 +    // instead of in a separate pass over every channel afterwards (the same f32 additions).
-+    let shift_in_store =
-+        !header.defer_level_shift && !tiles[0].mct && header.skipped_resolution_levels == 0;
++    // shl patch 11: a Part 2 multiple component transformation replaces the level shift.
++    let shift_in_store = !header.defer_level_shift
++        && !tiles[0].mct
++        && header.part2.is_none()
++        && header.skipped_resolution_levels == 0;
++    // shl patch 11: the transformation is read from the main header only, so every tile
++    // must use it (a tile-part COD may switch it off).
++    if header.part2.is_some() && tiles.iter().any(|t| t.mct_type != header.global_coding_style.mct_type) {
++        bail!(crate::error::MarkerError::Unsupported);
++    }
 +    let sole_tile = tiles.len() == 1;
 +
      for tile in &tiles {
          trace!(
              "tile {} rect [{},{} {}x{}]",
-@@ -84,6 +90,8 @@
+@@ -84,6 +98,8 @@
              &mut ctx.tile_decode_context,
              &mut ctx.channel_data,
              &mut ctx.storage,
@@ -649,18 +794,27 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
          )?;
      }
  
-@@ -94,7 +102,9 @@
+@@ -94,7 +110,18 @@
          mct::apply_inverse(&mut ctx.channel_data, &tiles[0].component_infos, header)?;
      }
  
 -    apply_sign_shift(&mut ctx.channel_data, &header.component_infos);
++    // shl patch 11: the Part 2 transformation, with no DC level shift (T.801 Annex J).
++    if let Some(part2) = &header.part2 {
++        let len = (header.size_data.image_width() as usize)
++            .checked_mul(header.size_data.image_height() as usize)
++            .ok_or(ValidationError::ImageTooLarge)?;
++        part2.apply(&mut ctx.channel_data, len)?;
++        return Ok(());
++    }
++
 +    if !shift_in_store && !header.defer_level_shift {
 +        apply_sign_shift(&mut ctx.channel_data, &header.component_infos);
 +    }
  
      Ok(())
  }
-@@ -136,6 +146,8 @@
+@@ -136,6 +163,8 @@
      tile_ctx: &mut TileDecodeContext,
      channel_data: &mut [ComponentData],
      storage: &mut DecompositionStorage<'a>,
@@ -669,7 +823,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
  ) -> Result<()> {
      storage.reset();
  
-@@ -181,6 +193,8 @@
+@@ -181,6 +210,8 @@
              tile_ctx,
              &mut channel_data[idx],
              component_info,
@@ -678,7 +832,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
          );
      }
  
-@@ -261,6 +275,9 @@
+@@ -261,6 +292,9 @@
      pub(crate) sub_bands: Vec<SubBand>,
      pub(crate) decompositions: Vec<Decomposition>,
      pub(crate) tile_decompositions: Vec<TileDecompositions>,
@@ -688,7 +842,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
  }
  
  impl DecompositionStorage<'_> {
-@@ -293,6 +310,10 @@
+@@ -293,6 +327,10 @@
      pub(crate) bit_plane_decode_context: BitPlaneDecodeContext,
      /// Reusable buffers for decoding bitplanes.
      pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
@@ -699,7 +853,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
  }
  
  impl TileDecodeContext {
-@@ -384,6 +405,19 @@
+@@ -384,6 +422,19 @@
          num_bitplanes as u8
      };
  
@@ -719,7 +873,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
      for precinct in sub_band
          .precincts
          .clone()
-@@ -433,6 +467,122 @@
+@@ -433,6 +484,122 @@
      Ok(())
  }
  
@@ -842,7 +996,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
  fn apply_sign_shift(channel_data: &mut [ComponentData], component_infos: &[ComponentInfo]) {
      use crate::math::{Level, dispatch, f32x8};
  
-@@ -454,9 +604,42 @@
+@@ -454,9 +621,42 @@
      tile_ctx: &mut TileDecodeContext,
      channel_data: &mut ComponentData,
      component_info: &ComponentInfo,
@@ -885,7 +1039,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
      let component_tile = ComponentTile::new(tile, component_info);
      let resolution_tile = ResolutionTile::new(
          component_tile,
-@@ -502,7 +685,14 @@
+@@ -502,7 +702,14 @@
                  [resolution_tile.rect.x0.saturating_sub(image_x_offset) as usize..]
                  [..input_row.len()];
  
@@ -901,7 +1055,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
          }
      } else {
          let image_width = header.size_data.image_width();
-@@ -520,17 +710,27 @@
+@@ -520,17 +727,27 @@
              .image_area_y_offset
              .div_ceil(y_shrink_factor);
  
@@ -934,7 +1088,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
                      ..u32::min(reference_grid_x + scale_x as u32, image_width + x_offset)
 diff -ruN a/src/j2c/ht/decode.rs b/src/j2c/ht/decode.rs
 --- a/src/j2c/ht/decode.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/decode.rs	2026-10-15 09:15:46.841425097 -0500
++++ b/src/j2c/ht/decode.rs	2026-10-15 11:39:09.461950314 -0500
 @@ -0,0 +1,640 @@
 +//! HT block decoder: cleanup, `SigProp` and `MagRef` passes (T.814 §7).
 +//!
@@ -1578,7 +1732,7 @@ diff -ruN a/src/j2c/ht/decode.rs b/src/j2c/ht/decode.rs
 +}
 diff -ruN a/src/j2c/ht/encode.rs b/src/j2c/ht/encode.rs
 --- a/src/j2c/ht/encode.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/encode.rs	2026-10-15 09:15:46.841052071 -0500
++++ b/src/j2c/ht/encode.rs	2026-10-15 11:39:09.461595993 -0500
 @@ -0,0 +1,345 @@
 +//! HT block encoder: a single self-contained cleanup pass (T.814 §6).
 +//!
@@ -1927,7 +2081,7 @@ diff -ruN a/src/j2c/ht/encode.rs b/src/j2c/ht/encode.rs
 +}
 diff -ruN a/src/j2c/ht/LICENSE b/src/j2c/ht/LICENSE
 --- a/src/j2c/ht/LICENSE	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/LICENSE	2026-10-15 09:15:46.854600980 -0500
++++ b/src/j2c/ht/LICENSE	2026-10-15 11:39:09.462507849 -0500
 @@ -0,0 +1,53 @@
 +The files in this directory come from ndic-htj2k 0.2.5 (src/block/), MIT licence:
 +
@@ -1984,7 +2138,7 @@ diff -ruN a/src/j2c/ht/LICENSE b/src/j2c/ht/LICENSE
 +OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 diff -ruN a/src/j2c/ht/mel.rs b/src/j2c/ht/mel.rs
 --- a/src/j2c/ht/mel.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/mel.rs	2026-10-15 09:15:46.841171627 -0500
++++ b/src/j2c/ht/mel.rs	2026-10-15 11:39:09.461709458 -0500
 @@ -0,0 +1,331 @@
 +//! MEL (adaptive run-length) coder — T.814 §7.1.1 / §7.3.4.
 +//!
@@ -2319,7 +2473,7 @@ diff -ruN a/src/j2c/ht/mel.rs b/src/j2c/ht/mel.rs
 +}
 diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 --- a/src/j2c/ht/mod.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/mod.rs	2026-10-15 09:15:46.841377888 -0500
++++ b/src/j2c/ht/mod.rs	2026-10-15 11:39:09.461907182 -0500
 @@ -0,0 +1,68 @@
 +//! The HTJ2K (ITU-T T.814) block decoder: HT cleanup, SigProp and MagRef passes.
 +//!
@@ -2391,7 +2545,7 @@ diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 +}
 diff -ruN a/src/j2c/ht/streams.rs b/src/j2c/ht/streams.rs
 --- a/src/j2c/ht/streams.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/streams.rs	2026-10-15 09:15:46.841487205 -0500
++++ b/src/j2c/ht/streams.rs	2026-10-15 11:39:09.462007682 -0500
 @@ -0,0 +1,654 @@
 +//! Sub-bitstream readers and writers for the HT cleanup / refinement passes.
 +//!
@@ -3049,7 +3203,7 @@ diff -ruN a/src/j2c/ht/streams.rs b/src/j2c/ht/streams.rs
 +}
 diff -ruN a/src/j2c/ht/tables_data.rs b/src/j2c/ht/tables_data.rs
 --- a/src/j2c/ht/tables_data.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tables_data.rs	2026-10-15 09:15:46.841276897 -0500
++++ b/src/j2c/ht/tables_data.rs	2026-10-15 11:39:09.461832581 -0500
 @@ -0,0 +1,938 @@
 +//! CxtVLC / UVLC lookup tables for the HT (FBCOT) block coder.
 +//!
@@ -3991,7 +4145,7 @@ diff -ruN a/src/j2c/ht/tables_data.rs b/src/j2c/ht/tables_data.rs
 +];
 diff -ruN a/src/j2c/ht/tables.rs b/src/j2c/ht/tables.rs
 --- a/src/j2c/ht/tables.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tables.rs	2026-10-15 09:15:46.841223345 -0500
++++ b/src/j2c/ht/tables.rs	2026-10-15 11:39:09.461753100 -0500
 @@ -0,0 +1,151 @@
 +//! Lookup-table access for the HT block coder.
 +//!
@@ -4146,7 +4300,7 @@ diff -ruN a/src/j2c/ht/tables.rs b/src/j2c/ht/tables.rs
 +}
 diff -ruN a/src/j2c/ht/tests.rs b/src/j2c/ht/tests.rs
 --- a/src/j2c/ht/tests.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tests.rs	2026-10-15 09:15:46.841122374 -0500
++++ b/src/j2c/ht/tests.rs	2026-10-15 11:39:09.461667318 -0500
 @@ -0,0 +1,158 @@
 +//! Round-trip tests for the HT block decoder: blocks coded by the (test-only) encoder must
 +//! decode back exactly. Adapted from ndic-htj2k's `tests/block_roundtrip.rs` (MIT), with a
@@ -4307,8 +4461,8 @@ diff -ruN a/src/j2c/ht/tests.rs b/src/j2c/ht/tests.rs
 +    std::println!("{ns:.2} ns/sample ({} bytes coded)", coded.len());
 +}
 diff -ruN a/src/j2c/idwt.rs b/src/j2c/idwt.rs
---- a/src/j2c/idwt.rs	2026-10-15 09:15:46.837673211 -0500
-+++ b/src/j2c/idwt.rs	2026-10-15 09:15:46.840611847 -0500
+--- a/src/j2c/idwt.rs	2026-10-15 11:39:09.457978835 -0500
++++ b/src/j2c/idwt.rs	2026-10-15 11:39:09.461154738 -0500
 @@ -175,12 +175,21 @@
      transform: WaveletTransform,
      storage: &DecompositionStorage<'_>,
@@ -4831,20 +4985,778 @@ diff -ruN a/src/j2c/idwt.rs b/src/j2c/idwt.rs
          #[inline(always)]
          |s1, s2, s3| (s2 + s3).mul_add(neg_alpha, s1),
          #[inline(always)]
+diff -ruN a/src/j2c/mct2.rs b/src/j2c/mct2.rs
+--- a/src/j2c/mct2.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/src/j2c/mct2.rs	2026-10-15 11:39:09.461511854 -0500
+@@ -0,0 +1,730 @@
++//! shl patch 11: the array-based multiple component transformations of ITU-T T.801 |
++//! ISO/IEC 15444-2 Annex J (JPEG 2000 Part 2), as DICOM uses them for the transfer syntaxes
++//! 1.2.840.10008.1.2.4.92 and .93.
++//!
++//! Read from the main header: CBD (A.3.6), MCT (A.3.7), MCC (A.3.8) and MCO (A.3.9), with
++//! series of marker segments (Zmct/Ymct, Zmcc/Ymcc) joined. Applied after every tile is
++//! decoded, in place of the DC level shift (J.2.1): each MCO stage runs its MCC component
++//! collections, each an array-based decorrelation (J.3.1.1) or dependency (J.3.1.2)
++//! transformation, reversible or irreversible, with an optional offset array. Null
++//! intermediate components are zero (J.2.3.1).
++//!
++//! Refused as unsupported: the wavelet-based transformation (J.3.2), and these marker
++//! segments in a tile-part header (tile overrides); `tile.rs` refuses any marker it does not
++//! know there.
++
++use alloc::vec;
++use alloc::vec::Vec;
++
++use super::ComponentData;
++use crate::error::{ColorError, MarkerError, Result, bail};
++use crate::math::{SIMD_WIDTH, SimdBuffer};
++
++/// Rsiz bit 15: a Part 2 codestream (T.801 Table A.2).
++pub(crate) const RSIZ_PART2: u16 = 0x8000;
++/// Rsiz: the multiple component transformation capability.
++pub(crate) const RSIZ_MCT: u16 = 0x0100;
++/// SGcod multiple component transformation type (T.801 Table A.8): array-based.
++pub(crate) const COD_MCT_ARRAY: u8 = 0x02;
++/// SGcod: wavelet-based.
++pub(crate) const COD_MCT_WAVELET: u8 = 0x04;
++/// The largest number of components (CBD, MCC) T.801 allows.
++const MAX_COMPONENTS: usize = 16_384;
++
++/// One reconstructed image component from CBD.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct OutputComponent {
++    pub(crate) precision: u8,
++    pub(crate) signed: bool,
++}
++
++/// The Part 2 multiple component transformation marker segments of a main header.
++#[derive(Debug, Clone, Default)]
++pub(crate) struct Part2Header {
++    pub(crate) cbd: Option<Vec<OutputComponent>>,
++    /// MCT series by Imct (index | array type | element type): (Zmct, Ymct, data).
++    mct: Vec<(u16, Vec<(u16, Option<u16>, Vec<u8>)>)>,
++    /// MCC series by Imcc: (Zmcc, Ymcc and Qmcc if Zmcc = 0, data).
++    mcc: Vec<(u8, Vec<(u16, Option<(u16, u16)>, Vec<u8>)>)>,
++    /// MCO: the MCC index of each stage.
++    pub(crate) mco: Option<Vec<u8>>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Kind {
++    Dependency,
++    Decorrelation,
++    Wavelet,
++}
++
++#[derive(Debug, Clone)]
++struct Collection {
++    kind: Kind,
++    inputs: Vec<usize>,
++    outputs: Vec<usize>,
++    /// Tmcc: transform array index (bits 0-7), offset array index (8-15), reversible (16).
++    tmcc: u32,
++}
++
++/// The transformation, validated against the number of codestream components.
++#[derive(Debug, Clone)]
++pub(crate) struct Part2Transform {
++    pub(crate) outputs: Vec<OutputComponent>,
++    stages: Vec<Vec<Step>>,
++    /// Number of intermediate components after each stage (the last is the CBD count).
++    sizes: Vec<usize>,
++}
++
++#[derive(Debug, Clone)]
++struct Step {
++    kind: Kind,
++    reversible: bool,
++    inputs: Vec<usize>,
++    outputs: Vec<usize>,
++    /// Row-major coefficients, in the order of J.3.1 for the kind (empty: the default array).
++    coefficients: Vec<f64>,
++    /// One per output component (empty: zero offsets).
++    offsets: Vec<f64>,
++}
++
++fn invalid<T>() -> Result<T> {
++    Err(ColorError::Mct.into())
++}
++
++fn be16(b: &[u8], at: usize) -> Option<u16> {
++    Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
++}
++
++impl Part2Header {
++    /// CBD (A.3.6). `data` is the marker segment after Lcbd.
++    pub(crate) fn read_cbd(&mut self, data: &[u8]) -> Result<()> {
++        if self.cbd.is_some() {
++            return invalid();
++        }
++        let n = be16(data, 0).ok_or(MarkerError::ParseFailure("CBD"))?;
++        let count = usize::from(n & 0x7FFF);
++        if count == 0 || count > MAX_COMPONENTS {
++            return invalid();
++        }
++        let depth = |b: u8| -> Result<OutputComponent> {
++            let precision = (b & 0x7F) + 1;
++            if precision > 38 {
++                return invalid();
++            }
++            Ok(OutputComponent { precision, signed: b & 0x80 != 0 })
++        };
++        let comps = if n & 0x8000 != 0 {
++            if data.len() != 3 {
++                return invalid();
++            }
++            vec![depth(data[2])?; count]
++        } else {
++            if data.len() != 2 + count {
++                return invalid();
++            }
++            data[2..].iter().map(|&b| depth(b)).collect::<Result<Vec<_>>>()?
++        };
++        self.cbd = Some(comps);
++        Ok(())
++    }
++
++    /// MCT (A.3.7). `data` is the marker segment after Lmct.
++    pub(crate) fn read_mct(&mut self, data: &[u8]) -> Result<()> {
++        let z = be16(data, 0).ok_or(MarkerError::ParseFailure("MCT"))?;
++        let imct = be16(data, 2).ok_or(MarkerError::ParseFailure("MCT"))?;
++        let (y, rest) = if z == 0 {
++            (Some(be16(data, 4).ok_or(MarkerError::ParseFailure("MCT"))?), &data[6..])
++        } else {
++            (None, &data[4..])
++        };
++        if imct & 0xF000 != 0 || imct & 0xFF == 0 || (imct >> 8) & 3 == 3 {
++            return invalid();
++        }
++        let series = match self.mct.iter_mut().find(|(i, _)| *i == imct) {
++            Some((_, s)) => s,
++            None => {
++                self.mct.push((imct, Vec::new()));
++                &mut self.mct.last_mut().ok_or(ColorError::Mct)?.1
++            }
++        };
++        series.push((z, y, rest.to_vec()));
++        Ok(())
++    }
++
++    /// MCC (A.3.8). `data` is the marker segment after Lmcc.
++    pub(crate) fn read_mcc(&mut self, data: &[u8]) -> Result<()> {
++        let z = be16(data, 0).ok_or(MarkerError::ParseFailure("MCC"))?;
++        let imcc = *data.get(2).ok_or(MarkerError::ParseFailure("MCC"))?;
++        let (yq, rest) = if z == 0 {
++            let y = be16(data, 3).ok_or(MarkerError::ParseFailure("MCC"))?;
++            let q = be16(data, 5).ok_or(MarkerError::ParseFailure("MCC"))?;
++            (Some((y, q)), &data[7..])
++        } else {
++            (None, &data[3..])
++        };
++        let series = match self.mcc.iter_mut().find(|(i, _)| *i == imcc) {
++            Some((_, s)) => s,
++            None => {
++                self.mcc.push((imcc, Vec::new()));
++                &mut self.mcc.last_mut().ok_or(ColorError::Mct)?.1
++            }
++        };
++        series.push((z, yq, rest.to_vec()));
++        Ok(())
++    }
++
++    /// MCO (A.3.9). `data` is the marker segment after Lmco.
++    pub(crate) fn read_mco(&mut self, data: &[u8]) -> Result<()> {
++        let n = *data.first().ok_or(MarkerError::ParseFailure("MCO"))?;
++        if self.mco.is_some() || data.len() != 1 + usize::from(n) {
++            return invalid();
++        }
++        self.mco = Some(data[1..].to_vec());
++        Ok(())
++    }
++
++    /// The array with this index and type (0 dependency, 1 decorrelation, 2 offset), its
++    /// series joined in Zmct order, as values.
++    fn array(&self, index: u8, array_type: u16) -> Result<Vec<f64>> {
++        let Some((imct, series)) =
++            self.mct.iter().find(|(i, _)| *i & 0xFF == u16::from(index) && (*i >> 8) & 3 == array_type)
++        else {
++            return invalid();
++        };
++        let bytes = join_series(series.iter().map(|(z, y, d)| (*z, *y, d.as_slice())))?;
++        let element = (imct >> 10) & 3;
++        let size = [2usize, 4, 4, 8][usize::from(element)];
++        if bytes.len() % size != 0 {
++            return invalid();
++        }
++        Ok(bytes
++            .chunks_exact(size)
++            .map(|c| match element {
++                0 => f64::from(i16::from_be_bytes([c[0], c[1]])),
++                1 => f64::from(i32::from_be_bytes([c[0], c[1], c[2], c[3]])),
++                2 => f64::from(f32::from_be_bytes([c[0], c[1], c[2], c[3]])),
++                _ => f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]),
++            })
++            .collect())
++    }
++
++    /// The component collections of the MCC series with this index.
++    fn collections(&self, index: u8) -> Result<Vec<Collection>> {
++        let Some((_, series)) = self.mcc.iter().find(|(i, _)| *i == index) else {
++            return invalid();
++        };
++        let q = match series.iter().find(|(z, _, _)| *z == 0) {
++            Some((_, Some((_, q)), _)) => *q,
++            _ => return invalid(),
++        };
++        let bytes = join_series(series.iter().map(|(z, yq, d)| (*z, yq.map(|(y, _)| y), d.as_slice())))?;
++        let mut at = 0usize;
++        let mut byte = || -> Result<u8> {
++            let b = *bytes.get(at).ok_or(ColorError::Mct)?;
++            at += 1;
++            Ok(b)
++        };
++        let mut out = Vec::new();
++        for _ in 0..q {
++            let x = byte()?;
++            let kind = match x & 3 {
++                0 => Kind::Dependency,
++                1 => Kind::Decorrelation,
++                3 => Kind::Wavelet,
++                _ => return invalid(),
++            };
++            let list = |byte: &mut dyn FnMut() -> Result<u8>| -> Result<Vec<usize>> {
++                let n = u16::from_be_bytes([byte()?, byte()?]);
++                let wide = n & 0x8000 != 0;
++                let count = usize::from(n & 0x7FFF);
++                if count == 0 || count > MAX_COMPONENTS {
++                    return invalid();
++                }
++                (0..count)
++                    .map(|_| {
++                        Ok(if wide { usize::from(u16::from_be_bytes([byte()?, byte()?])) } else { usize::from(byte()?) })
++                    })
++                    .collect()
++            };
++            let inputs = list(&mut byte)?;
++            let outputs = list(&mut byte)?;
++            let tmcc = u32::from_be_bytes([0, byte()?, byte()?, byte()?]);
++            if kind == Kind::Wavelet {
++                // Omcc (32 bits).
++                for _ in 0..4 {
++                    byte()?;
++                }
++            }
++            out.push(Collection { kind, inputs, outputs, tmcc });
++        }
++        if at != bytes.len() {
++            return invalid();
++        }
++        Ok(out)
++    }
++
++    /// Build the transformation for `csiz` codestream components. Wavelet-based collections
++    /// give `MarkerError::Unsupported`; anything inconsistent gives `ColorError::Mct`.
++    pub(crate) fn transform(&self, csiz: usize) -> Result<Part2Transform> {
++        let Some(outputs) = self.cbd.clone() else {
++            return invalid();
++        };
++        let Some(mco) = &self.mco else {
++            return invalid();
++        };
++        let mut stages = Vec::with_capacity(mco.len());
++        for &index in mco {
++            let mut steps = Vec::new();
++            for c in self.collections(index)? {
++                if c.kind == Kind::Wavelet {
++                    bail!(MarkerError::Unsupported);
++                }
++                let reversible = c.tmcc & 0x1_0000 != 0;
++                let t_index = (c.tmcc & 0xFF) as u8;
++                let o_index = ((c.tmcc >> 8) & 0xFF) as u8;
++                let array_type = if c.kind == Kind::Dependency { 0 } else { 1 };
++                let coefficients = if t_index == 0 { Vec::new() } else { self.array(t_index, array_type)? };
++                let offsets = if o_index == 0 { Vec::new() } else { self.array(o_index, 2)? };
++                let step = Step { kind: c.kind, reversible, inputs: c.inputs, outputs: c.outputs, coefficients, offsets };
++                step.validate()?;
++                steps.push(step);
++            }
++            stages.push(steps);
++        }
++        // Intermediate component counts (J-1): stage k reads NI_k components; NI_0 = Csiz and
++        // the last stage writes NI_Nmco = Ncbd.
++        let mut sizes = Vec::with_capacity(stages.len());
++        for (k, steps) in stages.iter().enumerate() {
++            let max_in = steps.iter().flat_map(|s| s.inputs.iter()).copied().max().ok_or(ColorError::Mct)?;
++            if k == 0 && max_in >= csiz {
++                return invalid();
++            }
++            if k > 0 {
++                sizes.push(max_in + 1);
++            }
++        }
++        sizes.push(outputs.len());
++        for (steps, &size) in stages.iter().zip(&sizes) {
++            let mut seen = vec![false; size];
++            for o in steps.iter().flat_map(|s| s.outputs.iter()) {
++                match seen.get_mut(*o) {
++                    Some(s) if !*s => *s = true,
++                    // Out of range, or written twice in one stage (A.3.8).
++                    _ => return invalid(),
++                }
++            }
++        }
++        Ok(Part2Transform { outputs, stages, sizes })
++    }
++}
++
++/// Join a series of marker segments in Zmct/Zmcc order: Z runs 0..=Y with no gaps.
++fn join_series<'a>(parts: impl Iterator<Item = (u16, Option<u16>, &'a [u8])>) -> Result<Vec<u8>> {
++    let mut parts: Vec<_> = parts.collect();
++    parts.sort_by_key(|p| p.0);
++    let last = match parts.first() {
++        Some((0, Some(y), _)) => *y,
++        _ => return invalid(),
++    };
++    if parts.len() != usize::from(last) + 1 || parts.iter().enumerate().any(|(i, p)| usize::from(p.0) != i) {
++        return invalid();
++    }
++    Ok(parts.iter().flat_map(|p| p.2.iter().copied()).collect())
++}
++
++fn is_integer(v: f64) -> bool {
++    v.is_finite() && v.abs() < 9.0e15 && (v as i64) as f64 == v
++}
++
++fn is_power_of_two(v: f64) -> bool {
++    is_integer(v) && v >= 1.0 && (v as u64).is_power_of_two()
++}
++
++impl Step {
++    fn n(&self) -> usize {
++        self.inputs.len()
++    }
++
++    fn m(&self) -> usize {
++        self.outputs.len()
++    }
++
++    /// The array sizes and value constraints of J.3.1 for this kind.
++    fn validate(&self) -> Result<()> {
++        let (n, m) = (self.n(), self.m());
++        let coefficients = match (self.kind, self.reversible) {
++            (Kind::Decorrelation, false) => m * n,
++            (Kind::Decorrelation, true) | (Kind::Dependency, _) if n != m => return invalid(),
++            (Kind::Decorrelation, true) => (n + 1) * n,
++            (Kind::Dependency, false) => m * (m - 1) / 2,
++            (Kind::Dependency, true) => m * (m + 1) / 2 - 1,
++            (Kind::Wavelet, _) => return invalid(),
++        };
++        if !self.coefficients.is_empty() && self.coefficients.len() != coefficients {
++            return invalid();
++        }
++        if !self.offsets.is_empty() && self.offsets.len() != m {
++            return invalid();
++        }
++        if self.coefficients.iter().chain(&self.offsets).any(|v| !v.is_finite()) {
++            return invalid();
++        }
++        if self.reversible {
++            if self.coefficients.iter().chain(&self.offsets).any(|&v| !is_integer(v)) {
++                return invalid();
++            }
++            if !self.coefficients.is_empty() {
++                match self.kind {
++                    Kind::Decorrelation => {
++                        // Scale factors: t_l(N-1-l) for l < N, positive powers of 2, and
++                        // |t_N(N-1)|.
++                        for l in 0..n {
++                            if !is_power_of_two(self.coefficients[l * n + (n - 1 - l)]) {
++                                return invalid();
++                            }
++                        }
++                        if !is_power_of_two(self.coefficients[n * n + n - 1].abs()) {
++                            return invalid();
++                        }
++                    }
++                    _ => {
++                        for i in 1..m {
++                            if !is_power_of_two(self.coefficients[dependency_index(i, i, true)]) {
++                                return invalid();
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        Ok(())
++    }
++}
++
++/// Position of t_ij (j < i, or j = i when reversible) in a dependency array: t10, t20, t21, ...
++/// (irreversible) or t10, t11, t20, t21, t22, ... (reversible).
++fn dependency_index(i: usize, j: usize, reversible: bool) -> usize {
++    if reversible { i * (i + 1) / 2 - 1 + j } else { i * (i - 1) / 2 + j }
++}
++
++impl Part2Transform {
++    /// Apply every stage to the spatially reconstructed components, replacing them with the
++    /// reconstructed image components (CBD). `len` is the number of samples per component.
++    pub(crate) fn apply(&self, components: &mut Vec<ComponentData>, len: usize) -> Result<()> {
++        let mut current: Vec<Option<SimdBuffer<SIMD_WIDTH>>> =
++            core::mem::take(components).into_iter().map(|c| Some(c.container)).collect();
++        for (steps, &size) in self.stages.iter().zip(&self.sizes) {
++            let mut next: Vec<Option<SimdBuffer<SIMD_WIDTH>>> = (0..size).map(|_| None).collect();
++            for step in steps {
++                let inputs: Vec<Option<&[f32]>> =
++                    step.inputs.iter().map(|&i| current.get(i).and_then(|c| c.as_ref().map(|b| b.truncated()))).collect();
++                let mut outs: Vec<Vec<f32>> = (0..step.m()).map(|_| vec![0.0; len]).collect();
++                step.run(&inputs, &mut outs, len);
++                for (&o, data) in step.outputs.iter().zip(outs) {
++                    *next.get_mut(o).ok_or(ColorError::Mct)? = Some(SimdBuffer::new(data));
++                }
++            }
++            current = next;
++        }
++        *components = current
++            .into_iter()
++            .zip(&self.outputs)
++            .map(|(c, o)| ComponentData {
++                container: c.unwrap_or_else(|| SimdBuffer::zeros(len)),
++                bit_depth: o.precision,
++            })
++            .collect();
++        Ok(())
++    }
++}
++
++impl Step {
++    /// Transform the collection's input components (None: a null component, all zero) into
++    /// its output components.
++    fn run(&self, inputs: &[Option<&[f32]>], outs: &mut [Vec<f32>], len: usize) {
++        let (n, m) = (self.n(), self.m());
++        let input = |j: usize, x: usize| -> f32 { inputs[j].and_then(|c| c.get(x)).copied().unwrap_or(0.0) };
++        let offset = |i: usize| self.offsets.get(i).copied().unwrap_or(0.0);
++        match (self.kind, self.reversible) {
++            // J-2: W_i = sum_j t_ij C_j + o_i, in f32 as OpenJPEG's custom MCT does.
++            (Kind::Decorrelation, false) => {
++                let t: Vec<f32> = if self.coefficients.is_empty() {
++                    (0..m * n).map(|k| if k / n == k % n { 1.0 } else { 0.0 }).collect()
++                } else {
++                    self.coefficients.iter().map(|&v| v as f32).collect()
++                };
++                let o: Vec<f32> = (0..m).map(|i| offset(i) as f32).collect();
++                let mut c = vec![0.0f32; n];
++                for x in 0..len {
++                    for (j, cj) in c.iter_mut().enumerate() {
++                        *cj = input(j, x);
++                    }
++                    for i in 0..m {
++                        let mut acc = 0.0f32;
++                        for j in 0..n {
++                            acc += t[i * n + j] * c[j];
++                        }
++                        outs[i][x] = acc + o[i];
++                    }
++                }
++            }
++            // J-11, J-12: Y = C + o; W_i = sum_{j<i} t_ij W_j + Y_i.
++            (Kind::Dependency, false) => {
++                let t: Vec<f32> = self.coefficients.iter().map(|&v| v as f32).collect();
++                let o: Vec<f32> = (0..m).map(|i| offset(i) as f32).collect();
++                let mut w = vec![0.0f32; m];
++                for x in 0..len {
++                    for i in 0..m {
++                        let mut acc = 0.0f32;
++                        if !t.is_empty() {
++                            for j in 0..i {
++                                acc += t[dependency_index(i, j, false)] * w[j];
++                            }
++                        }
++                        w[i] = acc + (input(i, x) + o[i]);
++                        outs[i][x] = w[i];
++                    }
++                }
++            }
++            // J-4 to J-6, in integers.
++            (Kind::Decorrelation, true) => {
++                let t: Vec<i64> = if self.coefficients.is_empty() {
++                    // The default array: t_N(N-1) = 1, t_i(N-1-i) = 1, all others 0.
++                    (0..(n + 1) * n)
++                        .map(|k| {
++                            let (r, col) = (k / n, k % n);
++                            i64::from((r < n && col == n - 1 - r) || (r == n && col == n - 1))
++                        })
++                        .collect()
++                } else {
++                    self.coefficients.iter().map(|&v| v as i64).collect()
++                };
++                let o: Vec<i64> = (0..n).map(|i| offset(i) as i64).collect();
++                let mut p = vec![0i64; n];
++                for x in 0..len {
++                    for (j, pj) in p.iter_mut().enumerate() {
++                        *pj = round_to_i64(input(j, x));
++                    }
++                    for l in 0..=n {
++                        let k = if l < n { n - 1 - l } else { n - 1 };
++                        let row = &t[l * n..(l + 1) * n];
++                        let scale = row[k].abs();
++                        let mut s = scale / 2;
++                        for (i, (&ti, &pi)) in row.iter().zip(&p).enumerate() {
++                            if i != k {
++                                s = s.wrapping_add(ti.wrapping_mul(pi));
++                            }
++                        }
++                        let q = s.div_euclid(scale);
++                        p[k] = if l < n { p[k] - q } else { row[k].signum() * (p[k] - q) };
++                    }
++                    for i in 0..n {
++                        outs[i][x] = (p[i] + o[i]) as f32;
++                    }
++                }
++            }
++            // J-14, J-15: Y = C + o; S_i = sum_{j<i} t_ij W_j + floor(t_ii / 2);
++            // W_i = floor(S_i / t_ii) + Y_i.
++            (Kind::Dependency, true) => {
++                let t: Vec<i64> = self.coefficients.iter().map(|&v| v as i64).collect();
++                let o: Vec<i64> = (0..m).map(|i| offset(i) as i64).collect();
++                let mut w = vec![0i64; m];
++                for x in 0..len {
++                    for i in 0..m {
++                        let y = round_to_i64(input(i, x)) + o[i];
++                        w[i] = if t.is_empty() || i == 0 {
++                            y
++                        } else {
++                            let scale = t[dependency_index(i, i, true)];
++                            let mut s = scale / 2;
++                            for j in 0..i {
++                                s = s.wrapping_add(t[dependency_index(i, j, true)].wrapping_mul(w[j]));
++                            }
++                            s.div_euclid(scale) + y
++                        };
++                        outs[i][x] = w[i] as f32;
++                    }
++                }
++            }
++            (Kind::Wavelet, _) => {}
++        }
++    }
++}
++
++/// Reversible transforms work on integers: the 5/3 path gives exact integers in f32.
++fn round_to_i64(v: f32) -> i64 {
++    if v.is_finite() { crate::math::floor_f32(v + 0.5) as i64 } else { 0 }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn step(kind: Kind, reversible: bool, n: usize, coefficients: Vec<f64>, offsets: Vec<f64>) -> Step {
++        Step { kind, reversible, inputs: (0..n).collect(), outputs: (0..n).collect(), coefficients, offsets }
++    }
++
++    fn run(s: &Step, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
++        let len = input[0].len();
++        let ins: Vec<Option<&[f32]>> = input.iter().map(|v| Some(v.as_slice())).collect();
++        let mut outs: Vec<Vec<f32>> = (0..s.m()).map(|_| vec![0.0; len]).collect();
++        s.run(&ins, &mut outs, len);
++        outs
++    }
++
++    /// Forward reversible dependency transform (the inverse of J-15): C_i = W_i - o_i -
++    /// floor(S_i / t_ii).
++    fn forward_dependency(t: &[i64], o: &[i64], w: &[i64]) -> Vec<i64> {
++        let m = w.len();
++        (0..m)
++            .map(|i| {
++                if i == 0 {
++                    return w[0] - o[0];
++                }
++                let scale = t[dependency_index(i, i, true)];
++                let mut s = scale / 2;
++                for j in 0..i {
++                    s += t[dependency_index(i, j, true)] * w[j];
++                }
++                w[i] - o[i] - s.div_euclid(scale)
++            })
++            .collect()
++    }
++
++    /// Forward reversible decorrelation (the inverse of J-4/J-5): the SERM steps in reverse
++    /// order, each adding what the inverse step subtracts.
++    fn forward_decorrelation(t: &[i64], o: &[i64], w: &[i64]) -> Vec<i64> {
++        let n = w.len();
++        let mut p: Vec<i64> = w.iter().zip(o).map(|(a, b)| a - b).collect();
++        for l in (0..=n).rev() {
++            let k = if l < n { n - 1 - l } else { n - 1 };
++            let row = &t[l * n..(l + 1) * n];
++            let scale = row[k].abs();
++            let mut s = scale / 2;
++            for i in 0..n {
++                if i != k {
++                    s += row[i] * p[i];
++                }
++            }
++            let q = s.div_euclid(scale);
++            p[k] = if l < n { p[k] + q } else { row[k].signum() * p[k] + q };
++        }
++        p
++    }
++
++    #[test]
++    fn reversible_dependency_round_trips() {
++        // 3 components: t10 = 1 (scale t11 = 1), t20 = -3, t21 = 5 (scale t22 = 4).
++        let t = [1i64, 1, -3, 5, 4];
++        let o = [7i64, -2, 100];
++        let s = step(Kind::Dependency, true, 3, t.iter().map(|&v| v as f64).collect(), o.iter().map(|&v| v as f64).collect());
++        s.validate().unwrap();
++        let mut rng = 12345u64;
++        let mut rand = || {
++            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            ((rng >> 33) % 4096) as i64 - 2048
++        };
++        let originals: Vec<[i64; 3]> = (0..500).map(|_| [rand(), rand(), rand()]).collect();
++        let coded: Vec<Vec<i64>> = originals.iter().map(|w| forward_dependency(&t, &o, w)).collect();
++        let input: Vec<Vec<f32>> = (0..3).map(|c| coded.iter().map(|v| v[c] as f32).collect()).collect();
++        let out = run(&s, &input);
++        for (x, w) in originals.iter().enumerate() {
++            for c in 0..3 {
++                assert_eq!(out[c][x] as i64, w[c]);
++            }
++        }
++    }
++
++    #[test]
++    fn reversible_decorrelation_round_trips() {
++        // A SERM-style array for 3 components: rows 0..2 adjust P2, P1, P0 (scales 4, 2, 8),
++        // row 3 adjusts P2 again with scale -2.
++        let t = [3i64, -1, 4, 5, 2, -7, 8, 1, 2, -6, 3, -2];
++        let o = [128i64, 0, -5];
++        let s = step(Kind::Decorrelation, true, 3, t.iter().map(|&v| v as f64).collect(), o.iter().map(|&v| v as f64).collect());
++        s.validate().unwrap();
++        let mut rng = 99u64;
++        let mut rand = || {
++            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            ((rng >> 33) % 1024) as i64 - 300
++        };
++        let originals: Vec<[i64; 3]> = (0..500).map(|_| [rand(), rand(), rand()]).collect();
++        let coded: Vec<Vec<i64>> = originals.iter().map(|w| forward_decorrelation(&t, &o, w)).collect();
++        let input: Vec<Vec<f32>> = (0..3).map(|c| coded.iter().map(|v| v[c] as f32).collect()).collect();
++        let out = run(&s, &input);
++        for (x, w) in originals.iter().enumerate() {
++            for c in 0..3 {
++                assert_eq!(out[c][x] as i64, w[c], "sample {x} component {c}");
++            }
++        }
++    }
++
++    #[test]
++    fn default_arrays_are_identities() {
++        let input = vec![vec![1.0f32, -2.0, 300.0], vec![5.0, 6.0, 7.0]];
++        for (kind, rev) in [(Kind::Decorrelation, false), (Kind::Decorrelation, true), (Kind::Dependency, false), (Kind::Dependency, true)] {
++            let s = step(kind, rev, 2, vec![], vec![]);
++            s.validate().unwrap();
++            assert_eq!(run(&s, &input), input, "{kind:?} reversible={rev}");
++        }
++    }
++
++    #[test]
++    fn irreversible_decorrelation_matches_matrix() {
++        // YCbCr -> RGB with offsets 128.
++        let t = [1.0, 0.0, 1.402, 1.0, -0.344136, -0.714136, 1.0, 1.772, 0.0];
++        let s = step(Kind::Decorrelation, false, 3, t.to_vec(), vec![128.0; 3]);
++        let out = run(&s, &[vec![10.0], vec![-20.0], vec![30.0]]);
++        let want = [10.0 + 1.402 * 30.0 + 128.0, 10.0 + 0.344136 * 20.0 - 0.714136 * 30.0 + 128.0, 10.0 - 1.772 * 20.0 + 128.0];
++        for c in 0..3 {
++            assert!((f64::from(out[c][0]) - want[c]).abs() < 1e-3);
++        }
++    }
++
++    #[test]
++    fn irreversible_dependency_predicts() {
++        // t10 = 0.5, t20 = 0.25, t21 = -1.
++        let s = step(Kind::Dependency, false, 3, vec![0.5, 0.25, -1.0], vec![1.0, 2.0, 3.0]);
++        let out = run(&s, &[vec![10.0], vec![4.0], vec![-6.0]]);
++        // W0 = 11; W1 = 0.5*11 + 6 = 11.5; W2 = 0.25*11 - 11.5 - 3 = -11.75.
++        assert_eq!(out, vec![vec![11.0], vec![11.5], vec![-11.75]]);
++    }
++
++    #[test]
++    fn bad_arrays_are_refused() {
++        // Wrong length, non-integer reversible coefficient, zero scale factor.
++        assert!(step(Kind::Decorrelation, false, 3, vec![1.0; 8], vec![]).validate().is_err());
++        assert!(step(Kind::Dependency, true, 2, vec![0.5, 1.0], vec![]).validate().is_err());
++        assert!(step(Kind::Dependency, true, 2, vec![1.0, 0.0], vec![]).validate().is_err());
++        assert!(step(Kind::Decorrelation, true, 2, vec![1.0, 3.0, 3.0, 1.0, 0.0, 0.0], vec![]).validate().is_err());
++    }
++
++    fn seg(marker_body: &[u8]) -> Vec<u8> {
++        marker_body.to_vec()
++    }
++
++    #[test]
++    fn parses_series_and_builds_a_transform() {
++        let mut h = Part2Header::default();
++        h.read_cbd(&seg(&[0x80, 0x03, 0x07])).unwrap();
++        // Decorrelation array index 1, 16-bit, split over two segments (Ymct = 1).
++        h.read_mct(&seg(&[0, 0, 0x01, 0x01, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1])).unwrap();
++        h.read_mct(&seg(&[0, 1, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0, 1])).unwrap();
++        // MCC 3: one irreversible decorrelation collection over components 0,1,2.
++        h.read_mcc(&seg(&[0, 0, 3, 0, 0, 0, 1, 1, 0, 3, 0, 1, 2, 0, 3, 0, 1, 2, 0, 0, 1])).unwrap();
++        h.read_mco(&seg(&[1, 3])).unwrap();
++        let t = h.transform(3).unwrap();
++        assert_eq!(t.outputs.len(), 3);
++        assert_eq!(t.stages[0][0].coefficients, vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
++        // An MCO stage naming a missing MCC, and a missing series member, are refused.
++        let mut bad = h.clone();
++        bad.mco = Some(vec![9]);
++        assert!(bad.transform(3).is_err());
++        let mut bad = Part2Header::default();
++        bad.read_cbd(&seg(&[0x80, 0x03, 0x07])).unwrap();
++        bad.read_mct(&seg(&[0, 0, 0x01, 0x01, 0, 1, 0, 1])).unwrap();
++        bad.read_mcc(&seg(&[0, 0, 3, 0, 0, 0, 1, 1, 0, 3, 0, 1, 2, 0, 3, 0, 1, 2, 0, 0, 1])).unwrap();
++        bad.read_mco(&seg(&[1, 3])).unwrap();
++        assert!(bad.transform(3).is_err());
++    }
++}
 diff -ruN a/src/j2c/mod.rs b/src/j2c/mod.rs
---- a/src/j2c/mod.rs	2026-10-15 09:15:46.837779282 -0500
-+++ b/src/j2c/mod.rs	2026-10-15 09:15:46.840207401 -0500
-@@ -3,6 +3,7 @@
+--- a/src/j2c/mod.rs	2026-10-15 11:39:09.458132105 -0500
++++ b/src/j2c/mod.rs	2026-10-15 11:39:09.460743169 -0500
+@@ -3,8 +3,10 @@
  mod build;
  mod codestream;
  mod decode;
 +mod ht;
  mod idwt;
  mod mct;
++mod mct2;
  mod progression;
+ mod rect;
+ mod segment;
+@@ -52,6 +54,20 @@
+     let header = &parsed_codestream.header;
+     let mut boxes = ImageBoxes::default();
+ 
++    // shl patch 11: after a Part 2 multiple component transformation the components are
++    // whatever CBD describes, so no colour space is assumed and no conversion applies.
++    if let Some(part2) = &header.part2 {
++        let num_channels = u8::try_from(part2.outputs.len()).unwrap_or(u8::MAX);
++        return Ok(Image {
++            codestream: parsed_codestream.data,
++            header: parsed_codestream.header,
++            boxes,
++            settings: *settings,
++            color_space: crate::ColorSpace::Unknown { num_channels },
++            has_alpha: false,
++        });
++    }
++
+     // If we are just decoding a raw codestream, we assume greyscale or
+     // RGB.
+     let cs = if header.component_infos.len() < 3 {
 diff -ruN a/src/j2c/progression.rs b/src/j2c/progression.rs
---- a/src/j2c/progression.rs	2026-10-15 09:15:46.837822384 -0500
-+++ b/src/j2c/progression.rs	2026-10-15 09:15:46.840723749 -0500
+--- a/src/j2c/progression.rs	2026-10-15 11:39:09.458214591 -0500
++++ b/src/j2c/progression.rs	2026-10-15 11:39:09.461246000 -0500
 @@ -120,7 +120,8 @@
      let mut resolution = input.min_resolution();
      let mut component_idx = input.min_comp();
@@ -4881,8 +5793,8 @@ diff -ruN a/src/j2c/progression.rs b/src/j2c/progression.rs
                      ResolutionTile::new(component_tiles[component_idx as usize], resolution);
  
 diff -ruN a/src/j2c/segment.rs b/src/j2c/segment.rs
---- a/src/j2c/segment.rs	2026-10-15 09:15:46.837917474 -0500
-+++ b/src/j2c/segment.rs	2026-10-15 09:15:46.840822937 -0500
+--- a/src/j2c/segment.rs	2026-10-15 11:39:09.458395604 -0500
++++ b/src/j2c/segment.rs	2026-10-15 11:39:09.461332795 -0500
 @@ -8,7 +8,8 @@
  use super::decode::DecompositionStorage;
  use super::progression::ProgressionData;
@@ -5013,21 +5925,78 @@ diff -ruN a/src/j2c/segment.rs b/src/j2c/segment.rs
          let end = storage.segments.len();
          layer.segments = Some(start..end);
 diff -ruN a/src/j2c/tile.rs b/src/j2c/tile.rs
---- a/src/j2c/tile.rs	2026-10-15 09:15:46.838023354 -0500
-+++ b/src/j2c/tile.rs	2026-10-15 09:15:46.840930370 -0500
-@@ -828,6 +828,9 @@
+--- a/src/j2c/tile.rs	2026-10-15 11:39:09.458617745 -0500
++++ b/src/j2c/tile.rs	2026-10-15 11:39:09.461432463 -0500
+@@ -28,6 +28,8 @@
+     pub(crate) progression_order: ProgressionOrder,
+     pub(crate) num_layers: u8,
+     pub(crate) mct: bool,
++    /// shl patch 11: the SGcod multiple component transformation byte.
++    pub(crate) mct_type: u8,
+ }
+ 
+ /// A tile part where packet headers and packet data are interleaved.
+@@ -118,6 +120,7 @@
+             component_infos: header.component_infos.clone(),
+             progression_order: header.global_coding_style.progression_order,
+             mct: header.global_coding_style.mct,
++            mct_type: header.global_coding_style.mct_type,
+             num_layers: header.global_coding_style.num_layers,
+         }
+     }
+@@ -210,6 +213,7 @@
+                 let cod = codestream::cod_marker(reader).ok_or(MarkerError::ParseFailure("COD"))?;
+ 
+                 tile.mct = cod.mct;
++                tile.mct_type = cod.mct_type;
+                 tile.num_layers = cod.num_layers;
+                 tile.progression_order = cod.progression_order;
+ 
+@@ -791,6 +795,7 @@
+             tile_x_offset: 0,
+             tile_y_offset: 0,
+             component_sizes: vec![component_size_info_0, component_size_info_1],
++            capabilities: 0,
+             x_shrink_factor: 1,
+             y_shrink_factor: 1,
+             x_resolution_shrink_factor: 1,
+@@ -811,6 +816,7 @@
+                 progression_order: ProgressionOrder::LayerResolutionComponentPosition,
+                 num_layers: 0,
+                 mct: false,
++                mct_type: 0,
+                 component_parameters: CodingStyleComponent {
+                     flags: CodingStyleFlags::default(),
+                     parameters: CodingStyleParameters {
+@@ -828,6 +834,10 @@
              ppm_packets: vec![],
              skipped_resolution_levels: 0,
              strict: false,
 +            high_throughput: false,
 +            ht_set: crate::j2c::codestream::HtSet::NoCap,
 +            defer_level_shift: false,
++            part2: None,
          };
  
          let tile_0_0 = Tile::new(0, &header);
+diff -ruN a/src/jp2/mod.rs b/src/jp2/mod.rs
+--- a/src/jp2/mod.rs	2026-10-15 11:39:09.459251715 -0500
++++ b/src/jp2/mod.rs	2026-10-15 11:39:09.462778101 -0500
+@@ -117,6 +117,11 @@
+ 
+     let mut image_boxes = image_boxes.ok_or(FormatError::InvalidBox)?;
+     let parsed_codestream = parsed_codestream.ok_or(FormatError::MissingCodestream)?;
++    // shl patch 11: JPX colour handling after a Part 2 multiple component transformation is
++    // not implemented.
++    if parsed_codestream.header.part2.is_some() {
++        return Err(FormatError::Unsupported.into());
++    }
+ 
+     if let Some(palette) = image_boxes.palette.as_ref()
+         && image_boxes.component_mapping.is_none()
 diff -ruN a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs	2026-10-15 09:15:46.838464109 -0500
-+++ b/src/lib.rs	2026-10-15 09:15:46.856402134 -0500
+--- a/src/lib.rs	2026-10-15 11:39:09.459444500 -0500
++++ b/src/lib.rs	2026-10-15 11:39:09.462999440 -0500
 @@ -64,6 +64,8 @@
  The crate is `no_std` compatible but requires an allocator to be available.
  */
@@ -5089,9 +6058,24 @@ diff -ruN a/src/lib.rs b/src/lib.rs
          } else if data.starts_with(CODESTREAM_MAGIC) {
              j2c::parse(data, settings)
          } else {
+@@ -195,6 +215,14 @@
+         self.header.component_infos[0].size_info.precision
+     }
+ 
++    /// shl patch 11: when the codestream uses a Part 2 multiple component transformation
++    /// (T.801 Annex J), the reconstructed image components it produces, from CBD, as
++    /// (precision, signed); `decode` returns that many components, with no DC level shift
++    /// applied. `None` for every other codestream.
++    pub fn multi_component_output(&self) -> Option<Vec<(u8, bool)>> {
++        self.header.part2.as_ref().map(|p| p.outputs.iter().map(|o| (o.precision, o.signed)).collect())
++    }
++
+     /// Decode the image and return its decoded components.
+     pub fn decode<'b>(
+         &'a self,
 diff -ruN a/src/math.rs b/src/math.rs
---- a/src/math.rs	2026-10-15 09:15:46.838583535 -0500
-+++ b/src/math.rs	2026-10-15 09:15:46.856294981 -0500
+--- a/src/math.rs	2026-10-15 11:39:09.459632015 -0500
++++ b/src/math.rs	2026-10-15 11:39:09.462898309 -0500
 @@ -454,7 +454,25 @@
  
  #[inline(always)]
@@ -5167,8 +6151,8 @@ diff -ruN a/src/math.rs b/src/math.rs
 +    }
 +}
 diff -ruN a/src/reader.rs b/src/reader.rs
---- a/src/reader.rs	2026-10-15 09:15:46.838639371 -0500
-+++ b/src/reader.rs	2026-10-15 09:15:46.856350837 -0500
+--- a/src/reader.rs	2026-10-15 11:39:09.459719941 -0500
++++ b/src/reader.rs	2026-10-15 11:39:09.462949055 -0500
 @@ -150,11 +150,11 @@
  
      #[inline]

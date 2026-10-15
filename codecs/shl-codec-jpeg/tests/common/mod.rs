@@ -48,7 +48,12 @@ pub fn load_cases(fmt: &str) -> Vec<Case> {
             rows: n("rows"),
             columns: n("columns"),
             samples_per_pixel: n("samples_per_pixel") as u16,
-            bits_allocated: n("bits_allocated") as u16,
+            // Bits Allocated 12 on encapsulated data: the CLI passes 16, the container for the
+            // 12-bit SOF (uncompressed FORMAT.md, rule 15).
+            bits_allocated: match n("bits_allocated") as u16 {
+                12 => 16,
+                v => v,
+            },
             bits_stored: n("bits_stored") as u16,
             pixel_representation: n("pixel_representation") as u16,
             photometric: Photometric::parse(&num("photometric")),

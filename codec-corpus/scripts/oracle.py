@@ -27,7 +27,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import FORMAT_NAMES, ROOT, TRANSFER_SYNTAXES, load_cases, oracle_paths, sample_path, save_cases, sha256_bytes  # noqa: E402
+from common import (FORMAT_NAMES, ROOT, TRANSFER_SYNTAXES, abs_diff, load_cases, oracle_paths, sample_path,  # noqa: E402
+                    save_cases, sha256_bytes)
 from ref_decode import applicable, decode, family  # noqa: E402
 
 warnings.filterwarnings("ignore")
@@ -93,7 +94,8 @@ def build(fmt: str, case: dict) -> dict:
             results[ref]["vs_oracle"] = f"shape {list(arr.shape)}"
             disagreements.append(10**9)
             continue
-        d = int(np.abs(arr.astype(np.int64) - truth.astype(np.int64)).max()) if arr.size else 0
+        dd = abs_diff(arr, truth)
+        d = (float(dd.max()) if dd.dtype.kind == "f" else int(dd.max())) if arr.size else 0
         results[ref]["vs_oracle_max_abs"] = d
         disagreements.append(d)
     agreeing = sorted({results[r]["family"] for r, a in arrays.items() if results[r].get("vs_oracle_max_abs") == 0})

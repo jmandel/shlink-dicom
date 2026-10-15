@@ -8,6 +8,8 @@ Every decoder checked against this corpus, reference or candidate, is a command 
 <decoder> IN.dcm OUT.raw
 ```
 
+`shl-dicom-decode` also takes `--frames A-B` (frames A to B, counted from 0, inclusive): `OUT.raw` then holds only those frames, byte-identical to the same frames of a whole decode. `scripts/check_frames.py` checks this on every multi-frame case, and on any large file in chunks.
+
 | Exit code | Meaning |
 |---|---|
 | 0 | Decoded. `OUT.raw` holds every frame in canonical form. |
@@ -20,7 +22,7 @@ A decoder must finish each case within 60 seconds, which is `check.py --timeout`
 ## Canonical pixels
 
 - **Layout:** all frames, then rows, then columns, then samples per pixel: shape `(frames, rows, columns, samples)`, in C order with samples interleaved. When the file uses Planar Configuration 1 (planes stored separately), the decoder interleaves them.
-- **Sample type:** an integer the width of Bits Allocated (8, 16 or 32), little-endian. It is unsigned when Pixel Representation is 0 and signed when it is 1.
+- **Sample type:** an integer the width of Bits Allocated (8, 16 or 32), little-endian. It is unsigned when Pixel Representation is 0 and signed when it is 1. Float and Double Float Pixel Data are the exception; see [Float pixel data](#float-pixel-data).
 - **Values:** the stored values. When Bits Stored is less than Bits Allocated (for JPEG 2000 and HTJ2K, use the larger of Bits Stored and the codestream's precision for that component, as pydicom does; ruling on `ext-gdcm-Osirix10vs8BitsStored`):
   - unsigned values keep only the low Bits Stored bits;
   - signed values are sign-extended from bit `Bits Stored − 1`.
@@ -29,10 +31,20 @@ A decoder must finish each case within 60 seconds, which is `check.py --timeout`
 - **Colour:**
   - `YBR_FULL`, `YBR_FULL_422`, `YBR_PARTIAL_422`, `YBR_ICT` and `YBR_RCT` are converted to RGB.
   - For JPEG and JPEG 2000 this usually happens inside the codec: the colour transform in the codestream, or the decoder's YCbCr output converted back.
+  - The retired `ARGB`, `CMYK` and `HSV` are converted to RGB too, so the output has 3 samples per pixel (formats/uncompressed/FORMAT.md, rule 20).
   - `PALETTE COLOR` stays as indices, and `MONOCHROME1` is not inverted.
 - **Order:** frames in file order. For encapsulated data, the frame boundaries come from the Basic or Extended Offset Table when present; otherwise from fragments, one frame per fragment when the counts match.
 
-This is what pydicom returns from `pixel_array(path, raw=False)`. `scripts/ref_decode.py` is the reference implementation of the contract.
+This is what pydicom returns from `pixel_array(path, raw=False)`. `scripts/ref_decode.py` is the reference implementation of the contract. Where pydicom refuses a valid file (the GE private syntax, Encapsulated Uncompressed, Deflated Image Frame Compression, the ACR-NEMA forms and the retired colour models), the references named in formats/uncompressed/FORMAT.md stand in.
+
+## Float pixel data
+
+Float Pixel Data (7FE0,0008) and Double Float Pixel Data (7FE0,0009) are decoded to their stored IEEE 754 values:
+
+- **Output:** f32 (Bits Allocated 32) or f64 (Bits Allocated 64), little-endian, in the same `(frames, rows, columns, samples)` layout. Explicit VR Big Endian samples are byte-swapped. No rescale, Real World Value Mapping or windowing is applied.
+- **Attributes:** there is no Bits Stored and no Pixel Representation. Bits Allocated follows the element; a missing or different declared value is reported as inferred.
+- **Checking:** the oracle is an `.npy` of dtype `<f4` or `<f8` (`pydicom` `pixel_array`). `check.py` compares bit-for-bit values: two NaNs are equal, NaN against a number is a failure, and `max_abs` 0 means the values are identical (−0 equals 0).
+- **Reduced resolution:** the box downsample averages in f64, leaving out NaN samples; a block of only NaN gives NaN.
 
 ## What counts as correct
 
@@ -55,7 +67,7 @@ uv run python scripts/check.py --name <label> --candidate "<command> {in} {out}"
 
 ## How the CLI calls codecs
 
-`shl-dicom-decode` (`decode_file` in its library) does all the DICOM work. A codec only turns one frame's codestream into samples.
+`shl-dicom-decode` (`decode_file` in its library) does all the DICOM work. A codec only turns one frame's codestream into samples. The two encapsulated syntaxes whose frames hold native pixel data, Encapsulated Uncompressed (.1.98) and Deflated Image Frame Compression (.8.1), have their codecs inside `shl-dicom-decode`.
 
 **1. Frames.** The CLI splits encapsulated Pixel Data into one codestream per frame, choosing the method in this order (the same order as pydicom):
 
@@ -70,7 +82,7 @@ An offset table that fails these checks is ignored, and the next method is used,
 
 Fewer frames than Number of Frames is exit 2. Each codestream is the fragments joined; any trailing pad byte is still there.
 
-**2. Call.** `decode_frame(codestream, &info)` is called once per frame, in order. `FrameInfo` holds the data set's values: Photometric Interpretation as declared, Planar Configuration as declared (0 when Samples per Pixel is 1, or when it is missing on encapsulated data), and the transfer syntax UID. The exception is an attribute the CLI had to infer (step 6); `FrameInfo` then carries the inferred value. `Unsupported` becomes exit 3 and `Invalid` becomes exit 2; the first frame error stops the decode.
+**2. Call.** `decode_frame(codestream, &info)` is called once per frame. Outside wasm, a large multi-frame image is decoded on up to 8 threads, each taking a contiguous run of frames; the output, and the error reported if a frame fails, are those of a serial decode. `FrameInfo` holds the data set's values: Photometric Interpretation as declared, Planar Configuration as declared (0 when Samples per Pixel is 1, or when it is missing on encapsulated data), and the transfer syntax UID. The exception is an attribute the CLI had to infer (step 6); `FrameInfo` then carries the inferred value. `Unsupported` becomes exit 3 and `Invalid` becomes exit 2; the first frame error stops the decode.
 
 **3. Output size.** `DecodedFrame.data` must be exactly `info.frame_bytes()` long (rows × columns × samples × bytes per sample). Anything else is exit 2. Bits Allocated 1 means one byte per sample.
 
@@ -83,7 +95,8 @@ Fewer frames than Number of Frames is exit 2. Each codestream is the fragments j
 3. **Colour**, depending on `color` and the declared photometric:
    - `Rgb`: no conversion. Use it whenever the codec undid a colour transform: JPEG YCbCr, JPEG 2000 RCT/ICT, or a JPEG-LS colour transform.
    - `AsDeclared` with YBR_FULL or YBR_FULL_422: converted to RGB exactly as pydicom does (float32 matrix, `floor(x + 0.5)`, clamp). Unsigned 8-bit only; other widths are exit 3. Use this for RLE YBR_FULL.
-   - `AsDeclared` with YBR_PARTIAL_420, YBR_PARTIAL_422, YBR_ICT or YBR_RCT and 3 samples: exit 3. The codec must return RGB for these.
+   - `AsDeclared` with YBR_PARTIAL_422 (expanded to 3 samples): converted by the inverse of the PS3.3 equations, unsigned 8-bit only.
+   - `AsDeclared` with YBR_PARTIAL_420, YBR_ICT or YBR_RCT and 3 samples: exit 3. The codec must return RGB for these.
    - `AsDeclared` with any other photometric: no conversion.
 
 **5. Sign.** pydicom does not treat signedness the same way for every codec, and the CLI does not reproduce these special cases, so the codec must:

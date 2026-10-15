@@ -24,6 +24,8 @@ pub const TS_IMPLICIT_LE: &str = "1.2.840.10008.1.2";
 pub const TS_EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
 pub const TS_DEFLATED_LE: &str = "1.2.840.10008.1.2.1.99";
 pub const TS_EXPLICIT_BE: &str = "1.2.840.10008.1.2.2";
+/// GE private: an implicit VR little endian data set whose Pixel Data is big endian.
+pub const TS_GE_PRIVATE: &str = "1.2.840.113619.5.2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Syntax {
@@ -60,6 +62,12 @@ pub struct Fragment<'a> {
 /// Raw values of the top-level elements the decoder needs.
 #[derive(Debug, Default)]
 pub struct Attributes<'a> {
+    /// Red, Green, Blue Palette Color Lookup Table Descriptors (0028,1101–1103) and Data
+    /// (0028,1201–1203).
+    pub palette_descriptors: [Option<&'a [u8]>; 3],
+    pub palette_data: [Option<&'a [u8]>; 3],
+    /// ACR-NEMA Recognition Code (0008,0010), retired.
+    pub recognition_code: Option<&'a [u8]>,
     pub samples_per_pixel: Option<&'a [u8]>,
     pub photometric: Option<&'a [u8]>,
     pub planar_configuration: Option<&'a [u8]>,
@@ -71,7 +79,9 @@ pub struct Attributes<'a> {
     pub pixel_representation: Option<&'a [u8]>,
     pub extended_offsets: Option<&'a [u8]>,
     pub extended_lengths: Option<&'a [u8]>,
-    pub float_pixel_data: bool,
+    /// Float Pixel Data (7FE0,0008) or Double Float Pixel Data (7FE0,0009): the value, and the
+    /// sample size in bits (32 or 64).
+    pub float_pixel: Option<(&'a [u8], u16)>,
     pub pixel: Option<PixelValue<'a>>,
 }
 
@@ -247,7 +257,9 @@ pub fn prepare(bytes: &[u8]) -> Result<Prepared<'_>, Error> {
 
     match transfer_syntax.as_deref() {
         None => Ok(Prepared { transfer_syntax, syntax: guess_syntax(rest), dataset: Cow::Borrowed(rest) }),
-        Some(TS_IMPLICIT_LE) => Ok(Prepared { transfer_syntax, syntax: IMPLICIT_LE, dataset: Cow::Borrowed(rest) }),
+        Some(TS_IMPLICIT_LE | TS_GE_PRIVATE) => {
+            Ok(Prepared { transfer_syntax, syntax: IMPLICIT_LE, dataset: Cow::Borrowed(rest) })
+        }
         Some(TS_EXPLICIT_BE) => Ok(Prepared { transfer_syntax, syntax: EXPLICIT_BE, dataset: Cow::Borrowed(rest) }),
         Some(TS_DEFLATED_LE) => {
             let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(rest, MAX_INFLATED)
@@ -356,6 +368,9 @@ pub fn read_dataset(ds: &[u8], assumed: Syntax) -> Result<Attributes<'_>, Error>
         }
         let v = c.take(h.len as usize)?;
         match tag {
+            0x0008_0010 => a.recognition_code = Some(v),
+            0x0028_1101..=0x0028_1103 => a.palette_descriptors[(tag - 0x0028_1101) as usize] = Some(v),
+            0x0028_1201..=0x0028_1203 => a.palette_data[(tag - 0x0028_1201) as usize] = Some(v),
             0x0028_0002 => a.samples_per_pixel = Some(v),
             0x0028_0004 => a.photometric = Some(v),
             0x0028_0006 => a.planar_configuration = Some(v),
@@ -367,7 +382,8 @@ pub fn read_dataset(ds: &[u8], assumed: Syntax) -> Result<Attributes<'_>, Error>
             0x0028_0103 => a.pixel_representation = Some(v),
             0x7FE0_0001 => a.extended_offsets = Some(v),
             0x7FE0_0002 => a.extended_lengths = Some(v),
-            0x7FE0_0008 | 0x7FE0_0009 => a.float_pixel_data = true,
+            0x7FE0_0008 => a.float_pixel = Some((v, 32)),
+            0x7FE0_0009 => a.float_pixel = Some((v, 64)),
             _ => {}
         }
     }

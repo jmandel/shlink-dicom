@@ -20,8 +20,14 @@ const SOC: u16 = 0xFF4F;
 const SIZ: u16 = 0xFF51;
 const COD: u16 = 0xFF52;
 const SOT: u16 = 0xFF90;
+/// JPEG 2000 Part 2 (T.801 A.3.6, A.3.9): component bit depths, transformation ordering.
+const CBD: u16 = 0xFF78;
+const MCO: u16 = 0xFF77;
+/// Rsiz: Part 2, with the multiple component transformation capability (T.801 Table A.2).
+const RSIZ_PART2: u16 = 0x8000;
+const RSIZ_MCT: u16 = 0x0100;
 
-const JP2_SIGNATURE: [u8; 12] = [0, 0, 0, 0x0C, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A];
+pub const JP2_SIGNATURE: [u8; 12] = [0, 0, 0, 0x0C, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A];
 
 /// One SIZ component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +50,18 @@ pub struct MainHeader {
     pub tile_width: u32,
     pub tile_height: u32,
     pub tiles: u64,
+    /// The image components the decoder returns: the SIZ components, or after a Part 2
+    /// multiple component transformation the CBD components (not subsampled).
     pub components: Vec<Component>,
-    /// COD's multiple component transformation flag (main header).
+    /// COD's Part 1 multiple component transformation flag (RCT or ICT; main header).
     pub mct: bool,
+    /// A Part 2 multiple component transformation (T.801 Annex J) is used: Rsiz has the
+    /// capability, COD selects the array-based transformation and MCO has at least one stage.
+    /// `components` then come from CBD and get no DC level shift.
+    pub part2: bool,
+    /// The SIZ components (the codestream components, which differ from `components` when
+    /// `part2` is set).
+    pub codestream_components: Vec<Component>,
 }
 
 /// A frame that passed every check, ready for the wrapped decoder.
@@ -152,6 +167,7 @@ pub fn read_main_header(cs: &[u8]) -> Result<MainHeader> {
     }
     let lsiz = usize::from(be16(cs, 4).ok_or_else(|| invalid("truncated SIZ"))?);
     let siz = cs.get(4..4 + lsiz).ok_or_else(|| invalid("truncated SIZ"))?;
+    let rsiz = be16(siz, 2).ok_or_else(|| invalid("truncated SIZ"))?;
     // siz[0..2] Lsiz, [2..4] Rsiz, then Xsiz Ysiz XOsiz YOsiz XTsiz YTsiz XTOsiz YTOsiz, Csiz.
     let f = |i: usize| be32(siz, 4 + 4 * i).ok_or_else(|| invalid("truncated SIZ"));
     let (xsiz, ysiz, xo, yo) = (f(0)?, f(1)?, f(2)?, f(3)?);
@@ -193,6 +209,8 @@ pub fn read_main_header(cs: &[u8]) -> Result<MainHeader> {
     // Walk the rest of the main header (marker segments) up to the first SOT, for COD.
     let mut pos = 4 + lsiz;
     let mut mct = None;
+    let mut cbd: Option<&[u8]> = None;
+    let mut mco_stages = 0usize;
     loop {
         let marker = be16(cs, pos).ok_or_else(|| invalid("main header ends before the first tile"))?;
         if marker == SOT {
@@ -211,11 +229,34 @@ pub fn read_main_header(cs: &[u8]) -> Result<MainHeader> {
             if len < 12 {
                 return Err(invalid("COD too short"));
             }
-            mct = Some(*b == 1);
+            mct = Some(*b);
+        }
+        if marker == CBD {
+            cbd = cs.get(pos + 4..pos + 2 + len);
+        }
+        if marker == MCO {
+            mco_stages = usize::from(*cs.get(pos + 4).ok_or_else(|| invalid("truncated MCO"))?);
         }
         pos = pos.checked_add(2 + len).ok_or_else(|| invalid("main header overflow"))?;
     }
     let mct = mct.ok_or_else(|| invalid("main header has no COD"))?;
+    let part2 = rsiz & RSIZ_PART2 != 0 && rsiz & RSIZ_MCT != 0 && mct == 2 && mco_stages > 0;
+    let codestream_components = components.clone();
+    if part2 {
+        // CBD (T.801 A.3.6): Ncbd, then one bit depth per component, or one for all.
+        let b = cbd.ok_or_else(|| invalid("Part 2 multiple component transformation without CBD"))?;
+        let n = be16(b, 0).ok_or_else(|| invalid("truncated CBD"))?;
+        let count = usize::from(n & 0x7FFF);
+        let depth = |d: u8| Component { precision: (d & 0x7F) + 1, signed: d & 0x80 != 0, dx: 1, dy: 1 };
+        components = match (n & 0x8000 != 0, b.get(2..)) {
+            (true, Some([d])) => vec![depth(*d); count],
+            (false, Some(ds)) if ds.len() == count => ds.iter().map(|&d| depth(d)).collect(),
+            _ => return Err(invalid("CBD length does not match its component count")),
+        };
+        if count == 0 || components.iter().any(|c| c.precision > 38) {
+            return Err(invalid("CBD component parameters out of range"));
+        }
+    }
 
     Ok(MainHeader {
         width: xsiz - xo,
@@ -226,14 +267,29 @@ pub fn read_main_header(cs: &[u8]) -> Result<MainHeader> {
         tile_height: yt,
         tiles,
         components,
-        mct,
+        mct: mct == 1,
+        part2,
+        codestream_components,
     })
 }
 
 /// Strip any JP2 wrapper, read the main header, and refuse it unless it describes exactly
 /// the frame in `info`: same size and number of components, no subsampling, one precision
-/// for every component, at most Bits Allocated (and at most [`MAX_PRECISION`]).
+/// for every component, at most Bits Allocated (and at most [`MAX_PRECISION`]). A Part 2
+/// multiple component transformation is `Unsupported` here; [`prepare_part2`] accepts it.
 pub fn prepare<'a>(data: &'a [u8], info: &FrameInfo) -> Result<Prepared<'a>> {
+    let prep = prepare_part2(data, info, false)?;
+    if prep.header.part2 {
+        return Err(DecodeError::Unsupported("JPEG 2000 Part 2 multiple component transformation".into()));
+    }
+    Ok(prep)
+}
+
+/// [`prepare`], also accepting a Part 2 multiple component transformation (T.801 Annex J),
+/// whose output components are checked instead of the SIZ components. With `frames`, the
+/// codestream may hold several frames: its components are then a multiple of Samples per
+/// Pixel, frame by frame (DICOM PS3.5 A.4.4, volumetric JPEG 2000 Part 2).
+pub fn prepare_part2<'a>(data: &'a [u8], info: &FrameInfo, frames: bool) -> Result<Prepared<'a>> {
     let codestream = unwrap_jp2(data)?;
     let header = read_main_header(codestream)?;
     if header.width != info.columns || header.height != info.rows {
@@ -242,7 +298,9 @@ pub fn prepare<'a>(data: &'a [u8], info: &FrameInfo) -> Result<Prepared<'a>> {
             header.width, header.height, info.columns, info.rows
         )));
     }
-    if header.components.len() != usize::from(info.samples_per_pixel) {
+    let spp = usize::from(info.samples_per_pixel);
+    let fits = if frames { spp > 0 && header.components.len().is_multiple_of(spp) } else { header.components.len() == spp };
+    if !fits {
         return Err(invalid(format!(
             "codestream has {} components, data set says {} samples per pixel",
             header.components.len(),
@@ -253,7 +311,18 @@ pub fn prepare<'a>(data: &'a [u8], info: &FrameInfo) -> Result<Prepared<'a>> {
         return Err(DecodeError::Unsupported(format!("Bits Allocated {} with JPEG 2000", info.bits_allocated)));
     }
     let first = header.components[0];
-    if header.components.iter().any(|c| c.dx != 1 || c.dy != 1) {
+    if header.part2 {
+        if header.codestream_components.iter().any(|c| c.dx != 1 || c.dy != 1) {
+            return Err(DecodeError::Unsupported(
+                "JPEG 2000 Part 2 multiple component transformation of subsampled components".into(),
+            ));
+        }
+        // Hayro works in f32; the codestream components may carry a few more bits than the
+        // output, but not more than f32 holds exactly.
+        if header.codestream_components.iter().any(|c| c.precision > 24) {
+            return Err(DecodeError::Unsupported("JPEG 2000 codestream component precision above 24".into()));
+        }
+    } else if header.components.iter().any(|c| c.dx != 1 || c.dy != 1) {
         check_sycc(&header)?;
     }
     for c in &header.components {

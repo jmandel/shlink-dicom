@@ -45,8 +45,16 @@ pub(crate) fn decode<'a>(
 
     // shl patch 8: without MCT, the DC level shift is added while each tile is stored,
     // instead of in a separate pass over every channel afterwards (the same f32 additions).
-    let shift_in_store =
-        !header.defer_level_shift && !tiles[0].mct && header.skipped_resolution_levels == 0;
+    // shl patch 11: a Part 2 multiple component transformation replaces the level shift.
+    let shift_in_store = !header.defer_level_shift
+        && !tiles[0].mct
+        && header.part2.is_none()
+        && header.skipped_resolution_levels == 0;
+    // shl patch 11: the transformation is read from the main header only, so every tile
+    // must use it (a tile-part COD may switch it off).
+    if header.part2.is_some() && tiles.iter().any(|t| t.mct_type != header.global_coding_style.mct_type) {
+        bail!(crate::error::MarkerError::Unsupported);
+    }
     let sole_tile = tiles.len() == 1;
 
     for tile in &tiles {
@@ -100,6 +108,15 @@ pub(crate) fn decode<'a>(
     // images exist!
     if tiles[0].mct {
         mct::apply_inverse(&mut ctx.channel_data, &tiles[0].component_infos, header)?;
+    }
+
+    // shl patch 11: the Part 2 transformation, with no DC level shift (T.801 Annex J).
+    if let Some(part2) = &header.part2 {
+        let len = (header.size_data.image_width() as usize)
+            .checked_mul(header.size_data.image_height() as usize)
+            .ok_or(ValidationError::ImageTooLarge)?;
+        part2.apply(&mut ctx.channel_data, len)?;
+        return Ok(());
     }
 
     if !shift_in_store && !header.defer_level_shift {

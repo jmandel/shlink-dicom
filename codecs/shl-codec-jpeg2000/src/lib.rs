@@ -1,4 +1,5 @@
-//! JPEG 2000 (1.2.840.10008.1.2.4.90/.91) decoder: a thin wrapper around `hayro-jpeg2000`.
+//! JPEG 2000 (1.2.840.10008.1.2.4.90/.91, and Part 2 multi-component .92/.93) decoder: a thin
+//! wrapper around `hayro-jpeg2000`.
 //! Owned by the jpeg2000 format agent; see codec-corpus/formats/jpeg2000/FORMAT.md.
 //!
 //! The wrapper does what hayro does not do for DICOM:
@@ -10,6 +11,11 @@
 //!   signed components (hayro reads the SIZ sign bit and discards it);
 //! - rounds and clamps hayro's f32 samples, and applies pydicom's signedness rules ([`prep::pack`],
 //!   or row by row with [`prep::pack_rows`] when no component is subsampled).
+//!
+//! A codestream with a Part 2 multiple component transformation (T.801 Annex J, vendored
+//! patch 11) is decoded to the components CBD declares, without a DC level shift. In a
+//! volumetric file each of those components is a frame (DICOM PS3.5 A.4.4); [`decode_frames`]
+//! returns all of them, and [`decode_frame`] refuses a codestream that holds more than one.
 //!
 //! [`prep`] is shared with `shl-codec-htj2k`, which also decodes through
 //! [`decode_frame_high_throughput`] (hayro with its HT block decoder, vendored patch 5).
@@ -23,6 +29,31 @@ use shl_codec_common::{scaled_extent, DecodeError, DecodedFrame, DecodedScaled, 
 /// Decode one frame's codestream. See `shl_codec_common::DecodeFn`.
 pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame> {
     decode(codestream, info, false, 0)
+}
+
+/// Decode a codestream that may hold several frames: a JPEG 2000 Part 2 codestream whose
+/// components are the frames of a volume (DICOM PS3.5 A.4.4), Samples per Pixel components
+/// per frame, in order. Returns the number of frames and their samples, frame after frame,
+/// each frame as [`decode_frame`] would return it. A codestream with one frame gives 1.
+pub fn decode_frames(codestream: &[u8], info: &FrameInfo) -> Result<(usize, DecodedFrame)> {
+    decode_multi(codestream, info, false, 0, true)
+}
+
+/// Group the fragments of encapsulated Pixel Data into codestreams: a new codestream starts
+/// at each fragment that begins with SOC + SIZ (or a JP2 signature). For JPEG 2000 Part 2,
+/// where a codestream may hold the frames of a volume or of one component collection
+/// (DICOM PS3.5 A.4.4), instead of one frame. Fragments before the first such start are
+/// joined into the first codestream.
+pub fn codestreams<'a>(fragments: impl IntoIterator<Item = &'a [u8]>) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for f in fragments {
+        let starts = f.starts_with(&[0xFF, 0x4F, 0xFF, 0x51]) || f.starts_with(&prep::JP2_SIGNATURE);
+        match out.last_mut() {
+            Some(last) if !starts => last.extend_from_slice(f),
+            _ => out.push(f.to_vec()),
+        }
+    }
+    out
 }
 
 /// Decode one frame at 1/2^`scale_log2` size (`shl_codec_common::DecodeScaledFn`) by
@@ -62,7 +93,18 @@ pub fn decode_frame_high_throughput(codestream: &[u8], info: &FrameInfo) -> Resu
 /// `reduce` > 0: discard that many resolution levels; the frame is then `out` (the reduced
 /// size) instead of `info`.
 fn decode(codestream: &[u8], full: &FrameInfo, high_throughput: bool, reduce: u8) -> Result<DecodedFrame> {
-    let prep = prep::prepare(codestream, full)?;
+    decode_multi(codestream, full, high_throughput, reduce, false).map(|(_, frame)| frame)
+}
+
+/// `frames`: the codestream may hold several frames (see [`decode_frames`]).
+fn decode_multi(
+    codestream: &[u8],
+    full: &FrameInfo,
+    high_throughput: bool,
+    reduce: u8,
+    frames: bool,
+) -> Result<(usize, DecodedFrame)> {
+    let prep = prep::prepare_part2(codestream, full, frames)?;
     let reduced;
     let info = if reduce == 0 {
         full
@@ -104,6 +146,12 @@ fn decode(codestream: &[u8], full: &FrameInfo, high_throughput: bool, reduce: u8
         ),
         e => map_err(e),
     })?;
+    // Hayro and `prep` read the Part 2 header separately; they must agree.
+    let part2: Option<Vec<(u8, bool)>> =
+        prep.header.part2.then(|| prep.header.components.iter().map(|c| (c.precision, c.signed)).collect());
+    if image.multi_component_output() != part2 {
+        return Err(DecodeError::Invalid("JPEG 2000 Part 2 component bit depths are inconsistent".into()));
+    }
     if image.width() != info.columns || image.height() != info.rows {
         if reduce > 0 {
             return Err(DecodeError::Unsupported("reduced JPEG 2000 grid differs from ceil(size / 2^s)".into()));
@@ -124,7 +172,8 @@ fn decode(codestream: &[u8], full: &FrameInfo, high_throughput: bool, reduce: u8
         .components
         .iter()
         .map(|c| {
-            let shift = (1u32 << (c.precision - 1)) as f32;
+            // A Part 2 transformation replaces the DC level shift (T.801 Annex J).
+            let shift = if prep.header.part2 { 0.0 } else { (1u32 << (c.precision - 1)) as f32 };
             (shift, if c.signed { shift } else { 0.0 })
         })
         .collect();
@@ -149,23 +198,72 @@ fn decode(codestream: &[u8], full: &FrameInfo, high_throughput: bool, reduce: u8
             (lo as f32, hi as f32)
         })
         .collect();
-    if steps.iter().all(|&s| s == (1, 1)) {
-        if let Some(r) = prep::pack_rows(info, &prep, |c, y, row| {
-            let (lo, hi) = bounds[c];
-            let (shift, unshift) = shifts[c];
-            for (d, &s) in row.iter_mut().zip(&planes[c][y * w..(y + 1) * w]) {
-                *d = prep::round_clamped((s + shift) - unshift, lo, hi);
+    let spp = usize::from(info.samples_per_pixel);
+    let count = planes.len() / spp.max(1);
+    // One frame: the usual case. Several (a Part 2 volume): each frame is packed from its own
+    // components, as if it were a codestream of its own.
+    let pack_frame = |f: usize| -> Result<DecodedFrame> {
+        let base = f * spp;
+        let one;
+        let prep = if count == 1 {
+            &prep
+        } else {
+            let h = &prep.header;
+            one = prep::Prepared {
+                codestream: prep.codestream,
+                header: prep::MainHeader {
+                    width: h.width,
+                    height: h.height,
+                    x0: h.x0,
+                    y0: h.y0,
+                    tile_width: h.tile_width,
+                    tile_height: h.tile_height,
+                    tiles: h.tiles,
+                    components: h.components[base..base + spp].to_vec(),
+                    mct: h.mct,
+                    part2: h.part2,
+                    codestream_components: Vec::new(),
+                },
+            };
+            &one
+        };
+        if steps.iter().all(|&s| s == (1, 1)) {
+            if let Some(r) = prep::pack_rows(info, prep, |c, y, row| {
+                let c = base + c;
+                let (lo, hi) = bounds[c];
+                let (shift, unshift) = shifts[c];
+                for (d, &s) in row.iter_mut().zip(&planes[c][y * w..(y + 1) * w]) {
+                    *d = prep::round_clamped((s + shift) - unshift, lo, hi);
+                }
+            }) {
+                return r;
             }
-        }) {
-            return r;
         }
+        prep::pack(info, prep, |c, cx, cy| {
+            let c = base + c;
+            let (dx, dy) = steps[c];
+            // Rounds as `round() as i32` (saturating, NaN to 0); pack clamps to the SIZ range.
+            let (shift, unshift) = shifts[c];
+            prep::round_to_i32((planes[c][cy * dy * w + cx * dx] + shift) - unshift)
+        })
+    };
+    if count == 1 {
+        return pack_frame(0).map(|f| (1, f));
     }
-    prep::pack(info, &prep, |c, cx, cy| {
-        let (dx, dy) = steps[c];
-        // Rounds as `round() as i32` (saturating, NaN to 0); pack clamps to the SIZ range.
-        let (shift, unshift) = shifts[c];
-        prep::round_to_i32((planes[c][cy * dy * w + cx * dx] + shift) - unshift)
-    })
+    if !frames {
+        return Err(DecodeError::Unsupported(format!("JPEG 2000 codestream holds {count} frames")));
+    }
+    let frame_bytes = info.frame_bytes().ok_or_else(|| DecodeError::Invalid("frame size overflows".into()))?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(frame_bytes.saturating_mul(count))
+        .map_err(|_| DecodeError::Unsupported(format!("cannot allocate {count} frames")))?;
+    let mut color = shl_codec_common::ColorOut::AsDeclared;
+    for f in 0..count {
+        let frame = pack_frame(f)?;
+        data.extend_from_slice(&frame.data);
+        color = frame.color;
+    }
+    Ok((count, DecodedFrame { data, planar: false, color }))
 }
 
 fn map_err(e: hayro_jpeg2000::DecodeError) -> DecodeError {

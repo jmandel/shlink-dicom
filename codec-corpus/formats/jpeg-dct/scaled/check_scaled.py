@@ -10,7 +10,7 @@ For each case and each scale 1/2, 1/4, 1/8:
     1-component cases). Clamped blocks (the full decode clipped overshoot the scaled one keeps
     out of the average) and partial edge blocks (which average the encoder's padding) are only
     reported.
-Lossless frames must return Unsupported (exit 3).
+Lossless and hierarchical frames must return Unsupported (exit 3).
 
 Run from codec-corpus after extract_frames.py --format jpeg-dct / jpeg-lossless:
     uv run python formats/jpeg-dct/scaled/check_scaled.py [--case SUBSTRING]
@@ -89,7 +89,9 @@ def main():
                     continue
                 for s in (1, 2, 3):
                     rc, got = ours(dump, case_dir, s, tmp)
-                    if fmt == "jpeg-lossless":
+                    # Lossless and hierarchical JPEG have no reduced decode (the CLI falls back).
+                    hierarchical = info.get("transfer_syntax", "") in {f"1.2.840.10008.1.2.4.{n}" for n in range(59, 67)}
+                    if fmt == "jpeg-lossless" or hierarchical:
                         if rc != 3:
                             print(f"{case_dir.name} 1/{1 << s}: expected Unsupported, got rc {rc}")
                             bad += 1

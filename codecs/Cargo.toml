@@ -8,6 +8,7 @@ members = [
     "shl-codec-jpeg-ls",
     "shl-codec-jpeg2000",
     "shl-codec-htj2k",
+    "shl-codec-jpegxl",
     "shl-dicom-decode",
     "shl-dicom-wasm-bench",
     "shl-dicom-decode-wasm",

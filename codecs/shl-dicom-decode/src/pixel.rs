@@ -32,6 +32,20 @@ pub fn unpack_bits(src: &[u8], count: usize) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
+/// Unpack `count` ACR-NEMA 12-bit samples, two in every three bytes (b0, b1, b2 hold
+/// `b0 | (b1 & 0x0F) << 8` and `b1 >> 4 | b2 << 4`, as GDCM reads them), into 16-bit little-endian.
+pub fn unpack_12(src: &[u8], count: usize) -> Result<Vec<u8>, Error> {
+    let mut out = alloc(count.checked_mul(2).ok_or_else(|| Error::Unsupported("image too large".into()))?)?;
+    for (k, pair) in out.chunks_mut(4).enumerate() {
+        let b = |i: usize| u16::from(src.get(3 * k + i).copied().unwrap_or(0));
+        let (p0, p1) = (b(0) | (b(1) & 0x0F) << 8, b(1) >> 4 | b(2) << 4);
+        for (d, v) in pair.chunks_exact_mut(2).zip([p0, p1]) {
+            d.copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
 /// Expand native YBR_FULL_422 (Y1 Y2 Cb Cr per pair of pixels, PS3.3 C.7.6.3.1.2) to YBR_FULL
 /// (Y1 Cb Cr Y2 Cb Cr). Like pydicom, this runs over the whole buffer, so pairs may span rows.
 pub fn expand_ybr_422(src: &[u8], bps: usize) -> Result<Vec<u8>, Error> {

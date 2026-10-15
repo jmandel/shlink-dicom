@@ -1,0 +1,33 @@
+diff --git a/codestream/tables.cpp b/codestream/tables.cpp
+index f6027e3..46835c1 100644
+--- a/codestream/tables.cpp
++++ b/codestream/tables.cpp
+@@ -1499,8 +1499,8 @@ class QuantizationTable *Tables::FindQuantizationTable(UBYTE idx) const
+ // This is for encoder-side quantization table assignment.
+ UBYTE Tables::QuantizationTableIndexOf(UBYTE component,bool separatechroma) const
+ {
+-  if (m_pQuant == NULL)
+-    JPG_THROW(OBJECT_DOESNT_EXIST,"Tables::QuantizationTableIndexOf","DQT marker missing, no quantization table defined");
++  if (m_pQuant == NULL) // lossless: no DQT; the index only selects the Huffman/AC table
++    return (separatechroma && component > 0)?1:0;
+ 
+   if (separatechroma) {
+     if (component == 2 && m_pQuant->hasCompleteTables())
+diff --git a/marker/scan.cpp b/marker/scan.cpp
+index ab2905e..a6b62fb 100644
+--- a/marker/scan.cpp
++++ b/marker/scan.cpp
+@@ -1,3 +1,4 @@
++#include <stdlib.h>
+ /*************************************************************************
+ 
+     This project implements a complete(!) JPEG (Recommendation ITU-T
+@@ -633,7 +634,7 @@ void Scan::InstallDefaults(UBYTE depth,ULONG tagoffset,const struct JPG_TagItem
+     break;
+   case Lossless:
+   case ACLossless:
+-    m_ucScanStart = 4; // predictor to use. This is the default.
++    m_ucScanStart = getenv("LJ_PREDICTOR") ? atoi(getenv("LJ_PREDICTOR")) : 4; // predictor (test-data hack: env LJ_PREDICTOR)
+     m_ucScanStop  = 0; // shall be zero
+     m_ucHighBit   = 0; // shall be zero
+     m_ucLowBit    = 0; // point transform.

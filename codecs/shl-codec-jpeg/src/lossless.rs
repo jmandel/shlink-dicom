@@ -1,5 +1,6 @@
 //! Lossless JPEG (T.81 Annex H, process 14): predictors 1–7, point transform, 2–16 bits.
 
+use crate::arith::{ArithReader, LosslessStats};
 use crate::bits::{extend, BitReader, Bits};
 use crate::huffman::HuffTable;
 use crate::markers::{Frame, Scan, Tables};
@@ -45,6 +46,9 @@ impl LosslessDecoder {
     }
 
     pub(crate) fn decode_scan(&mut self, data: &[u8], scan: &Scan, t: &Tables, f: &Frame) -> Result<()> {
+        if f.arithmetic || f.differential {
+            return self.decode_scan_generic(data, scan, t, f);
+        }
         let psv = scan.ss;
         if !(1..=7).contains(&psv) {
             return Err(invalid(&format!("lossless predictor selection value {psv} (must be 1-7)")));
@@ -117,6 +121,112 @@ impl LosslessDecoder {
             }
         }
         Ok(())
+    }
+
+    /// Arithmetic-coded scans (process 15) and differential scans of hierarchical images
+    /// (processes 28, 29): one sample at a time in MCU order. In a differential frame every
+    /// prediction is 0 (H.1.2.1 does not apply; J.1.3.1).
+    fn decode_scan_generic(&mut self, data: &[u8], scan: &Scan, t: &Tables, f: &Frame) -> Result<()> {
+        let psv = scan.ss;
+        if !f.differential && !(1..=7).contains(&psv) {
+            return Err(invalid(&format!("lossless predictor selection value {psv} (must be 1-7)")));
+        }
+        let pt = scan.al;
+        if pt >= f.precision {
+            return Err(invalid("point transform >= precision"));
+        }
+        let initial = if f.differential { 0 } else { 1i32 << (f.precision - pt - 1) };
+        let mut huff: Vec<Option<&HuffTable>> = Vec::with_capacity(scan.comps.len());
+        for sc in &scan.comps {
+            huff.push(if f.arithmetic { None } else { Some(t.dc_table(sc.td)?) });
+            self.planes[sc.index].pt = pt;
+        }
+        // Geometry: a one-component scan has one sample per MCU over the component's own size.
+        let single = scan.comps.len() == 1;
+        let (mx, my) = if single { f.comp_size(scan.comps[0].index) } else { f.mcus(1) };
+        let hv = |k: usize| if single { (1, 1) } else { (f.comps[scan.comps[k].index].h, f.comps[scan.comps[k].index].v) };
+        let mut br = BitReader::new(data);
+        let mut ar = ArithReader::new(data);
+        let mut stats = vec![LosslessStats::new(); 4];
+        // Differences to the left (one per sample row of an MCU) and above (one per column).
+        let mut da: Vec<Vec<i32>> = (0..scan.comps.len()).map(|k| vec![0; hv(k).1]).collect();
+        let mut db: Vec<Vec<i32>> = (0..scan.comps.len()).map(|k| vec![0; mx * hv(k).0]).collect();
+        let ri = t.restart_interval;
+        let mut starts = vec![LineStart { row: 0, col: 0 }; scan.comps.len()];
+        let ctx = Ctx { psv, initial };
+        for m in 0..mx * my {
+            let (mxi, myi) = (m % mx, m / mx);
+            if ri > 0 && m > 0 && m.is_multiple_of(ri) {
+                br.restart();
+                ar.restart();
+                stats.iter_mut().for_each(|s| *s = LosslessStats::new());
+                for (k, s) in starts.iter_mut().enumerate() {
+                    let (h, v) = hv(k);
+                    *s = LineStart { row: myi * v, col: mxi * h };
+                    db[k].fill(0);
+                    da[k].fill(0);
+                }
+            }
+            if mxi == 0 {
+                da.iter_mut().for_each(|d| d.fill(0));
+            }
+            for (k, sc) in scan.comps.iter().enumerate() {
+                let (h, v) = hv(k);
+                let tbl = sc.td & 3;
+                let (l, u) = (t.arith_dc_l[tbl], t.arith_dc_u[tbl]);
+                let p = &mut self.planes[sc.index];
+                for yy in 0..v {
+                    for xx in 0..h {
+                        let (x, y) = (mxi * h + xx, myi * v + yy);
+                        let diff = match huff[k] {
+                            Some(tab) => diff(&mut br, tab)?,
+                            None if ar.is_failed() => 0,
+                            None => {
+                                let (a, b) = (da[k].get(yy).copied().unwrap_or(0), db[k].get(x).copied().unwrap_or(0));
+                                match crate::arith::lossless_diff(&mut ar, &mut stats[tbl], a, b, l, u) {
+                                    Some(d) => d,
+                                    None => {
+                                        ar.set_failed();
+                                        0
+                                    }
+                                }
+                            }
+                        };
+                        if let Some(a) = da[k].get_mut(yy) {
+                            *a = diff;
+                        }
+                        if let Some(b) = db[k].get_mut(x) {
+                            *b = diff;
+                        }
+                        ctx.put(p, x, y, starts[k], diff, f.differential);
+                    }
+                }
+            }
+        }
+        self.bad_codes += br.bad_codes;
+        self.saw_ssss16 |= br.ssss16;
+        Ok(())
+    }
+
+    /// The decoded samples of each component, `comp_size` wide and high, with the point transform
+    /// applied (hierarchical frames).
+    pub(crate) fn raw(&self, f: &Frame) -> Vec<Vec<i32>> {
+        self.planes
+            .iter()
+            .enumerate()
+            .map(|(ci, p)| {
+                let (cw, ch) = f.comp_size(ci);
+                let pt = u32::from(p.pt);
+                let mut out = Vec::with_capacity(cw * ch);
+                for y in 0..ch {
+                    for x in 0..cw {
+                        let v = p.data.get(y * p.stride + x).copied().unwrap_or(0);
+                        out.push(((u32::from(v) << pt) & 0xFFFF) as i32);
+                    }
+                }
+                out
+            })
+            .collect()
     }
 
     /// `photometric` is the dataset's label. Lossless JPEG has no colour transform of its own, so
@@ -321,6 +431,31 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// Store sample (x, y) from its decoded difference: prediction (0 in a differential frame)
+    /// plus the difference, modulo 2^16.
+    fn put(&self, p: &mut Plane, x: usize, y: usize, s: LineStart, diff: i32, differential: bool) {
+        let st = p.stride;
+        let at = |xx: Option<usize>, yy: Option<usize>| match (xx, yy) {
+            (Some(xx), Some(yy)) => p.data.get(yy * st + xx).map_or(0, |&v| i32::from(v)),
+            _ => 0,
+        };
+        let (left, up) = (x.checked_sub(1), y.checked_sub(1));
+        let pred = if differential {
+            0
+        } else if y == s.row && x == s.col {
+            self.initial
+        } else if y == s.row && x > s.col {
+            at(left, Some(y))
+        } else if x == 0 {
+            at(Some(0), up)
+        } else {
+            predict(self.psv, at(left, Some(y)), at(Some(x), up), at(left, up))
+        };
+        if let Some(d) = p.data.get_mut(y * st + x) {
+            *d = (pred.wrapping_add(diff) & 0xFFFF) as u16;
+        }
+    }
+
     #[inline]
     fn sample(&mut self, r: &mut BitReader, t: &HuffTable, p: &mut Plane, x: usize, y: usize, s: LineStart) -> Result<()> {
         let st = p.stride;
@@ -435,6 +570,9 @@ mod tests {
                 flush(&mut bits, &mut bytes);
                 let frame = Frame {
                     process: Process::Lossless,
+                    arithmetic: false,
+                    progressive: false,
+                    differential: false,
                     precision: 16,
                     width: w,
                     height: h,
@@ -445,7 +583,7 @@ mod tests {
                 let mut tables = Tables::default();
                 tables.dc[0] = Some(table.clone());
                 tables.restart_interval = ri;
-                let scan = Scan { comps: vec![ScanComp { index: 0, td: 0, ta: 0 }], ss: psv, al: 0 };
+                let scan = Scan { comps: vec![ScanComp { index: 0, td: 0, ta: 0 }], ss: psv, se: 0, ah: 0, al: 0 };
                 let mut dec = LosslessDecoder::new(&frame, false).unwrap();
                 dec.decode_scan(&bytes, &scan, &tables, &frame).unwrap();
                 let out = dec.finish(&frame, 2, Photometric::Monochrome2).unwrap();

@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use super::DecodeSettings;
 use super::bitplane::BITPLANE_BIT_SIZE;
 use super::build::SubBandType;
+use super::mct2;
 use crate::error::{MarkerError, Result, ValidationError, bail, err};
 use crate::reader::BitReader;
 
@@ -30,6 +31,9 @@ pub(crate) struct Header<'a> {
     pub(crate) ht_set: HtSet,
     /// shl patch 8: `DecodeSettings::defer_level_shift`.
     pub(crate) defer_level_shift: bool,
+    /// shl patch 11: the Part 2 multiple component transformation (T.801 Annex J), when the
+    /// codestream uses one. It replaces the DC level shift.
+    pub(crate) part2: Option<super::mct2::Part2Transform>,
 }
 
 /// shl patch 5: the T.814 code-block set signalled by CAP Ccap15 bits 15-14 (Table A.2).
@@ -88,6 +92,15 @@ pub(crate) fn read_header<'a>(
 
     let mut size_data = size_marker(reader)?;
     size_data.num_tiles()?;
+
+    // shl patch 11: of the Part 2 capabilities (T.801 Table A.2), only the multiple component
+    // transformation is decoded; any other would be decoded wrongly, so it is refused.
+    let rsiz = size_data.capabilities;
+    let part2_mct = rsiz & mct2::RSIZ_PART2 != 0 && rsiz & mct2::RSIZ_MCT != 0;
+    if rsiz & mct2::RSIZ_PART2 != 0 && rsiz & 0x7FFF & !mct2::RSIZ_MCT != 0 {
+        bail!(MarkerError::Unsupported);
+    }
+    let mut part2_markers = mct2::Part2Header::default();
 
     let mut cod = None;
     let mut qcd = None;
@@ -155,6 +168,18 @@ pub(crate) fn read_header<'a>(
                 reader.read_marker()?;
                 skip_marker_segment(reader);
             }
+            // shl patch 11: CBD, MCT, MCC and MCO (T.801 A.3.6-A.3.9), only in a codestream
+            // whose Rsiz announces the multiple component transformation.
+            m @ (markers::CBD | markers::MCT | markers::MCC | markers::MCO) if part2_mct => {
+                reader.read_marker()?;
+                let data = marker_segment_body(reader).ok_or(MarkerError::ParseFailure("MCT"))?;
+                match m {
+                    markers::CBD => part2_markers.read_cbd(data)?,
+                    markers::MCT => part2_markers.read_mct(data)?,
+                    markers::MCC => part2_markers.read_mcc(data)?,
+                    _ => part2_markers.read_mco(data)?,
+                }
+            }
             (0x30..=0x3F) => {
                 // "All markers with the marker code between 0xFF30 and 0xFF3F
                 // have no marker segment parameters. They shall be skipped by
@@ -170,6 +195,31 @@ pub(crate) fn read_header<'a>(
 
     let cod = cod.ok_or(MarkerError::Missing("COD"))?;
     let qcd = qcd.ok_or(MarkerError::Missing("QCD"))?;
+
+    // shl patch 11: SGcod 2 (array-based) selects the Part 2 transformation; the wavelet-based
+    // one (4, 6) is not implemented. Values above 1 mean nothing in a Part 1 codestream.
+    let part2 = match cod.mct_type {
+        0 | 1 => None,
+        mct2::COD_MCT_ARRAY if part2_mct => {
+            match &part2_markers.mco {
+                Some(stages) if !stages.is_empty() => {}
+                // No stages: no transformation, and CBD alone cannot be honoured.
+                _ => bail!(MarkerError::Unsupported),
+            }
+            Some(part2_markers.transform(size_data.component_sizes.len())?)
+        }
+        t if part2_mct && t & mct2::COD_MCT_WAVELET != 0 => bail!(MarkerError::Unsupported),
+        _ => bail!(MarkerError::Unsupported),
+    };
+    if let Some(p) = &part2 {
+        // Every input of a collection must have the same size (J.2.3); hayro spreads
+        // subsampled components over the full grid, so only full-size ones are accepted.
+        if size_data.component_sizes.iter().any(|c| c.horizontal_resolution != 1 || c.vertical_resolution != 1)
+            || p.outputs.iter().any(|o| u32::from(o.precision) > BITPLANE_BIT_SIZE)
+        {
+            bail!(MarkerError::Unsupported);
+        }
+    }
 
     let component_infos: Vec<ComponentInfo> = size_data
         .component_sizes
@@ -243,6 +293,7 @@ pub(crate) fn read_header<'a>(
         high_throughput: settings.high_throughput,
         ht_set,
         defer_level_shift: settings.defer_level_shift,
+        part2,
     };
 
     validate(&header)?;
@@ -507,6 +558,8 @@ pub(crate) struct CodingStyleDefault {
     pub(crate) progression_order: ProgressionOrder,
     pub(crate) num_layers: u8,
     pub(crate) mct: bool,
+    /// shl patch 11: the SGcod multiple component transformation byte (T.801 Table A.8).
+    pub(crate) mct_type: u8,
     // This is the default used for all components, if not overridden by COC.
     pub(crate) component_parameters: CodingStyleComponent,
 }
@@ -551,6 +604,8 @@ pub(crate) struct SizeData {
     pub(crate) tile_y_offset: u32,
     /// Component information (SSiz/XRSiz/YRSiz).
     pub(crate) component_sizes: Vec<ComponentSizeInfo>,
+    /// shl patch 11: Rsiz, the capabilities.
+    pub(crate) capabilities: u16,
     /// Shrink factor in the x direction. See the comment in the parsing method.
     pub(crate) x_shrink_factor: u32,
     /// Shrink factor in the y direction. See the comment in the parsing method.
@@ -677,7 +732,7 @@ fn size_marker_inner(reader: &mut BitReader<'_>) -> Option<SizeData> {
     // Length.
     let _ = reader.read_u16()?;
     // Decoder capabilities.
-    let _ = reader.read_u16()?;
+    let capabilities = reader.read_u16()?;
 
     let xsiz = reader.read_u32()?;
     let ysiz = reader.read_u32()?;
@@ -752,6 +807,7 @@ fn size_marker_inner(reader: &mut BitReader<'_>) -> Option<SizeData> {
         tile_x_offset: xto_siz,
         tile_y_offset: yto_siz,
         component_sizes: components,
+        capabilities,
         x_shrink_factor,
         y_shrink_factor,
         x_resolution_shrink_factor: 1,
@@ -849,6 +905,12 @@ fn ppm_marker<'a>(reader: &mut BitReader<'a>) -> Option<PpmMarkerData<'a>> {
     })
 }
 
+/// shl patch 11: the parameters of a marker segment (after its length field).
+fn marker_segment_body<'a>(reader: &mut BitReader<'a>) -> Option<&'a [u8]> {
+    let length = reader.read_u16()?.checked_sub(2)?;
+    reader.read_bytes(usize::from(length))
+}
+
 pub(crate) fn skip_marker_segment(reader: &mut BitReader<'_>) -> Option<()> {
     let length = reader.read_u16()?.checked_sub(2)?;
     reader.skip_bytes(length as usize)?;
@@ -870,7 +932,8 @@ pub(crate) fn cod_marker(reader: &mut BitReader<'_>) -> Option<CodingStyleDefaul
         return None;
     }
 
-    let mct = reader.read_byte()? == 1;
+    let mct_type = reader.read_byte()?;
+    let mct = mct_type == 1;
 
     let coding_style_parameters = coding_style_parameters(reader, &coding_style_flags)?;
 
@@ -878,6 +941,7 @@ pub(crate) fn cod_marker(reader: &mut BitReader<'_>) -> Option<CodingStyleDefaul
         progression_order,
         num_layers: num_layers as u8,
         mct,
+        mct_type,
         component_parameters: CodingStyleComponent {
             flags: coding_style_flags,
             parameters: coding_style_parameters,
@@ -1055,6 +1119,12 @@ pub(crate) mod markers {
     pub(crate) const CRG: u8 = 0x63;
     /// Comment - 'COM'.
     pub(crate) const COM: u8 = 0x64;
+    /// shl patch 11: Part 2 (T.801 Table A.12) component bit depth, multiple component
+    /// transformation definition, collection and ordering.
+    pub(crate) const CBD: u8 = 0x78;
+    pub(crate) const MCT: u8 = 0x74;
+    pub(crate) const MCC: u8 = 0x75;
+    pub(crate) const MCO: u8 = 0x77;
 
     pub(crate) fn to_string(marker: u8) -> &'static str {
         match marker {

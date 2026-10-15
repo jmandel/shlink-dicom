@@ -5,34 +5,27 @@
 //! - **Image metadata** ([`read_extra`]): Rescale Slope/Intercept, the first Window Center/Width,
 //!   VOI LUT Function, and the same values from the Shared and Per-Frame Functional Groups of
 //!   enhanced multi-frame objects.
+//! - **Real World Value Mapping** (first item, from the top level or the functional groups): the
+//!   slope, intercept, label and units that map stored values (float parametric maps included)
+//!   to measured quantities.
 //! - **Frame ranges** ([`decode_frames`]): decode frames `first..first + count` of a multi-frame
-//!   instance without decoding the others, so frames of one instance can be decoded in parallel
-//!   by several wasm instances. For encapsulated syntaxes the selected frame codestreams are
-//!   re-wrapped in a minimal single-purpose Part 10 file (same transfer syntax and Image Pixel
-//!   attributes, one fragment per frame) and passed to `decode_file`, so every frame still goes
-//!   through the decoder's own normalisation (planar, Bits Stored, J2K precision, YBR->RGB).
-//!   Native (uncompressed) data is decoded whole and the range is sliced out: it is a copy, and
-//!   not worth parallelising.
+//!   instance without decoding the others (`shl_dicom_decode::decode_frames`), so frames of one
+//!   instance can be decoded in parallel by several wasm instances.
 //!
-//! The DICOM reader and the frame splitter are the decoder's own `parse.rs` and `encaps.rs`,
-//! compiled into this crate by path (they are private modules of `shl-dicom-decode`), so the
-//! frame split is exactly the one `decode_file` uses.
+//! The DICOM reader is the decoder's own `parse.rs`, compiled into this crate by path (it is a
+//! private module of `shl-dicom-decode`).
 //!
 //! On wasm32 the crate exports a small C ABI (`vk_*`, see the `exports` module); no wasm-bindgen.
 
-use std::borrow::Cow;
 use std::fmt::Write as _;
 
 #[path = "../../shl-dicom-decode/src/parse.rs"]
 #[allow(dead_code, clippy::all)]
 mod parse;
-#[path = "../../shl-dicom-decode/src/encaps.rs"]
-#[allow(dead_code, clippy::all)]
-mod encaps;
 
 pub use shl_dicom_decode::{decode_file, decode_file_scaled, Canonical, Error};
 
-use parse::{PixelValue, Syntax, TS_DEFLATED_LE, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_IMPLICIT_LE};
+use parse::{PixelValue, Syntax, TS_EXPLICIT_BE, TS_IMPLICIT_LE};
 
 // --------------------------------------------------------------------------------- metadata
 
@@ -52,6 +45,21 @@ pub struct Extra {
     /// PALETTE COLOR lookup table as RGBA8, with its First Mapped value. None when the instance
     /// has no (non-segmented) Red/Green/Blue Palette Color LUT.
     pub palette: Option<Palette>,
+    /// First item of the Real World Value Mapping Sequence (0040,9096), from the top level, else
+    /// the Shared Functional Groups, else Per-Frame item 0.
+    pub real_world: Option<RealWorld>,
+}
+
+/// One Real World Value Mapping item: value = stored × slope + intercept, in `units`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RealWorld {
+    pub slope: Option<f64>,
+    pub intercept: Option<f64>,
+    /// LUT Label (0040,9210).
+    pub label: Option<String>,
+    /// Measurement Units Code Sequence (0040,08EA): Code Value (UCUM) and Code Meaning.
+    pub units: Option<String>,
+    pub units_meaning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -162,6 +170,9 @@ enum Ctx {
     Shared,
     /// Inside item `n` of the Per-Frame Functional Groups Sequence.
     PerFrame(usize),
+    /// Inside the first Real World Value Mapping item (`units`: in its Measurement Units Code
+    /// Sequence). `rank` orders the places one can be found: 0 top level, 1 shared, 2 per-frame.
+    RealWorld { rank: u8, units: bool },
     /// Somewhere nothing is recorded.
     Ignore,
 }
@@ -173,6 +184,8 @@ struct Walker<'a> {
     shared: FrameValues,
     palette: RawPalette<'a>,
     pixel_representation: u16,
+    /// The Real World Value Mapping item found so far, and the rank of where it was found.
+    real_world: Option<(u8, RealWorld)>,
 }
 
 impl<'a> Walker<'a> {
@@ -217,11 +230,16 @@ impl<'a> Walker<'a> {
             };
             let vstart = pos + hdr;
             let tag = (u32::from(group) << 16) | u32::from(element);
-            let known_sq = matches!(tag, 0x5200_9229 | 0x5200_9230 | 0x0028_9145 | 0x0028_9132);
+            let known_sq =
+                matches!(tag, 0x5200_9229 | 0x5200_9230 | 0x0028_9145 | 0x0028_9132 | 0x0040_9096 | 0x0040_08EA);
             if len == UNDEFINED || is_sq || known_sq {
                 let child_ctx = match (ctx, tag) {
                     (Ctx::Top, 0x5200_9229) => Ctx::Shared,
                     (Ctx::Top, 0x5200_9230) => Ctx::PerFrame(0),
+                    (Ctx::Top, 0x0040_9096) => Ctx::RealWorld { rank: 0, units: false },
+                    (Ctx::Shared, 0x0040_9096) => Ctx::RealWorld { rank: 1, units: false },
+                    (Ctx::PerFrame(_), 0x0040_9096) => Ctx::RealWorld { rank: 2, units: false },
+                    (Ctx::RealWorld { rank, .. }, 0x0040_08EA) => Ctx::RealWorld { rank, units: true },
                     (Ctx::Shared | Ctx::PerFrame(_), _) => ctx, // functional group macros
                     _ => Ctx::Ignore,
                 };
@@ -255,6 +273,9 @@ impl<'a> Walker<'a> {
                 0xE000 => {
                     let item_ctx = match ctx {
                         Ctx::PerFrame(_) => Ctx::PerFrame(index),
+                        // Only the first item of a Real World Value Mapping Sequence is read, and
+                        // per-frame only from frame 0.
+                        Ctx::RealWorld { .. } if index > 0 => Ctx::Ignore,
                         c => c,
                     };
                     if len == UNDEFINED {
@@ -299,6 +320,7 @@ impl<'a> Walker<'a> {
                 }
             }
             Ctx::Shared if group == 0x0028 => self.shared.set(element, v),
+            Ctx::RealWorld { rank, units } => self.record_real_world(rank, units, group, element, v),
             Ctx::PerFrame(i) if group == 0x0028 && matches!(element, 0x1050..=0x1053) && i < 1 << 16 => {
                 if self.extra.per_frame.len() <= i {
                     self.extra.per_frame.resize(i + 1, FrameValues::default());
@@ -307,6 +329,28 @@ impl<'a> Walker<'a> {
                     f.set(element, v);
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+impl Walker<'_> {
+    fn record_real_world(&mut self, rank: u8, units: bool, group: u16, element: u16, v: &[u8]) {
+        // Keep the item from the best-ranked place; a later item from a worse place is ignored.
+        match &self.real_world {
+            Some((r, _)) if *r < rank => return,
+            Some((r, _)) if *r > rank => self.real_world = None,
+            _ => {}
+        }
+        let little = self.little;
+        let fd = |v: &[u8]| parse::read_u64(v, little).map(f64::from_bits).filter(|x| x.is_finite());
+        let rw = &mut self.real_world.get_or_insert_with(|| (rank, RealWorld::default())).1;
+        match (units, group, element) {
+            (false, 0x0040, 0x9224) => rw.intercept = rw.intercept.or(fd(v)),
+            (false, 0x0040, 0x9225) => rw.slope = rw.slope.or(fd(v)),
+            (false, 0x0040, 0x9210) => rw.label = rw.label.take().or(Some(parse::trim_text(v))),
+            (true, 0x0008, 0x0100) => rw.units = rw.units.take().or(Some(parse::trim_text(v))),
+            (true, 0x0008, 0x0104) => rw.units_meaning = rw.units_meaning.take().or(Some(parse::trim_text(v))),
             _ => {}
         }
     }
@@ -328,12 +372,15 @@ pub fn read_extra(bytes: &[u8]) -> Extra {
         shared: FrameValues::default(),
         palette: RawPalette::default(),
         pixel_representation: 0,
+        real_world: None,
     };
     let _ = w.elements(0, ds.len(), explicit, Ctx::Top, 0);
     let shared = w.shared;
     let palette = build_palette(&w.palette, little, w.pixel_representation == 1);
+    let real_world = w.real_world.take().map(|(_, rw)| rw);
     let mut e = w.extra;
     e.palette = palette;
+    e.real_world = real_world;
     for f in &mut e.per_frame {
         *f = f.or(shared);
     }
@@ -381,141 +428,52 @@ pub fn probe(bytes: &[u8]) -> Result<Probe, Error> {
     let ts = prepared.transfer_syntax.clone().unwrap_or_else(|| TS_IMPLICIT_LE.to_string());
     Ok(Probe {
         frames: number_of_frames(attrs.number_of_frames)?,
-        encapsulated: !is_native(&ts) && matches!(attrs.pixel, Some(PixelValue::Encapsulated { .. })),
+        encapsulated: !shl_dicom_decode::is_native(&ts) && matches!(attrs.pixel, Some(PixelValue::Encapsulated { .. })),
         transfer_syntax: ts,
     })
 }
 
-fn is_native(ts: &str) -> bool {
-    matches!(ts, TS_IMPLICIT_LE | TS_EXPLICIT_LE | TS_EXPLICIT_BE | TS_DEFLATED_LE)
-}
-
-/// Decode frames `first..first + count` (count 0: all frames from `first`). Returns the canonical
-/// pixels of those frames only (`frames` = number returned) and the instance's total frame count.
-///
-/// The pixels are byte-identical to the same frames of `decode_file(bytes)`.
+/// Decode frames `first..first + count` (count 0, or a count running past the last frame: every
+/// frame from `first`). Returns the canonical pixels of those frames only (`frames` = number
+/// returned) and the instance's total frame count. The pixels are byte-identical to the same
+/// frames of `decode_file(bytes)`.
 pub fn decode_frames(bytes: &[u8], first: usize, count: usize) -> Result<(Canonical, usize), Error> {
     decode_frames_scaled(bytes, first, count, 0)
 }
 
-/// [`decode_frames`] at 1/2^`scale` size: `shl_dicom_decode::decode_file_scaled` on the selected
-/// frames (CONTRACT.md, "Reduced-resolution decode"). The result is ceil(rows / 2^scale) ×
-/// ceil(columns / 2^scale), byte-identical to the same frames of `decode_file_scaled(bytes,
-/// scale)`. `scale` 0 is [`decode_frames`].
+/// [`decode_frames`] at 1/2^`scale` size (CONTRACT.md, "Reduced-resolution decode"): ceil(rows /
+/// 2^scale) × ceil(columns / 2^scale), byte-identical to the same frames of
+/// `decode_file_scaled(bytes, scale)`. `scale` 0 is [`decode_frames`].
 pub fn decode_frames_scaled(bytes: &[u8], first: usize, count: usize, scale: u8) -> Result<(Canonical, usize), Error> {
-    let decode = |b: &[u8]| if scale == 0 { decode_file(b) } else { decode_file_scaled(b, scale) };
-    let prepared = parse::prepare(bytes)?;
-    let attrs = parse::read_dataset(&prepared.dataset, prepared.syntax)?;
-    let total = number_of_frames(attrs.number_of_frames)?;
-    let count = if count == 0 { total.saturating_sub(first) } else { count };
-    if first == 0 && count >= total {
-        return decode(bytes).map(|c| (c, total));
-    }
-    let end = first.checked_add(count).filter(|&e| e <= total && count > 0).ok_or_else(|| {
-        Error::Invalid(format!("frames {first}..{} requested, the instance has {total}", first + count))
-    })?;
-    let ts = prepared.transfer_syntax.clone().unwrap_or_else(|| TS_IMPLICIT_LE.to_string());
-
-    if is_native(&ts) || shl_dicom_decode::codec_for(&ts).is_none() {
-        // Native: decode whole and slice. No codec: decode_file reports the same error.
-        let mut c = decode(bytes)?;
-        let fb = c.data.len() / (c.frames.max(1) as usize);
-        let start = fb * first;
-        c.data = c.data.get(start..fb * end).map(<[u8]>::to_vec).unwrap_or_default();
-        c.frames = count as u32;
-        return Ok((c, total));
-    }
-
-    let little = ts != TS_EXPLICIT_BE;
-    let reparsed;
-    let (basic_offsets, fragments) = match attrs.pixel.as_ref() {
-        Some(PixelValue::Encapsulated { basic_offsets, fragments, .. }) => (*basic_offsets, fragments),
-        Some(PixelValue::Native { data, .. }) => {
-            reparsed = parse::parse_items(data, little)?;
-            match &reparsed {
-                PixelValue::Encapsulated { basic_offsets, fragments, .. } => (*basic_offsets, fragments),
-                PixelValue::Native { .. } => return Err(Error::Invalid("Pixel Data is not encapsulated".into())),
-            }
-        }
-        // Let decode_file produce its own error for anything unusual.
-        None => return decode(bytes).map(|c| (c, total)),
-    };
-    let extended = attrs.extended_offsets.zip(attrs.extended_lengths);
-    let frames = encaps::split_frames(basic_offsets, fragments, extended, total, little)?;
-    let selected = frames.get(first..end).unwrap_or(&[]);
-    let file = rewrap(&ts, &attrs, selected);
-    let mut c = decode(&file)?;
-    c.transfer_syntax = ts;
+    let total = probe(bytes).map(|p| p.frames).unwrap_or(0);
+    let count = if first < total && count >= total - first { 0 } else { count };
+    let c = shl_dicom_decode::decode_frames(bytes, first, count, scale)?;
+    let total = c.total_frames as usize;
     Ok((c, total))
-}
-
-/// A minimal Part 10 file holding `frames` as one fragment each, with the source's Image Pixel
-/// attributes copied byte for byte (encapsulated data sets are little endian).
-fn rewrap(ts: &str, a: &parse::Attributes<'_>, frames: &[Cow<'_, [u8]>]) -> Vec<u8> {
-    let payload: usize = frames.iter().map(|f| f.len() + 9).sum();
-    let mut out = Vec::with_capacity(payload + 512);
-    out.extend_from_slice(&[0u8; 128]);
-    out.extend_from_slice(b"DICM");
-    let mut ts_v = ts.as_bytes().to_vec();
-    if ts_v.len() % 2 == 1 {
-        ts_v.push(0);
-    }
-    short(&mut out, 0x0002, 0x0010, b"UI", &ts_v);
-    let nf = frames.len().to_string();
-    type Attr<'x> = (u16, &'x [u8; 2], Option<&'x [u8]>);
-    let attrs: [Attr<'_>; 9] = [
-        (0x0002, b"US", a.samples_per_pixel),
-        (0x0004, b"CS", a.photometric),
-        (0x0006, b"US", a.planar_configuration),
-        (0x0008, b"IS", Some(nf.as_bytes())),
-        (0x0010, b"US", a.rows),
-        (0x0011, b"US", a.columns),
-        (0x0100, b"US", a.bits_allocated),
-        (0x0101, b"US", a.bits_stored),
-        (0x0103, b"US", a.pixel_representation),
-    ];
-    for (element, vr, v) in attrs {
-        if let Some(v) = v {
-            let mut v = v.to_vec();
-            if v.len() % 2 == 1 {
-                v.push(b' ');
-            }
-            short(&mut out, 0x0028, element, vr, &v);
-        }
-    }
-    out.extend_from_slice(&[0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
-    item(&mut out, &[]);
-    for f in frames {
-        item(&mut out, f);
-    }
-    out.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
-    out
-}
-
-fn short(out: &mut Vec<u8>, group: u16, element: u16, vr: &[u8; 2], v: &[u8]) {
-    out.extend_from_slice(&group.to_le_bytes());
-    out.extend_from_slice(&element.to_le_bytes());
-    out.extend_from_slice(vr);
-    out.extend_from_slice(&(v.len().min(0xFFFF) as u16).to_le_bytes());
-    out.extend_from_slice(&v[..v.len().min(0xFFFF)]);
-}
-
-fn item(out: &mut Vec<u8>, v: &[u8]) {
-    let padded = v.len() + v.len() % 2;
-    out.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
-    out.extend_from_slice(&(padded as u32).to_le_bytes());
-    out.extend_from_slice(v);
-    if v.len() % 2 == 1 {
-        out.push(0);
-    }
 }
 
 // --------------------------------------------------------------------------- result as JSON
 
-/// Smallest and largest sample (single-sample images only; colour returns None).
+/// Smallest and largest sample (single-sample images only; colour returns None). Float samples
+/// that are NaN or infinite are left out; None if no sample is finite.
 pub fn min_max(c: &Canonical) -> Option<(f64, f64)> {
     if c.samples_per_pixel != 1 || c.data.is_empty() {
         return None;
+    }
+    if c.float {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut scan = |v: f64| {
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        };
+        match c.bytes_per_sample() {
+            4 => c.data.chunks_exact(4).for_each(|b| scan(f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])))),
+            8 => c.data.chunks_exact(8).for_each(|b| scan(f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))),
+            _ => return None,
+        }
+        return (lo <= hi).then_some((lo, hi));
     }
     macro_rules! scan {
         ($t:ty, $n:expr) => {{
@@ -599,8 +557,8 @@ pub fn info_json(c: &Canonical, first: usize, total: usize, e: &Extra) -> String
     let frame_bytes = c.data.len() / (c.frames.max(1) as usize);
     let _ = write!(
         o,
-        "{{\"rows\":{},\"columns\":{},\"frames\":{},\"firstFrame\":{first},\"totalFrames\":{total},\"samplesPerPixel\":{},\"bitsAllocated\":{},\"bitsStored\":{},\"pixelRepresentation\":{},\"frameBytes\":{frame_bytes},\"photometric\":",
-        c.rows, c.columns, c.frames, c.samples_per_pixel, c.bits_allocated, c.bits_stored, u8::from(c.signed)
+        "{{\"rows\":{},\"columns\":{},\"frames\":{},\"firstFrame\":{first},\"totalFrames\":{total},\"samplesPerPixel\":{},\"bitsAllocated\":{},\"bitsStored\":{},\"pixelRepresentation\":{},\"float\":{},\"frameBytes\":{frame_bytes},\"photometric\":",
+        c.rows, c.columns, c.frames, c.samples_per_pixel, c.bits_allocated, c.bits_stored, u8::from(c.signed), c.float
     );
     jstr(&mut o, &c.photometric);
     o.push_str(",\"transferSyntax\":");
@@ -648,6 +606,23 @@ pub fn info_json(c: &Canonical, first: usize, total: usize, e: &Extra) -> String
             o.push(']');
         }
         _ => o.push_str("null"),
+    }
+    o.push_str(",\"realWorldValueMapping\":");
+    match &e.real_world {
+        Some(rw) => {
+            o.push_str("{\"slope\":");
+            jnum(&mut o, rw.slope);
+            o.push_str(",\"intercept\":");
+            jnum(&mut o, rw.intercept);
+            o.push_str(",\"label\":");
+            jopt_str(&mut o, rw.label.as_deref());
+            o.push_str(",\"units\":");
+            jopt_str(&mut o, rw.units.as_deref());
+            o.push_str(",\"unitsMeaning\":");
+            jopt_str(&mut o, rw.units_meaning.as_deref());
+            o.push('}');
+        }
+        None => o.push_str("null"),
     }
     o.push_str(",\"palette\":");
     match &e.palette {
@@ -806,6 +781,14 @@ mod exports {
 mod tests {
     use super::*;
 
+    fn short(out: &mut Vec<u8>, group: u16, element: u16, vr: &[u8; 2], v: &[u8]) {
+        out.extend_from_slice(&group.to_le_bytes());
+        out.extend_from_slice(&element.to_le_bytes());
+        out.extend_from_slice(vr);
+        out.extend_from_slice(&(v.len() as u16).to_le_bytes());
+        out.extend_from_slice(v);
+    }
+
     fn el(out: &mut Vec<u8>, g: u16, e: u16, vr: &[u8; 2], v: &[u8]) {
         short(out, g, e, vr, v);
     }
@@ -838,5 +821,39 @@ mod tests {
         assert_eq!(e.rescale_intercept, Some(-1024.0));
         assert_eq!(e.window_center, Some(40.0));
         assert_eq!(e.window_width, Some(400.0));
+    }
+
+    #[test]
+    fn reads_real_world_value_mapping_from_shared_groups() {
+        // Shared FG item > RWVM item (slope 2.5, intercept -1, label, units code "mm2/s").
+        let mut units = Vec::new();
+        el(&mut units, 0x0008, 0x0100, b"SH", b"mm2/s ");
+        el(&mut units, 0x0008, 0x0104, b"LO", b"mm2/s ");
+        let mut rw = Vec::new();
+        for (tag, x) in [(0x9224u16, -1.0f64), (0x9225, 2.5)] {
+            el(&mut rw, 0x0040, tag, b"FD", &x.to_le_bytes());
+        }
+        el(&mut rw, 0x0040, 0x9210, b"SH", b"ADC ");
+        let seq = |out: &mut Vec<u8>, g: u16, e: u16, item: &[u8]| {
+            out.extend_from_slice(&g.to_le_bytes());
+            out.extend_from_slice(&e.to_le_bytes());
+            out.extend_from_slice(b"SQ\0\0");
+            out.extend_from_slice(&(item.len() as u32 + 8).to_le_bytes());
+            out.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
+            out.extend_from_slice(&(item.len() as u32).to_le_bytes());
+            out.extend_from_slice(item);
+        };
+        seq(&mut rw, 0x0040, 0x08EA, &units);
+        let mut shared = Vec::new();
+        seq(&mut shared, 0x0040, 0x9096, &rw);
+        let mut file = vec![0u8; 128];
+        file.extend_from_slice(b"DICM");
+        short(&mut file, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
+        seq(&mut file, 0x5200, 0x9229, &shared);
+        let e = read_extra(&file);
+        let rw = e.real_world.expect("mapping");
+        assert_eq!((rw.slope, rw.intercept), (Some(2.5), Some(-1.0)));
+        assert_eq!(rw.label.as_deref(), Some("ADC"));
+        assert_eq!(rw.units.as_deref(), Some("mm2/s"));
     }
 }

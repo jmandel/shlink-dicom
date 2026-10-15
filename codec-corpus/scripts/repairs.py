@@ -19,6 +19,7 @@ import pydicom
 sys.path.insert(0, str(Path(__file__).parent))
 from common import load_cases, remove_cases, sample_path, save_cases, sha256_file  # noqa: E402
 from discover import describe  # noqa: E402
+from ref_decode import read  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -28,7 +29,7 @@ def add_case(fmt: str, cid: str, src: Path, source: dict, **extra) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if src != dst:
         shutil.copyfile(src, dst)
-    ds = pydicom.dcmread(dst, force=True)
+    ds = read(dst)
     entry = {"id": cid, "notes": "", "tags": ["repair"], **describe(ds), "source": source,
              "sha256": sha256_file(dst), "size": dst.stat().st_size, **extra}
     save_cases(fmt, [entry])
@@ -66,7 +67,7 @@ def patch_attr(fmt: str, cid: str, rid: str, how: str, ruling: str, **attrs) -> 
     src = sample_path(fmt, cid)
     if not src.exists() or find(fmt, rid):   # idempotent: an existing repair keeps its oracle fields
         return
-    ds = pydicom.dcmread(src, force=True)
+    ds = read(src)
     for k, v in attrs.items():
         setattr(ds, k, v)
     with tempfile.TemporaryDirectory() as td:
@@ -106,6 +107,14 @@ def ybr_lossless() -> None:
         save_cases("jpeg-lossless", [c])
 
 
+def oracle_ref(fmt: str, cid: str, ref: str, ruling: str) -> None:
+    c = find(fmt, cid)
+    if c and c.get("oracle_ref") != ref:
+        c.pop("expect_override", None)
+        c.update(oracle_ref=ref, ruling=ruling)
+        save_cases(fmt, [c])
+
+
 def main() -> None:
     patch_attr("jpeg-dct", "ext-gdcm-DCMTK_JPEGExt_12Bits", "repair-gdcm-DCMTK_JPEGExt_12Bits-ba16",
                "Bits Allocated 12 -> 16", "Bits Allocated 12 is impossible for encapsulated data; inferred 16 from the 12-bit SOF (matches dcmdjpeg)", BitsAllocated=16)
@@ -121,6 +130,16 @@ def main() -> None:
     patch_attr("uncompressed", "ext-gdcm-MR16BitsAllocated_8BitsStored", "repair-gdcm-MR16BA8BS-mono2",
                "Photometric MONOCHROME -> MONOCHROME2", "undefined photometric 'MONOCHROME' read as MONOCHROME2",
                PhotometricInterpretation="MONOCHROME2")
+    patch_attr("uncompressed", "ext-gdcm-SIEMENS_GBS_III-16-ACR_NEMA_1.acr", "repair-gdcm-SIEMENS_GBS_III-mono2",
+               "Photometric MONOCHROME2 and Samples per Pixel 1 added",
+               "ACR-NEMA 1.0 has no Photometric Interpretation; one sample per pixel read as MONOCHROME2",
+               PhotometricInterpretation="MONOCHROME2", SamplesPerPixel=1)
+    oracle_ref("uncompressed", "ext-gdcm-LIBIDO-24-ACR_NEMA-Rectangle", "gdcm-native",
+               "ACR-NEMA Bits Allocated 24 with no Samples per Pixel is 8-bit interleaved RGB, and LIBIDO swaps Rows and Columns; read as GDCM reads it")
+    oracle_ref("uncompressed", "ext-gdcm-gdcm-ACR-LibIDO.acr", "gdcm-native",
+               "LIBIDO (Recognition Code ACRNEMA_LIBIDO) writes Rows and Columns swapped; read swapped, as GDCM does")
+    oracle_ref("uncompressed", "ext-fodicom-GH340", "gdcm-native",
+               "ACR-NEMA Bits Allocated 12 packs two samples in three bytes; unpacked into 16 bits as GDCM does")
 
 
 if __name__ == "__main__":

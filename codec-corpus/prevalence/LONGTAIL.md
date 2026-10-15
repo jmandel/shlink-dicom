@@ -265,10 +265,9 @@ Each group is listed with the component at fault, the right behaviour and the ev
 ### 3. Float Pixel Data (Parametric Map)
 
 - **Instances:** 3 `tcga_gbm` instances, "Gevaert Lab Converted By Imaging Data Commons", highdicom 0.27.0, with (7FE0,0008) Float Pixel Data.
-- **Our behaviour:** exit 3, "float pixel data not supported". pydicom decodes them.
-- **Component:** CLI scope.
-- **Right behaviour:** out of scope by the contract (integer canonical form), so this is already recorded as a blind spot in [IDC_SAMPLES.md](IDC_SAMPLES.md#what-was-picked).
-- **Case:** none. `discover.register` requires (7FE0,0010) and cannot register these files.
+- **Behaviour in the sweep:** exit 3, "float pixel data not supported". pydicom decodes them.
+- **Now:** decoded to f32 ([CONTRACT.md, Float pixel data](../CONTRACT.md#float-pixel-data)), equal to pydicom and GDCM.
+- **Cases:** `idc-lt-sop-1-2-840-10008-{9c519f08,a1cc97dd,eb217aa0}`, all three files.
 
 ### 4. Empty frames at the end of a whole-slide image
 
@@ -340,7 +339,7 @@ From the probe of 9,520 files with Pixel Data:
   - 14 files carry an Icon Image Sequence.
   - 14 files have a private element (01F1,1026) whose value is text (b"0.829 ") where pydicom's dictionary says FD. pydicom's probe fails on them with "BytesLengthException", but every decoder reads the pixels, and all 14 pass (byte-exact against the reference).
 
-**Decode time.** Our decoder's median time is 5 ms. The slowest were 160–210 MB JPEG 2000 Lossless slides (MONOCHROME2, about 0.6–0.7 GB decoded) at 67–70 s, while the machine's load average was about 29 from other agents. The slowest reference on the same files took 104–144 s. This is a throughput figure for large files, not a hang; the contract's 60 s limit is meant for corpus-sized files.
+**Decode time.** Our decoder's median time is 5 ms. The slowest were 160–210 MB JPEG 2000 Lossless slides (MONOCHROME2, about 0.6–0.7 GB decoded) at 67–70 s, while the machine's load average was about 29 from other agents. The slowest reference on the same files took 104–144 s. Per frame our JPEG 2000 decode is on par with `opj_decompress` (about 60–90 ms per 1024² frame); the time was the frame count. The CLI now decodes large multi-frame images on up to 8 threads: `e64f56d0` (630 frames) went from 37 s to 11.5 s at load 9, with identical output.
 
 ## Requests for the coordinator
 
@@ -349,9 +348,9 @@ From the probe of 9,520 files with Pixel Data:
    - `oracle_case` and ruling text on `idc-lt-imgtype-derived-second-de33dc5b`, `idc-lt-sw-logiqe9-r6-2-0-44d156ec` and `idc-lt-sw-logiqe9-r4-3-0-ab87d1f0`, pointing at their `idc-lt-repair-planar*` copies;
    - `oracle_ref` and `max_abs_override` on `idc-lt-combo-63dd4058`.
 3. **Empty frames in TILED_FULL slides:** decide whether a zero-length frame item is exit 2 (today) or an empty tile. A test case can be derived from `2553b307` (frames 32399 and 32400).
-4. **`ref_decode.py` `openjpeg-cli`:** it stacks all frames as int64 (8 × the decoded size), which gets oracle builds of large multi-frame J2K files killed. A per-frame loop writing into the output dtype would fix it.
-5. **Frame option in the CLI:** a `--frames FIRST..END` option on `shl-dicom-decode` would let the harness check our whole-file framing on oversize files directly, without the `shl-dicom-decode-wasm` wrapper. During this run that crate briefly failed to compile, because `parse.rs` gained a field (`note`) that `decode_frames` did not yet match; it builds again now.
-6. **`discover.register`** cannot take Float Pixel Data files (it requires (7FE0,0010)), so the Parametric Map blind spot still has no case.
+4. Done: `ref_decode.py`'s `openjpeg-cli` decodes frame by frame into the output dtype.
+5. Done: `shl-dicom-decode --frames A-B`, and `scripts/check_frames.py --file BIG.dcm --frames N` checks a large file in chunks.
+6. Done: `discover.register` takes Float Pixel Data; the three files are registered.
 
 ## Cost
 

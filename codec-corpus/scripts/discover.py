@@ -23,31 +23,46 @@ import pydicom
 
 sys.path.insert(0, str(Path(__file__).parent))
 from common import ROOT, TRANSFER_SYNTAXES, load_cases, sample_path, save_cases, sha256_file  # noqa: E402
+from ref_decode import is_float, read  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
 
 def describe(ds) -> dict:
-    return {
+    """Image Pixel values of a data set read by ref_decode.read (Transfer Syntax UID guessed for a
+    file without a Part 10 meta). Float and Double Float Pixel Data have Bits Allocated 32 and 64
+    and no Bits Stored or Pixel Representation."""
+    fl = is_float(ds)
+    ba = int(getattr(ds, "BitsAllocated", 0) or 0)
+    if fl:
+        ba = 64 if "DoubleFloatPixelData" in ds else 32
+    meta = {
         "transfer_syntax": str(ds.file_meta.TransferSyntaxUID),
         "rows": int(ds.Rows),
         "columns": int(ds.Columns),
         "frames": int(getattr(ds, "NumberOfFrames", 1) or 1),
         "samples_per_pixel": int(getattr(ds, "SamplesPerPixel", 1)),
-        "bits_allocated": int(ds.BitsAllocated),
-        "bits_stored": int(getattr(ds, "BitsStored", ds.BitsAllocated)),
-        "pixel_representation": int(getattr(ds, "PixelRepresentation", 0)),
+        "bits_allocated": ba,
+        "bits_stored": ba if fl else int(getattr(ds, "BitsStored", ba)),
+        "pixel_representation": 0 if fl else int(getattr(ds, "PixelRepresentation", 0)),
         "photometric": str(getattr(ds, "PhotometricInterpretation", "")),
         "planar_configuration": int(getattr(ds, "PlanarConfiguration", 0) or 0),
     }
+    if fl:
+        meta["float_pixels"] = True
+    return meta
 
 
 def register(src: Path, case_id: str, source: dict, budget: dict[str, int], per_format: int) -> str | None:
+    """Copy `src` into its format's samples and add or update its case. Files without a Part 10
+    meta are registered under the transfer syntax pydicom's force=True reader guesses, tagged
+    `no-part10-meta`."""
     try:
-        ds = pydicom.dcmread(src, stop_before_pixels=True, force=True)
-        ts = str(ds.file_meta.TransferSyntaxUID)
-        full = pydicom.dcmread(src, force=True)
-        if "PixelData" not in full or ts not in TRANSFER_SYNTAXES:
+        head = pydicom.dcmread(src, stop_before_pixels=True, force=True)
+        no_meta = "TransferSyntaxUID" not in getattr(head, "file_meta", {})
+        full = read(src)
+        ts = str(full.file_meta.TransferSyntaxUID)
+        if not any(k in full for k in ("PixelData", "FloatPixelData", "DoubleFloatPixelData")) or ts not in TRANSFER_SYNTAXES:
             return None
         meta = describe(full)
     except Exception:
@@ -61,6 +76,8 @@ def register(src: Path, case_id: str, source: dict, budget: dict[str, int], per_
     shutil.copyfile(src, dst)
     entry = cases.get(case_id, {"id": case_id, "notes": "", "tags": []})
     entry.update(meta)
+    if no_meta and "no-part10-meta" not in entry["tags"]:
+        entry["tags"].append("no-part10-meta")
     entry["source"] = source
     entry["sha256"] = sha256_file(dst)
     entry["size"] = dst.stat().st_size

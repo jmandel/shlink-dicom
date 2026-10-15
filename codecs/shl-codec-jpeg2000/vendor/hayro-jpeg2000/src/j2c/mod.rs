@@ -6,6 +6,7 @@ mod decode;
 mod ht;
 mod idwt;
 mod mct;
+mod mct2;
 mod progression;
 mod rect;
 mod segment;
@@ -52,6 +53,20 @@ pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<I
     let parsed_codestream = parse_raw(stream, settings)?;
     let header = &parsed_codestream.header;
     let mut boxes = ImageBoxes::default();
+
+    // shl patch 11: after a Part 2 multiple component transformation the components are
+    // whatever CBD describes, so no colour space is assumed and no conversion applies.
+    if let Some(part2) = &header.part2 {
+        let num_channels = u8::try_from(part2.outputs.len()).unwrap_or(u8::MAX);
+        return Ok(Image {
+            codestream: parsed_codestream.data,
+            header: parsed_codestream.header,
+            boxes,
+            settings: *settings,
+            color_space: crate::ColorSpace::Unknown { num_channels },
+            has_alpha: false,
+        });
+    }
 
     // If we are just decoding a raw codestream, we assume greyscale or
     // RGB.
