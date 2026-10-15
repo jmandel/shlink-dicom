@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Imaging over SMART Health Links</title>
+  <script>
+    // Links made with this site's root as the viewer prefix (https://host/#shlink:/…) open in the viewer.
+    if (location.hash.indexOf("shlink:/") >= 0) location.replace("view" + location.search + location.hash);
+  </script>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5fbf'/><path d='M9 9h14v14H9z' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='3.5' fill='white'/></svg>" />
+  <link rel="stylesheet" href="assets/base.css" />
+  <link rel="stylesheet" href="assets/landing.css" />
+</head>
+<body>
+  <main class="landing">
+    <header class="hero">
+      <h1>Medical imaging, shared as a link</h1>
+      <p class="lede">Send a full CT, MRI or X-ray study (every original DICOM file) as a SMART Health Link. The files are stored encrypted, and the key that opens them travels only inside the link.</p>
+    </header>
+
+    <div class="doors">
+      <section class="door card" aria-labelledby="door-view">
+        <h2 id="door-view">Open a link you received</h2>
+        <p class="muted">The images open here, in your browser. Nothing to install.</p>
+        <form id="open-form" class="open-form">
+          <label for="input-link" class="sr-only">Link</label>
+          <input id="input-link" type="url" placeholder="Paste the link (https://… or shlink:/…)" autocomplete="off" spellcheck="false" />
+          <button class="btn btn-primary" type="submit">Open</button>
+        </form>
+        <div class="samples">
+          <a id="sample-public" class="btn" href="view" aria-disabled="true">Try a sample: brain MRI and wrist X-rays</a>
+          <a id="sample-passcode" class="btn hidden" href="view">Try a passcode link (the passcode is 1234)</a>
+        </div>
+        <p id="sample-note" class="small muted">The sample is a real, published study set, shared by its owner.</p>
+      </section>
+
+      <a class="door card door-link" href="share">
+        <h2>Share your imaging <span class="soon">coming soon</span></h2>
+        <p class="muted">From a CD, a download or your patient portal. Choose what to include, who it's for and how long it works.</p>
+      </a>
+
+      <a class="door card door-link" href="how">
+        <h2>See how it works <span class="soon">coming soon</span></h2>
+        <p class="muted">Follow the sample link step by step: the key, the encrypted files, and every request your browser makes.</p>
+      </a>
+    </div>
+  </main>
+  <script type="module" src="assets/landing.js"></script>
+</body>
+</html>

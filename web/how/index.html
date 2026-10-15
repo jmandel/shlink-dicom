@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>How it works</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5fbf'/><path d='M9 9h14v14H9z' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='3.5' fill='white'/></svg>" />
+  <link rel="modulepreload" href="../assets/how.js" />
+  <link rel="stylesheet" href="../assets/base.css" />
+  <link rel="stylesheet" href="../assets/how.css" />
+</head>
+<body class="how">
+  <header class="how-top">
+    <a class="btn btn-ghost" href="../">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Start</span>
+    </a>
+    <span class="how-top-title">How it works</span>
+  </header>
+
+  <main class="how-main">
+    <div class="intro">
+      <h1>How it works</h1>
+      <p class="lede">This page opens the site's public sample link and walks through what a receiver does with it, in eight steps. Every value shown about the sample comes from requests this page sends and data it decrypts in your browser.</p>
+      <p id="status" class="status" role="status"><span class="spinner-sm" aria-hidden="true"></span> Opening the sample link…</p>
+      <nav class="toc" aria-label="Steps">
+        <ol>
+          <li><a href="#link">The link</a></li>
+          <li><a href="#bundle">The Bundle</a></li>
+          <li><a href="#series-file">The series file</a></li>
+          <li><a href="#verify">Decrypt and verify</a></li>
+          <li><a href="#host">What the host sees</a></li>
+          <li><a href="#revoke">Sharing and revocation</a></li>
+          <li><a href="#codecs">Codecs and performance</a></li>
+          <li><a href="#build">Build it</a></li>
+        </ol>
+      </nav>
+    </div>
+
+    <!-- 1 -->
+    <section class="step" id="link" aria-labelledby="h-link">
+      <div class="step-text">
+        <p class="step-n">1</p>
+        <h2 id="h-link">The link</h2>
+        <p class="lead">Below is the sample link and the JSON inside it. Tap a field to see what it gives whoever holds the link.</p>
+        <p>A SMART Health Link is <code>shlink:/</code> followed by base64url-encoded JSON. The JSON says where the encrypted data is (<code>url</code>) and holds the key that decrypts it (<code>key</code>). Anyone who has the link can read what it points to.</p>
+        <p>In a viewer address the link comes after <code>#</code>. Browsers do not send that part to the server, so the server that hosts the files never receives the key.</p>
+        <p class="ref"><a href="../how/spec.html#2-background-smart-health-links-in-brief">Spec §2: SMART Health Links in brief</a></p>
+      </div>
+      <div class="step-widget card">
+        <h3 class="w-title">The sample link</h3>
+        <p id="link-raw" class="mono link-raw" aria-label="The sample link"></p>
+        <h3 class="w-title">Decoded</h3>
+        <pre id="link-json" class="json-block" aria-label="Decoded link payload"></pre>
+        <div id="link-note" class="note" aria-live="polite"></div>
+        <details class="paste">
+          <summary>Decode another link</summary>
+          <p class="small muted">Decoding happens in this page. Nothing is fetched.</p>
+          <div class="row">
+            <label class="sr-only" for="link-input">Link to decode</label>
+            <input id="link-input" type="text" placeholder="shlink:/… or https://…#shlink:/…" autocomplete="off" spellcheck="false" />
+            <button id="link-decode" class="btn" type="button">Decode</button>
+          </div>
+          <p id="link-input-msg" class="small form-msg" role="alert"></p>
+        </details>
+      </div>
+    </section>
+
+    <!-- 2 -->
+    <section class="step" id="bundle" aria-labelledby="h-bundle">
+      <div class="step-text">
+        <p class="step-n">2</p>
+        <h2 id="h-bundle">The Bundle</h2>
+        <p class="lead">Open the decrypted Bundle below. The highlighted <code>series</code> lists are where the imaging is described; tap an instance's offset to see where its bytes are.</p>
+        <p>The link's key decrypts one file: a FHIR Bundle, sent as a compact JWE (<code>A256GCM</code>, DEFLATE-compressed). It holds the Patient and one <code>ImagingStudy</code> per study.</p>
+        <p>Each series has two extra values: a random file id, which names its file on the host, and a random 32-byte key for that file. Each instance has its length in bytes. Instances are listed in the order their bytes appear in the series file, so an instance's offset is the sum of the lengths before it.</p>
+        <p>A client that does not know these extensions ignores them and still reads a valid FHIR study.</p>
+        <p class="ref"><a href="../how/spec.html#8-the-bundle">Spec §8: The Bundle</a></p>
+      </div>
+      <div class="step-widget card">
+        <p id="bundle-stats" class="small muted"></p>
+        <div id="bundle-pick" class="note hidden" aria-live="polite"></div>
+        <div id="bundle-tree" class="json-tree" aria-label="Decrypted Bundle"></div>
+      </div>
+    </section>
+
+    <!-- 3 -->
+    <section class="step" id="series-file" aria-labelledby="h-series">
+      <div class="step-text">
+        <p class="step-n">3</p>
+        <h2 id="h-series">The series file</h2>
+        <p class="lead">Drag the slider to pick an image. The page works out which records hold it, sends one Range request for them, and verifies what comes back. Each request appears in the list.</p>
+        <p>Each series is one file, <code>{fileId}.bin</code>, next to the Bundle. It holds the series' DICOM files end to end, encrypted in records of 65,520 bytes. On the host each record takes 65,536 bytes: the ciphertext and a 16-byte authentication tag.</p>
+        <p>To read plaintext bytes [<i>a</i>, <i>b</i>), the client fetches records ⌊<i>a</i> / 65,520⌋ to ⌊(<i>b</i> − 1) / 65,520⌋, which start at 65,536 times the first record's index. Record <i>i</i> is decrypted with nonce <i>i</i>, written as a 12-byte big-endian number.</p>
+        <p>Tap a record in the map to jump to the first image that starts in it.</p>
+        <p class="ref"><a href="../how/spec.html#9-3-locating-and-authenticating-byte-ranges">Spec §9.3: Locating and authenticating byte ranges</a></p>
+      </div>
+      <div class="step-widget card">
+        <label class="field">
+          <span class="field-label">Series</span>
+          <select id="sf-series"></select>
+        </label>
+        <p id="sf-file" class="small mono muted file-line"></p>
+        <div id="sf-map" class="record-map" role="img" aria-label="Records of the series file"></div>
+        <p class="legend small muted">
+          <span><i class="sw sw-sel"></i>this image's records</span>
+          <span><i class="sw sw-ok"></i>verified</span>
+          <span><i class="sw sw-fetch"></i>in flight</span>
+        </p>
+        <div class="slider-row">
+          <button id="sf-prev" class="btn" type="button" aria-label="Previous image">−</button>
+          <label class="sr-only" for="sf-slider">Image</label>
+          <input id="sf-slider" type="range" min="0" max="0" step="1" value="0" />
+          <button id="sf-next" class="btn" type="button" aria-label="Next image">+</button>
+        </div>
+        <dl id="sf-facts" class="facts"></dl>
+        <h3 class="w-title">Requests from this page</h3>
+        <div id="sf-net" class="net" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="step" id="verify" aria-labelledby="h-verify">
+      <div class="step-text">
+        <p class="step-n">4</p>
+        <h2 id="h-verify">Decrypt and verify</h2>
+        <p class="lead">Pick a record and decrypt it. Turn on the switch to flip one bit of it between the network and the decryptor, and the record is refused.</p>
+        <p>AES-256-GCM checks each record's 16-byte tag before releasing any plaintext. A changed bit fails the check, and so does a record moved to another position, because its nonce no longer matches. A short or padded file is caught by its length, which the Bundle gives. In each case the receiver uses no bytes from the record.</p>
+        <p>The series key and the expected lengths come from the Bundle, which is itself encrypted and authenticated under the link's key. The series file supplies only ciphertext.</p>
+        <p class="ref"><a href="../how/spec.html#9-2-encryption">Spec §9.2: Encryption</a></p>
+      </div>
+      <div class="step-widget card">
+        <p id="vf-series" class="small muted"></p>
+        <div class="slider-row">
+          <button id="vf-prev" class="btn" type="button" aria-label="Previous record">−</button>
+          <label class="sr-only" for="vf-slider">Record</label>
+          <input id="vf-slider" type="range" min="0" max="0" step="1" value="0" />
+          <button id="vf-next" class="btn" type="button" aria-label="Next record">+</button>
+        </div>
+        <div class="vf-controls">
+          <label class="switch">
+            <input id="vf-tamper" type="checkbox" role="switch" />
+            <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+            <span>Flip one bit in transit</span>
+          </label>
+          <button id="vf-run" class="btn btn-primary" type="button">Fetch and decrypt record 0</button>
+        </div>
+        <dl id="vf-facts" class="facts"></dl>
+        <div id="vf-result" class="result" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="step" id="host" aria-labelledby="h-host">
+      <div class="step-text">
+        <p class="step-n">5</p>
+        <h2 id="h-host">What the host sees</h2>
+        <p class="lead">The two panes show the same requests: on one side what reached the host, on the other what this browser made of them. Tap a request to see what it carried.</p>
+        <p>The host stores the Bundle and the series files as ciphertext. From requests it learns the paths (with random file ids), the byte ranges and their times, the number and sizes of the files, the <code>recipient</code> string the client sends, and, as for any web request, the client's IP address.</p>
+        <p>It does not learn names, DICOM UIDs or pixels: no UID appears in a URL, and the keys are only in the link and the Bundle. File sizes and the pattern of reads can still hint at the kind of study.</p>
+        <p class="small muted">The list on the host side is this page's own requests, with the fields the server's access log keeps. Step 6 shows the server's log itself, for a share you make.</p>
+        <p class="ref"><a href="../how/spec.html#13-security-and-privacy">Spec §13: Security and privacy</a></p>
+      </div>
+      <div class="step-widget host-panes">
+        <div class="pane card">
+          <h3 class="pane-title">The host</h3>
+          <div id="host-log" class="host-log" role="listbox" aria-label="Requests as the host receives them"></div>
+        </div>
+        <div class="pane card">
+          <h3 class="pane-title">This browser</h3>
+          <dl id="host-patient" class="facts"></dl>
+          <div id="host-carried" class="carried"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 -->
+    <section class="step" id="revoke" aria-labelledby="h-revoke">
+      <div class="step-text">
+        <p class="step-n">6</p>
+        <h2 id="h-revoke">Sharing and revocation</h2>
+        <p class="lead">Make your own link to part of the sample, open it in a new tab, then revoke it and watch the requests fail.</p>
+        <p>To share only some studies, the sharer encrypts a new Bundle that lists just those, under a new link key, and tells the server which series files the new link may serve. The series files are not re-encrypted: the new Bundle carries their existing ids and keys.</p>
+        <p>Each link reads files under its own path. Revoking a link makes the server answer 404 for its Bundle and for every file under that path. Other links to the same files keep working.</p>
+        <p>The sample share is read-only, so the first step asks the server for a copy you control. The copy holds the same ciphertext, expires in 24 hours, and the server needs no key to make it.</p>
+        <p class="ref"><a href="../how/spec.html#10-fetch-contract">Spec §10: Fetch contract</a></p>
+      </div>
+      <div class="step-widget card">
+        <ol class="sandbox">
+          <li>
+            <p class="sb-title">Copy the sample share</p>
+            <button id="sb-clone" class="btn btn-primary" type="button" disabled>Copy the sample share</button>
+            <p id="sb-clone-msg" class="small muted"></p>
+          </li>
+          <li>
+            <p class="sb-title">Make a link to some of it</p>
+            <fieldset id="sb-form" class="sb-form" disabled>
+              <legend class="sr-only">Studies to include</legend>
+              <div id="sb-studies" class="checks"></div>
+              <label class="field">
+                <span class="field-label">Passcode (optional)</span>
+                <input id="sb-pass" type="text" autocomplete="off" spellcheck="false" maxlength="40" placeholder="Leave empty for a direct link" />
+              </label>
+              <button id="sb-mint" class="btn btn-primary" type="button">Make the link</button>
+            </fieldset>
+            <p id="sb-mint-msg" class="small muted" aria-live="polite"></p>
+            <div id="sb-link" class="sb-link hidden">
+              <p id="sb-link-text" class="mono link-raw small"></p>
+              <div class="row wrap">
+                <a id="sb-open" class="btn" href="#" target="_blank" rel="noopener">Open in a new tab</a>
+                <button id="sb-copy" class="btn" type="button">Copy</button>
+              </div>
+            </div>
+          </li>
+          <li>
+            <p class="sb-title">Test it</p>
+            <button id="sb-probe" class="btn" type="button" disabled>Request an included and a left-out series</button>
+            <p id="sb-probe-msg" class="small muted" aria-live="polite"></p>
+          </li>
+          <li>
+            <p class="sb-title">Revoke it</p>
+            <button id="sb-revoke" class="btn btn-danger" type="button" disabled>Revoke the link</button>
+            <p id="sb-revoke-msg" class="small muted" aria-live="polite"></p>
+          </li>
+        </ol>
+        <h3 class="w-title">Requests to your link</h3>
+        <div id="sb-net" class="net"><p class="small muted">None yet.</p></div>
+        <h3 class="w-title">The server's access log for your copy</h3>
+        <div id="sb-log" class="net"><p class="small muted">Appears once you have a copy.</p></div>
+      </div>
+    </section>
+
+    <!-- 7 -->
+    <section class="step" id="codecs" aria-labelledby="h-codecs">
+      <div class="step-text">
+        <p class="step-n">7</p>
+        <h2 id="h-codecs">Codecs and performance</h2>
+        <p class="lead">See which transfer syntaxes the decoder handles in its test corpus, and time decryption and decoding of the sample in this browser.</p>
+        <p>The DICOM files are shared exactly as the source wrote them, compression included. A receiver therefore needs a decoder for each transfer syntax it may meet. This site decodes in Web Workers, with Rust decoders compiled to WebAssembly.</p>
+        <p>Each corpus case is checked against a reference decode: exact for lossless syntaxes, within a stated tolerance for lossy ones.</p>
+        <p class="ref"><a href="../how/corpus.html">The codec corpus and every case</a> · <a href="../how/bench.html">Full benchmark report</a></p>
+      </div>
+      <div class="step-widget card">
+        <h3 class="w-title">Corpus cases passed, by transfer syntax</h3>
+        <div id="cx-table" class="cx-table"></div>
+        <p id="cx-idc" class="small"></p>
+        <h3 class="w-title">In this browser, on the sample</h3>
+        <p id="bx-what" class="small muted"></p>
+        <button id="bx-run" class="btn btn-primary" type="button" disabled>Run the benchmark</button>
+        <dl id="bx-facts" class="facts"></dl>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="step" id="build" aria-labelledby="h-build">
+      <div class="step-text">
+        <p class="step-n">8</p>
+        <h2 id="h-build">Build it</h2>
+        <p class="lead">Run a complete receiver here: about 50 lines that use only <code>fetch</code> and WebCrypto. It resolves the sample link and returns the first image's file meta header.</p>
+        <p>The receiver needs no library: AES-GCM from WebCrypto, <code>DecompressionStream</code> for the Bundle, and HTTP Range requests. The same file runs in Node 24 and Bun.</p>
+        <ul class="links">
+          <li><a href="../how/spec.html">The specification</a> (PROPOSAL.md)</li>
+          <li><a href="../how/series-file.html">Reference code: series-file encryption and range reads</a></li>
+          <li><a href="../how/test-vector.html">Reference code: the test vector script</a></li>
+          <li><a href="../how/spec.html#appendix-b-test-vector">The test vector</a> (spec appendix B)</li>
+          <li><a href="../how/receiver.mjs" download="receiver.mjs">receiver.mjs</a>, the code on this page</li>
+        </ul>
+      </div>
+      <div class="step-widget card">
+        <h3 class="w-title">receiver.mjs</h3>
+        <pre id="rx-code" class="code" tabindex="0"></pre>
+        <div class="row wrap">
+          <button id="rx-run" class="btn btn-primary" type="button" disabled>Run it on the sample</button>
+          <a class="btn" href="../how/receiver.mjs" download="receiver.mjs">Download</a>
+        </div>
+        <pre id="rx-out" class="json-block hidden" aria-live="polite"></pre>
+        <h3 class="w-title">The test vector</h3>
+        <p class="small muted">Encrypts the appendix B plaintext (150,000 bytes, byte <i>k</i> = <i>k</i> mod 251) under its series key with WebCrypto, and compares the result with the published values.</p>
+        <button id="tv-run" class="btn" type="button">Check the test vector here</button>
+        <dl id="tv-facts" class="facts"></dl>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="../assets/how.js"></script>
+</body>
+</html>

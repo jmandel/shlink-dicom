@@ -1,6 +1,7 @@
 //! `shl-dicom-decode [--scale S] IN.dcm OUT.raw` per codec-corpus/CONTRACT.md.
 //!
-//! Exit 0: decoded; 2: invalid input; 3: unsupported. One line on stderr for 2 and 3.
+//! Exit 0: decoded; 2: invalid input; 3: unsupported. One line on stderr for 2 and 3. On exit 0,
+//! each attribute the decoder had to infer is listed on stderr as "note: inferred NAME = VALUE: why".
 //! `--scale S` decodes at 1/2^S size (CONTRACT.md, "Reduced-resolution decode") and prints
 //! "COLUMNS ROWS" of the result on stdout.
 
@@ -35,6 +36,10 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(img) => {
+            // Decoded, but some attributes had to be inferred: say which, one line each.
+            for i in &img.inferred {
+                eprintln!("note: inferred {} = {}: {}", i.attribute, i.value, i.reason);
+            }
             if scale.is_some() {
                 println!("{} {}", img.columns, img.rows);
             }

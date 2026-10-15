@@ -245,24 +245,26 @@ export async function probeOverhead() {
   return out;
 }
 
-/** Longest gap between event-loop turns while `fn` decrypts `ct` (main-thread responsiveness). */
+/** Event-loop turns on this thread while `fn` decrypts `ct`. MessageChannel pings are not
+ *  throttled, so zero ticks means the thread ran no other task for the whole call. */
 export async function probeJank(fn, ct) {
-  // setTimeout(0) chain: each tick is a separate task, so a gap is time the thread was busy
-  // (or the crypto results' tasks ran ahead of it). Nested timeouts are clamped to 4 ms.
+  const ch = new MessageChannel();
   let last = performance.now(), maxGap = 0, running = true, ticks = 0;
-  const tick = () => {
+  ch.port1.onmessage = () => {
     const t = performance.now();
     maxGap = Math.max(maxGap, t - last);
     last = t; ticks++;
-    if (running) setTimeout(tick, 0);
+    if (running) ch.port2.postMessage(0);
   };
-  setTimeout(tick, 0);
-  await new Promise((r) => setTimeout(r, 20));
-  maxGap = 0; last = performance.now();
-  const t0 = performance.now();
+  ch.port2.postMessage(0);
+  await new Promise((r) => setTimeout(r, 10));
   const ticks0 = ticks;
+  const t0 = performance.now();
+  last = t0; maxGap = 0;
   await fn(ct, 0);
   const ms = performance.now() - t0;
+  const during = ticks - ticks0;
   running = false;
-  return { ms, maxGapMs: maxGap, ticks: ticks - ticks0 };
+  ch.port1.close();
+  return { ms, ticksDuring: during, longestTaskMs: during === 0 ? ms : maxGap };
 }

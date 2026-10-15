@@ -30,7 +30,7 @@ mod parse;
 #[allow(dead_code, clippy::all)]
 mod encaps;
 
-pub use shl_dicom_decode::{decode_file, Canonical, Error};
+pub use shl_dicom_decode::{decode_file, decode_file_scaled, Canonical, Error};
 
 use parse::{PixelValue, Syntax, TS_DEFLATED_LE, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_IMPLICIT_LE};
 
@@ -395,12 +395,21 @@ fn is_native(ts: &str) -> bool {
 ///
 /// The pixels are byte-identical to the same frames of `decode_file(bytes)`.
 pub fn decode_frames(bytes: &[u8], first: usize, count: usize) -> Result<(Canonical, usize), Error> {
+    decode_frames_scaled(bytes, first, count, 0)
+}
+
+/// [`decode_frames`] at 1/2^`scale` size: `shl_dicom_decode::decode_file_scaled` on the selected
+/// frames (CONTRACT.md, "Reduced-resolution decode"). The result is ceil(rows / 2^scale) ×
+/// ceil(columns / 2^scale), byte-identical to the same frames of `decode_file_scaled(bytes,
+/// scale)`. `scale` 0 is [`decode_frames`].
+pub fn decode_frames_scaled(bytes: &[u8], first: usize, count: usize, scale: u8) -> Result<(Canonical, usize), Error> {
+    let decode = |b: &[u8]| if scale == 0 { decode_file(b) } else { decode_file_scaled(b, scale) };
     let prepared = parse::prepare(bytes)?;
     let attrs = parse::read_dataset(&prepared.dataset, prepared.syntax)?;
     let total = number_of_frames(attrs.number_of_frames)?;
     let count = if count == 0 { total.saturating_sub(first) } else { count };
     if first == 0 && count >= total {
-        return decode_file(bytes).map(|c| (c, total));
+        return decode(bytes).map(|c| (c, total));
     }
     let end = first.checked_add(count).filter(|&e| e <= total && count > 0).ok_or_else(|| {
         Error::Invalid(format!("frames {first}..{} requested, the instance has {total}", first + count))
@@ -409,7 +418,7 @@ pub fn decode_frames(bytes: &[u8], first: usize, count: usize) -> Result<(Canoni
 
     if is_native(&ts) || shl_dicom_decode::codec_for(&ts).is_none() {
         // Native: decode whole and slice. No codec: decode_file reports the same error.
-        let mut c = decode_file(bytes)?;
+        let mut c = decode(bytes)?;
         let fb = c.data.len() / (c.frames.max(1) as usize);
         let start = fb * first;
         c.data = c.data.get(start..fb * end).map(<[u8]>::to_vec).unwrap_or_default();
@@ -429,13 +438,13 @@ pub fn decode_frames(bytes: &[u8], first: usize, count: usize) -> Result<(Canoni
             }
         }
         // Let decode_file produce its own error for anything unusual.
-        None => return decode_file(bytes).map(|c| (c, total)),
+        None => return decode(bytes).map(|c| (c, total)),
     };
     let extended = attrs.extended_offsets.zip(attrs.extended_lengths);
     let frames = encaps::split_frames(basic_offsets, fragments, extended, total, little)?;
     let selected = frames.get(first..end).unwrap_or(&[]);
     let file = rewrap(&ts, &attrs, selected);
-    let mut c = decode_file(&file)?;
+    let mut c = decode(&file)?;
     c.transfer_syntax = ts;
     Ok((c, total))
 }
@@ -564,6 +573,26 @@ fn jopt_str(out: &mut String, v: Option<&str>) {
     }
 }
 
+/// Rows and Columns as the data set declares them (the full size), or None if unreadable.
+pub fn full_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let prepared = parse::prepare(bytes).ok()?;
+    let attrs = parse::read_dataset(&prepared.dataset, prepared.syntax).ok()?;
+    let little = prepared.transfer_syntax.as_deref() != Some(TS_EXPLICIT_BE);
+    let rows = parse::read_u16(attrs.rows?, little)?;
+    let columns = parse::read_u16(attrs.columns?, little)?;
+    Some((u32::from(rows), u32::from(columns)))
+}
+
+/// [`info_json`] for a reduced-resolution result: the same object (whose `rows`, `columns` and
+/// `frameBytes` describe the reduced pixels) plus `"scale"` (log2 of the reduction) and
+/// `"fullRows"` / `"fullColumns"` (the instance's own size).
+pub fn info_json_scaled(c: &Canonical, first: usize, total: usize, e: &Extra, scale: u8, full: (u32, u32)) -> String {
+    let mut o = info_json(c, first, total, e);
+    o.pop(); // the closing brace
+    let _ = write!(o, ",\"scale\":{scale},\"fullRows\":{},\"fullColumns\":{}}}", full.0, full.1);
+    o
+}
+
 /// Metadata of a decode result as one JSON object (see viewer-kit/src/types.ts `ImageInfo`).
 pub fn info_json(c: &Canonical, first: usize, total: usize, e: &Extra) -> String {
     let mut o = String::with_capacity(512);
@@ -681,6 +710,30 @@ mod exports {
             Ok((c, total)) => {
                 let mut extra = read_extra(bytes);
                 JSON.with(|j| *j.borrow_mut() = info_json(&c, first as usize, total, &extra));
+                LUT.with(|l| *l.borrow_mut() = extra.palette.take().map(|p| p.rgba).unwrap_or_default());
+                OUT.with(|o| *o.borrow_mut() = c.data);
+                0
+            }
+            Err(e) => fail(&e),
+        }
+    }
+
+    /// [`vk_decode`] at 1/2^`scale` size (`decode_frames_scaled`). The JSON adds `scale`,
+    /// `fullRows` and `fullColumns`; its `rows`, `columns` and `frameBytes` describe the reduced
+    /// pixels. `scale` 0 gives the same pixels as `vk_decode`.
+    ///
+    /// # Safety
+    /// `ptr`/`len` must be a live allocation from `vk_alloc`.
+    #[no_mangle]
+    pub unsafe extern "C" fn vk_decode_scaled(ptr: *const u8, len: usize, first: u32, count: u32, scale: u32) -> i32 {
+        OUT.with(|o| *o.borrow_mut() = Vec::new());
+        let bytes = std::slice::from_raw_parts(ptr, len);
+        let s = scale.min(16) as u8;
+        match decode_frames_scaled(bytes, first as usize, count as usize, s) {
+            Ok((c, total)) => {
+                let mut extra = read_extra(bytes);
+                let full = full_size(bytes).unwrap_or((c.rows, c.columns));
+                JSON.with(|j| *j.borrow_mut() = info_json_scaled(&c, first as usize, total, &extra, s, full));
                 LUT.with(|l| *l.borrow_mut() = extra.palette.take().map(|p| p.rgba).unwrap_or_default());
                 OUT.with(|o| *o.borrow_mut() = c.data);
                 0

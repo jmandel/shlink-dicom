@@ -7,3 +7,4 @@
 viewer-kit/dist/
 viewer-kit/node_modules/
 perf-spikes/**/node_modules/
+docs/shots/

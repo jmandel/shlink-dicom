@@ -19,6 +19,8 @@ pub const DEFAULT_FILES_MAX: usize = 256;
 pub const DEFAULT_MAX_SANDBOX_SHARES: usize = 64;
 pub const DEFAULT_SANDBOX_TTL_SECS: i64 = 24 * 3600; // 24 hours
 pub const DEFAULT_CAP_TTL_SECS: i64 = 3600; // 1 hour
+/// Longest lifetime a sharer may ask for with `POST /api/shares` or `PATCH /api/shares/{sid}`.
+pub const MAX_SHARE_TTL_SECS: i64 = 31 * 24 * 3600;
 pub const DEFAULT_PASSCODE_ATTEMPTS: i64 = 5;
 const MAX_OPEN_SHARE_DBS: usize = 64;
 
@@ -90,6 +92,14 @@ pub struct LinkResource {
     pub created_at: i64,
     pub last_access_at: Option<i64>,
     pub access_count: u64,
+    /// Successful Bundle fetches (`bundle.jwe` answered 200 or 304): how often the link was opened.
+    #[serde(default)]
+    pub open_count: u64,
+    #[serde(default)]
+    pub last_opened_at: Option<i64>,
+    /// Bytes served through this link (Bundle, manifest and series files).
+    #[serde(default)]
+    pub bytes_served: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,6 +465,17 @@ impl AppState {
         Ok((sid, control_token))
     }
 
+    /// Sets a sandbox share's expiry (catalog). Read-only shares are never changed.
+    pub fn set_share_expiry(&self, sid: &str, expires_at: i64) -> Result<(), String> {
+        let cat = self.catalog.lock().unwrap();
+        cat.execute(
+            "UPDATE shares SET expires_at = ?1 WHERE sid = ?2 AND read_only = 0",
+            params![expires_at, sid],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
     pub fn delete_share(&self, sid: &str) -> Result<(), String> {
         // Rule: when deleting, write the catalog first and remove the share file last.
         {
@@ -671,13 +692,24 @@ pub fn build_link_resource_from_row(
         }
     }
 
-    let (access_count, last_access_at): (u64, Option<i64>) = conn
+    let (access_count, last_access_at, bytes_served, open_count, last_opened_at): (u64, Option<i64>, u64, u64, Option<i64>) = conn
         .query_row(
-            "SELECT COUNT(*), MAX(ts) FROM access_log WHERE lid = ?1",
+            "SELECT COUNT(*), MAX(ts), COALESCE(SUM(bytes), 0),
+                    COALESCE(SUM(CASE WHEN path LIKE '%/bundle.jwe' AND status IN (200, 304) THEN 1 ELSE 0 END), 0),
+                    MAX(CASE WHEN path LIKE '%/bundle.jwe' AND status IN (200, 304) THEN ts END)
+             FROM access_log WHERE lid = ?1",
             params![lid],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, i64>(3)? as u64,
+                    r.get(4)?,
+                ))
+            },
         )
-        .unwrap_or((0, None));
+        .unwrap_or((0, None, 0, 0, None));
 
     let clean_origin = origin.trim_end_matches('/');
     let url = if has_passcode {
@@ -702,6 +734,9 @@ pub fn build_link_resource_from_row(
         created_at,
         last_access_at,
         access_count,
+        open_count,
+        last_opened_at,
+        bytes_served,
     })
 }
 

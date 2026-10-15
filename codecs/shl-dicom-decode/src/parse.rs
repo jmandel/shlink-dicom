@@ -41,7 +41,12 @@ pub enum PixelValue<'a> {
     /// Defined-length (native) pixel data, bytes in file order.
     Native { data: &'a [u8], vr: Option<[u8; 2]> },
     /// Undefined-length (encapsulated) pixel data.
-    Encapsulated { basic_offsets: &'a [u8], fragments: Vec<Fragment<'a>> },
+    Encapsulated {
+        basic_offsets: &'a [u8],
+        fragments: Vec<Fragment<'a>>,
+        /// Set when a damaged ending was tolerated (see `read_encapsulated`).
+        note: Option<String>,
+    },
 }
 
 /// One encapsulated fragment and the offset of its item tag, counted from the first byte of the
@@ -434,13 +439,25 @@ pub fn parse_items(data: &[u8], little: bool) -> Result<PixelValue<'_>, Error> {
 
 /// Parse the items of encapsulated Pixel Data (PS3.5 A.4).
 fn read_encapsulated<'a>(c: &mut Cursor<'a>, s: Syntax) -> Result<PixelValue<'a>, Error> {
+    /// A last fragment may claim this many bytes more than are left (an off-by-one length, or
+    /// a missing pad byte). Anything more is a truncated file and stays an error.
+    const OVERRUN_SLACK: usize = 2;
     let mut basic_offsets: &[u8] = &[];
     let mut fragments = Vec::new();
     let mut first = true;
     let mut origin = 0usize;
+    let mut note = None;
     loop {
         if c.remaining() == 0 {
             // pydicom stops quietly at the end of the data; a missing delimiter is tolerated.
+            break;
+        }
+        // After at least one fragment, a damaged ending (CENSUS.md: "odd-length last fragment,
+        // fragment length off by one, garbage terminator") ends the pixel data instead of
+        // refusing the file: it is the last element read.
+        let damaged_end_ok = !fragments.is_empty();
+        if damaged_end_ok && c.remaining() < 8 {
+            note = Some(format!("{} stray byte(s) after the last fragment ignored", c.remaining()));
             break;
         }
         let item_pos = c.pos;
@@ -453,7 +470,16 @@ fn read_encapsulated<'a>(c: &mut Cursor<'a>, s: Syntax) -> Result<PixelValue<'a>
                 if len == UNDEFINED {
                     return Err(invalid("undefined item length in encapsulated pixel data"));
                 }
-                let data = c.take(len as usize)?;
+                let len = len as usize;
+                let data = if !first && len > c.remaining() && len - c.remaining() <= OVERRUN_SLACK {
+                    note = Some(format!(
+                        "last fragment claims {len} bytes but {} remain; the remaining bytes used",
+                        c.remaining()
+                    ));
+                    c.take(c.remaining())?
+                } else {
+                    c.take(len)?
+                };
                 if first {
                     if len % 4 != 0 {
                         return Err(invalid(format!("Basic Offset Table length {len} is not a multiple of 4")));
@@ -466,6 +492,12 @@ fn read_encapsulated<'a>(c: &mut Cursor<'a>, s: Syntax) -> Result<PixelValue<'a>
                     fragments.push(Fragment { offset, data });
                 }
             }
+            _ if damaged_end_ok => {
+                note = Some(format!(
+                    "({group:04X},{element:04X}) where an item or sequence delimiter belongs; pixel data ends at the last fragment"
+                ));
+                break;
+            }
             _ => {
                 return Err(invalid(format!(
                     "unexpected ({group:04X},{element:04X}) in encapsulated pixel data"
@@ -476,7 +508,7 @@ fn read_encapsulated<'a>(c: &mut Cursor<'a>, s: Syntax) -> Result<PixelValue<'a>
     if first {
         return Err(invalid("encapsulated pixel data has no Basic Offset Table item"));
     }
-    Ok(PixelValue::Encapsulated { basic_offsets, fragments })
+    Ok(PixelValue::Encapsulated { basic_offsets, fragments, note })
 }
 
 #[cfg(test)]

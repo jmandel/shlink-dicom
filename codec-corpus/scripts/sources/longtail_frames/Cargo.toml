@@ -1,0 +1,17 @@
+# Frame-range wrapper around shl-dicom-decode-wasm::decode_frames, for the long-tail sweep's
+# frame-wise verification of instances too large to decode whole (prevalence/LONGTAIL.md).
+# Its own workspace root, so it builds without touching codecs/Cargo.toml.
+[package]
+name = "longtail-frames"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+shl-dicom-decode-wasm = { path = "../../../../codecs/shl-dicom-decode-wasm" }
+sha2 = "0.10"
+
+[profile.release]
+debug = false

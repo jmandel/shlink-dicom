@@ -2,7 +2,7 @@
 //
 // Messages in:
 //   { type: "init", module: WebAssembly.Module }
-//   { type: "decode", id, bytes: ArrayBuffer, first, count }
+//   { type: "decode", id, bytes: ArrayBuffer, first, count, scale }
 //   { type: "probe", id, bytes: ArrayBuffer }
 // Messages out:
 //   { type: "ready" }
@@ -39,7 +39,7 @@ self.onmessage = async (ev: MessageEvent) => {
       const p = d.probe(bytes);
       post("error" in p ? { id: m.id, ok: false, code: p.error, message: p.message, ms: 0 } : { id: m.id, ok: true, probe: p });
     } else {
-      const r = d.decode(bytes, m.first ?? 0, m.count ?? 0);
+      const r = d.decode(bytes, m.first ?? 0, m.count ?? 0, m.scale ?? 0);
       if (r.ok) post({ id: m.id, ...r }, r.lut ? [r.pixels, r.lut] : [r.pixels]);
       else post({ id: m.id, ...r });
     }

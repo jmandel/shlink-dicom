@@ -153,3 +153,41 @@ These recommendations are based on the codecs/bench results (`results/latest.jso
 - **JPEG 2000 (`hayro-jpeg2000`):** the native build is 2.6× slower than wasm with simd128. This suggests its `simd` feature takes a scalar fallback on the default x86-64 target, where only SSE2 is enabled at compile time. Compiling the hot paths with AVX2 enabled, chosen at run time as `simd.rs` does here, or checking how the crate selects its SIMD level, should be the first step. The tier-1 (MQ/EBCOT) decoder is serial, so scalar work applies there. The inverse wavelet and colour transforms are where SIMD pays.
 - **HTJ2K (`oxideav-jpeg2000`):** about 240 ms for one 512×512 slice. HT block coding was designed for high throughput, so this points to an algorithmic cost rather than missing SIMD. Profile it first. If the cost is in the HT block decoder, a focused rewrite of that one stage in the vendored crate is likely to pay more than any vector work.
 
+
+## Reduced-resolution decode
+
+`decode_frame_scaled` (CONTRACT.md, "Reduced-resolution decode") decodes at 1/2, 1/4 or 1/8 through libjpeg's reduced IDCTs, instead of a full decode followed by a downsample. A viewer thumbnail at 1/8 of a 2048² image is 256², which a cheap second reduction takes to 64 px.
+
+**Method:**
+
+- **Machine:** the same Ryzen 5 3600, with a native release build; the AVX2 kernels are selected at run time.
+- **Tool:** `cargo run --release --example scaled_bench -- <frames/CASE dir> <reps> loop S | loopfull S`, on frame 0.
+  - `loop S` runs `decode_frame_scaled` at 1/2^S.
+  - `loopfull S` runs `decode_frame` followed by the example's box downsample. That downsample is a row-summing loop that LLVM vectorises; at 1/8 it takes about 4 ms on the colour case and 3 ms on the wrist case.
+- **Counts:** user-mode instructions and cycles per decode come from `perf stat` over 60 decodes, and include process start-up and reading the file.
+- **Load:** the load average was 19–20 from other agents throughout, so only the instruction counts are reliable; cycles and times are indicative.
+
+| Case | Scale | Full decode + box: instructions / cycles / min time | Scaled decode: instructions / cycles / min time | Instruction ratio |
+|---|---|---|---|---|
+| `gen-bench-photo-rgb8-2048-ijg-baseline` (2048×2048, 8-bit YCbCr 4:2:2) | 1/8 | 176M / 72M / 16.8 ms | 57M / 29M / 6.4 ms | 3.1× |
+| | 1/4 | 209M / 111M / 20.5 ms | 86M / 35M / 8.4 ms | 2.4× |
+| | 1/2 | 318M / 133M / 30.4 ms | 97M / 50M / 10.5 ms | 3.3× |
+| `local-wrist-lateral` (2320×2920, 12-bit mono) | 1/8 | 169M / 81M / 22.1 ms | 93M / 55M / 12.5 ms | 1.8× |
+| | 1/4 | 197M / 109M / 27.9 ms | 129M / 69M / 15.3 ms | 1.5× |
+| | 1/2 | 297M / 134M / 29.8 ms | 131M / 66M / 17.4 ms | 2.3× |
+
+Full decode alone, without the downsample, costs 134M instructions on the colour case and 143M on the wrist. The box downsample in this example costs more at 1/2 than at 1/8, because its per-block sums are short and strided. A better 2× downsample would narrow the 1/2 ratios, but the 1/8 ratios would barely move.
+
+**Where the time goes:**
+
+- **1/8.** Entropy decoding must still read every coefficient to find the next block, so it sets the floor: about 70% of the 12-bit 1/8 decode (`perf record`).
+  - The IDCT is one multiply per block.
+  - With every component on 1×1 blocks, `decode_block` is compiled in a DC-only form that decodes AC symbols without storing them.
+  - The 12-bit radiograph gains less than the colour image for two reasons: its codestream is larger relative to the pixel count (1.73 MB for 6.8 Mpixel, against 0.54 MB for 4.2 Mpixel), and its full decode has no colour stage to save.
+- **4:2:2 colour.** At 1/2 and 1/4 the chroma components use the next larger IDCT (8×8 and 4×4) with fancy h2v1 upsampling at the reduced size. At 1/8 they use 1×1 blocks with replicated upsampling. libjpeg-turbo chooses the same.
+- **Reduced IDCT kernels.** The 4×4 (1/2) and 2×2 (1/4) transforms have AVX2 and wasm simd128 kernels (`simd.rs`). They are needed: the scalar `jidctred.c` port made the 1/2 decode cost more instructions than full decode plus box (219M against 169M on the wrist), because the full path's 8×8 IDCT is vectorised.
+  - Lanes are columns in pass 1. The 4×4 pass 2 runs on the transposed work array.
+  - The 2×2 pass 2 stays scalar in 64 bits, because for 12-bit data its range limit reads bit 32 of the sum.
+  - The kernels are exact for dequantised coefficients within ±25,000 (`idct::REDUCED_MAX`, bound proved by `tests::reduced_bound_holds`). Other blocks take the scalar code.
+  - Unit tests compare the kernels with the scalar code on random blocks. `scaled/check_wasm.mjs` compares the base and simd128 wasm builds with the native build on every corpus frame at every scale: 810 comparisons, all equal.
+  - Wasm timing is not measured here.

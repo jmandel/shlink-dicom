@@ -564,6 +564,17 @@ impl<const N: usize> SimdBuffer<N> {
         Self { data, original_len }
     }
 
+    /// shl patch 8: if `data` holds exactly `original_len` samples, pad it as [`Self::new`]
+    /// pads and swap it with the contents (so `data` gets the previous storage, for reuse).
+    pub(crate) fn swap_in(&mut self, data: &mut Vec<f32>) -> bool {
+        if data.len() != self.original_len {
+            return false;
+        }
+        data.resize(Self::padded_len(self.original_len), 0.0);
+        core::mem::swap(&mut self.data, data);
+        true
+    }
+
     /// Returns only the original (non-padded) data as an immutable slice.
     pub(crate) fn truncated(&self) -> &[f32] {
         &self.data[..self.original_len]

@@ -290,3 +290,57 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
   - the pointer to the two identified studies in ~/Downloads for performance testing. This is how they ended up in the demo, and why the coordinator's review 1 led with privacy.
 - **After that:** a run of "proceed"s from Josh, then the coordinator's tmux messages took over steering pi.
 - **15 Oct, reframing:** with the UX "a lot better" after five review rounds, Josh said the job to be done still wasn't settled. He asked to factor the work into three experiences: consumer sharing, a viewer for recipients, and a technology demo with insight for developers. A brainstorm began (see the chat; a design document is planned).
+
+## 10. Three experiences, a SMART Imaging sandbox, and exe.dev (15 Oct)
+
+- **Josh's brief.**
+  - **Sharing:** "via a smart on FHIR imaging DICOM enabled portal source :) even (1) can have a bit of flair like thumbnail, series count, bytes because this is a technical demo after all".
+  - **The explainer:** "should be powered with live interactivity demo widgets … on a public sample SHLink built in".
+  - **Audience:** all of the above.
+- **Decisions, captured with the question tool:**
+  - one site that can be split later; the sharing site and the explainer will later move to separate GitHub Pages sites, configured to talk to the server;
+  - everything first on exe.dev, since it needs a database;
+  - manage links, no accounts;
+  - download-only import;
+  - our own sandbox "based on https://build.fhir.org/ig/argonautproject/smart-imaging/";
+  - subagents rather than pi as builders.
+
+  Recorded in docs/EXPERIENCES.md.
+- **Checkpoint commit.** 68e6b9a: 443 files, a 5.8 MB repo, no images.
+- **Wave 1:**
+  - **Core + View agent:** a shared `web/core/`, a three-door landing page, a lean `/view#shlink:/…` with the worker pool and GPU renderer, and DICOMDIR ZIP export. 154 scripted Chromium checks on desktop, 390, 360 and landscape. WebCrypto became the default decrypt, from measured numbers: about 800 MB/s against about 45 MB/s for wasm.
+  - **Imaging sandbox agent:** a SMART Imaging Access server (Bun, one process) with an authorization server (PKCE, introspection, a consent page with per-study opt-out), clinical FHIR, imaging FHIR (all three Endpoint modes) and WADO-RS.
+    - 86 end-to-end checks in Chromium from another origin; 266 instances byte-identical; HL7 validator clean.
+    - It found **14 unclear points in the Argonaut IG**: `aud` across servers; 403 or 404 for studies the token doesn't cover; 401 or 403 for an expired capability; whether `.s` or `.r` covers retrieval; what a capability is bound to; reading a study in capability mode; `_lastUpdated` after a consent change; omitted transfer-syntax; the token response example; `payloadMimeType` failing R4 validation. Possible feedback for the IG.
+  - **Finding:** the published my-health-data archives are already anonymized (`Anonymized1` and `Anonymized2`, no dates). Earlier sightings of the real name came only from the unpublished Downloads CT.
+- **exe.dev.** Josh asked: "do you have exe.dev hostname picked out?" The coordinator read exe.dev's llms.txt and proxy docs. Since each VM gets one public port, it proposed two VMs: separate origins are also realistic, because the portal is a different organisation. Josh: "we could always reverse proxy ourselves with subpaths". The coordinator created `smart-imaging-sandbox.exe.xyz` and `shlink-dicom.exe.xyz`, both private, tagged `#health-skillz-mgmt` like Josh's other VMs.
+- **Josh's data request for the sandbox:** a sample patient with a real-looking name rewritten into the DICOM headers, with pixel bytes untouched; everything scripted and reproducible from git; DiagnosticReports carrying PDF and text attachments, marked as sample reports. These are real images, so no invented clinical reads are presented as real.
+- **Wave 2:** a How agent (live widgets on the sample link, a runnable 50-line receiver) and a Share agent (files, CD, ZIP; the SMART portal through the sandbox; re-share; manage page with activity) run in parallel. Each owns its `web/<x>/` directory, and changes to the shared core may only add files.
+
+## 11. IG feedback, public VMs, inference, and the sweep at two thirds (15 Oct, afternoon)
+
+- **Josh's rulings on the 14 IG ambiguities the sandbox surfaced:**
+  - `aud` is internal to the token format; RFC 7519 allows it to be an array;
+  - responses never reveal whether a study exists;
+  - `.rs` covers search plus retrieval, `.r` retrieval alone;
+  - capabilities are bound to the grant, not the access token;
+  - the consent-related edge cases don't matter.
+- **Transfer syntax.** Josh: "I don't fully understand. So I need you to break this down for me." The coordinator checked the current PS3.18 text before explaining it. When the `transfer-syntax` parameter is absent, the default is Explicit VR Little Endian, unless the server has only lossy data. Josh chose the IG rule "apps send `*`", and decided the sandbox should "just refuse" (406) when the parameter is omitted.
+- **The first outward-facing actions.** With Josh's approval, the coordinator opened GitHub issues argonautproject/smart-imaging#2 (the token response example lacks `token_type` and `scope`) and #3 (transfer-syntax guidance). It quoted the IG's own source, fetched by cloning the repo, rather than paraphrasing, and fixed a typo in #3 after posting. The payloadMimeType point was explained to Josh first ("explain it to me first") and then dropped as a tooling quirk.
+- **Speed results landed:**
+  - **Decryption:** WebCrypto at about 800 MB/s against about 50 MB/s for wasm AES. For uncompressed and lossless data, wasm decryption had been the real bottleneck. WebCrypto is now the default; moving decryption into the decoder workers is next.
+  - **JPEG-LS:** greyscale is now at or faster than CharLS; RGB cine is about 1.25×.
+  - **Reduced-resolution decoding:** the JPEG thumbnail path, a `decode_file_scaled` API, and a `scale` option in the browser pool. A 2048² colour image decodes in 9.9 ms instead of 42.6 ms.
+- **Surviving compaction.** Josh: "make sure that you have a plan for all the balls that you're juggling … written out to disc". The result is `docs/COORDINATION.md`: every agent's id and what it owns, decisions made and pending, and an ordered queue, plus a memory entry pointing at it.
+- **Three decisions in one message:**
+  - the public sample matches the sandbox's fictional patient;
+  - the VMs go public now; the coordinator ran `share set-public` on both, and the proxy is on port 8000;
+  - "detect what we can in order to have the most robust behavior". This became an inference round: missing Planar Configuration is decided by image smoothness, and other safe "infer instead of refuse" cases follow, each reported as a warning.
+- **The long-tail sweep at 66%** (6,344 of 9,557 files, about an hour in). It covers 118 manufacturers, 425 models, 17 writing-toolkit versions and 25 SOP classes.
+  - **Random control:** 998 of 998 decodable files pass, so the 95% lower bound is about 99.6%.
+  - **Failures in the long-tail selection:**
+    - RGB with no Planar Configuration (Philips IntelliSpace Portal; GE LOGIQ E9, written by the same converter version "0.5"), where every reference decoder fails too;
+    - Leica JPEG 2000 YBR_FULL_422 mismatches, likely the known sYCC double conversion in the reference decoders;
+    - one float-pixel-data file (highdicom).
+
+    No new codec bug so far.

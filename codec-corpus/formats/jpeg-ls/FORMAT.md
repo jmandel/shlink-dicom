@@ -29,7 +29,7 @@ Sources: generated 31, pydicom 12. Multi-frame cases: 4. Ground truth from seeds
 
 ## Decision
 
-**Build.** `shl-codec-jpeg-ls` is our own decoder (`#![forbid(unsafe_code)]`, no dependencies beyond `shl-codec-common`, about 1,000 lines).
+**Build.** `shl-codec-jpeg-ls` is our own decoder (`#![forbid(unsafe_code)]`, no dependencies beyond `shl-codec-common`, about 1,100 lines plus tests).
 
 `pure_jpegls` 2.0.0 (MIT OR Apache-2.0, pure Rust) was evaluated by decoding every extracted corpus frame with `jpegls::decode`. It decoded 30 of 43 cases (pixels not compared) and failed the rest:
 
@@ -51,11 +51,11 @@ Interpretations taken where T.87 leaves room or the corpus does not reach:
 
 ## STATUS
 
-**check.py: jpeg-ls pass = 43 / 43** (CLI `shl-dicom-decode`). The four pydicom files without a Part 10 header pass through the CLI.
+**check.py: jpeg-ls pass = 69 / 69** (CLI `shl-dicom-decode`; the corpus grew from 43 cases). The four pydicom files without a Part 10 header pass through the CLI.
 
 **Tests (`cargo test -p shl-codec-jpeg-ls`):**
 
-- **`tests/corpus.rs`:** decodes every frame from `extract_frames.py` and compares it with `oracle/<case>.npy`, applying the CLI's Bits Stored mask and sign extension. 43/43 match, all exactly.
+- **`tests/corpus.rs`:** decodes every frame from `extract_frames.py` and compares it with `oracle/<case>.npy`, applying the CLI's Bits Stored mask and sign extension. 68 of 69 match, all exactly. The YBR_FULL case `ext-orthanc-jpegls80-YBR-FULL` is skipped there, because the codec returns YBR and the CLI converts it to RGB; check.py covers it.
 - **`tests/vectors.rs`:** 114 extra vectors from `extra/gen_vectors.py`, compared exactly with CharLS's decode. All pass. The vectors cover:
   - the T.87 conformance streams shipped with pyjpegls (T8C0/1/2 E0/E3, T16E0/E3, T8NDE0/E3 with non-default T1/T2/T3/RESET), except the subsampled T8SS*;
   - CharLS encodes at every precision from 2 to 16 bits with NEAR 0, 1 and 3;
@@ -66,7 +66,7 @@ Interpretations taken where T.87 leaves room or the corpus does not reach:
   - restart intervals (DRI + RSTm) for mono, ILV 1 and ILV 2, including NEAR > 0.
 
   The vectors are generated, not committed (`extra/.gitignore`). Without them the test skips.
-- **Unit tests:** bit reader (stuffing, unary codes, fill bytes), default thresholds against T.87 C.2.4.1.1.1, mapping tables (LSE ID 2), and malformed input (every truncation of a stream, bad precision, NEAR, ILV, and dimension mismatch).
+- **Unit tests:** bit reader (stuffing, unary codes, fill bytes), the short-code Golomb table against the general decoder for every (k, byte), the closed-form Golomb k, default thresholds against T.87 C.2.4.1.1.1, mapping tables (LSE ID 2), and malformed input (every truncation of a stream, bad precision, NEAR, ILV, and dimension mismatch).
 
 **Supported:**
 
@@ -88,16 +88,14 @@ Interpretations taken where T.87 leaves room or the corpus does not reach:
 
 HP transforms are verified only for ILV 2: CharLS's own legacy-API decode of ILV 1 with a transform does not round-trip, so it cannot serve as a reference there. Mapping tables are covered only by a unit test, because no reference encoder in the environment writes them.
 
-**Fuzzing:** `cargo fuzz` target `fuzz/fuzz_targets/decode.rs` takes Rows, Columns and Samples per Pixel from the input's own SOF55, so mutations reach the scan decoder. Debug assertions are on, so integer overflow also panics. Seeded with all corpus frames and the extra vectors (151 seeds). One run: 723 s, 4 forked workers, about 1.7 M executions, coverage 610 edges, corpus 513. **0 crashes, 0 timeouts, 0 OOMs.** It ran with `-s none` (no ASan; the crate is `forbid(unsafe_code)`) under `RUSTC_BOOTSTRAP=1 cargo +stable fuzz`, because the installed nightly is too old for current cargo-fuzz.
+**Fuzzing:** `cargo fuzz` target `fuzz/fuzz_targets/decode.rs` takes Rows, Columns and Samples per Pixel from the input's own SOF55, so mutations reach the scan decoder. Debug assertions are on, so integer overflow also panics. Seeded with all corpus frames and the extra vectors (151 seeds). Three runs, each with 4 forked workers, all with **0 crashes, 0 timeouts and 0 OOMs**:
 
-**Speed** (release build, x86-64, single thread, measured with `cargo run --release --example bench`, while a 4-process fuzz run was active):
+- the first decoder: 723 s, about 1.7 M executions;
+- after the speed work: 725 s, about 9.7 M executions, coverage 3,020;
+- after the final bit-reader change: 676 s, about 3.0 M executions under heavy machine load.
 
-| Image | Speed | CharLS via pyjpegls |
-|---|---|---|
-| 2048×2048 12-bit mono, lossless | 136 ms (31 Msamples/s) | 80 ms |
-| 2048×2048 8-bit RGB, ILV 2 | 377 ms (33 Msamples/s) | 196 ms |
-| T8C0E0, 256×256 RGB | 5.1 ms (38 Msamples/s) | |
+Set `TMPDIR` to a directory on disk: libFuzzer's fork mode writes its temp files there, and they can fill a small /tmp. It ran with `-s none` (no ASan; the crate is `forbid(unsafe_code)`) under `RUSTC_BOOTSTRAP=1 cargo +stable fuzz`, because the installed nightly is too old for current cargo-fuzz.
 
-Our decoder runs at roughly half CharLS's speed.
+**Speed:** see [PERF.md](PERF.md). Mono lossless and near-lossless decode at or below CharLS's time. Sample-interleaved colour is 1.05–1.26× CharLS (cine is the worst case). The geometric mean over the 8 benchmark cases is about 1.04–1.09× CharLS natively, down from 1.83×.
 
 **Build checks:** `cargo clippy --all-targets -D warnings` is clean, and `cargo build --target wasm32-unknown-unknown -p shl-codec-jpeg-ls` succeeds (with the rustup stable toolchain; the system Arch rustc has no wasm32 std).

@@ -38,6 +38,14 @@ export interface ImageInfo {
   maxValue: number | null;
   /** Per-frame rescale and window from the Per-Frame Functional Groups, for the returned frames. */
   perFrame: FrameValues[] | null;
+  /**
+   * Set only by a reduced-resolution decode (`scale` option): log2 of the reduction, and the
+   * instance's own Rows and Columns. `rows`, `columns` and `frameBytes` then describe the reduced
+   * pixels.
+   */
+  scale?: number;
+  fullRows?: number;
+  fullColumns?: number;
 }
 
 export interface FrameValues {

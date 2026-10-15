@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Share your imaging</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5fbf'/><path d='M9 9h14v14H9z' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='3.5' fill='white'/></svg>" />
+  <link rel="stylesheet" href="../assets/base.css" />
+  <link rel="stylesheet" href="../assets/share.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="../">Imaging links</a>
+    <a class="btn btn-ghost" id="top-manage" href="manage">Your shares</a>
+  </header>
+
+  <main class="wiz">
+    <nav class="steps" aria-label="Progress">
+      <ol id="steps">
+        <li data-step="1"><span class="dot">1</span><span class="lbl">Add imaging</span></li>
+        <li data-step="2"><span class="dot">2</span><span class="lbl">Review</span></li>
+        <li data-step="3"><span class="dot">3</span><span class="lbl">Recipient</span></li>
+        <li data-step="4"><span class="dot">4</span><span class="lbl">Upload</span></li>
+        <li data-step="5"><span class="dot">5</span><span class="lbl">Send</span></li>
+      </ol>
+      <p class="step-count" id="step-count" aria-live="polite">Step 1 of 5 · Add imaging</p>
+    </nav>
+
+    <!-- 1. Add imaging -->
+    <section class="screen" id="s-add" data-step="1">
+      <div id="add-choose">
+        <h1 tabindex="-1">Share your imaging</h1>
+        <p class="lede">Choose where the imaging comes from. It is read and encrypted on this device before anything is uploaded.</p>
+        <div class="choices" id="choices"></div>
+        <section class="saved hidden" id="saved">
+          <h2>Shares you made in this browser</h2>
+          <ul id="saved-list"></ul>
+        </section>
+      </div>
+
+      <div id="add-files" class="panel hidden">
+        <button class="btn btn-ghost back" data-back>← Other sources</button>
+        <h1 tabindex="-1">Files or a folder</h1>
+        <p class="lede">DICOM files, a CD or a folder copied from one, or ZIP and TGZ archives. They are read here and are not uploaded until you finish.</p>
+        <div class="drop" id="drop">
+          <div class="drop-actions">
+            <button class="btn btn-primary" id="pick-files">Choose files</button>
+            <button class="btn" id="pick-folder">Choose a folder</button>
+          </div>
+          <p class="small muted drop-hint">or drop them here</p>
+        </div>
+        <input type="file" id="in-files" multiple class="hidden" />
+        <input type="file" id="in-folder" webkitdirectory class="hidden" />
+      </div>
+
+      <div id="add-portal" class="panel hidden">
+        <button class="btn btn-ghost back" data-back>← Other sources</button>
+        <h1 tabindex="-1">Connect to a patient portal</h1>
+        <p class="lede">You sign in at the portal and choose what this page may read. The page then downloads your imaging and reports from the portal to this device.</p>
+        <form id="portal-form" class="stack">
+          <label for="in-portal">Portal address (FHIR server)</label>
+          <input id="in-portal" type="url" autocomplete="off" spellcheck="false" required />
+          <p class="hint">The default is a demo portal that follows the SMART Imaging Access guide. Its patients are fictional and sign in without a password.</p>
+          <button class="btn btn-primary" type="submit">Connect</button>
+          <p class="error hidden" id="portal-error" role="alert"></p>
+        </form>
+      </div>
+
+      <div id="add-link" class="panel hidden">
+        <button class="btn btn-ghost back" data-back>← Other sources</button>
+        <h1 tabindex="-1">A link from your provider</h1>
+        <p class="lede">Paste a SMART Health Link you were given. It is opened here, and you choose which of its studies to pass on in a new link of your own.</p>
+        <form id="link-form" class="stack">
+          <label for="in-link">Link</label>
+          <input id="in-link" type="text" autocomplete="off" spellcheck="false" placeholder="https://…#shlink:/… or shlink:/…" required />
+          <div id="link-pass-row" class="stack hidden">
+            <label for="in-link-pass">Passcode for this link</label>
+            <input id="in-link-pass" type="password" autocomplete="off" />
+          </div>
+          <button class="btn btn-primary" type="submit">Open</button>
+          <p class="error hidden" id="link-error" role="alert"></p>
+        </form>
+      </div>
+
+      <div id="add-loading" class="panel hidden" aria-live="polite">
+        <h1 tabindex="-1" id="loading-title">Reading your imaging</h1>
+        <div class="bar indeterminate" id="loading-bar"><div></div></div>
+        <p class="found" id="found">Looking…</p>
+        <p class="tech" id="doing"></p>
+        <button class="btn" id="loading-cancel">Cancel</button>
+        <div id="loading-error" class="hidden">
+          <p class="error" role="alert" id="loading-error-text"></p>
+          <button class="btn" data-back>Choose another source</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. Review -->
+    <section class="screen hidden" id="s-review" data-step="2">
+      <h1 tabindex="-1">Choose what to share</h1>
+      <p class="lede" id="rv-patient"></p>
+      <div class="studies" id="rv-studies"></div>
+      <p class="tech" id="rv-skipped"></p>
+      <div class="actions">
+        <button class="btn" data-go="1">Back</button>
+        <button class="btn btn-primary" id="rv-next">Continue</button>
+      </div>
+      <p class="tech right" id="rv-total"></p>
+    </section>
+
+    <!-- 3. Who and for how long -->
+    <section class="screen hidden" id="s-who" data-step="3">
+      <h1 tabindex="-1">Who is it for, and for how long?</h1>
+      <form id="who-form" class="stack">
+        <div class="field">
+          <label for="in-recipient">Who is it for?</label>
+          <input id="in-recipient" type="text" maxlength="60" placeholder="Dr. Patel, Neurology" autocomplete="off" />
+          <p class="hint">The person who opens the link sees this name, and you see it on the manage page.</p>
+        </div>
+        <div id="who-expiry"></div>
+        <label class="toggle-row">
+          <span class="switch"><input type="checkbox" id="in-updates" /><span class="track" aria-hidden="true"></span></span>
+          <span><strong>Allow updates</strong><span class="hint">You can change which studies this link shows later, and the recipient keeps the same link.</span></span>
+        </label>
+        <div class="field">
+          <label for="in-pass">Passcode (optional)</label>
+          <input id="in-pass" type="text" maxlength="40" autocomplete="off" spellcheck="false" />
+          <p class="hint">The recipient must type it to open the link, so send it separately. After 5 wrong tries the link stops working.</p>
+        </div>
+        <div class="actions">
+          <button class="btn" type="button" data-go="2">Back</button>
+          <button class="btn btn-primary" type="submit">Encrypt and upload</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 4. Encrypt and upload -->
+    <section class="screen hidden" id="s-upload" data-step="4">
+      <h1 tabindex="-1" id="up-title">Encrypting and uploading</h1>
+      <p class="lede">The server stores only scrambled data.</p>
+      <div class="bar" id="up-bar-wrap"><div id="up-bar"></div></div>
+      <p class="found" id="up-main"></p>
+      <p class="tech" id="up-tech"></p>
+      <ol class="tech-log" id="up-log"></ol>
+      <div id="up-error" class="hidden">
+        <p class="error" role="alert" id="up-error-text"></p>
+        <div class="actions"><button class="btn" data-go="3">Back</button><button class="btn btn-primary" id="up-retry">Try again</button></div>
+      </div>
+    </section>
+
+    <!-- 5. Hand it over -->
+    <section class="screen hidden" id="s-done" data-step="5">
+      <h1 tabindex="-1">Your link is ready</h1>
+      <p class="lede" id="done-sub"></p>
+      <div class="qr-wrap"><div class="qr" id="qr" role="img" aria-label="QR code for the link"></div></div>
+      <div class="share-actions">
+        <button class="btn btn-primary" id="d-copy">Copy link</button>
+        <button class="btn hidden" id="d-share">Share…</button>
+        <a class="btn" id="d-email" href="#">Email</a>
+        <a class="btn" id="d-open" href="#" target="_blank" rel="noopener">Open it</a>
+      </div>
+      <p class="hint center" id="done-note"></p>
+      <details class="tech-details">
+        <summary>The link itself</summary>
+        <p class="mono break" id="done-link"></p>
+      </details>
+
+      <section class="card manage-box">
+        <h2>Save this to manage or revoke later</h2>
+        <p>The manage link shows when your link is opened. With it you can extend the link, take it offline, revoke it, or make links for other people.</p>
+        <input type="text" readonly id="manage-url" aria-label="Manage link" />
+        <div class="share-actions left">
+          <button class="btn btn-primary" id="m-copy">Copy manage link</button>
+          <a class="btn" id="m-open" href="#">Open manage page</a>
+        </div>
+        <p class="hint" id="saved-note"></p>
+        <p class="hint">Keep it to yourself: anyone who has it can change or revoke your links.</p>
+      </section>
+      <p class="center"><button class="btn btn-ghost" id="again">Share something else</button></p>
+    </section>
+  </main>
+  <script type="module" src="../assets/share.js"></script>
+</body>
+</html>

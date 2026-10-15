@@ -20,7 +20,7 @@ use super::{Error, Result};
 
 use super::BlockPasses;
 use super::mel::MelDecoder;
-use super::streams::{FwdReader, RevReader};
+use super::streams::{FwdReader, LocalBits, RevReader};
 use super::tables::{DEC_VLC_TBL0, DEC_VLC_TBL1, UVLC_TBL0, UVLC_TBL1};
 
 /// Neighbor-propagation masks for the `SigProp` membership scan, indexed by
@@ -140,10 +140,15 @@ pub(crate) fn decode_block(
 
     let mmsbp2 = missing_msbs + 2;
 
-    // ---- step 1: decode the VLC + MEL segments ------------------------
+    // ---- step 1: decode the VLC + MEL segments
+    // (shl patch 5: the table indices are masked to the table sizes, 1024 and 256, which
+    // they never exceed (c_q < 0x400, uvlc_mode <= 0xC0); the masks only let the compiler
+    // drop the bounds checks.) ------------------------
     {
         let mut mel = MelDecoder::new(coded, lcup, scup);
         let mut vlc = RevReader::new_vlc(coded, lcup, scup);
+        // shl patch 5: the VLC bit buffer in locals (see `LocalBits`).
+        let mut vb = LocalBits::new(&vlc);
 
         let mut run = mel.get_run();
 
@@ -153,8 +158,8 @@ pub(crate) fn decode_block(
         let mut x = 0usize;
         while x < width {
             // First quad of the pair.
-            let vlc_val = vlc.fetch();
-            let mut t0 = u32::from(DEC_VLC_TBL0[(c_q | (vlc_val & 0x7F)) as usize]);
+            let vlc_val = vb.fetch(&mut vlc);
+            let mut t0 = u32::from(DEC_VLC_TBL0[((c_q | (vlc_val & 0x7F)) & 0x3FF) as usize]);
             if c_q == 0 {
                 // Zero context: quad significance comes from a MEL event.
                 run -= 2;
@@ -168,9 +173,9 @@ pub(crate) fn decode_block(
 
             // Context for the second quad (T.814 eq. 1).
             c_q = ((t0 & 0x10) << 3) | ((t0 & 0xE0) << 2);
-            let vlc_val = vlc.advance(t0 & 0x7);
+            let vlc_val = vb.advance(t0 & 0x7);
 
-            let mut t1 = u32::from(DEC_VLC_TBL0[(c_q | (vlc_val & 0x7F)) as usize]);
+            let mut t1 = u32::from(DEC_VLC_TBL0[((c_q | (vlc_val & 0x7F)) & 0x3FF) as usize]);
             if c_q == 0 && x < width {
                 run -= 2;
                 t1 = if run == -1 { t1 } else { 0 };
@@ -185,7 +190,7 @@ pub(crate) fn decode_block(
             x += 2;
 
             c_q = ((t1 & 0x10) << 3) | ((t1 & 0xE0) << 2);
-            let vlc_val = vlc.advance(t1 & 0x7);
+            let vlc_val = vb.advance(t1 & 0x7);
 
             // u values for the pair (kappa = 1 on the initial row).
             let mut uvlc_mode = ((t0 & 0x8) << 3) | ((t1 & 0x8) << 4);
@@ -198,11 +203,11 @@ pub(crate) fn decode_block(
                 }
             }
             let mut uvlc_entry = u32::from(UVLC_TBL0[(uvlc_mode + (vlc_val & 0x3F)) as usize]);
-            let vlc_val = vlc.advance(uvlc_entry & 0x7);
+            let vlc_val = vb.advance(uvlc_entry & 0x7);
             uvlc_entry >>= 3;
             let len = uvlc_entry & 0xF;
             let tmp = vlc_val & ((1 << len) - 1);
-            vlc.advance(len);
+            vb.advance(len);
             uvlc_entry >>= 4;
             let len0 = uvlc_entry & 0x7;
             uvlc_entry >>= 3;
@@ -226,8 +231,8 @@ pub(crate) fn decode_block(
                 c_q |= (u32::from(scratch[above + idx]) & 0xA0) << 2;
                 c_q |= (u32::from(scratch[above + idx + 2]) & 0x20) << 4;
 
-                let vlc_val = vlc.fetch();
-                let mut t0 = u32::from(DEC_VLC_TBL1[(c_q | (vlc_val & 0x7F)) as usize]);
+                let vlc_val = vb.fetch(&mut vlc);
+                let mut t0 = u32::from(DEC_VLC_TBL1[((c_q | (vlc_val & 0x7F)) & 0x3FF) as usize]);
                 if c_q == 0 {
                     run -= 2;
                     t0 = if run == -1 { t0 } else { 0 };
@@ -243,9 +248,9 @@ pub(crate) fn decode_block(
                 c_q |= u32::from(scratch[above + idx]) & 0x80;
                 c_q |= (u32::from(scratch[above + idx + 2]) & 0xA0) << 2;
                 c_q |= (u32::from(scratch[above + idx + 4]) & 0x20) << 4;
-                let vlc_val = vlc.advance(t0 & 0x7);
+                let vlc_val = vb.advance(t0 & 0x7);
 
-                let mut t1 = u32::from(DEC_VLC_TBL1[(c_q | (vlc_val & 0x7F)) as usize]);
+                let mut t1 = u32::from(DEC_VLC_TBL1[((c_q | (vlc_val & 0x7F)) & 0x3FF) as usize]);
                 if c_q == 0 && x < width {
                     run -= 2;
                     t1 = if run == -1 { t1 } else { 0 };
@@ -261,16 +266,16 @@ pub(crate) fn decode_block(
 
                 c_q = ((t1 & 0x40) << 2) | ((t1 & 0x80) << 1);
                 c_q |= u32::from(scratch[above + idx + 2]) & 0x80;
-                let vlc_val = vlc.advance(t1 & 0x7);
+                let vlc_val = vb.advance(t1 & 0x7);
 
                 // u values (kappa is applied later, in the MagSgn step).
                 let uvlc_mode = ((t0 & 0x8) << 3) | ((t1 & 0x8) << 4);
-                let mut uvlc_entry = u32::from(UVLC_TBL1[(uvlc_mode + (vlc_val & 0x3F)) as usize]);
-                let vlc_val = vlc.advance(uvlc_entry & 0x7);
+                let mut uvlc_entry = u32::from(UVLC_TBL1[((uvlc_mode + (vlc_val & 0x3F)) & 0xFF) as usize]);
+                let vlc_val = vb.advance(uvlc_entry & 0x7);
                 uvlc_entry >>= 3;
                 let len = uvlc_entry & 0xF;
                 let tmp = vlc_val & ((1 << len) - 1);
-                vlc.advance(len);
+                vb.advance(len);
                 uvlc_entry >>= 4;
                 let len0 = uvlc_entry & 0x7;
                 uvlc_entry >>= 3;
@@ -551,6 +556,13 @@ fn decode_sample(
     let m_n = u_q - ((inf >> (12 + bit)) & 1);
     *acc >>= m_n;
     *nb = nb.saturating_sub(m_n);
+    sample_value(ms_val, m_n, inf, bit, p)
+}
+
+/// The sample value and v_n from the MagSgn bits `ms_val` (bit 0 the sign, then the
+/// magnitude bits) of a significant sample.
+#[inline(always)]
+fn sample_value(ms_val: u32, m_n: u32, inf: u32, bit: u32, p: u32) -> (u32, u32) {
     let mut v_n = ms_val & ((1u32 << m_n) - 1);
     v_n |= ((inf >> (8 + bit)) & 1) << m_n;
     v_n |= 1; // half the bin, for mid-point reconstruction
@@ -559,6 +571,7 @@ fn decode_sample(
     let val = (ms_val << 31) | v_n.wrapping_add(2).wrapping_shl(p - 1);
     (val, v_n)
 }
+
 
 /// shl patch 5: MagSgn decoding of one row of quads (two sample rows), as ndic's loops: the
 /// first quad row (`initial`, kappa = 1) or a later one (kappa from `v_n_scratch`, the

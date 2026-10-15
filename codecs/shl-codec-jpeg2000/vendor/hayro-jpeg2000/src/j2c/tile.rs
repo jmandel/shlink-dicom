@@ -830,6 +830,7 @@ mod tests {
             strict: false,
             high_throughput: false,
             ht_set: crate::j2c::codestream::HtSet::NoCap,
+            defer_level_shift: false,
         };
 
         let tile_0_0 = Tile::new(0, &header);

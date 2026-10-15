@@ -13,7 +13,7 @@ Build it with `node viewer-kit/scripts/build.mjs`. That produces the three files
 
 | File | What it is |
 |---|---|
-| `shl_dicom_decode.wasm` | 944 KiB, 310 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm` |
+| `shl_dicom_decode.wasm` | 1071 KiB, 341 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm` |
 | `decoder-worker.js` | the worker script; must be a separate file |
 | the API | `viewer-kit/src/index.ts`; import it into `web/main.ts` and bun bundles it |
 
@@ -41,6 +41,8 @@ const img = await pool.decode(bytes, { priority: Priority.Visible, key, signal }
 //      windowCenter/Width (first value, or null), minValue/maxValue, frameOffsets, palette, decodeMs
 
 const all = await pool.decodeFrames(bytes, { priority, signal, onChunk });  // multi-frame, split over workers
+
+const thumb = await pool.decode(bytes, { scale: 3, key: `${key}@1/8` });   // 1/8 size; see "Thumbnails"
 
 const renderer = createRenderer(canvas);     // WebGL2, or CpuRenderer on SwiftShader or without WebGL2
 renderer.setFrame(frameOf(img, k), { windowCenter, windowWidth });   // uploads once
@@ -101,7 +103,7 @@ To size the canvas, set `canvas.width` and `canvas.height` from `clientWidth * d
 
 **4. Thumbnails (line ~340) and the Cornerstone bridge (line ~888)**
 
-Don't create a WebGL context per thumbnail; browsers cap contexts at about 16. Decode with `Priority.Near`, then draw with the CPU reference:
+Don't create a WebGL context per thumbnail; browsers cap contexts at about 16. Decode with `Priority.Near` and `scale: 3` (see [Thumbnails and first display](#thumbnails-and-first-display-scale)), then draw with the CPU reference:
 
 ```ts
 const ctx = thumb.getContext("2d")!; const im = ctx.createImageData(64, 64);
@@ -122,6 +124,26 @@ When a series is selected:
 Each decode still needs its records fetched first, through `ensureInstanceFetched`. The pool's queue orders only decodes, so issue the fetches nearest-first as well. When the slider moves to a slice that is not decoded yet, call `pool.decode` again with `Priority.Visible` and the same key. It moves that queued job to the front.
 
 **Multi-frame instances.** One instance holding many frames, such as cine, enhanced CT/MR or tomosynthesis, should use `pool.decodeFrames(bytes, { onChunk })`. Its frames become the slices, and `onChunk` lets the first frames show while the rest decode. Frames are only decoded in parallel for encapsulated syntaxes. A native (uncompressed) instance is decoded whole in one worker, because its decode is a copy.
+
+## Thumbnails and first display: `scale`
+
+`pool.decode(bytes, { scale: s })` decodes at 1/2^s of the size in each direction. `decodeFrames` takes the same option. Use `scale: 3` (1/8) for thumbnails: a 2048² image becomes 256², and the canvas scales that to 64 px.
+
+**The result:**
+- **Size.** `rows` and `columns` are `ceil(fullRows / 2^s)` and `ceil(fullColumns / 2^s)`. `frameBytes` and `pixels` describe the reduced pixels.
+- **New fields.** `scale`, `fullRows` and `fullColumns` are set; they are absent on a full-size decode.
+- **Everything else is as before.** Samples stay canonical, with the same `bitsAllocated`, signedness, photometric, rescale, window and palette. So `frameOf` and both renderers take a reduced image unchanged.
+- **Geometry.** One reduced pixel covers 2^s × 2^s original pixels. Anything measured in pixels, such as Pixel Spacing, overlays or annotations, must be scaled by 2^s.
+
+**What it costs:**
+- **JPEG baseline and extended** (`.50`, `.51`, the common lossy syntax) decode through the codec's own reduced decode (scaled IDCT). It does much less work: in one Chromium run, a 2048² colour image took 9.9 ms at 1/8 against 42.6 ms at full size.
+- **Every other syntax** is decoded at full size, then box-averaged in the worker. That saves transfer and cache memory but not decode time. JPEG 2000 and HTJ2K are planned to use their resolution levels next.
+- **Pixels.** At any scale, they match the native `shl_dicom_decode::decode_file_scaled` (`viewer-kit/test/scaled.ts`).
+- **PALETTE COLOR** images keep each block's top-left index, since averaging indices would be meaningless.
+
+**Caching and keys.** A reduced image is a different result from the full one. Give it its own `key` (for example `${key}@1/8`), because a same-key `decode` returns the first job's promise whatever its scale. Cache it under that key too. It costs 1/4^s of the full frame.
+
+A full-size decode of the slice on screen can follow the thumbnail at `Priority.Visible`, and replace the reduced image on the canvas when it arrives.
 
 ## Cache: raw frames, with a byte budget
 

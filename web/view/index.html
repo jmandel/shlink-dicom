@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Shared imaging</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5fbf'/><path d='M9 9h14v14H9z' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='3.5' fill='white'/></svg>" />
+  <link rel="modulepreload" href="../assets/view.js" />
+  <link rel="preload" href="../assets/shl_dicom_decode.wasm" as="fetch" type="application/wasm" crossorigin />
+  <link rel="stylesheet" href="../assets/base.css" />
+  <link rel="stylesheet" href="../assets/view.css" />
+</head>
+<body class="view">
+  <header id="topbar" class="topbar">
+    <button id="btn-back" class="btn btn-ghost topbar-back hidden" type="button" aria-label="Back to studies">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="back-text">Studies</span>
+    </button>
+    <div class="topbar-title">
+      <div id="top-kicker" class="top-kicker"></div>
+      <div id="top-title" class="top-title">Shared with you</div>
+    </div>
+    <button id="btn-trust" class="trust-badge hidden" type="button" aria-haspopup="dialog">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      <span class="trust-text">Encrypted · verified</span>
+    </button>
+    <button id="btn-download" class="btn btn-ghost hidden" type="button" aria-haspopup="dialog" aria-label="Download originals">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="dl-text">Download</span>
+    </button>
+  </header>
+
+  <main id="main">
+    <section id="screen-loading" class="screen center-screen" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loading-text" class="muted">Opening the link…</p>
+    </section>
+
+    <section id="screen-passcode" class="screen center-screen hidden">
+      <form id="passcode-form" class="card center-card" autocomplete="off">
+        <svg class="big-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        <h1 class="center-title">Enter the passcode the sender gave you</h1>
+        <p id="passcode-label" class="muted small"></p>
+        <label class="sr-only" for="input-passcode">Passcode</label>
+        <input id="input-passcode" type="password" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        <p id="passcode-msg" class="form-msg" role="alert"></p>
+        <button id="btn-passcode" class="btn btn-primary wide" type="submit">Open</button>
+      </form>
+    </section>
+
+    <section id="screen-error" class="screen center-screen hidden">
+      <div class="card center-card">
+        <svg id="error-icon" class="big-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 7.5v5.5M12 16.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <h1 id="error-title" class="center-title"></h1>
+        <p id="error-body" class="muted"></p>
+        <div class="center-actions">
+          <button id="btn-retry" class="btn btn-primary wide hidden" type="button">Try again</button>
+          <button id="btn-paste-other" class="btn wide" type="button">Open a different link</button>
+        </div>
+        <form id="paste-form" class="paste-form hidden">
+          <label class="small muted" for="input-link">Paste the link you received</label>
+          <input id="input-link" type="url" placeholder="https://… or shlink:/…" autocomplete="off" spellcheck="false" />
+          <button class="btn btn-primary wide" type="submit">Open</button>
+        </form>
+        <p class="small muted error-foot"><a href="../">What is this site?</a></p>
+      </div>
+    </section>
+
+    <section id="screen-overview" class="screen overview hidden">
+      <div class="overview-inner">
+        <div class="overview-head">
+          <h1 id="ov-patient" class="ov-patient"></h1>
+          <p id="ov-meta" class="muted small"></p>
+        </div>
+        <div id="ov-studies" class="study-list"></div>
+      </div>
+    </section>
+
+    <section id="screen-viewer" class="screen viewer hidden">
+      <div id="stage" class="stage" tabindex="0" aria-label="Image. Drag up or down to change slice.">
+        <div id="hud-tl" class="hud hud-tl"></div>
+        <div id="hud-tr" class="hud hud-tr"></div>
+        <div id="hud-bl" class="hud hud-bl"></div>
+        <div id="stage-busy" class="stage-busy hidden"><div class="spinner"></div></div>
+        <div id="stage-msg" class="stage-msg hidden" role="alert"></div>
+      </div>
+      <div id="toolbar" class="toolbar">
+        <div class="slice-ctl">
+          <label for="slice" class="sr-only">Slice</label>
+          <input id="slice" type="range" min="0" max="0" value="0" step="1" />
+          <span id="slice-label" class="slice-label mono">1 / 1</span>
+        </div>
+        <div class="tool-btns">
+          <label for="preset" class="sr-only">Window</label>
+          <select id="preset" class="preset hidden"></select>
+          <button id="btn-reset" class="btn" type="button" title="Reset window, zoom and pan">Reset</button>
+        </div>
+      </div>
+      <nav id="strip" class="strip" aria-label="Series"></nav>
+    </section>
+  </main>
+
+  <div id="sheet-backdrop" class="sheet-backdrop hidden"></div>
+  <section id="sheet-download" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="dl-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="dl-title">Download originals</h2>
+    <p class="muted small">The DICOM files exactly as they were shared. Each ZIP includes a DICOMDIR index, as on an imaging CD.</p>
+    <div id="dl-options" class="dl-options"></div>
+    <div id="dl-progress" class="dl-progress hidden" aria-live="polite">
+      <div class="bar"><div id="dl-bar" class="bar-fill"></div></div>
+      <p id="dl-status" class="small"></p>
+      <button id="btn-dl-cancel" class="btn" type="button">Cancel</button>
+    </div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-trust" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="trust-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="trust-title">How this share is protected</h2>
+    <dl id="trust-facts" class="trust-facts"></dl>
+    <p class="small"><a id="trust-how" href="../how">How this works</a></p>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <script type="module" src="../assets/view.js"></script>
+</body>
+</html>

@@ -156,6 +156,45 @@ impl<'a> RevReader<'a> {
         self
     }
 
+    /// shl patch 5: `fetch`'s refill for a caller that keeps the bit buffer in locals. The
+    /// common case is inline: four whole bytes, none of which can be unstuffed (no byte whose
+    /// low 7 bits are all set), which `read` would turn into the same 32 bits, highest
+    /// address first.
+    #[inline(always)]
+    pub fn top_up(&mut self, acc: u64, bits: u32) -> (u64, u32) {
+        if self.size > 3 && self.pos >= 3 {
+            let p = self.pos as usize;
+            if let Some(&[b0, b1, b2, b3]) = self.data.get(p - 3..=p) {
+                let val = u32::from_le_bytes([b0, b1, b2, b3]);
+                let x = val | 0x8080_8080;
+                if (!x).wrapping_sub(0x0101_0101) & x & 0x8080_8080 == 0 {
+                    self.pos -= 4;
+                    self.size -= 4;
+                    self.unstuff = b0 > 0x8F;
+                    return (acc | (u64::from(val.swap_bytes()) << bits), bits + 32);
+                }
+            }
+        }
+        self.top_up_slow(acc, bits)
+    }
+
+    #[inline(never)]
+    fn top_up_slow(&mut self, acc: u64, bits: u32) -> (u64, u32) {
+        self.tmp = acc;
+        self.bits = bits;
+        self.read();
+        if self.bits < 32 {
+            self.read();
+        }
+        (self.tmp, self.bits)
+    }
+
+    /// The bit buffer, for [`Self::top_up`] callers.
+    #[inline(always)]
+    pub fn buffer(&self) -> (u64, u32) {
+        (self.tmp, self.bits)
+    }
+
     /// Consumes `num_bits` bits.
     #[inline(always)]
     pub fn advance(&mut self, num_bits: u32) -> u32 {
@@ -573,5 +612,43 @@ mod tests {
         assert_eq!(dec.fetch() & 0xFF, 0xAB);
         dec.advance(8);
         assert_eq!(dec.fetch(), 0, "exhausted MagRef stream must feed zeros");
+    }
+}
+
+/// shl patch 5: a [`RevReader`]'s bit buffer held in local variables, so a decoding loop keeps
+/// it in registers; `fetch` and `advance` behave as the reader's own.
+pub(crate) struct LocalBits {
+    acc: u64,
+    bits: u32,
+}
+
+impl LocalBits {
+    #[inline(always)]
+    pub(crate) fn new(r: &RevReader<'_>) -> Self {
+        let (acc, bits) = r.buffer();
+        Self { acc, bits }
+    }
+
+    /// [`RevReader::fetch`].
+    #[inline(always)]
+    pub(crate) fn fetch(&mut self, r: &mut RevReader<'_>) -> u32 {
+        if self.bits < 32 {
+            (self.acc, self.bits) = r.top_up(self.acc, self.bits);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.acc as u32
+        }
+    }
+
+    /// [`RevReader::advance`].
+    #[inline(always)]
+    pub(crate) fn advance(&mut self, num_bits: u32) -> u32 {
+        self.acc >>= num_bits;
+        self.bits = self.bits.saturating_sub(num_bits);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.acc as u32
+        }
     }
 }

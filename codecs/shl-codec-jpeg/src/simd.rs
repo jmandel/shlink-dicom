@@ -81,6 +81,34 @@ impl Kernels {
 }
 
 impl Kernels {
+    /// Dequantise and run the reduced IDCT of `size` 4 or 2 (`idct::idct_reduced`). The vector
+    /// kernels handle blocks whose dequantised coefficients lie within ±REDUCED_MAX, with the same
+    /// results; others go to the scalar code.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn idct_reduced<T: Sample>(
+        self,
+        size: usize,
+        blk: &[i32; 64],
+        q: &[i32; 64],
+        pass1: u32,
+        max: i32,
+        range: &[u16],
+        out: &mut [T],
+        stride: usize,
+    ) {
+        if self == Kernels::Vector && (size == 4 || size == 2) && stride >= size && out.len() >= (size - 1) * stride + size {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
+            return unsafe { avx2::idct_reduced(size, blk, q, pass1, max, range, out, stride) };
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            return wasm::idct_reduced(size, blk, q, pass1, max, range, out, stride);
+        }
+        let _ = max;
+        let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
+        idct::idct_reduced(size, &deq, pass1, range, out, stride)
+    }
+
     /// Upsampling, colour conversion and output (`dct::RowJob`). On x86_64 with AVX2 the same
     /// code is compiled with AVX2 enabled; LLVM vectorises its loops. wasm simd128 builds
     /// vectorise it the same way without a separate copy.
@@ -122,7 +150,7 @@ impl Limits {
 #[cfg(target_arch = "x86_64")]
 mod avx2 {
     use super::Limits;
-    use crate::idct::{idct_1d, Lane, CONST_BITS, SMALL_MAX};
+    use crate::idct::{idct2_1d, idct4_1d, idct_1d, Lane, CONST_BITS, REDUCED_MAX, SMALL_MAX};
     use crate::out::Sample;
     use core::arch::x86_64::*;
     use core::ops::{Add, Sub};
@@ -246,12 +274,68 @@ mod avx2 {
             }
         }
     }
+    /// `Kernels::idct_reduced` with AVX2: lanes are columns in pass 1. For 4×4, pass 2 runs on
+    /// the transposed work array (lanes are rows); for 2×2 it runs in 64 bits (`idct2_rows`).
+    /// Caller checks `out.len() >= (size - 1) * stride + size`.
+    #[target_feature(enable = "avx2")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn idct_reduced<T: Sample>(
+        size: usize,
+        blk: &[i32; 64],
+        q: &[i32; 64],
+        pass1: u32,
+        max: i32,
+        range: &[u16],
+        out: &mut [T],
+        stride: usize,
+    ) {
+        // SAFETY: both arrays have 64 elements, so 8 are readable at r * 8 for r < 8.
+        let ld = |a: &[i32; 64], r: usize| unsafe { _mm256_loadu_si256(a.as_ptr().add(r * 8).cast()) };
+        let rows: [Y; 8] = core::array::from_fn(|r| Y(_mm256_mullo_epi32(ld(blk, r), ld(q, r))));
+        let lim_v = _mm256_set1_epi32(REDUCED_MAX as i32);
+        let over = rows.iter().fold(_mm256_setzero_si256(), |acc, y| {
+            _mm256_or_si256(acc, _mm256_cmpgt_epi32(_mm256_abs_epi32(y.0), lim_v))
+        });
+        let store = |y: Y| {
+            let mut a = [0i32; 8];
+            // SAFETY: `a` holds 8 i32.
+            unsafe { _mm256_storeu_si256(a.as_mut_ptr().cast(), y.0) };
+            a
+        };
+        if _mm256_movemask_epi8(over) != 0 {
+            let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
+            return crate::idct::idct_reduced(size, &deq, pass1, range, out, stride);
+        }
+        if size == 2 {
+            let ws = idct2_1d(rows).map(|y| store(descale(y, CONST_BITS - pass1 + 2)).map(i64::from));
+            return crate::idct::idct2_rows(&ws, pass1, range, out, stride);
+        }
+        let ws = idct4_1d(rows).map(|y| descale(y, CONST_BITS - pass1 + 1));
+        let z = Y(_mm256_setzero_si256());
+        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z]);
+        let l = Limits::new(max);
+        let (k, mask, two_n) = (_mm256_set1_epi32(l.k), _mm256_set1_epi32(l.mask), _mm256_set1_epi32(l.two_n));
+        let (zero, vmax) = (_mm256_setzero_si256(), _mm256_set1_epi32(l.max));
+        // o[c] lane r is output row r, column c.
+        let o = idct4_1d(cols).map(|y| {
+            let y = descale(y, CONST_BITS + pass1 + 4);
+            let v = _mm256_sub_epi32(_mm256_and_si256(_mm256_add_epi32(y.0, k), mask), two_n);
+            store(Y(_mm256_min_epi32(_mm256_max_epi32(v, zero), vmax)))
+        });
+        for r in 0..4 {
+            let dst = &mut out[r * stride..r * stride + 4];
+            for (c, d) in dst.iter_mut().enumerate() {
+                *d = T::from_u16(o[c][r] as u16);
+            }
+        }
+    }
 }
+
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 pub(crate) mod wasm {
     use super::Limits;
-    use crate::idct::{idct_1d, Lane, CONST_BITS, SMALL_MAX};
+    use crate::idct::{idct2_1d, idct4_1d, idct_1d, Lane, CONST_BITS, REDUCED_MAX, SMALL_MAX};
     use crate::out::Sample;
     use core::arch::wasm32::*;
     use core::ops::{Add, Sub};
@@ -472,6 +556,64 @@ pub(crate) mod wasm {
             }
         }
     }
+    /// `Kernels::idct_reduced` with simd128; the same steps as the AVX2 kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn idct_reduced<T: Sample>(
+        size: usize,
+        blk: &[i32; 64],
+        q: &[i32; 64],
+        pass1: u32,
+        max: i32,
+        range: &[u16],
+        out: &mut [T],
+        stride: usize,
+    ) {
+        let ld = |a: &[i32; 64], i: usize| i32x4(a[i], a[i + 1], a[i + 2], a[i + 3]);
+        let dq = |i: usize| i32x4_mul(ld(blk, i), ld(q, i));
+        let rows: [W; 8] = core::array::from_fn(|r| W(dq(r * 8), dq(r * 8 + 4)));
+        let lim_v = i32x4_splat(REDUCED_MAX as i32);
+        let over = rows.iter().fold(i32x4_splat(0), |acc, w| {
+            v128_or(acc, v128_or(i32x4_gt(i32x4_abs(w.0), lim_v), i32x4_gt(i32x4_abs(w.1), lim_v)))
+        });
+        if v128_any_true(over) {
+            let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
+            return crate::idct::idct_reduced(size, &deq, pass1, range, out, stride);
+        }
+        let store = |w: W| {
+            [
+                i32x4_extract_lane::<0>(w.0),
+                i32x4_extract_lane::<1>(w.0),
+                i32x4_extract_lane::<2>(w.0),
+                i32x4_extract_lane::<3>(w.0),
+                i32x4_extract_lane::<0>(w.1),
+                i32x4_extract_lane::<1>(w.1),
+                i32x4_extract_lane::<2>(w.1),
+                i32x4_extract_lane::<3>(w.1),
+            ]
+        };
+        if size == 2 {
+            let ws = idct2_1d(rows).map(|y| store(descale(y, CONST_BITS - pass1 + 2)).map(i64::from));
+            return crate::idct::idct2_rows(&ws, pass1, range, out, stride);
+        }
+        let ws = idct4_1d(rows).map(|y| descale(y, CONST_BITS - pass1 + 1));
+        let z = W(i32x4_splat(0), i32x4_splat(0));
+        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z]);
+        let l = Limits::new(max);
+        let (k, mask, two_n) = (i32x4_splat(l.k), i32x4_splat(l.mask), i32x4_splat(l.two_n));
+        let (zero, vmax) = (i32x4_splat(0), i32x4_splat(l.max));
+        let lim1 = |v: v128| i32x4_min(i32x4_max(i32x4_sub(v128_and(i32x4_add(v, k), mask), two_n), zero), vmax);
+        // o[c] lane r is output row r, column c (only the low half: 4 rows).
+        let o = idct4_1d(cols).map(|w| {
+            let w = descale(w, CONST_BITS + pass1 + 4);
+            store(W(lim1(w.0), lim1(w.1)))
+        });
+        for r in 0..4 {
+            let dst = &mut out[r * stride..r * stride + 4];
+            for (c, d) in dst.iter_mut().enumerate() {
+                *d = T::from_u16(o[c][r] as u16);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -506,6 +648,36 @@ mod tests {
             }
         }
         eprintln!("{frames} frames compared");
+    }
+
+    #[test]
+    fn reduced_idct_kernels_match_scalar_on_random_blocks() {
+        let mut rng = Rng(0xFEED_FACE_1234_5678);
+        for (max, pass1) in [(255, 2u32), (4095, 1)] {
+            let range = range_table(max);
+            for i in 0..100_000 {
+                let nz = [1, 2, 6, 20, 64][i % 5];
+                let qmax = [255u64, 4095, 65535][i % 3];
+                let q: [i32; 64] = core::array::from_fn(|_| (rng.next() % (qmax + 1)) as i32);
+                let lim = [32767i64, 2047, 255, 100][(i / 3) % 4];
+                let b = random_block(&mut rng, lim, nz);
+                let deq: [i32; 64] = core::array::from_fn(|k| b[k] * q[k]);
+                for size in [4usize, 2] {
+                    let mut want = [0u16; 4 * 7];
+                    idct::idct_reduced(size, &deq, pass1, &range, &mut want, 7);
+                    for k in Kernels::available() {
+                        let mut got = [0u16; 4 * 7];
+                        k.idct_reduced(size, &b, &q, pass1, max, &range, &mut got, 7);
+                        assert_eq!(want, got, "{k:?} size {size} block {b:?} q {q:?}");
+                        if max == 255 {
+                            let mut got8 = [0u8; 4 * 7];
+                            k.idct_reduced(size, &b, &q, pass1, max, &range, &mut got8, 7);
+                            assert_eq!(want.map(|v| v as u8), got8, "{k:?} u8 size {size}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

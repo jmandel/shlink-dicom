@@ -1,0 +1,155 @@
+// Loads the dataset built by scripts/build-data.ts (manifest.json, the
+// rewritten DICOM files and the report attachments) and indexes it as
+// patients, studies, series and instances. WADO-RS serves the files'
+// bytes unchanged.
+
+import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { parseDicom, str, int, type DicomElement } from "./dicom.ts";
+
+export interface Instance {
+  sopInstanceUID: string;
+  sopClassUID: string;
+  number?: number;
+  transferSyntaxUID: string;
+  path: string;
+  bytes: Uint8Array;
+  header: DicomElement[];
+}
+
+export interface Series {
+  uid: string;
+  number?: number;
+  modality: string;
+  description?: string;
+  bodyPart?: string;
+  instances: Instance[];
+}
+
+export interface Attachment {
+  id: string; // Binary id
+  contentType: string;
+  title: string;
+  size: number;
+  sha1: string; // base64, as FHIR R4 Attachment.hash
+  bytes: Uint8Array;
+}
+
+export interface Report {
+  id: string;
+  code: { system: string; code: string; display: string };
+  title: string;
+  conclusion: string;
+  attachments: Attachment[];
+}
+
+export interface Study {
+  id: string;
+  uid: string;
+  patientId: string;
+  accession: string;
+  description?: string;
+  started?: string; // FHIR dateTime
+  modalities: string[];
+  series: Series[];
+  lastUpdated: string;
+  bytes: number;
+  report: Report;
+}
+
+export interface DemoPatient {
+  id: string;
+  family: string;
+  given: string[];
+  birthDate?: string;
+  mrn?: string;
+  synthetic?: boolean;
+}
+
+export interface Store {
+  patients: Map<string, DemoPatient>;
+  studies: Map<string, Study>; // by Study Instance UID
+  studiesById: Map<string, Study>;
+  binaries: Map<string, { attachment: Attachment; study: Study }>;
+}
+
+// Data in the sandbox changes only when the dataset is rebuilt; this fixed
+// instant is used as meta.lastUpdated so responses are reproducible.
+export const DATA_LAST_UPDATED = "2026-10-15T00:00:00Z";
+
+export async function loadStore(datasetDir: string, testPatientsFile: string): Promise<Store> {
+  const manifestPath = join(datasetDir, "manifest.json");
+  if (!existsSync(manifestPath)) throw new Error(`${manifestPath} not found: run bun scripts/build-data.ts first`);
+  const manifest = JSON.parse(await Bun.file(manifestPath).text());
+  const patients = new Map<string, DemoPatient>();
+  const studies = new Map<string, Study>();
+  const studiesById = new Map<string, Study>();
+  const binaries = new Map<string, { attachment: Attachment; study: Study }>();
+
+  const p = manifest.patient;
+  patients.set(p.id, { id: p.id, family: p.family, given: p.given, birthDate: p.birthDate, mrn: p.mrn });
+  if (existsSync(testPatientsFile)) {
+    for (const t of JSON.parse(await Bun.file(testPatientsFile).text()).patients) patients.set(t.id, { ...t, synthetic: true });
+  }
+
+  for (const m of manifest.studies) {
+    const study: Study = {
+      id: m.id,
+      uid: m.studyInstanceUID,
+      patientId: p.id,
+      accession: m.accession,
+      started: `${m.studyDate}T${m.studyTime}${m.utcOffset}`,
+      modalities: [],
+      series: [],
+      lastUpdated: DATA_LAST_UPDATED,
+      bytes: 0,
+      report: { id: `report-${m.id}`, code: m.report.code, title: m.report.title, conclusion: m.report.conclusion, attachments: [] },
+    };
+    for (const f of m.files) {
+      const bytes = new Uint8Array(await Bun.file(join(datasetDir, f.path)).arrayBuffer());
+      const parsed = parseDicom(bytes);
+      const d = parsed.dataset;
+      if (str(d, 0x0020000d) !== study.uid) throw new Error(`${f.path}: Study Instance UID does not match the manifest`);
+      study.description ??= str(d, 0x00081030);
+      const seriesUID = str(d, 0x0020000e)!;
+      let series = study.series.find((s) => s.uid === seriesUID);
+      if (!series) {
+        series = { uid: seriesUID, number: int(d, 0x00200011), modality: str(d, 0x00080060) ?? "OT", description: str(d, 0x0008103e), bodyPart: str(d, 0x00180015), instances: [] };
+        study.series.push(series);
+        if (!study.modalities.includes(series.modality)) study.modalities.push(series.modality);
+      }
+      series.instances.push({
+        sopInstanceUID: str(d, 0x00080018)!,
+        sopClassUID: str(d, 0x00080016) ?? str(parsed.meta, 0x00020002)!,
+        number: int(d, 0x00200013),
+        transferSyntaxUID: parsed.transferSyntaxUID,
+        path: f.path,
+        bytes,
+        header: d,
+      });
+      study.bytes += bytes.byteLength;
+    }
+    study.series.sort((a, b) => (a.number ?? 1e9) - (b.number ?? 1e9) || a.uid.localeCompare(b.uid));
+    for (const s of study.series) s.instances.sort((a, b) => (a.number ?? 1e9) - (b.number ?? 1e9) || a.sopInstanceUID.localeCompare(b.sopInstanceUID));
+    for (const a of m.report.attachments) {
+      const ext = a.contentType === "application/pdf" ? "pdf" : "txt";
+      const att: Attachment = {
+        id: `${study.report.id}-${ext}`,
+        contentType: a.contentType,
+        title: `${study.report.title} (sample report, ${ext === "pdf" ? "PDF" : "text"})`,
+        size: a.size,
+        sha1: a.sha1,
+        bytes: new Uint8Array(await Bun.file(join(datasetDir, a.path)).arrayBuffer()),
+      };
+      study.report.attachments.push(att);
+      binaries.set(att.id, { attachment: att, study });
+    }
+    studies.set(study.uid, study);
+    studiesById.set(study.id, study);
+  }
+  return { patients, studies, studiesById, binaries };
+}
+
+export function studiesForPatient(store: Store, patientId: string): Study[] {
+  return [...store.studies.values()].filter((s) => s.patientId === patientId);
+}

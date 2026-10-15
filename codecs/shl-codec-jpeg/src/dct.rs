@@ -156,8 +156,7 @@ impl<T: Sample> DctDecoder<T> {
             let bs = p.bs;
             // 1×1 uses the DC coefficient only, so every block takes the flat path.
             if has_ac && bs > 1 {
-                let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
-                idct::idct_reduced(bs, &deq, pass1, &self.range, out, p.stride);
+                self.kernels.idct_reduced(bs, blk, q, pass1, self.max, &self.range, out, p.stride);
             } else {
                 let v = T::from_u16(idct::dc_only_reduced(bs, blk[0] * q[0], pass1, &self.range));
                 for row in out.chunks_mut(p.stride).take(bs) {

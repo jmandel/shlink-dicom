@@ -1,0 +1,4 @@
+{
+  "_note": "Synthetic patients with no imaging, used to test tokens for another patient. Not written into any DICOM file.",
+  "patients": [{ "id": "robin-example", "family": "Example", "given": ["Robin"], "synthetic": true }]
+}

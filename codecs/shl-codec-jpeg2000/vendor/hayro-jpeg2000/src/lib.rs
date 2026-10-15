@@ -130,6 +130,11 @@ pub struct DecodeSettings {
     /// shl patch 5: decode HTJ2K (ITU-T T.814) codestreams: accept the CAP and CPF markers
     /// and decode HT code-blocks. Off by default, so plain JPEG 2000 decoding is unchanged.
     pub high_throughput: bool,
+    /// shl patch 8: leave out the DC level shift (adding 2^(precision-1) to every sample,
+    /// G.1.2), for a caller that adds it itself while converting the samples. Raw codestreams
+    /// only: it is ignored for JP2 files, whose colour conversions need shifted samples. Off
+    /// by default.
+    pub defer_level_shift: bool,
 }
 
 impl Default for DecodeSettings {
@@ -139,6 +144,7 @@ impl Default for DecodeSettings {
             strict: false,
             target_resolution: None,
             high_throughput: false,
+            defer_level_shift: false,
         }
     }
 }
@@ -164,7 +170,9 @@ impl<'a> Image<'a> {
     /// Try to create a new JPEG2000 image from the given data.
     pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
         if data.starts_with(JP2_MAGIC) {
-            jp2::parse(data, *settings)
+            // shl patch 8: the JP2 colour conversions expect shifted samples, so the level
+            // shift is never deferred for a JP2 file.
+            jp2::parse(data, DecodeSettings { defer_level_shift: false, ..*settings })
         } else if data.starts_with(CODESTREAM_MAGIC) {
             j2c::parse(data, settings)
         } else {

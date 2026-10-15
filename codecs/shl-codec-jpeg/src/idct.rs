@@ -179,16 +179,23 @@ pub(crate) fn dc_only(dc: i32, pass1: u32, range: &[u16]) -> u16 {
 }
 
 // `jidctred.c` constants (FIX(x) with CONST_BITS = 13).
-const FIX_0_211164243: i64 = 1730;
-const FIX_0_509795579: i64 = 4176;
-const FIX_0_601344887: i64 = 4926;
-const FIX_0_720959822: i64 = 5906;
-const FIX_0_850430095: i64 = 6967;
-const FIX_1_061594337: i64 = 8697;
-const FIX_1_272758580: i64 = 10426;
-const FIX_1_451774981: i64 = 11893;
-const FIX_2_172734803: i64 = 17799;
-const FIX_3_624509785: i64 = 29692;
+const FIX_0_211164243: i32 = 1730;
+const FIX_0_509795579: i32 = 4176;
+const FIX_0_601344887: i32 = 4926;
+const FIX_0_720959822: i32 = 5906;
+const FIX_0_850430095: i32 = 6967;
+const FIX_1_061594337: i32 = 8697;
+const FIX_1_272758580: i32 = 10426;
+const FIX_1_451774981: i32 = 11893;
+const FIX_2_172734803: i32 = 17799;
+const FIX_3_624509785: i32 = 29692;
+
+/// Largest |dequantised coefficient| for which the vector reduced IDCTs (32-bit lanes) are exact:
+/// pass 1 then fits in i32 (`tests::reduced_bound_holds`), and pass 2 may wrap only above the
+/// bits the range limit reads, as in [`idct_small`]. The 2×2 pass 2, which would read bit 32 for
+/// 12-bit data, is done in 64 bits. Valid 8-bit and 12-bit data stay below about 2^14.
+#[cfg_attr(not(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128"))), allow(dead_code))]
+pub(crate) const REDUCED_MAX: u32 = 25000;
 
 /// Reduced-size inverse DCTs, as `jidctred.c` (IJG 6b, kept unchanged in libjpeg-turbo) computes
 /// them: `size` 4 (`jpeg_idct_4x4`), 2 (`jpeg_idct_2x2`) or 1 (`jpeg_idct_1x1`) output samples
@@ -201,99 +208,113 @@ const FIX_3_624509785: i64 = 29692;
 /// data (checked against `djpeg -scale` on the corpus).
 pub(crate) fn idct_reduced<T: Sample>(size: usize, deq: &[i32; 64], pass1: u32, range: &[u16], out: &mut [T], stride: usize) {
     let mask = range.len() - 1;
-    let limit = |v: i64| range[(v as i32 as usize) & mask];
-    let c = |k: usize| i64::from(deq[k]);
+    let limit = |v: i64| T::from_u16(range[(v as i32 as usize) & mask]);
     match size {
         1 => {
             if let Some(o) = out.first_mut() {
-                *o = T::from_u16(limit(descale(c(0), 3)));
+                *o = limit(descale(i64::from(deq[0]), 3));
             }
         }
         2 => {
-            let mut ws = [0i32; 16];
-            // Columns 0, 1, 3, 5, 7 (2, 4 and 6 do not reach a 2×2 output).
+            // Work array: rows 0 and 1 of columns 0..8 (2, 4 and 6 are never read).
+            let mut ws = [[0i64; 8]; 2];
             for col in [0usize, 1, 3, 5, 7] {
-                if [1, 3, 5, 7].iter().all(|&r| deq[r * 8 + col] == 0) {
-                    let dc = (c(col) << pass1) as i32;
-                    ws[col] = dc;
-                    ws[8 + col] = dc;
+                let c = |r: usize| i64::from(deq[r * 8 + col]);
+                if deq[8 + col] | deq[24 + col] | deq[40 + col] | deq[56 + col] == 0 {
+                    let dc = i64::from((c(0) << pass1) as i32);
+                    ws[0][col] = dc;
+                    ws[1][col] = dc;
                     continue;
                 }
-                let tmp10 = c(col) << (CONST_BITS + 2);
-                let tmp0 = c(56 + col) * -FIX_0_720959822
-                    + c(40 + col) * FIX_0_850430095
-                    + c(24 + col) * -FIX_1_272758580
-                    + c(8 + col) * FIX_3_624509785;
-                let sh = CONST_BITS - pass1 + 2;
-                ws[col] = descale(tmp10 + tmp0, sh) as i32;
-                ws[8 + col] = descale(tmp10 - tmp0, sh) as i32;
+                let o = idct2_1d(core::array::from_fn(c));
+                ws[0][col] = i64::from(descale(o[0], CONST_BITS - pass1 + 2) as i32);
+                ws[1][col] = i64::from(descale(o[1], CONST_BITS - pass1 + 2) as i32);
             }
-            for r in 0..2 {
-                let Some(dst) = out.get_mut(r * stride..r * stride + 2) else { return };
-                let w = |k: usize| i64::from(ws[r * 8 + k]);
-                if w(1) == 0 && w(3) == 0 && w(5) == 0 && w(7) == 0 {
-                    let v = T::from_u16(limit(descale(w(0), pass1 + 3)));
-                    dst.fill(v);
-                    continue;
-                }
-                let tmp10 = w(0) << (CONST_BITS + 2);
-                let tmp0 = w(7) * -FIX_0_720959822 + w(5) * FIX_0_850430095 + w(3) * -FIX_1_272758580 + w(1) * FIX_3_624509785;
-                let sh = CONST_BITS + pass1 + 3 + 2;
-                dst[0] = T::from_u16(limit(descale(tmp10 + tmp0, sh)));
-                dst[1] = T::from_u16(limit(descale(tmp10 - tmp0, sh)));
-            }
+            idct2_rows(&ws, pass1, range, out, stride);
         }
         _ => {
-            let mut ws = [0i32; 32];
-            // Column 4 does not reach a 4×4 output.
+            if out.len() < 3 * stride + 4 {
+                return;
+            }
+            // Work array: rows 0..4 of columns 0..8 (column 4 is never read).
+            let mut ws = [[0i64; 8]; 4];
             for col in [0usize, 1, 2, 3, 5, 6, 7] {
-                if [1, 2, 3, 5, 6, 7].iter().all(|&r| deq[r * 8 + col] == 0) {
-                    let dc = (c(col) << pass1) as i32;
-                    for r in 0..4 {
-                        ws[r * 8 + col] = dc;
+                let c = |r: usize| i64::from(deq[r * 8 + col]);
+                if deq[8 + col] | deq[16 + col] | deq[24 + col] | deq[40 + col] | deq[48 + col] | deq[56 + col] == 0 {
+                    let dc = i64::from((c(0) << pass1) as i32);
+                    for w in ws.iter_mut() {
+                        w[col] = dc;
                     }
                     continue;
                 }
-                let (o0, o1, o2, o3) = idct4_1d(|r| c(r * 8 + col));
+                let o = idct4_1d(core::array::from_fn(c));
                 let sh = CONST_BITS - pass1 + 1;
-                ws[col] = descale(o0, sh) as i32;
-                ws[8 + col] = descale(o1, sh) as i32;
-                ws[16 + col] = descale(o2, sh) as i32;
-                ws[24 + col] = descale(o3, sh) as i32;
+                for (w, v) in ws.iter_mut().zip(o) {
+                    w[col] = i64::from(descale(v, sh) as i32);
+                }
             }
-            for r in 0..4 {
-                let Some(dst) = out.get_mut(r * stride..r * stride + 4) else { return };
-                let w = |k: usize| i64::from(ws[r * 8 + k]);
-                if [1, 2, 3, 5, 6, 7].iter().all(|&k| w(k) == 0) {
-                    let v = T::from_u16(limit(descale(w(0), pass1 + 3)));
+            for (r, w) in ws.iter().enumerate() {
+                let dst = &mut out[r * stride..r * stride + 4];
+                if w[1] | w[2] | w[3] | w[5] | w[6] | w[7] == 0 {
+                    let v = limit(descale(w[0], pass1 + 3));
                     dst.fill(v);
                     continue;
                 }
-                let (o0, o1, o2, o3) = idct4_1d(w);
+                let o = idct4_1d(*w);
                 let sh = CONST_BITS + pass1 + 3 + 1;
-                dst[0] = T::from_u16(limit(descale(o0, sh)));
-                dst[1] = T::from_u16(limit(descale(o1, sh)));
-                dst[2] = T::from_u16(limit(descale(o2, sh)));
-                dst[3] = T::from_u16(limit(descale(o3, sh)));
+                for (d, v) in dst.iter_mut().zip(o) {
+                    *d = limit(descale(v, sh));
+                }
             }
         }
     }
 }
 
+/// Pass 2 of `jpeg_idct_2x2`, in 64 bits: work array rows 0 and 1 to the 2×2 output.
+pub(crate) fn idct2_rows<T: Sample>(ws: &[[i64; 8]; 2], pass1: u32, range: &[u16], out: &mut [T], stride: usize) {
+    if out.len() < stride + 2 {
+        return;
+    }
+    let mask = range.len() - 1;
+    let limit = |v: i64| T::from_u16(range[(v as i32 as usize) & mask]);
+    for (r, w) in ws.iter().enumerate() {
+        let dst = &mut out[r * stride..r * stride + 2];
+        if w[1] | w[3] | w[5] | w[7] == 0 {
+            let v = limit(descale(w[0], pass1 + 3));
+            dst[0] = v;
+            dst[1] = v;
+            continue;
+        }
+        let o = idct2_1d(*w);
+        let sh = CONST_BITS + pass1 + 3 + 2;
+        dst[0] = limit(descale(o[0], sh));
+        dst[1] = limit(descale(o[1], sh));
+    }
+}
+
 /// One 1-D pass of `jpeg_idct_4x4` over inputs 0..8 (4 unused); returns outputs 0..4 before
-/// descaling.
+/// descaling. Generic over [`Lane`] so the vector kernels run the same operations.
 #[inline(always)]
-fn idct4_1d(i: impl Fn(usize) -> i64) -> (i64, i64, i64, i64) {
+pub(crate) fn idct4_1d<L: Lane>(i: [L; 8]) -> [L; 4] {
     // Even part.
-    let tmp0 = i(0) << (CONST_BITS + 1);
-    let tmp2 = i(2) * i64::from(FIX_1_847759065) + i(6) * -i64::from(FIX_0_765366865);
+    let tmp0 = i[0].shl(CONST_BITS + 1);
+    let tmp2 = i[2].mulc(FIX_1_847759065) + i[6].mulc(-FIX_0_765366865);
     let tmp10 = tmp0 + tmp2;
     let tmp12 = tmp0 - tmp2;
     // Odd part.
-    let (z1, z2, z3, z4) = (i(7), i(5), i(3), i(1));
-    let tmp0 = z1 * -FIX_0_211164243 + z2 * FIX_1_451774981 + z3 * -FIX_2_172734803 + z4 * FIX_1_061594337;
-    let tmp2 = z1 * -FIX_0_509795579 + z2 * -FIX_0_601344887 + z3 * i64::from(FIX_0_899976223) + z4 * i64::from(FIX_2_562915447);
-    (tmp10 + tmp2, tmp12 + tmp0, tmp12 - tmp0, tmp10 - tmp2)
+    let (z1, z2, z3, z4) = (i[7], i[5], i[3], i[1]);
+    let tmp0 = z1.mulc(-FIX_0_211164243) + z2.mulc(FIX_1_451774981) + z3.mulc(-FIX_2_172734803) + z4.mulc(FIX_1_061594337);
+    let tmp2 = z1.mulc(-FIX_0_509795579) + z2.mulc(-FIX_0_601344887) + z3.mulc(FIX_0_899976223) + z4.mulc(FIX_2_562915447);
+    [tmp10 + tmp2, tmp12 + tmp0, tmp12 - tmp0, tmp10 - tmp2]
+}
+
+/// One 1-D pass of `jpeg_idct_2x2` over inputs 0..8 (2, 4 and 6 unused); returns outputs 0 and 1
+/// before descaling.
+#[inline(always)]
+pub(crate) fn idct2_1d<L: Lane>(i: [L; 8]) -> [L; 2] {
+    let tmp10 = i[0].shl(CONST_BITS + 2);
+    let tmp0 = i[7].mulc(-FIX_0_720959822) + i[5].mulc(FIX_0_850430095) + i[3].mulc(-FIX_1_272758580) + i[1].mulc(FIX_3_624509785);
+    [tmp10 + tmp0, tmp10 - tmp0]
 }
 
 /// The value of a block with no AC coefficients at reduced size `size` (what [`idct_reduced`]
@@ -370,6 +391,28 @@ pub(crate) mod tests {
         // The SMALL_MAX + 1 boundary makes the path's guard meaningful: dequantised values reach
         // i16 × u16, far above it.
         assert!(l1 * 65536 > i64::from(i32::MAX));
+    }
+
+    #[test]
+    fn reduced_bound_holds() {
+        let unit = |k: usize| {
+            let mut f = [0i64; 8];
+            f[k] = 1;
+            Form(f)
+        };
+        for size in [4, 2] {
+            MAX_L1.with(|m| m.set(0));
+            let inputs: [Form; 8] = core::array::from_fn(unit);
+            if size == 4 {
+                idct4_1d(inputs);
+            } else {
+                idct2_1d(inputs);
+            }
+            let l1 = MAX_L1.with(Cell::get);
+            // Pass 1 rounding constant is at most 2^13.
+            let worst = l1 * i64::from(REDUCED_MAX) + (1 << 13);
+            assert!(worst <= i64::from(i32::MAX), "size {size}: L1 {l1}: {worst} overflows");
+        }
     }
 
     /// Deterministic xorshift for test vectors.

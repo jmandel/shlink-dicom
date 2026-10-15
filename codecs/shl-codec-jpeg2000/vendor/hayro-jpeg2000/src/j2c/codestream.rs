@@ -28,6 +28,8 @@ pub(crate) struct Header<'a> {
     /// marker's code-block set.
     pub(crate) high_throughput: bool,
     pub(crate) ht_set: HtSet,
+    /// shl patch 8: `DecodeSettings::defer_level_shift`.
+    pub(crate) defer_level_shift: bool,
 }
 
 /// shl patch 5: the T.814 code-block set signalled by CAP Ccap15 bits 15-14 (Table A.2).
@@ -234,6 +236,7 @@ pub(crate) fn read_header<'a>(
         strict: settings.strict,
         high_throughput: settings.high_throughput,
         ht_set,
+        defer_level_shift: settings.defer_level_shift,
     };
 
     validate(&header)?;

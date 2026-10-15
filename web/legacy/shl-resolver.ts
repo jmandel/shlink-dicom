@@ -1,4 +1,4 @@
-import { decode_shlink_wasm } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+import { decode_shlink_wasm } from "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
 export interface ShlPayload {
   url: string;

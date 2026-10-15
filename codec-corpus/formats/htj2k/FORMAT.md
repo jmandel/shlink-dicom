@@ -26,7 +26,7 @@ Sources: generated 18, pydicom 2. Multi-frame cases: 3. Ground truth from seeds:
 
 ## Decision
 
-**Wrap `oxideav-jpeg2000` 0.0.17, vendored with two speed patches** ([Phase 2c](#phase-2c-speed)). The wrapper was decided by the phase 1 j2k-survey; the full evidence is in [../jpeg2000/SURVEY.md](../jpeg2000/SURVEY.md). This crate stays separate from `shl-codec-jpeg2000`.
+**Decode through the vendored hayro, with an HT block decoder added, and fall back to the vendored `oxideav-jpeg2000` 0.0.17** ([Phase 2d](#phase-2d-ht-decoding-in-hayro)). hayro (in `shl-codec-jpeg2000`) decodes every corpus frame except the MIXED ones; any frame it does not decode goes to oxideav, which also handles MIXED code-blocks and more than one HT set. The history: the phase 1 j2k-survey chose oxideav ([../jpeg2000/SURVEY.md](../jpeg2000/SURVEY.md)); phase 2c made it fast enough for the first speed gate; phase 2d moved HT decoding into hayro to get close to OpenJPH.
 
 **Evidence:**
 - Pure Rust, no `unsafe`, zero dependencies with `default-features = false`, MIT, and builds for wasm32.
@@ -65,6 +65,36 @@ The coordinator's plan was to try the cheapest fix first: vendor oxideav and fix
 
 Both patches change speed only. On 2,320 inputs (corpus frames and the fuzz corpus), the patched crate gives byte-identical samples, or the identical error, to crates.io 0.0.17. The 512×512 16-bit frame now takes **30 ms in wasm32** (budget 150 ms), 21× faster than before. Timings for every step are in [PERF.md](PERF.md).
 
+### Phase 2d: HT decoding in hayro
+
+The second speed goal was to come within about 3× of OpenJPH, natively and in wasm with SIMD. oxideav was still 22–27× slower than OpenJPH: its 5/3 wavelet and its HT block decoder were the hot spots. Option B from the [SURVEY](../jpeg2000/SURVEY.md#phase-2b-ht-block-decoder-contingency) gives one pipeline to make fast, so it was taken. HT code-blocks are decoded inside the vendored hayro, which `shl-codec-jpeg2000` already uses for JPEG 2000, and its tier-2, wavelet and colour stages are shared.
+
+What was added to hayro ([vendor README](../../../codecs/shl-codec-jpeg2000/vendor/README.md), patches 5–9):
+- **HT decoding (patch 5),** behind a new `DecodeSettings::high_throughput` that only this crate sets, so `.90`/`.91` decoding is unchanged:
+  - the CAP and CPF markers;
+  - the T.814 tier-2 pass layout: one cleanup segment, which also takes any placeholder passes, then one SigProp + MagRef segment;
+  - an HT block decoder. It is `ndic-htj2k`'s port of OpenJPH's block decoder (MIT and BSD-2-Clause; both notices are in `src/j2c/ht/LICENSE`), made faster: refills of the bit buffers inline, and the bit buffers kept in local variables.
+  - MIXED tile-components, a second HT set, unusual code-block styles and HT blocks that fail to decode are reported as unsupported, and `shl-codec-htj2k` then uses oxideav.
+- **Changes that make both formats faster (patches 6–9):**
+  - an exact floor without the libm call;
+  - a vectorised horizontal wavelet pass fused with the interleave;
+  - one pass instead of two (5/3) or five (9/7) for the vertical wavelet;
+  - fewer full-frame copies (the DC level shift is added during the final conversion, and a single tile's wavelet output becomes the image buffer).
+
+  Every JPEG 2000 and HTJ2K corpus frame decodes byte-identically before and after each of these.
+- **In `shl-codec-jpeg2000`:**
+  - `pack_rows` converts whole rows in a vectorised loop. It writes exactly what `pack` writes (a unit test compares them).
+  - the float-to-integer rounding is done branch-free, without `roundf`. It is exact (a unit test compares it with `round()` on edge cases and 400 k random values).
+
+**Cross-check.** `tests/cross_check.rs` decodes every corpus frame through both hayro and oxideav:
+- the 60 lossless frames (`.201`, `.202`) are byte-identical;
+- the 17 lossy frames (`.203`) differ by at most 1, which the oracle allows (hayro's wavelet is f32, oxideav's f64);
+- the two MIXED frames go to oxideav.
+
+It also runs on streams outside the corpus. HT blocks with SigProp and MagRef passes decode identically both ways and equal the seed in OpenJPH and OpenJPEG; MULTIHT streams go to oxideav.
+
+The timings are in [PERF.md](PERF.md#phase-2d-ht-decoding-in-hayro).
+
 ## Rulings
 
 ### Signed HTJ2K cases: how they were made
@@ -83,16 +113,16 @@ The JPEG 2000 rulings on [sign handling](../jpeg2000/FORMAT.md#sign-handling), [
 
 ## STATUS
 
-Phase 2c (speed), 2026-10-14.
+Phase 2d (HT decoding in hayro), 2026-10-15.
 
 ### check.py
 
-**htj2k: 40/40 pass** (all `expect=decode`; none disputed), with the command in [jpeg2000 STATUS](../jpeg2000/FORMAT.md#checkpy). jpeg2000 still passes 166/166 with the same build. By source:
+**htj2k: 42/42 pass** (all `expect=decode`; none disputed), with the command in [jpeg2000 STATUS](../jpeg2000/FORMAT.md#checkpy). jpeg2000 still passes 166/166 with the same build. By source:
 
 | Source | Cases |
 |---|---|
 | generated by `generate.py` | 23 |
-| generated by this agent | 13 |
+| generated by this agent | 15 |
 | pydicom | 2 |
 | external | 2 |
 
@@ -114,18 +144,22 @@ The 11 cases are made with `ojph_compress` from raw seed samples (signed ones as
 | `local-mri-slice-ojph-rev-rpcl-tiles` (.202) | real 16-bit MR, 4 tiles |
 | `synth-u16-3frame-32x32-ojph-q-rlcp-tiles` (.203) | RLCP, tiles, 3 frames |
 
-### MIXED cases: `extra/gen_mixed.py`
+### Cases from the oxideav encoder: `extra/gen_oxideav.py`
 
-In a MIXED tile-component (T.814 §A.4, Ccap15 bits 15–14 = `11`), each code-block is either an HT block or a Part 1 (MQ) block, with no flag saying which. Kakadu is not installed and `ojph_compress` writes HT-only, but the vendored oxideav has a MIXED encoder. `shl-codec-htj2k`'s `encode_mixed` example uses it: lossless 5/3, one layer, RPCL. The encoder codes every block both ways and keeps the HT coding unless the MQ coding is markedly smaller.
+`ojph_compress` writes cleanup passes only, in HT-only codestreams, and Kakadu is not installed. The vendored oxideav has an encoder that writes two kinds of stream ojph cannot, and `shl-codec-htj2k`'s `encode_ht` example drives it: lossless 5/3, one layer, RPCL, RCT for colour.
+- **MIXED** (T.814 §A.4, Ccap15 bits 15–14 = `11`): each code-block is either an HT block or a Part 1 (MQ) block, with no flag saying which. The encoder codes every block both ways and keeps the HT coding unless the MQ coding is markedly smaller.
+- **Refinement passes:** HT blocks with SigProp and MagRef passes (three passes per block).
 
-| Case | Covers | HT / Part 1 blocks |
+| Case | Covers | Blocks |
 |---|---|---|
-| `gen-pydicom-CT_small-oxideav-rev-mixed` (.201) | signed 16-bit CT | 13 / 3 |
-| `gen-synth-rgb8-60x40-oxideav-rev-mixed` (.202) | RGB with RCT | 10 / 38 |
+| `gen-pydicom-CT_small-oxideav-rev-mixed` (.201) | MIXED, signed 16-bit CT | 13 HT, 3 Part 1 |
+| `gen-synth-rgb8-60x40-oxideav-rev-mixed` (.202) | MIXED, RGB with RCT | 10 HT, 38 Part 1 |
+| `gen-local-mri-slice-oxideav-rev-refine` (.201) | refinement passes, real 16-bit MR | 16 of 16 with 3 passes |
+| `gen-synth-rgb8-60x40-oxideav-rev-refine` (.202) | refinement passes, RGB with RCT | 44 of 48 with 3 passes |
 
-The block counts come from a decoder instrumented outside the tree.
+The block counts come from a decoder instrumented outside the tree. Both references decode the refinement-pass cases to the seed (OpenJPEG for the signed MR; OpenJPH and OpenJPEG for the RGB), so those cases have independent support.
 
-**What these cases show, and what they don't.** Neither reference decoder reads MIXED: OpenJPEG 2.5 stops with "Unsupported Mixed HT code-block style found", and OpenJPH with "wrong settings in a COD-SPcod parameter". So the oracle is the seed alone (truth = seed, lossless, `families agreeing: []`), and the encoder and decoder are the same library. The cases check that MIXED streams decode exactly and guard against regressions. They do not show that oxideav reads MIXED the way Kakadu writes it. The upstream evidence for that is oxideav's own test, `tests/mixed_conformance.rs`. It decodes the three Kakadu-made MIXED streams of the ISO/IEC 15444-4 conformance set. Two of them carry the same lossless components, and those decode byte-identically. That test passes with our patches applied. Those streams have four sub-sampled components, which DICOM cannot carry, so they are not in the corpus.
+**What the MIXED cases show, and what they don't.** Neither reference decoder reads MIXED: OpenJPEG 2.5 stops with "Unsupported Mixed HT code-block style found", and OpenJPH with "wrong settings in a COD-SPcod parameter". So the oracle is the seed alone (truth = seed, lossless, `families agreeing: []`), and the encoder and decoder are the same library. The cases check that MIXED streams decode exactly and guard against regressions. They do not show that oxideav reads MIXED the way Kakadu writes it. The upstream evidence for that is oxideav's own test, `tests/mixed_conformance.rs`. It decodes the three Kakadu-made MIXED streams of the ISO/IEC 15444-4 conformance set. Two of them carry the same lossless components, and those decode byte-identically. That test passes with our patches applied. Those streams have four sub-sampled components, which DICOM cannot carry, so they are not in the corpus.
 
 ### Robustness
 

@@ -7,6 +7,8 @@ interface Exports {
   vk_alloc(len: number): number;
   vk_free(ptr: number, len: number): void;
   vk_decode(ptr: number, len: number, first: number, count: number): number;
+  /** Absent from wasm builds older than the reduced-resolution decode. */
+  vk_decode_scaled?(ptr: number, len: number, first: number, count: number, scale: number): number;
   vk_probe(ptr: number, len: number): number;
   vk_out_ptr(): number;
   vk_out_len(): number;
@@ -68,11 +70,17 @@ export class WasmDecoder {
     });
   }
 
-  /** Decode frames first..first+count (count 0: all). Pixels are copied out of wasm memory once. */
-  decode(bytes: Uint8Array, first = 0, count = 0): RawResult {
+  /**
+   * Decode frames first..first+count (count 0: all). Pixels are copied out of wasm memory once.
+   * `scale` s > 0 decodes at 1/2^s size (rows and columns rounded up); see INTEGRATION.md.
+   */
+  decode(bytes: Uint8Array, first = 0, count = 0, scale = 0): RawResult {
+    if (scale > 0 && !this.x.vk_decode_scaled) {
+      return { ok: false, code: 3, message: "this decoder build has no reduced-resolution decode (vk_decode_scaled)", ms: 0 };
+    }
     return this.withInput(bytes, (p, n) => {
       const t0 = performance.now();
-      const rc = this.x.vk_decode(p, n, first, count);
+      const rc = scale > 0 ? this.x.vk_decode_scaled!(p, n, first, count, scale) : this.x.vk_decode(p, n, first, count);
       const ms = performance.now() - t0;
       if (rc !== 0) return { ok: false, code: rc, message: this.text(this.x.vk_msg_ptr(), this.x.vk_msg_len()), ms };
       const info = JSON.parse(this.text(this.x.vk_json_ptr(), this.x.vk_json_len()));

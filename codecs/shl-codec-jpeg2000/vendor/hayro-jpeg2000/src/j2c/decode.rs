@@ -45,7 +45,9 @@ pub(crate) fn decode<'a>(
 
     // shl patch 8: without MCT, the DC level shift is added while each tile is stored,
     // instead of in a separate pass over every channel afterwards (the same f32 additions).
-    let shift_in_store = !tiles[0].mct && header.skipped_resolution_levels == 0;
+    let shift_in_store =
+        !header.defer_level_shift && !tiles[0].mct && header.skipped_resolution_levels == 0;
+    let sole_tile = tiles.len() == 1;
 
     for tile in &tiles {
         trace!(
@@ -89,6 +91,7 @@ pub(crate) fn decode<'a>(
             &mut ctx.channel_data,
             &mut ctx.storage,
             shift_in_store,
+            sole_tile,
         )?;
     }
 
@@ -99,7 +102,7 @@ pub(crate) fn decode<'a>(
         mct::apply_inverse(&mut ctx.channel_data, &tiles[0].component_infos, header)?;
     }
 
-    if !shift_in_store {
+    if !shift_in_store && !header.defer_level_shift {
         apply_sign_shift(&mut ctx.channel_data, &header.component_infos);
     }
 
@@ -144,6 +147,7 @@ fn decode_tile<'a, 'b>(
     channel_data: &mut [ComponentData],
     storage: &mut DecompositionStorage<'a>,
     shift_in_store: bool,
+    sole_tile: bool,
 ) -> Result<()> {
     storage.reset();
 
@@ -190,6 +194,7 @@ fn decode_tile<'a, 'b>(
             &mut channel_data[idx],
             component_info,
             shift_in_store.then(|| (1_u32 << (component_info.size_info.precision - 1)) as f32),
+            sole_tile,
         );
     }
 
@@ -538,8 +543,9 @@ fn decode_ht_sub_band(
             if k > 31 || missing_msbs >= k {
                 bail!(DecodingError::HtUnsupported);
             }
+            // decode_block writes every sample of the block (its tests check this on a
+            // buffer filled with junk), so the buffer is only resized, not cleared.
             let samples = &mut tile_ctx.ht_samples;
-            samples.clear();
             samples.resize(w * h, 0);
             decode_block(
                 &mut tile_ctx.ht_scratch,
@@ -600,8 +606,34 @@ fn store<'a>(
     component_info: &ComponentInfo,
     // shl patch 8: the DC level shift to add while storing, if `apply_sign_shift` is skipped.
     offset: Option<f32>,
+    // shl patch 8: the tile is the only one.
+    sole_tile: bool,
 ) {
     let idwt_output = &mut tile_ctx.idwt_output;
+
+    // shl patch 8: when the IDWT output is exactly the image (one tile, no sub-sampling or
+    // reduced resolution, output rectangle = image area), the copy below would reproduce it
+    // sample for sample; take the buffer instead and add the offset in place.
+    let size = &header.size_data;
+    if sole_tile
+        && header.skipped_resolution_levels == 0
+        && component_info.size_info.horizontal_resolution == 1
+        && component_info.size_info.vertical_resolution == 1
+        && idwt_output.rect.x0 == size.image_area_x_offset
+        && idwt_output.rect.y0 == size.image_area_y_offset
+        && idwt_output.rect.width() == size.image_width()
+        && idwt_output.rect.height() == size.image_height()
+    {
+        if channel_data.container.swap_in(&mut idwt_output.coefficients) {
+            if let Some(offset) = offset {
+                let n = channel_data.container.truncated().len();
+                for v in &mut channel_data.container[..n] {
+                    *v += offset;
+                }
+            }
+            return;
+        }
+    }
 
     let component_tile = ComponentTile::new(tile, component_info);
     let resolution_tile = ResolutionTile::new(

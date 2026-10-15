@@ -20,11 +20,14 @@ fn main() {
         let n = |k: &str| field(&j, k).parse::<u32>().unwrap();
         let info = shl_htj2k_bench::info(n("rows"), n("columns"), n("samples_per_pixel") as u16, n("bits_allocated") as u16,
             n("bits_stored") as u16, n("pixel_representation") as u16, &field(&j, "photometric"));
-        if let Ok(dump) = std::env::var("DUMP") {
-            // Write each frame's output (codec CODEC, default 1) for comparing builds.
+        if std::env::var("HASH").is_ok() {
+            // Print a hash of each frame's output (codec CODEC, default 1) for comparing builds.
             let codec = only.unwrap_or(1);
-            let out = shl_htj2k_bench::decode_bytes(codec, &cs, &info).unwrap_or_else(|| b"ERROR".to_vec());
-            std::fs::write(std::path::Path::new(&dump).join(p.file_name().unwrap()), out).unwrap();
+            let h = match shl_htj2k_bench::decode_bytes(codec, &cs, &info) {
+                Some(out) => out.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)),
+                None => 0,
+            };
+            println!("{} {h:016x}", p.file_name().unwrap().to_string_lossy());
             continue;
         }
         for codec in [0u32, 1].into_iter().filter(|c| only.is_none_or(|o| o == *c)) {

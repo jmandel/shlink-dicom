@@ -147,6 +147,7 @@ Palette and 1-bit images never differ. A lose/restore context cycle (`WEBGL_lose
 node viewer-kit/scripts/build.mjs                                  # wasm (simd128, fat LTO) + bundles
 uv run --project codec-corpus python viewer-kit/bench/make_series.py   # CT series -> viewer-kit/data/
 bun  viewer-kit/test/verify-oracle.ts [--per-format 6]             # pool wasm vs oracle
+bun  viewer-kit/test/scaled.ts [--per-format 4]                   # pool wasm at scale 1-3 vs native decode_file_scaled
 node viewer-kit/test/pool.mjs                                      # pool behaviour
 node viewer-kit/test/gl-vs-cpu.mjs                                 # shader vs CPU reference
 node viewer-kit/bench/run.mjs [pool|wl]                            # this file's numbers

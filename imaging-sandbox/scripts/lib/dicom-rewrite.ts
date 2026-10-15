@@ -1,0 +1,146 @@
+// Rewrites selected DICOM header attributes and remaps instance UIDs.
+//
+// Every element that is not changed, and every sequence item with no
+// changed element inside it, is copied from the original file byte for
+// byte. Pixel Data is never decoded or re-encoded: its whole element
+// (header, value or encapsulated fragments, delimiter) is copied verbatim.
+// Only changed elements and the containers and group lengths around them
+// are re-encoded.
+
+import { parseDicom, str, type DicomElement } from "../../src/dicom.ts";
+
+export interface HeaderSet {
+  vr: string;
+  value: string; // multiple values joined with "\\"
+}
+
+export interface RewriteOptions {
+  set: Map<number, HeaderSet>; // top-level attributes to set (inserted if absent)
+  remove: Set<number>; // top-level attributes to drop
+  mapUid: (uid: string) => string; // applied to every non-registry UID
+}
+
+const EXPLICIT_LONG = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
+const REGISTRY = "1.2.840.10008.";
+const enc = new TextEncoder();
+
+function u16(n: number) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, n, true); return b; }
+function u32(n: number) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n >>> 0, true); return b; }
+function tagBytes(tag: number) { return concat([u16(tag >>> 16), u16(tag & 0xffff)]); }
+
+export function concat(parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((a, p) => a + p.byteLength, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.byteLength; }
+  return out;
+}
+
+function padded(vr: string, value: string): Uint8Array {
+  if (/[^\x20-\x7e]/.test(value)) throw new Error(`non-ASCII value for ${vr}: ${value}`);
+  const b = enc.encode(value);
+  if (b.byteLength % 2 === 0) return b;
+  return concat([b, new Uint8Array([vr === "UI" ? 0 : 0x20])]);
+}
+
+function header(tag: number, vr: string, len: number, explicit: boolean): Uint8Array {
+  if (!explicit) return concat([tagBytes(tag), u32(len)]);
+  if (EXPLICIT_LONG.has(vr)) return concat([tagBytes(tag), enc.encode(vr), new Uint8Array(2), u32(len)]);
+  if (len > 0xffff) throw new Error(`value too long for ${vr}`);
+  return concat([tagBytes(tag), enc.encode(vr), u16(len)]);
+}
+
+function element(tag: number, vr: string, value: Uint8Array, explicit: boolean): Uint8Array {
+  return concat([header(tag, vr, value.byteLength, explicit), value]);
+}
+
+interface Out { tag: number; bytes: Uint8Array; dirty: boolean; }
+
+function encodeLevel(src: Uint8Array, els: DicomElement[], explicit: boolean, top: boolean, o: RewriteOptions): { bytes: Uint8Array; dirty: boolean } {
+  const out: Out[] = [];
+  const seen = new Set<number>();
+  for (const e of els) {
+    seen.add(e.tag);
+    if (top && o.remove.has(e.tag)) continue;
+    if (top && o.set.has(e.tag)) {
+      const s = o.set.get(e.tag)!;
+      out.push({ tag: e.tag, bytes: element(e.tag, s.vr, padded(s.vr, s.value), explicit), dirty: true });
+      continue;
+    }
+    if (e.vr === "UI" && !e.items) {
+      const v = str([e], e.tag);
+      if (v && !v.startsWith(REGISTRY)) {
+        const m = v.split("\\").map((u) => (u.startsWith(REGISTRY) ? u : o.mapUid(u))).join("\\");
+        if (m !== v) { out.push({ tag: e.tag, bytes: element(e.tag, "UI", padded("UI", m), explicit), dirty: true }); continue; }
+      }
+    }
+    if (e.items) {
+      const itemExplicit = explicit && !e.fromUN;
+      const items = e.items.map((it) => encodeLevel(src, it, itemExplicit, false, o));
+      if (items.some((i) => i.dirty)) {
+        if (e.fromUN) throw new Error("cannot re-encode a sequence read from UN");
+        const parts: Uint8Array[] = [];
+        items.forEach((it, i) => {
+          const span = e.itemSpans![i];
+          if (!it.dirty) { parts.push(src.subarray(span.start, span.end)); return; }
+          if (span.undefinedLength) parts.push(concat([tagBytes(0xfffee000), u32(0xffffffff), it.bytes, tagBytes(0xfffee00d), u32(0)]));
+          else parts.push(concat([tagBytes(0xfffee000), u32(it.bytes.byteLength), it.bytes]));
+        });
+        const body = concat(parts);
+        const bytes = e.undefinedLength
+          ? concat([header(e.tag, "SQ", 0xffffffff, explicit), body, tagBytes(0xfffee0dd), u32(0)])
+          : concat([header(e.tag, "SQ", body.byteLength, explicit), body]);
+        out.push({ tag: e.tag, bytes, dirty: true });
+        continue;
+      }
+    }
+    out.push({ tag: e.tag, bytes: src.subarray(e.start, e.end), dirty: false });
+  }
+  if (top) {
+    for (const [tag, s] of o.set) {
+      if (!seen.has(tag)) out.push({ tag, bytes: element(tag, s.vr, padded(s.vr, s.value), explicit), dirty: true });
+    }
+    out.sort((a, b) => a.tag - b.tag);
+  }
+  // Recompute group lengths for groups that changed.
+  for (const g of out.filter((x) => (x.tag & 0xffff) === 0)) {
+    const group = g.tag >>> 16;
+    const members = out.filter((x) => x.tag >>> 16 === group && x !== g);
+    if (members.some((m) => m.dirty)) {
+      g.bytes = element(g.tag, "UL", u32(members.reduce((a, m) => a + m.bytes.byteLength, 0)), explicit);
+      g.dirty = true;
+    }
+  }
+  return { bytes: concat(out.map((x) => x.bytes)), dirty: out.some((x) => x.dirty) || out.length !== els.length };
+}
+
+export function rewriteDicom(src: Uint8Array, o: RewriteOptions): Uint8Array {
+  const parsed = parseDicom(src, { stopAtPixelData: false });
+  const explicit = parsed.transferSyntaxUID !== "1.2.840.10008.1.2";
+  // File meta: only (0002,0003) Media Storage SOP Instance UID changes;
+  // the group length is recomputed.
+  const sop = str(parsed.meta, 0x00020003)!;
+  const metaOpts: RewriteOptions = { set: new Map([[0x00020003, { vr: "UI", value: o.mapUid(sop) }]]), remove: new Set(), mapUid: (u) => u };
+  const meta = encodeLevel(src, parsed.meta, true, true, metaOpts);
+  const dataset = encodeLevel(src, parsed.dataset, explicit, true, o);
+  return concat([src.subarray(0, 132), meta.bytes, dataset.bytes]);
+}
+
+// Bytes of the whole Pixel Data element (tag through end), for comparison.
+export function pixelDataElement(bytes: Uint8Array): Uint8Array {
+  const p = parseDicom(bytes, { stopAtPixelData: false });
+  const e = p.dataset.find((x) => x.tag === 0x7fe00010);
+  if (!e) throw new Error("no Pixel Data element");
+  return bytes.subarray(e.start, e.end);
+}
+
+// Deterministic UID under the 2.25 root (ITU-T X.667): a name-based UUID
+// (version 5 layout over SHA-256) of namespace + original UID, as a decimal.
+export function mintUid(namespace: string, original: string): string {
+  const h = new Uint8Array(new Bun.CryptoHasher("sha256").update(`${namespace}:${original}`).digest());
+  const b = h.subarray(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x50;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  let n = 0n;
+  for (const x of b) n = (n << 8n) | BigInt(x);
+  return `2.25.${n.toString()}`;
+}

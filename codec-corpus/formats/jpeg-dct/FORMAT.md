@@ -97,8 +97,9 @@ The IDCT, upsampling and colour conversion use AVX2 (chosen at run time) or wasm
 **Reduced-resolution decode** (`decode_frame_scaled`, CONTRACT.md "Reduced-resolution decode"): 1/2, 1/4 and 1/8 for baseline and extended DCT, 8 and 12-bit, through the `jidctred.c` reduced IDCTs. Lossless JPEG returns Unsupported.
 - **Checked against libjpeg-turbo 3.2.0's own scaled decode** with [`scaled/check_scaled.py`](scaled/check_scaled.py), which builds the small oracle [`scaled/turbo_scaled.c`](scaled/turbo_scaled.c) against the system library. 402 of 405 case-scale pairs are byte-identical, 8-bit and 12-bit alike. The other 3 are `ext-gdcm-PHILIPS_Gyroscan-12-Jpeg_Extended_Process_2_4`, which libjpeg-turbo refuses ("Bogus Huffman table definition"); this decoder accepts it at full size under an existing ruling.
 - **12-bit against a block average of the full decode:** within 1.0 on every complete block with no sample clamped to 0 or 4095. The reduced IDCTs are the exact block average of the 8×8 transform before rounding (unit test `reduced_idct_is_block_average`). Blocks with clamped samples differ by up to about 40 (`local-wrist-*` at 1/2), because the full decode clips ringing before the average and the reduced decode does not. Partial edge blocks average the encoder's padding.
+- **Speed:** see [PERF.md](PERF.md#reduced-resolution-decode).
 - **Full-size output** is unchanged: the same bytes on every corpus frame before and after, and check.py stays at 100%.
-- **Fuzzing:** a `decode_scaled` target in `shl-codec-jpeg/fuzz`; results below.
+- **Fuzzing:** the `decode_scaled` target in `shl-codec-jpeg/fuzz` ran 10 minutes × 4 workers (about 273,000 executions, 906 coverage edges), then again for 5 minutes × 4 workers after the SIMD kernels were added (about 145,000 executions), with no findings. It is seeded with corpus frames under 300 KB, and the first byte also picks the scale (1/2 to 1/16).
 
 **Not supported:** these return `Unsupported` (exit 3):
 - progressive (SOF2; `.55` is retired);

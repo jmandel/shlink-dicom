@@ -595,3 +595,223 @@ fn missing_samples_per_pixel_means_one() {
     ds.elem(0x7FE0, 0x0010, b"OW", &[1, 0, 2, 0]);
     assert_eq!(u16s(&decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap().data), [1, 2]);
 }
+
+// ---- inferring missing or impossible attributes -------------------------------------------
+
+/// A smooth 3-sample test image, rows × cols, interleaved.
+fn smooth_rgb(rows: usize, cols: usize) -> Vec<u8> {
+    let mut v = Vec::new();
+    for r in 0..rows {
+        for c in 0..cols {
+            let d = ((r as i32 - 12).pow(2) + (c as i32 - 20).pow(2)) as f64;
+            v.extend_from_slice(&[(c * 6 % 256) as u8, (r * 7 % 256) as u8, (255.0 * (-d / 300.0).exp()) as u8]);
+        }
+    }
+    v
+}
+
+fn planes_of(px: &[u8]) -> Vec<u8> {
+    (0..3).flat_map(|s| px.iter().skip(s).step_by(3).copied()).collect()
+}
+
+fn rgb_without_planar(enc: Enc, rows: u16, cols: u16, pixels: &[u8]) -> Vec<u8> {
+    let mut ds = Ds::new(enc);
+    ds.image(3, "RGB", None, None, rows, cols, 8, 8, 0);
+    ds.elem(0x7FE0, 0x0010, b"OB", pixels);
+    let ts = if enc == Enc::ExplicitBe { EXPLICIT_BE } else { EXPLICIT_LE };
+    part10(ts, &ds.out, true)
+}
+
+fn inferred<'a>(c: &'a shl_dicom_decode::Canonical, attr: &str) -> Option<&'a shl_dicom_decode::Inference> {
+    c.inferred.iter().find(|i| i.attribute == attr)
+}
+
+#[test]
+fn missing_planar_configuration_is_inferred_from_smoothness() {
+    let (rows, cols) = (24usize, 40usize);
+    let img = smooth_rgb(rows, cols);
+    // Interleaved data without the attribute.
+    let out = decode_file(&rgb_without_planar(Enc::ExplicitLe, rows as u16, cols as u16, &img)).unwrap();
+    assert_eq!(out.data, img);
+    assert_eq!(inferred(&out, "PlanarConfiguration").unwrap().value, "0");
+    // The same image stored planar, also in big endian.
+    for enc in [Enc::ExplicitLe, Enc::ExplicitBe] {
+        let out = decode_file(&rgb_without_planar(enc, rows as u16, cols as u16, &planes_of(&img))).unwrap();
+        assert_eq!(out.data, img);
+        assert_eq!(inferred(&out, "PlanarConfiguration").unwrap().value, "1");
+    }
+    // A well-formed file reports nothing.
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.image(3, "RGB", Some(0), None, rows as u16, cols as u16, 8, 8, 0);
+    ds.elem(0x7FE0, 0x0010, b"OB", &img);
+    assert!(decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap().inferred.is_empty());
+}
+
+#[test]
+fn planar_inference_refuses_when_it_cannot_tell() {
+    // Noise: neither reading is smoother.
+    let mut x: u32 = 99;
+    let noise: Vec<u8> = (0..32 * 32 * 3)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect();
+    let Err(Error::Invalid(m)) = decode_file(&rgb_without_planar(Enc::ExplicitLe, 32, 32, &noise)) else {
+        panic!("noise must be refused")
+    };
+    assert!(m.contains("Planar Configuration"), "{m}");
+    // Too small to judge.
+    let tiny: Vec<u8> = (0..27u8).map(|i| i.wrapping_mul(37)).collect();
+    assert!(matches!(decode_file(&rgb_without_planar(Enc::ExplicitLe, 3, 3, &tiny)), Err(Error::Invalid(_))));
+    // A constant image reads the same either way.
+    let out = decode_file(&rgb_without_planar(Enc::ExplicitLe, 3, 3, &[7; 27])).unwrap();
+    assert_eq!(out.data, [7; 27]);
+}
+
+#[test]
+fn encapsulated_data_does_not_need_planar_configuration() {
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.image(3, "RGB", None, None, 1, 2, 8, 8, 0);
+    ds.encapsulated(&[], &[&[1, 2, 3, 4, 5, 6]]);
+    let out = decode_file_with(&part10(RLE, &ds.out, true), with(planar_passthrough)).unwrap();
+    assert_eq!(out.data, [1, 3, 5, 2, 4, 6]);
+    assert!(inferred(&out, "PlanarConfiguration").unwrap().reason.contains("encapsulated"));
+}
+
+#[test]
+fn bits_stored_missing_or_impossible_means_all_bits() {
+    for bs in [None, Some(0u16), Some(20)] {
+        let mut ds = Ds::new(Enc::ExplicitLe);
+        ds.us(0x0028, 0x0002, 1);
+        ds.text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+        ds.us(0x0028, 0x0010, 1);
+        ds.us(0x0028, 0x0011, 1);
+        ds.us(0x0028, 0x0100, 16);
+        if let Some(b) = bs {
+            ds.us(0x0028, 0x0101, b);
+        }
+        ds.us(0x0028, 0x0103, 0);
+        ds.elem(0x7FE0, 0x0010, b"OW", &0xFFFFu16.to_le_bytes());
+        let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+        assert_eq!(u16s(&out.data), [0xFFFF], "{bs:?}");
+        assert_eq!(inferred(&out, "BitsStored").unwrap().value, "16");
+    }
+}
+
+#[test]
+fn samples_and_photometric_stand_in_for_each_other() {
+    // RGB without Samples per Pixel: 3.
+    let img = smooth_rgb(16, 16);
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.text(0x0028, 0x0004, b"CS", "RGB");
+    ds.us(0x0028, 0x0006, 0);
+    for (e, v) in [(0x0010u16, 16u16), (0x0011, 16), (0x0100, 8), (0x0101, 8), (0x0103, 0)] {
+        ds.us(0x0028, e, v);
+    }
+    ds.elem(0x7FE0, 0x0010, b"OB", &img);
+    let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+    assert_eq!((out.samples_per_pixel, out.data.len()), (3, img.len()));
+    // No Photometric Interpretation: from Samples per Pixel.
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.us(0x0028, 0x0002, 1);
+    for (e, v) in [(0x0010u16, 1u16), (0x0011, 2), (0x0100, 8), (0x0101, 8), (0x0103, 0)] {
+        ds.us(0x0028, e, v);
+    }
+    ds.elem(0x7FE0, 0x0010, b"OB", &[3, 4]);
+    let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+    assert_eq!(out.photometric, "MONOCHROME2");
+    // An undefined term with 1 sample reads as MONOCHROME2 (GDCM's MR16BitsAllocated_8BitsStored).
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.image(1, "MONOCHROME", None, None, 1, 2, 8, 8, 0);
+    ds.elem(0x7FE0, 0x0010, b"OB", &[3, 4]);
+    let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+    assert_eq!((out.photometric.as_str(), out.data.as_slice()), ("MONOCHROME2", &[3u8, 4][..]));
+}
+
+#[test]
+fn native_size_from_the_data_length() {
+    // Columns missing: 2 rows of 8-bit, 6 bytes -> 3 columns.
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.us(0x0028, 0x0002, 1);
+    ds.text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+    for (e, v) in [(0x0010u16, 2u16), (0x0100, 8), (0x0101, 8), (0x0103, 0)] {
+        ds.us(0x0028, e, v);
+    }
+    ds.elem(0x7FE0, 0x0010, b"OB", &[1, 2, 3, 4, 5, 6]);
+    let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+    assert_eq!((out.rows, out.columns), (2, 3));
+    // Bits Allocated missing: 2×2 pixels in 8 bytes -> 16 bits.
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.us(0x0028, 0x0002, 1);
+    ds.text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+    for (e, v) in [(0x0010u16, 2u16), (0x0011, 2), (0x0103, 0)] {
+        ds.us(0x0028, e, v);
+    }
+    ds.elem(0x7FE0, 0x0010, b"OW", &[1, 0, 2, 0, 3, 0, 4, 0]);
+    let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+    assert_eq!((out.bits_allocated, u16s(&out.data)), (16, vec![1, 2, 3, 4]));
+    // A length that fits no size is still refused.
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.us(0x0028, 0x0002, 1);
+    ds.text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+    for (e, v) in [(0x0010u16, 2u16), (0x0011, 2), (0x0103, 0)] {
+        ds.us(0x0028, e, v);
+    }
+    ds.elem(0x7FE0, 0x0010, b"OB", &[0; 12]);
+    assert!(matches!(decode_file(&part10(EXPLICIT_LE, &ds.out, true)), Err(Error::Invalid(_))));
+}
+
+#[test]
+fn encapsulated_attributes_from_the_codestream() {
+    // JPEG 2000 with Bits Allocated/Stored 0xFFFF and no Rows/Columns/Pixel Representation:
+    // all from SIZ (precision 12, signed, 2×1).
+    const J2K: &str = "1.2.840.10008.1.2.4.90";
+    let codecs = |ts: &str| (ts == J2K).then_some(j2k_passthrough as shl_codec_common::DecodeFn);
+    let mut cs = vec![0xFF, 0x4F, 0xFF, 0x51, 0, 41, 0, 0];
+    for v in [2u32, 1, 0, 0, 2, 1, 0, 0] {
+        cs.extend_from_slice(&v.to_be_bytes());
+    }
+    cs.extend_from_slice(&[0, 1, 0x80 | 11, 1, 1]);
+    cs.resize(50, 0);
+    cs.extend_from_slice(&[0xFF, 0x0F, 0x01, 0x00]); // 0x0FFF (-1 in 12 bits), 0x0001
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    ds.us(0x0028, 0x0002, 1);
+    ds.text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+    ds.us(0x0028, 0x0100, 0xFFFF);
+    ds.us(0x0028, 0x0101, 0xFFFF);
+    ds.encapsulated(&[], &[&cs]);
+    let out = decode_file_with(&part10(J2K, &ds.out, true), codecs).unwrap();
+    assert_eq!((out.rows, out.columns, out.bits_allocated, out.bits_stored, out.signed), (1, 2, 16, 12, true));
+    assert_eq!(i16s(&out.data), [-1, 1]);
+    for a in ["Rows", "Columns", "BitsAllocated", "BitsStored", "PixelRepresentation"] {
+        assert!(inferred(&out, a).is_some(), "{a}");
+    }
+}
+
+#[test]
+fn damaged_encapsulated_endings_are_tolerated() {
+    let base = |ds: &mut Ds| {
+        ds.image(1, "MONOCHROME2", None, None, 1, 2, 8, 8, 0);
+        ds.out.extend_from_slice(b"\xE0\x7F\x10\x00OB\x00\x00\xFF\xFF\xFF\xFF");
+        ds.out.extend_from_slice(b"\xFE\xFF\x00\xE0\x00\x00\x00\x00");
+    };
+    // Garbage where the sequence delimiter belongs.
+    let mut ds = Ds::new(Enc::ExplicitLe);
+    base(&mut ds);
+    ds.out.extend_from_slice(b"\xFE\xFF\x00\xE0\x02\x00\x00\x00\x07\x08");
+    ds.out.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00");
+    let out = decode_file_with(&part10(RLE, &ds.out, true), with(planar_passthrough)).unwrap();
+    assert_eq!(out.data, [7, 8]);
+    assert!(inferred(&out, "PixelData").is_some());
+    // A last fragment 1 byte longer than the data: tolerated. 10 bytes longer: truncated, refused.
+    for (claimed, ok) in [(3u8, true), (12, false)] {
+        let mut ds = Ds::new(Enc::ExplicitLe);
+        base(&mut ds);
+        ds.out.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, claimed, 0, 0, 0, 7, 8]);
+        let r = decode_file_with(&part10(RLE, &ds.out, true), with(planar_passthrough));
+        assert_eq!(r.is_ok(), ok, "{claimed}: {r:?}");
+    }
+}

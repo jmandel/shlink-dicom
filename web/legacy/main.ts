@@ -1,4 +1,4 @@
-import initWasm, { WasmShlSession, decode_shlink_wasm } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+import initWasm, { WasmShlSession, decode_shlink_wasm } from "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 import { ShlResolver, PasscodeRequiredError } from "./shl-resolver";
 import { SeriesRecordTracker } from "./record-map";
 import { ApiClient, type DemoShareInfo } from "./api-client";
@@ -109,7 +109,7 @@ async function boot() {
   await initWasm();
   wasmReady = true;
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/sw-dicomweb.js").catch(() => {});
+    navigator.serviceWorker.register(new URL("sw-dicomweb.js", import.meta.url)).catch(() => {});
   }
   wireEvents();
 

@@ -6,3 +6,8 @@ license.workspace = true
 
 [dependencies]
 shl-codec-common = { path = "../shl-codec-common" }
+
+# wasm test harness for decode_frame_scaled (codec-corpus/formats/jpeg-dct/scaled/check_wasm.mjs).
+[[example]]
+name = "scaled_wasm"
+crate-type = ["cdylib"]

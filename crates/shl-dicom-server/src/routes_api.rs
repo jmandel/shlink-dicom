@@ -20,7 +20,7 @@ use crate::{
     state::{
         build_link_resource_from_row, hash_passcode, is_valid_id22, now_unix,
         parse_series_filename, sha256_bytes, write_series_file_to_db, AccessEvent, AppState,
-        DEFAULT_PASSCODE_ATTEMPTS, DEFAULT_SANDBOX_TTL_SECS,
+        DEFAULT_PASSCODE_ATTEMPTS, DEFAULT_SANDBOX_TTL_SECS, MAX_SHARE_TTL_SECS,
     },
 };
 
@@ -50,9 +50,38 @@ fn require_auth(state: &AppState, sid: &str, headers: &HeaderMap) -> Result<(), 
     Ok(())
 }
 
-/// `POST /api/shares`
-pub async fn create_share(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let expires_at = Some(now_unix() + DEFAULT_SANDBOX_TTL_SECS);
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareExpiryRequest {
+    /// Unix seconds. Clamped to at most `MAX_SHARE_TTL_SECS` from now; null or absent means that maximum
+    /// (PATCH) or the default sandbox lifetime (POST).
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+}
+
+fn clamp_share_expiry(requested: Option<i64>, fallback_ttl: i64) -> i64 {
+    let now = now_unix();
+    let max = now + MAX_SHARE_TTL_SECS;
+    match requested {
+        Some(t) => t.clamp(now + 60, max),
+        None => (now + fallback_ttl).min(max),
+    }
+}
+
+/// `POST /api/shares` (optional body `{ "expiresAt": unixSeconds }`)
+pub async fn create_share(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let req: ShareExpiryRequest = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        ShareExpiryRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("invalid JSON: {e}") })))
+                    .into_response()
+            }
+        }
+    };
+    let expires_at = Some(clamp_share_expiry(req.expires_at, DEFAULT_SANDBOX_TTL_SECS));
     let (sid, control_token) = match state.create_share(false, expires_at) {
         Ok(v) => v,
         Err(e) if e == "QUOTA_SHARES_EXCEEDED" => {
@@ -218,6 +247,27 @@ pub async fn get_share(
 ) -> Response {
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
+    }
+    let origin = request_origin(&headers);
+    match state.build_share_resource(&sid, &origin) {
+        Some(share) => (StatusCode::OK, Json(share)).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "share not found" }))).into_response(),
+    }
+}
+
+/// `PATCH /api/shares/{sid}`: `{ "expiresAt": unixSeconds | null }` (null: the longest allowed).
+pub async fn patch_share(
+    State(state): State<AppState>,
+    Path(sid): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<ShareExpiryRequest>,
+) -> Response {
+    if let Err(resp) = require_auth(&state, &sid, &headers) {
+        return resp;
+    }
+    let expires_at = clamp_share_expiry(req.expires_at, MAX_SHARE_TTL_SECS);
+    if let Err(e) = state.set_share_expiry(&sid, expires_at) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
     let origin = request_origin(&headers);
     match state.build_share_resource(&sid, &origin) {
@@ -771,6 +821,10 @@ pub async fn end_link_sessions(
 #[derive(Debug, Deserialize, Default)]
 pub struct AccessQuery {
     pub since: Option<i64>,
+    /// Only this link's events.
+    pub lid: Option<String>,
+    /// Newest first; default 500, at most 5000.
+    pub limit: Option<i64>,
 }
 
 /// `GET /api/shares/{sid}/access?since=`
@@ -787,10 +841,12 @@ pub async fn get_share_access(
         return StatusCode::NOT_FOUND.into_response();
     };
     let since = query.since.unwrap_or(0);
+    let lid_filter = query.lid.clone().unwrap_or_default();
+    let limit = query.limit.unwrap_or(500).clamp(1, 5000);
     let conn = conn_arc.lock().unwrap();
     let mut stmt = match conn.prepare(
         "SELECT ts, lid, method, path, range, status, bytes, recipient
-         FROM access_log WHERE ts >= ?1 ORDER BY ts DESC LIMIT 500",
+         FROM access_log WHERE ts >= ?1 AND (?2 = '' OR lid = ?2) ORDER BY ts DESC, rowid DESC LIMIT ?3",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -803,7 +859,7 @@ pub async fn get_share_access(
     };
 
     let events: Vec<AccessEvent> = stmt
-        .query_map(params![since], |r| {
+        .query_map(params![since, lid_filter, limit], |r| {
             Ok(AccessEvent {
                 ts: r.get(0)?,
                 lid: r.get(1)?,

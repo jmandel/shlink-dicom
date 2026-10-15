@@ -43,6 +43,9 @@ pub fn build_app_router(state: AppState) -> Router {
 
     let serve_dir = ServeDir::new("dist/web")
         .not_found_service(ServeFile::new("dist/web/index.html"));
+    // Experience pages (see docs/EXPERIENCES.md "Routes"). Served without a trailing-slash
+    // redirect so `/view#shlink:/…` loads in one request; the pages use relative asset paths.
+    let page = |p: &str| ServeFile::new(format!("dist/web/{p}/index.html"));
 
     Router::new()
         // Zero-Knowledge Share & Link Control API
@@ -50,7 +53,9 @@ pub fn build_app_router(state: AppState) -> Router {
         .route("/api/shares/{sid}/clone", post(routes_api::clone_share))
         .route(
             "/api/shares/{sid}",
-            get(routes_api::get_share).delete(routes_api::delete_share),
+            get(routes_api::get_share)
+                .patch(routes_api::patch_share)
+                .delete(routes_api::delete_share),
         )
         .route(
             "/api/shares/{sid}/owner.jwe",
@@ -80,7 +85,18 @@ pub fn build_app_router(state: AppState) -> Router {
         .route("/shl/{lid}", post(routes_shl::post_shl_manifest))
         .route("/shl/{lid}/{tail}", get(routes_shl::get_shl_file))
         .route("/cap/{token}/{tail}", get(routes_shl::get_cap_file))
-        // Fallback to static web UI
+        // Experiences: landing (/), View, How it works, Share, and the legacy single page
+        .route_service("/view", page("view"))
+        .route_service("/view/", page("view"))
+        .route_service("/how", page("how"))
+        .route_service("/how/", page("how"))
+        .route_service("/share", page("share"))
+        .route_service("/share/", page("share"))
+        .route_service("/share/manage", page("share/manage"))
+        .route_service("/share/manage/", page("share/manage"))
+        .route_service("/legacy", page("legacy"))
+        .route_service("/legacy/", page("legacy"))
+        // Static files (assets, config.json); unknown paths get the landing page
         .fallback_service(serve_dir)
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
         .layer(cors)

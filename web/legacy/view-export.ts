@@ -1,4 +1,4 @@
-import type { WasmShlSession } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+import type { WasmShlSession } from "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 import type { StudySummary, SeriesSummary } from "./view-sharer";
 import { buildStoreZip, triggerBlobDownload, type ZipEntryInput } from "./exporter";
 

@@ -1,0 +1,16 @@
+{
+  "name": "imaging-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SMART Imaging Access sandbox: authorization server, clinical and imaging FHIR, WADO-RS",
+  "scripts": {
+    "start": "bun src/server.ts",
+    "test": "bun test/e2e.ts",
+    "validate": "bun test/validate.ts"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "4.10.38",
+    "playwright-core": "1.64.1"
+  }
+}

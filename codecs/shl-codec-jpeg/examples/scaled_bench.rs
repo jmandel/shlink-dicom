@@ -89,14 +89,24 @@ fn main() {
         transfer_syntax: field(&text, "transfer_syntax"),
     };
     let cs = fs::read(dir.join("frame-0.bin")).unwrap();
-    // `<dir> <reps> loop S`: only the scaled decode at 1/2^S, for profiling.
+    // `<dir> <reps> loop S`: only the scaled decode at 1/2^S; `loopfull S`: only full decode plus
+    // box downsample by 2^S (for `perf stat`). Frame dimensions are set below.
+    let (w, h, spp, bps) = (info.columns as usize, info.rows as usize, usize::from(info.samples_per_pixel), info.bytes_per_sample());
+    if args.get(3).map(String::as_str) == Some("loopfull") {
+        let s: u8 = args[4].parse().unwrap();
+        let t = time(reps, || {
+            let d = shl_codec_jpeg::decode_frame(&cs, &info).unwrap();
+            box_downsample(&d.data, w, h, spp, bps, 1 << s).len()
+        });
+        println!("full + box 1/{}: min {:.3} median {:.3} ms", 1 << s, t.0, t.1);
+        return;
+    }
     if args.get(3).map(String::as_str) == Some("loop") {
         let s: u8 = args[4].parse().unwrap();
         let t = time(reps, || shl_codec_jpeg::decode_frame_scaled(&cs, &info, s).unwrap().frame.data.len());
         println!("scaled 1/{}: min {:.3} median {:.3} ms", 1 << s, t.0, t.1);
         return;
     }
-    let (w, h, spp, bps) = (info.columns as usize, info.rows as usize, usize::from(info.samples_per_pixel), info.bytes_per_sample());
     println!("{} ({w}x{h}, {spp} samples, {} bytes each)", dir.file_name().unwrap().to_string_lossy(), bps);
     let full = time(reps, || shl_codec_jpeg::decode_frame(&cs, &info).unwrap().data.len());
     println!("  full decode                        min {:8.3} ms  median {:8.3} ms", full.0, full.1);

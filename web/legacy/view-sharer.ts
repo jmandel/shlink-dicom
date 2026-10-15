@@ -4,7 +4,7 @@ import {
   WasmPacker,
   build_link_bundle_wasm,
   encode_shlink_wasm,
-} from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+} from "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
 export interface StudySummary {
   id: string;

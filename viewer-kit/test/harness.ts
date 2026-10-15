@@ -217,7 +217,7 @@ async function wlBench(opts: { url: string; frames: number; canvas?: [number, nu
 }
 
 /** Pool behaviour: errors, priorities, abort, transfer, dedupe, frame split. */
-async function poolSemantics(opts: { big: string; multiframe: string; unsupported: string }) {
+async function poolSemantics(opts: { big: string; multiframe: string; unsupported: string; jpeg?: string }) {
   const checks: { name: string; ok: boolean; detail: string }[] = [];
   const check = (name: string, ok: boolean, detail = "") => checks.push({ name, ok, detail });
   const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 1 });
@@ -298,6 +298,29 @@ async function poolSemantics(opts: { big: string; multiframe: string; unsupporte
     const a = new Uint8Array(whole.pixels), b = new Uint8Array(split.pixels);
     check("decodeFrames == decode (bytes)", a.length === b.length && a.every((v, i) => v === b[i]), `${split.frames} frames in ${chunks} chunks`);
     check("frameOffsets", split.frameOffsets.length === split.frames && split.frameOffsets[1] === split.frameBytes);
+
+    // Reduced resolution: metadata, and decodeFrames == decode at the same scale.
+    const small = await pool4.decode(mf.slice(0), { scale: 2 });
+    const want = (n: number) => Math.ceil(n / 4);
+    check(
+      "scale: 2 -> reduced rows/columns, full size kept",
+      small.rows === want(whole.rows) && small.columns === want(whole.columns) && small.scale === 2 && small.fullRows === whole.rows
+        && small.fullColumns === whole.columns && small.frameBytes * small.frames === small.pixels.byteLength,
+      `${small.columns}x${small.rows} of ${small.fullColumns}x${small.fullRows}`,
+    );
+    const smallSplit = await pool4.decodeFrames(mf.slice(0), { scale: 2 });
+    const c = new Uint8Array(small.pixels), d = new Uint8Array(smallSplit.pixels);
+    check("decodeFrames == decode at scale 2", c.length === d.length && c.every((v, i) => v === d[i]), `${smallSplit.frames} frames`);
+    if (opts.jpeg) {
+      const jb = await fetchBytes(opts.jpeg);
+      const full = await pool4.decode(jb.slice(0));
+      const thumb = await pool4.decode(jb.slice(0), { scale: 3 });
+      check(
+        "JPEG scale: 3 (codec's reduced decode)",
+        thumb.rows === Math.ceil(full.rows / 8) && thumb.columns === Math.ceil(full.columns / 8),
+        `${thumb.columns}x${thumb.rows}; decode ${full.decodeMs.toFixed(1)} ms full, ${thumb.decodeMs.toFixed(1)} ms at 1/8`,
+      );
+    }
   } finally {
     pool4.destroy();
   }

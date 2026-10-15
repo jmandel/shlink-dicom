@@ -697,47 +697,6 @@ fn filter_step_horizontal(
     }
 }
 
-#[inline(always)]
-fn filter_step_vertical<S: Simd>(
-    simd: S,
-    scanline: &mut [f32],
-    height: usize,
-    width: usize,
-    simd_width: usize,
-    first: usize,
-    f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-    f_scalar: impl Fn(f32, f32, f32) -> f32,
-) {
-    for row in (first..height).step_by(2) {
-        let row_above = periodic_symmetric_extension_left(row, 1);
-        let row_below = periodic_symmetric_extension_right(row, 1, height);
-
-        // Process SIMD chunks.
-        for base_column in (0..simd_width).step_by(SIMD_WIDTH) {
-            let s1 = f32x8::from_slice(simd, &scanline[row * width + base_column..][..SIMD_WIDTH]);
-            let s2 = f32x8::from_slice(
-                simd,
-                &scanline[row_above * width + base_column..][..SIMD_WIDTH],
-            );
-            let s3 = f32x8::from_slice(
-                simd,
-                &scanline[row_below * width + base_column..][..SIMD_WIDTH],
-            );
-
-            let result = f_simd(s1, s2, s3);
-            result.store(&mut scanline[row * width + base_column..][..SIMD_WIDTH]);
-        }
-
-        // Process scalar remainder.
-        for col in simd_width..width {
-            let s1 = scanline[row * width + col];
-            let s2 = scanline[row_above * width + col];
-            let s3 = scanline[row_below * width + col];
-            scanline[row * width + col] = f_scalar(s1, s2, s3);
-        }
-    }
-}
-
 /// Part of the `1D_EXTR` procedure, defined in F.3.7.
 ///
 /// Applies the period symmetric extension on the left side.
@@ -814,38 +773,107 @@ fn reversible_filter_53r_simd<S: Simd>(
     y0: usize,
 ) {
     let first_even = y0 % 2;
-    let first_odd = 1 - first_even;
-    let simd_width = width / SIMD_WIDTH * SIMD_WIDTH;
-
-    // Equation (F-5).
-    // Originally: for i in (start / 2)..(end / 2 + 1).
-    filter_step_vertical(
+    // shl patch 9: equations (F-5) and (F-6) in one pass down the rows (see
+    // `vertical_lift_pair`); the per-sample arithmetic is unchanged.
+    vertical_lift_pair(
         simd,
         scanline,
         height,
         width,
-        simd_width,
         first_even,
+        None,
         #[inline(always)]
         |s1, s2, s3| s1 - ((s2 + s3 + 2.0) * 0.25).floor(),
         #[inline(always)]
         |s1, s2, s3| s1 - math::floor_f32(math::mul_add(s2 + s3, 0.25, 0.5)),
-    );
-
-    // Equation (F-6).
-    // Originally: for i in (start / 2)..(end / 2).
-    filter_step_vertical(
-        simd,
-        scanline,
-        height,
-        width,
-        simd_width,
-        first_odd,
         #[inline(always)]
         |s1, s2, s3| s1 + ((s2 + s3) * 0.5).floor(),
         #[inline(always)]
         |s1, s2, s3| s1 + math::floor_f32((s2 + s3) * 0.5),
     );
+}
+
+/// shl patch 9: two lifting steps of `VER_SR` in a single pass over the rows. The first step
+/// updates the rows of parity `first_even` from their neighbours, the second the other rows
+/// from the updated ones (each row as `filter_step_vertical` would). A row of the second
+/// step is updated as soon as both its neighbours have had the first step, so every sample
+/// sees exactly the values it would in two separate passes. `scale`, if given, multiplies
+/// the rows of parity `first_even` and the others (9-7 steps 1 and 2) before any step reads
+/// them.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn vertical_lift_pair<S: Simd>(
+    simd: S,
+    data: &mut [f32],
+    height: usize,
+    width: usize,
+    first_even: usize,
+    scale: Option<(f32, f32)>,
+    f_even: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
+    f_even_scalar: impl Fn(f32, f32, f32) -> f32,
+    f_odd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
+    f_odd_scalar: impl Fn(f32, f32, f32) -> f32,
+) {
+    let simd_width = width / SIMD_WIDTH * SIMD_WIDTH;
+    let first_odd = 1 - first_even;
+    let mut scaled = 0;
+    let mut next_odd = first_odd;
+    let mut even = first_even;
+    while even < height {
+        if let Some((k_even, k_odd)) = scale {
+            while scaled <= (even + 1).min(height - 1) {
+                let k = if scaled % 2 == first_even { k_even } else { k_odd };
+                self::scale(simd, &mut data[scaled * width..][..width], k);
+                scaled += 1;
+            }
+        }
+        lift_row_vertical(simd, data, even, height, width, simd_width, &f_even, &f_even_scalar);
+        while next_odd < even {
+            lift_row_vertical(simd, data, next_odd, height, width, simd_width, &f_odd, &f_odd_scalar);
+            next_odd += 2;
+        }
+        even += 2;
+    }
+    if let Some((k_even, k_odd)) = scale {
+        while scaled < height {
+            let k = if scaled % 2 == first_even { k_even } else { k_odd };
+            self::scale(simd, &mut data[scaled * width..][..width], k);
+            scaled += 1;
+        }
+    }
+    while next_odd < height {
+        lift_row_vertical(simd, data, next_odd, height, width, simd_width, &f_odd, &f_odd_scalar);
+        next_odd += 2;
+    }
+}
+
+/// shl patch 9: one row of `filter_step_vertical`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn lift_row_vertical<S: Simd>(
+    simd: S,
+    scanline: &mut [f32],
+    row: usize,
+    height: usize,
+    width: usize,
+    simd_width: usize,
+    f_simd: &impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
+    f_scalar: &impl Fn(f32, f32, f32) -> f32,
+) {
+    let row_above = periodic_symmetric_extension_left(row, 1);
+    let row_below = periodic_symmetric_extension_right(row, 1, height);
+    for base_column in (0..simd_width).step_by(SIMD_WIDTH) {
+        let s1 = f32x8::from_slice(simd, &scanline[row * width + base_column..][..SIMD_WIDTH]);
+        let s2 = f32x8::from_slice(simd, &scanline[row_above * width + base_column..][..SIMD_WIDTH]);
+        let s3 = f32x8::from_slice(simd, &scanline[row_below * width + base_column..][..SIMD_WIDTH]);
+        f_simd(s1, s2, s3).store(&mut scanline[row * width + base_column..][..SIMD_WIDTH]);
+    }
+    for col in simd_width..width {
+        let s1 = scanline[row * width + col];
+        let s2 = scanline[row_above * width + col];
+        let s3 = scanline[row_below * width + col];
+        scanline[row * width + col] = f_scalar(s1, s2, s3);
+    }
 }
 
 /// The 1D Filter 9-7I procedure from F.3.8.2.
@@ -872,106 +900,42 @@ fn irreversible_filter_97i_simd<S: Simd>(
     let kappa = f32x8::splat(simd, KAPPA);
     let inv_kappa = f32x8::splat(simd, INV_KAPPA);
 
-    // Determine which local row indices correspond to even/odd global positions.
     let first_even = y0 % 2;
-    let first_odd = 1 - first_even;
-    let simd_width = width / SIMD_WIDTH * SIMD_WIDTH;
+    let (k0, k1) = if first_even == 0 { (KAPPA, INV_KAPPA) } else { (INV_KAPPA, KAPPA) };
+    // In the original passes, steps 1 and 2 scale local row 2i by k0 and 2i + 1 by k1, so
+    // the rows of parity `first_even` get KAPPA and the others INV_KAPPA.
+    let (k_even, k_odd) = if first_even == 0 { (k0, k1) } else { (k1, k0) };
+    let _ = (kappa, inv_kappa);
 
-    let (k0, k1, k0_simd, k1_simd) = if first_even == 0 {
-        (KAPPA, INV_KAPPA, kappa, inv_kappa)
-    } else {
-        (INV_KAPPA, KAPPA, inv_kappa, kappa)
-    };
-
-    // Step 1 and 2.
-    // Originally: for i in (start / 2 - 1)..(end / 2 + 2).
-    // Originally: for i in (start / 2 - 2)..(end / 2 + 2).
-    for row in (0..height.saturating_sub(1)).step_by(2) {
-        for base_column in (0..simd_width).step_by(SIMD_WIDTH) {
-            let mut vals0 =
-                f32x8::from_slice(simd, &scanline[row * width + base_column..][..SIMD_WIDTH]);
-            let mut vals1 = f32x8::from_slice(
-                simd,
-                &scanline[(row + 1) * width + base_column..][..SIMD_WIDTH],
-            );
-            vals0 = vals0 * k0_simd;
-            vals1 = vals1 * k1_simd;
-            vals0.store(&mut scanline[row * width + base_column..][..SIMD_WIDTH]);
-            vals1.store(&mut scanline[(row + 1) * width + base_column..][..SIMD_WIDTH]);
-        }
-        for col in simd_width..width {
-            scanline[row * width + col] *= k0;
-            scanline[(row + 1) * width + col] *= k1;
-        }
-    }
-
-    if height % 2 == 1 {
-        let row = height - 1;
-        for base_column in (0..simd_width).step_by(SIMD_WIDTH) {
-            let mut vals =
-                f32x8::from_slice(simd, &scanline[row * width + base_column..][..SIMD_WIDTH]);
-            vals = vals * k0_simd;
-            vals.store(&mut scanline[row * width + base_column..][..SIMD_WIDTH]);
-        }
-        for col in simd_width..width {
-            scanline[row * width + col] *= k0;
-        }
-    }
-
-    // Step 3.
-    // Originally: for i in (start / 2 - 1)..(end / 2 + 2).
-    filter_step_vertical(
+    // shl patch 9: steps 1 to 4 in one pass and steps 5 and 6 in another (see
+    // `vertical_lift_pair`); the per-sample arithmetic is unchanged.
+    vertical_lift_pair(
         simd,
         scanline,
         height,
         width,
-        simd_width,
         first_even,
+        Some((k_even, k_odd)),
         #[inline(always)]
         |s1, s2, s3| (s2 + s3).mul_add(neg_delta, s1),
         #[inline(always)]
         |s1, s2, s3| math::mul_add(s2 + s3, NEG_DELTA, s1),
-    );
-
-    // Step 4.
-    // Originally: for i in (start / 2 - 1)..(end / 2 + 1).
-    filter_step_vertical(
-        simd,
-        scanline,
-        height,
-        width,
-        simd_width,
-        first_odd,
         #[inline(always)]
         |s1, s2, s3| (s2 + s3).mul_add(neg_gamma, s1),
         #[inline(always)]
         |s1, s2, s3| math::mul_add(s2 + s3, NEG_GAMMA, s1),
     );
-
-    // Step 5.
-    // Originally: for i in (start / 2)..(end / 2 + 1).
-    filter_step_vertical(
+    vertical_lift_pair(
         simd,
         scanline,
         height,
         width,
-        simd_width,
         first_even,
+        None,
         #[inline(always)]
         |s1, s2, s3| (s2 + s3).mul_add(neg_beta, s1),
         #[inline(always)]
         |s1, s2, s3| math::mul_add(s2 + s3, NEG_BETA, s1),
-    );
-
-    // Step 6.
-    // Originally: for i in (start / 2)..(end / 2).
-    filter_step_vertical(
-        simd,
-        scanline,
-        height,
-        width,
-        simd_width,
-        first_odd,
         #[inline(always)]
         |s1, s2, s3| (s2 + s3).mul_add(neg_alpha, s1),
         #[inline(always)]

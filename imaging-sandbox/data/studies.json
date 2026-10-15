@@ -1,0 +1,69 @@
+{
+  "_note": "Inputs to scripts/build-data.ts. Sources are pinned by commit and SHA-256. Header values are fictional except where noted. The original Study, Series and SOP Instance UIDs are replaced because the same files are published in jmandel/my-health-data and seeded as the project's public sample share under their original UIDs; reusing those UIDs for a different patient identity would make two different patients claim the same instances. New UIDs are minted deterministically under the 2.25 root from uidNamespace and the original UID (see scripts/lib/dicom-rewrite.ts, mintUid).",
+  "uidNamespace": "shlink-dicom/imaging-sandbox/v1",
+  "sources": [
+    {
+      "archive": "mri-brain-2020.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/c23fade48fc6a7ab9ec22a5fce56cb58df550ba8/mri-brain-2020.tgz",
+      "sha256": "fc5c7a027161e4a060964b8f5108d817be0062ae951bcc3a57616baeb720177d"
+    },
+    {
+      "archive": "wrist-low-res.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/c23fade48fc6a7ab9ec22a5fce56cb58df550ba8/wrist-low-res.tgz",
+      "sha256": "a2c4dffa8ec93ef658fce1e5ea4803df91e1be0da8df52ae5fa17dc9dc067f8e"
+    }
+  ],
+  "removeTags": {
+    "_note": "Patient Identity Removed (0012,0062) is dropped: the headers now carry a (fictional) identity.",
+    "tags": ["00120062"]
+  },
+  "studies": [
+    {
+      "id": "mri-brain-2020",
+      "archive": "mri-brain-2020.tgz",
+      "accession": "SBX20200729-0418",
+      "studyDate": "2020-07-29",
+      "_studyDate": "From the source StudyDescription, BRAIN 7/29/20.",
+      "studyTime": "07:42:15",
+      "utcOffset": "-04:00",
+      "report": {
+        "code": { "system": "http://loinc.org", "code": "24590-2", "display": "MR Brain" },
+        "title": "MRI BRAIN",
+        "indication": "Headache.",
+        "comparison": "None.",
+        "techniqueIntro": "Multiplanar, multisequence MR imaging of the brain.",
+        "findings": [
+          "Brain parenchyma: No mass, mass effect or midline shift. No restricted diffusion on the diffusion-weighted images and ADC maps.",
+          "Hemorrhage: No intracranial hemorrhage on the T2* gradient-echo images.",
+          "Ventricles and extra-axial spaces: Ventricles and sulci are normal in size and configuration. No extra-axial collection.",
+          "Vessels: Normal major intracranial flow voids.",
+          "Other: The visualized paranasal sinuses and mastoid air cells are clear."
+        ],
+        "impression": ["No acute intracranial abnormality."]
+      }
+    },
+    {
+      "id": "wrist-low-res",
+      "archive": "wrist-low-res.tgz",
+      "accession": "SBX20110724-0093",
+      "studyDate": "2011-07-24",
+      "_studyDate": "Matches the source Instance Creation Date (0008,0012), 20110724.",
+      "studyTime": "21:41:30",
+      "utcOffset": "-04:00",
+      "report": {
+        "code": { "system": "http://loinc.org", "code": "37550-1", "display": "XR Wrist - left PA and Lateral and Oblique" },
+        "title": "XR WRIST LEFT, 3 VIEWS",
+        "indication": "Left wrist pain after a fall.",
+        "comparison": "None.",
+        "techniqueIntro": "Computed radiography of the left wrist.",
+        "findings": [
+          "Bones: No acute fracture. Normal bone mineralization.",
+          "Alignment: Normal radiocarpal and intercarpal alignment. No dislocation.",
+          "Joints: Joint spaces are preserved.",
+          "Soft tissues: Unremarkable."
+        ],
+        "impression": ["No acute osseous abnormality of the left wrist."]
+      }
+    }
+  ]
+}

@@ -5,11 +5,14 @@
 //! - strips a JP2 wrapper, so hayro's JP2 colour handling never applies;
 //! - checks the main header against the data set before hayro allocates anything
 //!   ([`prep::prepare`]);
-//! - restores signed components (hayro reads the SIZ sign bit and discards it, so it always
-//!   adds the unsigned DC offset 2^(p−1));
-//! - rounds and clamps hayro's f32 samples, and applies pydicom's signedness rules ([`prep::pack`]).
+//! - applies the DC level shift 2^(p−1) itself, while converting (hayro's
+//!   `defer_level_shift`, which saves a pass over the frame), and takes it off again for
+//!   signed components (hayro reads the SIZ sign bit and discards it);
+//! - rounds and clamps hayro's f32 samples, and applies pydicom's signedness rules ([`prep::pack`],
+//!   or row by row with [`prep::pack_rows`] when no component is subsampled).
 //!
-//! [`prep`] is shared with `shl-codec-htj2k`.
+//! [`prep`] is shared with `shl-codec-htj2k`, which also decodes through
+//! [`decode_frame_high_throughput`] (hayro with its HT block decoder, vendored patch 5).
 #![forbid(unsafe_code)]
 
 pub mod prep;
@@ -32,8 +35,15 @@ pub fn decode_frame_high_throughput(codestream: &[u8], info: &FrameInfo) -> Resu
 
 fn decode(codestream: &[u8], info: &FrameInfo, high_throughput: bool) -> Result<DecodedFrame> {
     let prep = prep::prepare(codestream, info)?;
-    let settings =
-        DecodeSettings { resolve_palette_indices: false, strict: false, target_resolution: None, high_throughput };
+    // The DC level shift is added below, while converting, instead of in a separate pass in
+    // hayro (vendored patch 8): the same f32 additions, in the same order.
+    let settings = DecodeSettings {
+        resolve_palette_indices: false,
+        strict: false,
+        target_resolution: None,
+        high_throughput,
+        defer_level_shift: true,
+    };
     let image = Image::new(prep.codestream, &settings).map_err(map_err)?;
     if image.width() != info.columns || image.height() != info.rows {
         return Err(DecodeError::Invalid("decoder disagrees with SIZ on the image size".into()));
@@ -45,12 +55,16 @@ fn decode(codestream: &[u8], info: &FrameInfo, high_throughput: bool) -> Result<
     if planes.len() != prep.header.components.len() || planes.iter().any(|p| p.samples().len() < pixels) {
         return Err(DecodeError::Invalid("decoder returned fewer samples than the frame needs".into()));
     }
-    // Hayro always adds 2^(p-1); take it off again for signed components.
-    let offsets: Vec<f32> = prep
+    // Hayro's DC level shift, 2^(p-1), is added here (it was told not to); signed components
+    // take it off again, as when hayro added it: (s + 2^(p-1)) - 2^(p-1), in f32.
+    let shifts: Vec<(f32, f32)> = prep
         .header
         .components
         .iter()
-        .map(|c| if c.signed { (1u32 << (c.precision - 1)) as f32 } else { 0.0 })
+        .map(|c| {
+            let shift = (1u32 << (c.precision - 1)) as f32;
+            (shift, if c.signed { shift } else { 0.0 })
+        })
         .collect();
     let planes: Vec<&[f32]> = planes.iter().map(|p| p.samples()).collect();
     // Hayro spreads subsampled components over the full image grid (each sample repeated
@@ -76,9 +90,9 @@ fn decode(codestream: &[u8], info: &FrameInfo, high_throughput: bool) -> Result<
     if steps.iter().all(|&s| s == (1, 1)) {
         if let Some(r) = prep::pack_rows(info, &prep, |c, y, row| {
             let (lo, hi) = bounds[c];
-            let off = offsets[c];
+            let (shift, unshift) = shifts[c];
             for (d, &s) in row.iter_mut().zip(&planes[c][y * w..(y + 1) * w]) {
-                *d = prep::round_clamped(s - off, lo, hi);
+                *d = prep::round_clamped((s + shift) - unshift, lo, hi);
             }
         }) {
             return r;
@@ -87,7 +101,8 @@ fn decode(codestream: &[u8], info: &FrameInfo, high_throughput: bool) -> Result<
     prep::pack(info, &prep, |c, cx, cy| {
         let (dx, dy) = steps[c];
         // Rounds as `round() as i32` (saturating, NaN to 0); pack clamps to the SIZ range.
-        prep::round_to_i32(planes[c][cy * dy * w + cx * dx] - offsets[c])
+        let (shift, unshift) = shifts[c];
+        prep::round_to_i32((planes[c][cy * dy * w + cx * dx] + shift) - unshift)
     })
 }
 

@@ -2,6 +2,7 @@
 //
 //   const pool = await DecoderPool.create({ wasmUrl, workerUrl });
 //   const img = await pool.decode(bytes, { priority: Priority.Visible, signal });
+//   const thumb = await pool.decode(bytes, { scale: 3 });   // 1/8 size, for thumbnails
 //   const all = await pool.decodeFrames(bytes, { priority: Priority.Visible });   // multi-frame, in parallel
 //
 // Scheduling: a single queue ordered by priority (lower number first), then by submission order.
@@ -36,6 +37,14 @@ export interface DecodeOptions {
   /** Decode only frames first..first+count of a multi-frame instance (count 0: to the end). */
   first?: number;
   count?: number;
+  /**
+   * Decode at 1/2^scale size in each direction (0, the default, is full size): rows and columns
+   * become ceil(fullRows / 2^scale) and ceil(fullColumns / 2^scale). JPEG baseline/extended
+   * uses its own reduced decode (much cheaper at 1/8); other syntaxes decode in full and are
+   * box-averaged in the worker. The result's `scale`, `fullRows` and `fullColumns` are set.
+   * When deduplicating, put the scale in `key`: a same-key job returns the first job's result.
+   */
+  scale?: number;
   /**
    * Deduplication key (for example `${study}/${series}/${instance}`). A second decode() with the
    * same key while the first is queued or running returns the first promise; a higher priority
@@ -77,6 +86,7 @@ interface Job {
   bytes: ArrayBuffer;
   first: number;
   count: number;
+  scale: number;
   key?: string;
   t0: number;
   resolve(v: any): void;
@@ -175,7 +185,7 @@ export class DecoderPool {
     for (let first = 0; first < p.frames; first += per) {
       const last = first + per >= p.frames;
       // Every job but the last gets a copy; the last takes the caller's buffer (unless opts.copy).
-      const job = this.decode(u8, { priority: opts.priority, signal: opts.signal, copy: !last || opts.copy, first, count: Math.min(per, p.frames - first) });
+      const job = this.decode(u8, { priority: opts.priority, signal: opts.signal, copy: !last || opts.copy, first, count: Math.min(per, p.frames - first), scale: opts.scale });
       if (opts.onChunk) void job.then(opts.onChunk, () => {});
       jobs.push(job);
     }
@@ -236,6 +246,7 @@ export class DecoderPool {
       bytes: buf,
       first: opts.first ?? 0,
       count: opts.count ?? 0,
+      scale: opts.scale ?? 0,
       key: opts.key,
       t0: performance.now(),
       settled: false,
@@ -291,7 +302,7 @@ export class DecoderPool {
       slot.job = job;
       const { bytes } = job;
       job.bytes = new ArrayBuffer(0);
-      slot.worker.postMessage({ type: job.kind, id: job.id, bytes, first: job.first, count: job.count }, [bytes]);
+      slot.worker.postMessage({ type: job.kind, id: job.id, bytes, first: job.first, count: job.count, scale: job.scale }, [bytes]);
     }
     this.emit();
   }

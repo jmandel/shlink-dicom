@@ -11,11 +11,15 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod encaps;
+mod infer;
 mod parse;
 mod pixel;
 mod scale;
 
 use std::fmt;
+
+pub use infer::Inference;
+use infer::{CodestreamInfo, Layout};
 
 use parse::{Attributes, PixelValue, Syntax, TS_DEFLATED_LE, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_IMPLICIT_LE};
 use shl_codec_common::{scaled_extent, ColorOut, DecodeError, DecodeFn, DecodeScaledFn, DecodedFrame, FrameInfo, Photometric};
@@ -101,6 +105,10 @@ pub struct Canonical {
     pub transfer_syntax: String,
     /// frames × rows × columns × samples, little-endian, [`Canonical::bytes_per_sample`] bytes each.
     pub data: Vec<u8>,
+    /// Attributes that were missing or impossible and were filled in from other evidence
+    /// (the codestream header, the pixel data length, or which planar layout is smoother).
+    /// Empty for a well-formed file.
+    pub inferred: Vec<Inference>,
 }
 
 impl Canonical {
@@ -170,18 +178,20 @@ fn decode_inner(
     let attrs = parse::read_dataset(&prepared.dataset, prepared.syntax)?;
     let little = ts != TS_EXPLICIT_BE;
 
-    if attrs.pixel.is_none() && attrs.float_pixel_data {
-        return Err(Error::Unsupported("float pixel data not supported (Float or Double Float Pixel Data)".into()));
-    }
-    let img = Image::from_attributes(&attrs, little, &ts)?;
     let Some(pixel) = attrs.pixel.as_ref() else {
+        if attrs.float_pixel_data {
+            return Err(Error::Unsupported("float pixel data not supported (Float or Double Float Pixel Data)".into()));
+        }
         return Err(Error::Invalid("no Pixel Data (7FE0,0010)".into()));
     };
+    let frames_n = number_of_frames(&attrs)?;
 
     if native {
         let PixelValue::Native { data, vr } = pixel else {
             return Err(Error::Invalid(format!("undefined-length Pixel Data in native transfer syntax {ts}")));
         };
+        let hints = Hints { native_len: Some(data.len()), codestream: None };
+        let img = Image::from_attributes(&attrs, little, &ts, frames_n, &hints)?;
         let full = decode_native(&img, data, *vr, little)?;
         return match scaled {
             None => Ok(full),
@@ -194,21 +204,48 @@ fn decode_inner(
     };
     // Encapsulated pixel data stored with a defined length: read the items inside it.
     let reparsed;
-    let (basic_offsets, fragments) = match pixel {
-        PixelValue::Encapsulated { basic_offsets, fragments } => (*basic_offsets, fragments),
+    let (basic_offsets, fragments, note) = match pixel {
+        PixelValue::Encapsulated { basic_offsets, fragments, note } => (*basic_offsets, fragments, note),
         PixelValue::Native { data, .. } => {
             reparsed = parse::parse_items(data, little)?;
             match &reparsed {
-                PixelValue::Encapsulated { basic_offsets, fragments } => (*basic_offsets, fragments),
+                PixelValue::Encapsulated { basic_offsets, fragments, note } => (*basic_offsets, fragments, note),
                 PixelValue::Native { .. } => return Err(Error::Invalid("Pixel Data is not encapsulated".into())),
             }
         }
     };
     let extended = attrs.extended_offsets.zip(attrs.extended_lengths);
-    let frames = encaps::split_frames(basic_offsets, fragments, extended, img.frames, little)?;
+    let frames = encaps::split_frames(basic_offsets, fragments, extended, frames_n, little)?;
+    let hints = Hints { native_len: None, codestream: frames.first().and_then(|f| infer::peek_codestream(&ts, f)) };
+    let mut img = Image::from_attributes(&attrs, little, &ts, frames_n, &hints)?;
+    if let Some(n) = note {
+        img.notes.push(Inference::new("PixelData", "tolerated", n.clone()));
+    }
     match scaled {
         None => decode_encapsulated(&img, &frames, codec),
         Some((s, table)) => decode_encapsulated_scaled(&img, &frames, codec, table(&ts), s),
+    }
+}
+
+/// Evidence for filling in missing attributes, gathered before the Image Pixel module is read.
+struct Hints {
+    /// Native: the length of the Pixel Data value.
+    native_len: Option<usize>,
+    /// Encapsulated: what the first frame's codestream header says.
+    codestream: Option<CodestreamInfo>,
+}
+
+/// Number of Frames: missing, empty or 0 means 1 (pydicom). A multi-valued IS uses its first value.
+fn number_of_frames(a: &Attributes<'_>) -> Result<usize, Error> {
+    let Some(s) = a.number_of_frames.map(parse::trim_text).filter(|s| !s.is_empty()) else {
+        return Ok(1);
+    };
+    let first = s.split('\\').next().unwrap_or("").trim();
+    let n: i64 = first.parse().map_err(|_| Error::Invalid(format!("Number of Frames {s:?}")))?;
+    match n {
+        0 => Ok(1),
+        n if n < 0 => Err(Error::Invalid(format!("Number of Frames {n}"))),
+        n => usize::try_from(n).map_err(|_| Error::Invalid(format!("Number of Frames {n}"))),
     }
 }
 
@@ -224,8 +261,12 @@ struct Image {
     photometric: Photometric,
     photometric_str: String,
     planar_configuration: u16,
+    /// Native 3-sample data with no usable Planar Configuration: decided from the pixels.
+    planar_unknown: bool,
     frames: usize,
     transfer_syntax: String,
+    /// Inferences made so far.
+    notes: Vec<Inference>,
 }
 
 fn us(v: Option<&[u8]>, little: bool, name: &str) -> Result<Option<u16>, Error> {
@@ -237,79 +278,262 @@ fn us(v: Option<&[u8]>, little: bool, name: &str) -> Result<Option<u16>, Error> 
     }
 }
 
-fn required(v: Option<u16>, name: &str) -> Result<u16, Error> {
-    v.ok_or_else(|| Error::Invalid(format!("missing required element {name}")))
-}
 
 impl Image {
-    fn from_attributes(a: &Attributes<'_>, little: bool, ts: &str) -> Result<Self, Error> {
-        let bits_allocated = required(us(a.bits_allocated, little, "Bits Allocated")?, "(0028,0100) Bits Allocated")?;
-        if bits_allocated == 0 || bits_allocated > 64 || (bits_allocated != 1 && bits_allocated % 8 != 0) {
-            return Err(Error::Invalid(format!("Bits Allocated {bits_allocated}")));
-        }
-        let bits_stored = required(us(a.bits_stored, little, "Bits Stored")?, "(0028,0101) Bits Stored")?;
-        if bits_stored == 0 || bits_stored > bits_allocated {
-            return Err(Error::Invalid(format!("Bits Stored {bits_stored} with Bits Allocated {bits_allocated}")));
-        }
-        let columns = required(us(a.columns, little, "Columns")?, "(0028,0011) Columns")?;
-        let rows = required(us(a.rows, little, "Rows")?, "(0028,0010) Rows")?;
-        if rows == 0 || columns == 0 {
-            return Err(Error::Invalid(format!("{rows} rows × {columns} columns")));
-        }
-        let frames = match a.number_of_frames.map(parse::trim_text) {
-            None => 1,
-            Some(s) if s.is_empty() => 1,
-            Some(s) => {
-                // IS; pydicom treats 0 as 1. A multi-valued IS uses its first value.
-                let first = s.split('\\').next().unwrap_or("").trim();
-                let n: i64 = first.parse().map_err(|_| Error::Invalid(format!("Number of Frames {s:?}")))?;
-                match n {
-                    0 => 1,
-                    n if n < 0 => return Err(Error::Invalid(format!("Number of Frames {n}"))),
-                    n => usize::try_from(n).map_err(|_| Error::Invalid(format!("Number of Frames {n}")))?,
-                }
+    /// Read the Image Pixel module. Where an attribute is missing or impossible and the evidence
+    /// in `hints` settles it, the value is filled in and recorded in `notes`; otherwise the file
+    /// is refused, as pydicom refuses it.
+    fn from_attributes(a: &Attributes<'_>, little: bool, ts: &str, frames: usize, hints: &Hints) -> Result<Self, Error> {
+        let mut notes = Vec::new();
+        let cs = hints.codestream;
+        let native = hints.native_len.is_some();
+
+        // Samples per Pixel and Photometric Interpretation: each can stand in for the other.
+        let pm_text = a.photometric.map(parse::trim_text).unwrap_or_default();
+        let pm_declared = (!pm_text.is_empty()).then(|| Photometric::parse(&pm_text));
+        let samples_per_pixel = match us(a.samples_per_pixel, little, "Samples per Pixel")? {
+            Some(v) => v,
+            None => {
+                let (v, why) = match (cs.filter(|c| matches!(c.components, 1 | 3)), pm_declared) {
+                    (Some(c), _) => (c.components, format!("missing; the codestream {} has {} component(s)", c.source, c.components)),
+                    (
+                        None,
+                        Some(
+                            Photometric::Rgb
+                            | Photometric::YbrFull
+                            | Photometric::YbrFull422
+                            | Photometric::YbrPartial420
+                            | Photometric::YbrPartial422
+                            | Photometric::YbrIct
+                            | Photometric::YbrRct,
+                        ),
+                    ) => (3, format!("missing; Photometric Interpretation {pm_text} has 3 samples")),
+                    (None, Some(Photometric::Monochrome1 | Photometric::Monochrome2 | Photometric::PaletteColor)) => {
+                        (1, format!("missing; Photometric Interpretation {pm_text} has 1 sample"))
+                    }
+                    _ => (1, "missing; 1 assumed, as GDCM does".to_string()),
+                };
+                notes.push(Inference::new("SamplesPerPixel", v, why));
+                v
             }
         };
-        let photometric_str = a.photometric.map(parse::trim_text).unwrap_or_default();
-        if photometric_str.is_empty() {
-            return Err(Error::Invalid("missing required element (0028,0004) Photometric Interpretation".into()));
-        }
-        let pixel_representation =
-            required(us(a.pixel_representation, little, "Pixel Representation")?, "(0028,0103) Pixel Representation")?;
-        if pixel_representation > 1 {
-            return Err(Error::Invalid(format!("Pixel Representation {pixel_representation}")));
-        }
-        // Missing Samples per Pixel means 1, as GDCM assumes (pydicom refuses).
-        let samples_per_pixel = us(a.samples_per_pixel, little, "Samples per Pixel")?.unwrap_or(1);
         if samples_per_pixel != 1 && samples_per_pixel != 3 {
             return Err(Error::Invalid(format!("Samples per Pixel {samples_per_pixel}")));
         }
-        let planar = us(a.planar_configuration, little, "Planar Configuration")?;
-        let planar_configuration = if samples_per_pixel == 3 {
-            let p = required(planar, "(0028,0006) Planar Configuration")?;
-            if p > 1 {
-                return Err(Error::Invalid(format!("Planar Configuration {p}")));
+        let photometric_str = match pm_declared {
+            None => {
+                let v = if samples_per_pixel == 3 { "RGB" } else { "MONOCHROME2" };
+                notes.push(Inference::new(
+                    "PhotometricInterpretation",
+                    v,
+                    format!("missing; {samples_per_pixel} sample(s) per pixel"),
+                ));
+                v.to_string()
             }
-            p
-        } else {
-            0
+            Some(Photometric::Other) if samples_per_pixel == 1 => {
+                notes.push(Inference::new(
+                    "PhotometricInterpretation",
+                    "MONOCHROME2",
+                    format!("{pm_text:?} is not a defined term; 1 sample per pixel"),
+                ));
+                "MONOCHROME2".to_string()
+            }
+            Some(_) => pm_text,
         };
-        if !matches!(bits_allocated, 1 | 8 | 16 | 32) {
-            return Err(Error::Unsupported(format!("Bits Allocated {bits_allocated}")));
+        let photometric = Photometric::parse(&photometric_str);
+
+        // Bits Allocated: for encapsulated data an impossible or missing value is replaced by
+        // the container for the codestream's precision (e.g. GDCM's FUJI file says 0xFFFF).
+        let ba_attr = us(a.bits_allocated, little, "Bits Allocated")?;
+        let from_codestream = cs.and_then(|c| infer::container_bits(c.precision).map(|b| (b, c)));
+        let mut bits_allocated = match (ba_attr, from_codestream) {
+            (Some(b @ (1 | 8 | 16 | 32)), _) => b,
+            (b, Some((v, c))) => {
+                let what = b.map_or("missing".to_string(), |b| format!("{b} is not a valid value"));
+                notes.push(Inference::new(
+                    "BitsAllocated",
+                    v,
+                    format!("{what}; the codestream {} has {}-bit samples", c.source, c.precision),
+                ));
+                v
+            }
+            (Some(b), None) if b == 0 || b > 64 || (b != 1 && b % 8 != 0) => {
+                return Err(Error::Invalid(format!("Bits Allocated {b}")))
+            }
+            (Some(b), None) => return Err(Error::Unsupported(format!("Bits Allocated {b}"))),
+            (None, None) => 0, // native: from the data length below, once the size is known
+        };
+
+        // Rows and Columns: from the codestream, or (native, one of them known) from the length.
+        let rows_attr = us(a.rows, little, "Rows")?.filter(|v| *v > 0).map(u32::from);
+        let cols_attr = us(a.columns, little, "Columns")?.filter(|v| *v > 0).map(u32::from);
+        let (rows, columns) = match (rows_attr, cols_attr, cs) {
+            (Some(r), Some(c), _) => (r, c),
+            (r, c, Some(info)) if info.rows > 0 && info.columns > 0 => {
+                if r.is_none() {
+                    notes.push(Inference::new("Rows", info.rows, format!("missing or 0; the codestream {} says {}", info.source, info.rows)));
+                }
+                if c.is_none() {
+                    notes.push(Inference::new(
+                        "Columns",
+                        info.columns,
+                        format!("missing or 0; the codestream {} says {}", info.source, info.columns),
+                    ));
+                }
+                (r.unwrap_or(info.rows), c.unwrap_or(info.columns))
+            }
+            (Some(r), None, None) | (None, Some(r), None) if native && bits_allocated >= 8 => {
+                let len = hints.native_len.unwrap_or(0);
+                let per_line = usize::from(samples_per_pixel) * usize::from(bits_allocated / 8) * frames * r as usize;
+                let other = (per_line > 0).then(|| len / per_line).filter(|n| *n > 0 && len - n * per_line <= 1);
+                let Some(other) = other.and_then(|n| u32::try_from(n).ok()) else {
+                    return Err(Error::Invalid("missing required element Rows or Columns".into()));
+                };
+                let name = if rows_attr.is_none() { "Rows" } else { "Columns" };
+                notes.push(Inference::new(name, other, format!("missing; the only value that fits the {len}-byte Pixel Data")));
+                if rows_attr.is_none() {
+                    (other, r)
+                } else {
+                    (r, other)
+                }
+            }
+            _ => return Err(Error::Invalid("missing required element (0028,0010) Rows or (0028,0011) Columns".into())),
+        };
+
+        if bits_allocated == 0 {
+            // Native and missing: bytes per sample from the data length, if it is exactly 1, 2 or 4.
+            let len = hints.native_len.unwrap_or(0);
+            let samples = (rows as usize)
+                .saturating_mul(columns as usize)
+                .saturating_mul(usize::from(samples_per_pixel))
+                .saturating_mul(frames);
+            let bytes = (samples > 0).then(|| len / samples).filter(|b| matches!(b, 1 | 2 | 4) && len - b * samples <= 1);
+            let Some(b) = bytes else {
+                return Err(Error::Invalid("missing required element (0028,0100) Bits Allocated".into()));
+            };
+            bits_allocated = (b * 8) as u16;
+            notes.push(Inference::new(
+                "BitsAllocated",
+                bits_allocated,
+                format!("missing; the {len}-byte Pixel Data holds {b} byte(s) per sample"),
+            ));
         }
+
+        // Bits Stored: missing, 0 or above Bits Allocated means "all the bits there are", or
+        // the codestream precision when it fits.
+        let bits_stored = match us(a.bits_stored, little, "Bits Stored")? {
+            Some(b) if b >= 1 && b <= bits_allocated => b,
+            b => {
+                let v = cs.map(|c| c.precision).filter(|p| (1..=bits_allocated).contains(p)).unwrap_or(bits_allocated);
+                let what = match b {
+                    None => "missing".to_string(),
+                    Some(b) => format!("{b} is impossible with Bits Allocated {bits_allocated}"),
+                };
+                let source = match cs {
+                    Some(c) if c.precision == v => format!("the codestream {} precision", c.source),
+                    _ => "Bits Allocated".to_string(),
+                };
+                notes.push(Inference::new("BitsStored", v, format!("{what}; {source} used")));
+                v
+            }
+        };
+
+        let pixel_representation = match us(a.pixel_representation, little, "Pixel Representation")? {
+            Some(v @ (0 | 1)) => v,
+            Some(v) => return Err(Error::Invalid(format!("Pixel Representation {v}"))),
+            None => {
+                let (v, why) = match cs.and_then(|c| c.signed) {
+                    Some(sg) => (u16::from(sg), "missing; the codestream SIZ says"),
+                    None => (0, "missing; unsigned assumed, as GDCM and dcmtk do"),
+                };
+                notes.push(Inference::new("PixelRepresentation", v, why));
+                v
+            }
+        };
+
+        // Planar Configuration matters only for native 3-sample data. When it is missing or
+        // impossible there, the decoder decides from the pixels (`decode_native`).
+        let mut planar_unknown = false;
+        let planar_configuration = match us(a.planar_configuration, little, "Planar Configuration")? {
+            _ if samples_per_pixel != 3 => 0,
+            Some(v @ (0 | 1)) => v,
+            declared => {
+                let what = declared.map_or("missing".to_string(), |v| format!("{v} is not a valid value"));
+                if !native {
+                    notes.push(Inference::new(
+                        "PlanarConfiguration",
+                        0,
+                        format!("{what}; not used for encapsulated transfer syntaxes (the codec decides the layout)"),
+                    ));
+                } else if photometric == Photometric::YbrFull422 || bits_allocated == 1 {
+                    notes.push(Inference::new("PlanarConfiguration", 0, format!("{what}; {photometric_str} is always interleaved")));
+                } else if declared.is_some() {
+                    return Err(Error::Invalid(format!("Planar Configuration {}", declared.unwrap_or(0))));
+                } else {
+                    planar_unknown = true;
+                }
+                0
+            }
+        };
+
         Ok(Self {
-            rows: u32::from(rows),
-            columns: u32::from(columns),
+            rows,
+            columns,
             samples_per_pixel,
             bits_allocated,
             bits_stored,
             pixel_representation,
-            photometric: Photometric::parse(&photometric_str),
+            photometric,
             photometric_str,
             planar_configuration,
+            planar_unknown,
             frames,
             transfer_syntax: ts.to_string(),
+            notes,
         })
+    }
+
+    /// Decide the layout of native 3-sample data with no Planar Configuration from its first
+    /// frame (`data`: little-endian samples). See `infer::planar_layout`.
+    fn with_planar_from_pixels(&self, data: &[u8]) -> Result<Self, Error> {
+        let bps = self.bps();
+        let frame_bytes = self.frame_samples()?.saturating_mul(bps);
+        let frame = data.get(..frame_bytes).unwrap_or(data);
+        let layout = infer::planar_layout(
+            frame,
+            self.rows as usize,
+            self.columns as usize,
+            bps,
+            self.bits_stored,
+            self.pixel_representation == 1,
+        );
+        let (pc, why) = match layout {
+            Layout::Either => (0, "missing; both layouts give the same pixels".to_string()),
+            Layout::Clear(pc, i, p) => (
+                pc,
+                format!(
+                    "missing; the {} reading is clearly smoother (mean neighbour difference {i:.2} interleaved, {p:.2} planar)",
+                    if pc == 1 { "planar" } else { "interleaved" }
+                ),
+            ),
+            Layout::Ambiguous(i, p) if i == 0.0 && p == 0.0 => {
+                return Err(Error::Invalid(format!(
+                    "missing required element (0028,0006) Planar Configuration, and a {}×{} image is too small to tell the layout",
+                    self.columns, self.rows
+                )))
+            }
+            Layout::Ambiguous(i, p) => {
+                return Err(Error::Invalid(format!(
+                    "missing required element (0028,0006) Planar Configuration, and neither layout is clearly smoother \
+                     (mean neighbour difference {i:.2} interleaved, {p:.2} planar)"
+                )))
+            }
+        };
+        let mut img = self.clone();
+        img.planar_configuration = pc;
+        img.planar_unknown = false;
+        img.notes.push(Inference::new("PlanarConfiguration", pc, why));
+        Ok(img)
     }
 
     fn bps(&self) -> usize {
@@ -355,6 +579,7 @@ impl Image {
             photometric,
             transfer_syntax: self.transfer_syntax.clone(),
             data,
+            inferred: self.notes.clone(),
         })
     }
 }
@@ -430,6 +655,13 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
         photometric = Photometric::YbrFull;
     }
 
+    let resolved;
+    let img = if img.planar_unknown {
+        resolved = img.with_planar_from_pixels(&data)?;
+        &resolved
+    } else {
+        img
+    };
     if img.samples_per_pixel > 1 && img.planar_configuration == 1 {
         let frame_bytes = img.frame_samples()?.saturating_mul(bps);
         if frame_bytes > 0 {

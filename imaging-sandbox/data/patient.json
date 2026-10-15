@@ -1,0 +1,11 @@
+{
+  "_note": "Morgan Rivera is a fictional patient. The sandbox writes this identity into the DICOM headers of its copy of the sample studies, which are Josh Mandel's published, anonymized studies. The sources carry no sex, so none is set.",
+  "id": "morgan-rivera",
+  "family": "Rivera",
+  "given": [
+    "Morgan"
+  ],
+  "dicomName": "RIVERA^MORGAN",
+  "birthDate": "1979-03-14",
+  "mrn": "SBX4417302"
+}
