@@ -969,6 +969,36 @@ async function flowDark(dev) {
   }
 }
 
+// ------------------------------------------------------------------ the stable sample address
+
+async function flowSample(dev) {
+  const P = `sample/${dev}`;
+  const S = await sample();
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(`${BASE}/sample`);
+  check(`${P}: /sample lands in the viewer`, /\/view#shlink:\//.test(page.url()), page.url().slice(0, 80));
+  await page.waitForSelector("#screen-overview:not(.hidden)", { timeout: 30000 });
+  const n = await page.locator(".study-card").count();
+  check(`${P}: with the sample open`, n === S.totals.studies.length, `${n} studies`);
+  await page.goto(`${BASE}/sample/passcode`);
+  await page.waitForSelector("#screen-passcode:not(.hidden)", { timeout: 30000 });
+  check(`${P}: /sample/passcode asks for the passcode`, /\/view#shlink:\//.test(page.url()));
+  await page.goto(`${BASE}/view`);
+  await page.waitForSelector("#sample-row:not(.hidden)", { timeout: 20000 });
+  await layout(page, `${P} empty /view`, dev);
+  await shot(page, `${dev}-view-empty`);
+  await page.click("#btn-sample");
+  await page.waitForSelector("#screen-overview:not(.hidden)", { timeout: 30000 });
+  const m = await page.locator(".study-card").count();
+  check(`${P}: the empty /view's sample button opens the sample`, m === S.totals.studies.length, `${m} studies`);
+  await page.goto(`${BASE}/`);
+  await page.waitForFunction(() => !document.getElementById("sample-public")?.hasAttribute("aria-disabled"), null, { timeout: 20000 });
+  const href = await page.getAttribute("#sample-public", "href");
+  check(`${P}: the landing page's sample button uses /sample`, href === `${new URL(BASE).origin}/sample`, href);
+  await noErrors(P, errors);
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 for (const dev of Object.keys(DEVICES)) {
@@ -980,6 +1010,7 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "reshare") await flowReshare(dev);
     if (files && (!only || only === "manage")) await flowManage(dev, files);
     if (!only || only === "slide") await flowSlide(dev);
+    if (!only || only === "sample") await flowSample(dev);
     if (!only || only === "dark") await flowDark(dev);
     if (!only || only === "remember") await flowRemember(dev);
     if (!only || only === "network") {

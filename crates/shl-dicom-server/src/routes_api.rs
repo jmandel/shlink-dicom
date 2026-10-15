@@ -1205,3 +1205,33 @@ fn load_link_resource(
         conn, origin, row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8,
     )
 }
+
+/// `GET /sample` and `GET /sample/passcode`: 302 to the current sample in the viewer. The sample's
+/// link changes whenever it is re-seeded; this address doesn't.
+pub async fn sample_redirect(state: &AppState, headers: &HeaderMap, passcode: bool) -> Response {
+    let link = state
+        .demo_shares
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|d| d.passcode_hint.is_some() == passcode)
+        .and_then(|d| d.shlink_uri.find("shlink:/").map(|i| d.shlink_uri[i..].to_string()));
+    let Some(link) = link else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "this server has no sample" }))).into_response();
+    };
+    let origin = request_origin(headers);
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, format!("{}/view#{link}", origin.trim_end_matches('/')))
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::empty())
+        .unwrap()
+}
+
+pub async fn get_sample(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    sample_redirect(&state, &headers, false).await
+}
+
+pub async fn get_sample_passcode(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    sample_redirect(&state, &headers, true).await
+}

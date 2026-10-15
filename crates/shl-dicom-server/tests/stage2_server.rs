@@ -968,3 +968,35 @@ async fn test_chunked_resumable_upload_and_disk_range_reads() {
     assert_eq!(all.status(), StatusCode::OK);
     assert_eq!(all.bytes().await.unwrap().as_ref(), &data[..]);
 }
+
+#[tokio::test]
+async fn test_sample_redirects() {
+    let dir = temp_data_dir("sample_redirect");
+    let state = AppState::new(&dir).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+
+    // No sample yet.
+    assert_eq!(client.get(format!("{base}/sample")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    let (sid, _) = state.create_share(true, None).unwrap();
+    let share = state.build_share_resource(&sid, &base).unwrap();
+    for (uri, hint) in [("http://seeded.example/#shlink:/PUBLIC", None), ("http://seeded.example/#shlink:/PASSCODE", Some("1234".to_string()))] {
+        state.demo_shares.lock().unwrap().push(shl_dicom_server::state::DemoShareInfo {
+            id: sid.clone(),
+            title: "Sample".into(),
+            description: String::new(),
+            shlink_uri: uri.into(),
+            passcode_hint: hint,
+            read_only: true,
+            share: share.clone(),
+        });
+    }
+    for (path, link) in [("/sample", "shlink:/PUBLIC"), ("/sample/passcode", "shlink:/PASSCODE")] {
+        let r = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::FOUND);
+        assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
+        let loc = r.headers()[header::LOCATION].to_str().unwrap();
+        assert!(loc.ends_with(&format!("/view#{link}")), "{loc}");
+    }
+}

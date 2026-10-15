@@ -24,12 +24,15 @@ $<HTMLInputElement>("input-link").addEventListener("input", (e) => (e.target as 
     const pass = samples.find((s) => s.passcodeHint && s.shlink);
     if (pub) {
       const a = $<HTMLAnchorElement>("sample-public");
-      a.href = viewerUrl(cfg, pub.shlink);
+      // The server's /sample keeps working after the sample is re-seeded (its link changes then),
+      // so a copied address stays good. Used when the viewer is the server's own.
+      const own = cfg.viewerPrefix.replace(/\/+$/, "") === `${cfg.apiBase}/view`;
+      a.href = own ? `${cfg.apiBase}/sample` : viewerUrl(cfg, pub.shlink);
       a.removeAttribute("aria-disabled");
     } else throw new Error("no public sample");
     if (pass) {
       const a = $<HTMLAnchorElement>("sample-passcode");
-      a.href = viewerUrl(cfg, pass.shlink);
+      a.href = cfg.viewerPrefix.replace(/\/+$/, "") === `${cfg.apiBase}/view` ? `${cfg.apiBase}/sample/passcode` : viewerUrl(cfg, pass.shlink);
       a.textContent = `Try a passcode link (the passcode is ${pass.passcodeHint})`;
       a.classList.remove("hidden");
     }

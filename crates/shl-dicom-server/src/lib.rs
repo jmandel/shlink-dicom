@@ -94,6 +94,9 @@ pub fn build_app_router(state: AppState) -> Router {
         .route("/api/shares/{sid}/access", get(routes_api::get_share_access))
         .route("/api/shares/{sid}/events", get(routes_api::get_share_events))
         .route("/api/demo-shares", get(routes_api::get_demo_shares))
+        // A stable address for the current sample, whatever its link is after a re-seed.
+        .route("/sample", get(routes_api::get_sample))
+        .route("/sample/passcode", get(routes_api::get_sample_passcode))
         // Receiver-facing SHL & Capability Range Routes
         .route("/shl/{lid}", post(routes_shl::post_shl_manifest))
         .route("/shl/{lid}/{tail}", get(routes_shl::get_shl_file))
