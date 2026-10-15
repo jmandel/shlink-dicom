@@ -13,6 +13,7 @@
 //   uv run --project codec-corpus python web/checks/objects/expect.py > /tmp/objects-expect.json
 //   bun web/checks/objects-fixtures.ts http://localhost:3350
 //   BASE=http://localhost:3350 node web/checks/display-checks.mjs [--only=case]
+import { pickMeasure } from "./ui.mjs";
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -194,7 +195,7 @@ async function geometry() {
         const { context, page } = await show("calibration", f);
         const r = await page.evaluate(() => window.__viewHooks.measureLength(0, 0, 100, 0));
         // And with the Length tool, by mouse: the result and its calibration source appear on the image.
-        await page.selectOption("#measure-tool", "length");
+        await pickMeasure(page, "length");
         const box = await page.locator("#stage").boundingBox();
         await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5);
         await page.mouse.down();

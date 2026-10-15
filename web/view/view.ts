@@ -89,6 +89,7 @@ function show(screen: Screen) {
   $("btn-report").classList.toggle("hidden", !(inViewer && share && studyReports().length > 0));
   if (!inViewer) closeReports();
   $("btn-trust").classList.toggle("hidden", !(share && (screen === "overview" || inViewer)));
+  $("btn-more").classList.toggle("hidden", !(share && (screen === "overview" || inViewer)));
   if (screen !== "viewer") document.title = share ? "Shared imaging" : document.title;
 }
 
@@ -978,7 +979,11 @@ function renderOverview() {
     thumb.width = thumb.height = Math.round(112 * dpr);
     const text = el("div", "study-text");
     text.append(el("p", "study-title", studyTitle(st)));
-    const sub = [st.started ? formatDate(st.started) : null, st.modalities.map(modalityName).join(", ")].filter(Boolean).join(" · ");
+    // Two studies on one day: add each one's time (as recorded, in the study's own zone).
+    const day = st.started ? formatDate(st.started) : null;
+    const sameDay = day !== null && idx.studies.some((x) => x !== st && x.started && formatDate(x.started) === day);
+    const time = sameDay ? /T(\d\d:\d\d)/.exec(st.started!)?.[1] ?? (studyTimes.get(st.id) || undefined) : undefined;
+    const sub = [day && (time ? `${day}, ${time}` : day), st.modalities.map(modalityName).join(", ")].filter(Boolean).join(" · ");
     if (sub) text.append(el("p", "study-sub", sub));
     text.append(el("p", "study-tech", `From the imaging system · ${plural(st.numberOfSeries, "series", "series")} · ${kindCounts(st)} · ${formatBytes(st.bytes)}`));
     for (const n of st.notes) text.append(el("p", "study-tech", n));
@@ -1028,6 +1033,7 @@ function renderOverview() {
   }
   mark("overview");
   void learnAccessions();
+  void learnStudyTimes();
 }
 
 /**
@@ -1051,6 +1057,32 @@ async function learnAccessions() {
     }),
   );
   if (sig() !== before && !$("screen-overview").classList.contains("hidden")) renderOverview();
+}
+
+/** Study Time (HH:MM) read from an image header, for studies the Bundle dates without a time. */
+const studyTimes = new Map<string, string>();
+
+/**
+ * Studies that share a date tell apart by their time: when the Bundle gives only the date, read
+ * Study Time from each such study's first header (64 KiB) and show the overview again.
+ */
+async function learnStudyTimes() {
+  const idx = share!.index;
+  const day = (st: StudyEntry) => (st.started ? formatDate(st.started) : null);
+  const need = idx.studies.filter((st) => st.series.length && st.started && !/T\d\d:\d\d/.test(st.started) && !studyTimes.has(st.id) && idx.studies.some((x) => x !== st && day(x) === day(st)));
+  if (!need.length) return;
+  await Promise.all(
+    need.map(async (st) => {
+      try {
+        const bytes = await readInstanceBytes(share!, st.series[0], 0, 0, RECORD_PLAINTEXT);
+        const t = parseDicomSync(bytes, { untilPixelData: true }).ds.str(T.StudyTime);
+        studyTimes.set(st.id, t && /^\d{4}/.test(t) ? `${t.slice(0, 2)}:${t.slice(2, 4)}` : "");
+      } catch {
+        studyTimes.set(st.id, "");
+      }
+    }),
+  );
+  if (!$("screen-overview").classList.contains("hidden")) renderOverview();
 }
 
 /** Instance counts by kind, e.g. "263 images · 1 report · 1 PDF". */
@@ -1559,6 +1591,8 @@ function showCursorValue(cx: number | null, cy = 0) {
 
 function updateHud(img?: DecodedImage) {
   const se = series();
+  // One image and one frame: nothing to step through.
+  $("toolbar").classList.toggle("single", sliceCount <= 1);
   const im = img ?? viewport?.image;
   $("hud-tl").textContent = `${se.description ?? modalityName(se.modality)}\n${se.modality ?? ""} · ${sliceIdx + 1}/${sliceCount}`;
   const wl = im?.float ? `W ${formatValue(ww)} L ${formatValue(wc)}` : `W ${Math.round(ww)} L ${Math.round(wc)}`;
@@ -1770,7 +1804,7 @@ function zoomAt(k: number, px: number, py: number) {
 function initialDisplay(img: DecodedImage, k: number) {
   const auto = displayPlan(img, k, headerNow(img), { kind: "auto" });
   seriesModel(auto.model);
-  presetId = auto.lut !== null ? `lut-${auto.lut}` : "auto";
+  presetId = initialPreset = auto.lut !== null ? `lut-${auto.lut}` : "auto";
   $<HTMLSelectElement>("preset").value = presetId;
   // With a VOI LUT, dragging starts from the full range; colour images have the identity.
   const w = auto.window ?? displayPlan(img, k, headerNow(img), { kind: "minmax" }).window ?? { center: 128, width: 256 };
@@ -1778,19 +1812,21 @@ function initialDisplay(img: DecodedImage, k: number) {
   autoWw = ww = w.width;
 }
 
-/** Reset: the first view of the image on screen (initialDisplay), at fit with no pan. */
+/** The display choice the series opened with (initialDisplay), for Reset. */
+let initialPreset = "auto";
+
+/** Reset: the series' first view (initialDisplay's choice and window), at fit with no pan. */
 function resetView() {
   zoom = 1;
   panX = 0;
   panY = 0;
-  if (mpr) {
-    wc = autoWc;
-    ww = autoWw;
-    showMpr(sliceIdx);
-  } else if (shown) {
-    initialDisplay(shown.img, shown.frame);
-    draw(shown.img, shown.frame);
-  } else viewport?.setView({ zoom, panX, panY });
+  presetId = initialPreset;
+  $<HTMLSelectElement>("preset").value = presetId;
+  wc = autoWc;
+  ww = autoWw;
+  if (mpr) showMpr(sliceIdx);
+  else if (shown) draw(shown.img, shown.frame);
+  else viewport?.setView({ zoom, panX, panY });
   updateHud();
 }
 
@@ -2161,6 +2197,104 @@ async function runOne(se: SeriesEntry, i: number) {
   }
 }
 
+// ------------------------------------------------------------------------------------- narrow screens
+
+/**
+ * The More sheet (narrow screens): the report, downloads with their sizes, and the encryption
+ * details, which wide screens show in the top bar.
+ */
+function openMoreSheet() {
+  const box = $("more-items");
+  box.textContent = "";
+  const inViewer = !$("screen-viewer").classList.contains("hidden");
+  $("more-title").textContent = inViewer && studyIdx >= 0 ? studyTitle(study()) : "Shared with you";
+  const item = (title: string, detail: string, run: () => void) => {
+    const b = el("button", "dl-option more-item");
+    b.type = "button";
+    b.append(el("strong", undefined, title), el("span", undefined, detail));
+    b.addEventListener("click", () => {
+      closeSheet();
+      run();
+    });
+    box.append(b);
+  };
+  const reps = inViewer ? studyReports() : [];
+  if (reps.length) item("Report", plural(reps.length, "report") + " from the clinical record", () => openReports(reps));
+  if (share) {
+    if (inViewer) {
+      const { def } = downloadChoices();
+      if (def) item(`Download ${def.id === "study" ? "study" : "everything shared"}`, `${formatBytes(def.bytes)} · ZIP with DICOMDIR`, () => downloadDefault());
+      item("Other downloads", "This series, this image, or everything shared, with their sizes", () => openDownloadSheet());
+    } else {
+      const studies = share.index.studies.filter((x) => x.series.length);
+      const n = exportSize({ kind: "all", studies });
+      if (studies.length)
+        item("Download everything shared", `${plural(studies.length, "study", "studies")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, () => {
+          openSheet("sheet-download");
+          $("dl-options").classList.add("hidden");
+          void runZip({ kind: "all", studies });
+        });
+    }
+    item("Encrypted · verified", "How this link protects the images, and what has been checked", () => openTrustSheet());
+  }
+  openSheet("sheet-more");
+}
+
+/** A choice list in a sheet, built from a select's options: picking one sets the select (its change handler does the rest). */
+function choiceSection(box: HTMLElement, title: string, sel: HTMLSelectElement, close: () => void) {
+  box.append(el("h3", "layers-h", title));
+  for (const o of Array.from(sel.options)) {
+    const b = el("button", "choice", o.textContent ?? "");
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(o.value === sel.value));
+    b.addEventListener("click", () => {
+      sel.value = o.value;
+      sel.dispatchEvent(new Event("change"));
+      close();
+    });
+    box.append(b);
+  }
+}
+
+/** Display choices (narrow screens): the window presets, including the file's own windows and LUTs, and the planes. */
+function openDisplaySheet() {
+  const box = $("display-items");
+  box.textContent = "";
+  if (!$("preset").classList.contains("hidden")) choiceSection(box, "Window", $<HTMLSelectElement>("preset"), closeSheet);
+  if (!$("view-plane").classList.contains("hidden")) choiceSection(box, "Plane", $<HTMLSelectElement>("view-plane"), closeSheet);
+  if (!$("btn-plane-opts").classList.contains("hidden")) {
+    const b = el("button", "choice", "Angle and slab…");
+    b.type = "button";
+    b.addEventListener("click", () => openPlaneSheet());
+    box.append(b);
+  }
+  openSheet("sheet-display");
+}
+
+function openMeasureSheet() {
+  const box = $("measure-items");
+  box.textContent = "";
+  const sel = $<HTMLSelectElement>("measure-tool");
+  for (const o of Array.from(sel.options)) {
+    const b = el("button", "choice", o.value ? o.textContent ?? "" : "Off");
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(o.value === sel.value));
+    b.addEventListener("click", () => {
+      sel.value = o.value;
+      sel.dispatchEvent(new Event("change"));
+      closeSheet();
+    });
+    box.append(b);
+  }
+  openSheet("sheet-measure");
+}
+
+/** The Display button is there when there is something to choose. */
+function updateDisplayButton() {
+  const any = ["preset", "view-plane", "btn-plane-opts"].some((id) => !$(id).classList.contains("hidden"));
+  $("btn-display").classList.toggle("hidden", !any);
+}
+
 function openTrustSheet() {
   const dl = $("trust-facts");
   dl.textContent = "";
@@ -2259,6 +2393,12 @@ function wireStatic() {
   $("btn-layers").addEventListener("click", openLayersSheet);
   $<HTMLSelectElement>("view-plane").addEventListener("change", (e) => void enterMpr((e.target as HTMLSelectElement).value as Plane | ""));
   $("btn-plane-opts").addEventListener("click", openPlaneSheet);
+  $("btn-more").addEventListener("click", openMoreSheet);
+  $("btn-display").addEventListener("click", openDisplaySheet);
+  $("btn-measure").addEventListener("click", openMeasureSheet);
+  // The Display button follows the controls it gathers.
+  const watch = new MutationObserver(updateDisplayButton);
+  for (const id of ["preset", "view-plane", "btn-plane-opts"]) watch.observe($(id), { attributes: true, attributeFilter: ["class"] });
   for (const id of ["plane-turn", "plane-tilt", "slab-thickness", "slab-mode"]) $(id).addEventListener("input", applyPlaneSheet);
   $("plane-reset").addEventListener("click", () => {
     $<HTMLInputElement>("plane-turn").value = "0";

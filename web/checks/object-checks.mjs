@@ -8,6 +8,7 @@
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { downloadMatrix } from "./download-matrix.mjs";
 import { darkAudit } from "./dark.mjs";
+import { bigTextOn, overflowAudit } from "./overflow.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -454,6 +455,47 @@ async function resetOthers() {
   }
 }
 
+/** No sideways overflow in the object views and video on narrow screens (overflow.mjs). */
+async function overflowObjects() {
+  const vf = process.env.VIDEO_FIXTURES_JSON ?? "/tmp/video-fixtures.json";
+  for (const w of [320, 390, 480])
+    for (const orient of ["portrait", "landscape"])
+      for (const text of [1, 2]) {
+        const h = Math.round(w * 2.16);
+        const viewport = orient === "portrait" ? { width: w, height: h } : { width: h, height: w };
+        const label = `overflow ${viewport.width}×${viewport.height} ${text === 2 ? "200%" : "100%"} text`;
+        const context = await browser.newContext({ viewport, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+        if (text === 2) await bigTextOn(context);
+        const page = await context.newPage();
+        const go = async (link) => {
+          await page.goto(link);
+          await page.waitForSelector(".study-open", { timeout: 60000 });
+          await page.locator(".study-open").first().click();
+          await page.waitForSelector(".series-btn");
+        };
+        try {
+          for (const c of ["sr-dose", "pdf", "waveform-ecg", "model-stl"]) {
+            await go(`${BASE}/view#${F[c].link}`);
+            await waitObject(page).catch(() => {});
+            await page.waitForTimeout(500);
+            const probs = await overflowAudit(page);
+            check(`${label}: ${c}`, probs.length === 0, probs.slice(0, 3).join("; "));
+          }
+          if (existsSync(vf)) {
+            const V = JSON.parse(readFileSync(vf, "utf8"));
+            const base = new URL(JSON.parse(Buffer.from(V.link.slice(V.link.indexOf("/") + 1), "base64url").toString()).url).origin;
+            await go(`${base}/view#${V.link}`);
+            await page.waitForTimeout(2500);
+            const probs = await overflowAudit(page);
+            check(`${label}: video`, probs.length === 0, probs.slice(0, 3).join("; "));
+          }
+        } catch (e) {
+          check(`${label}: ran`, false, String(e).slice(0, 200));
+        }
+        await context.close();
+      }
+}
+
 /** Originals of a share's files (sample-originals.py), cached per name. */
 function originals(name, files) {
   const out = `/tmp/originals-${name}.json`;
@@ -505,6 +547,7 @@ async function objectDownloads() {
 const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap"];
 try {
   for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "overflow") await overflowObjects().catch((e) => check("overflow: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "reset") await resetOthers().catch((e) => check("reset: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "dark") await darkObjects().catch((e) => check("dark: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "icons") await iconPreviews().catch((e) => check("icons: flow threw", false, String(e?.stack ?? e).slice(0, 400)));

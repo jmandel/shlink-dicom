@@ -105,7 +105,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .hud {
   position: absolute; z-index: 2; pointer-events: none;
   color: #e6e6e6; font: 12px/1.35 var(--mono); text-shadow: 0 0 3px #000, 0 0 2px #000;
-  white-space: pre-line; max-width: 48%;
+  white-space: pre-line; max-width: calc(50% - 20px); overflow-wrap: anywhere;
 }
 .hud-tl { top: 8px; left: calc(10px + var(--safe-l)); }
 .hud-tr { top: 8px; right: calc(10px + var(--safe-r)); text-align: right; }
@@ -133,8 +133,8 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 @media (max-width: 600px) {
   .toolbar { flex-wrap: wrap; row-gap: 6px; }
   .slice-ctl { flex-basis: 100%; }
-  .tool-btns { flex: 1 1 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; justify-content: flex-end; }
-  .tool-btns > * { flex: none; }
+  .tool-btns { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
+  .tool-btns > * { flex: none; max-width: 100%; }
 }
 .preset { width: auto; min-height: 40px; padding: 4px 8px; }
 .toolbar .btn { min-height: 40px; padding: 6px 12px; }
@@ -183,11 +183,13 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
     grid-template-areas: "stage strip" "toolbar strip";
   }
   .strip { flex-direction: column; overflow-x: hidden; overflow-y: auto; border-top: 0; border-left: 1px solid var(--border); padding: 6px calc(6px + var(--safe-r)) calc(6px + var(--safe-b)) 6px; }
-  .series-btn { width: 100%; }
+  /* The strip is a narrow column: each series is its thumbnail with the name below. */
+  .series-btn { width: 100%; flex-direction: column; align-items: stretch; }
   .series-btn canvas { width: 64px; height: 64px; }
+  .series-btn .s-text { width: 100%; }
+  .series-btn .s-name, .series-btn .s-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toolbar { padding-top: 2px; padding-bottom: calc(2px + var(--safe-b)); }
-  .top-kicker:empty { display: none; }
-.top-kicker { display: none; }
+  .top-kicker { display: none; }
 }
 @media (max-width: 420px) {
   .trust-text { display: none; }
@@ -369,4 +371,32 @@ body.object-mode .layer-canvas, body.slide-mode .layer-canvas { display: none; }
 .hud-br { bottom: 8px; right: calc(10px + var(--safe-r)); text-align: right; }
 body.measuring .stage { cursor: crosshair; }
 body.object-mode .measure-canvas, body.slide-mode .measure-canvas { display: none; }
-body.slide-mode .measure-tool { display: none; }
+body.slide-mode .measure-tool, body.slide-mode #btn-measure { display: none; }
+
+/* Narrow screens (phones either way up): progressive disclosure. The top bar keeps back, the
+   title (two lines) and one More button; the report, downloads and the encryption details are
+   in the More sheet. Below the image: Display, Measure and Reset, whose choices open as sheets. */
+.btn-more, .compact-only { display: none; }
+.toolbar.single .slice-ctl { display: none; }
+.toolbar.single { justify-content: flex-end; }
+@media (max-width: 600px), (max-height: 500px) {
+  #btn-trust, #btn-report, #dl-split { display: none !important; }
+  .btn-more:not(.hidden) { display: inline-flex; flex: none; min-width: 44px; padding: 8px 10px; }
+  .compact-only:not(.hidden) { display: inline-flex; }
+  #preset, #view-plane, #measure-tool, #btn-plane-opts { display: none !important; }
+  .topbar { gap: 4px; }
+  .top-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; line-height: 1.25; }
+  .toolbar { flex-wrap: wrap; row-gap: 6px; }
+  .tool-btns { flex: 1 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
+  /* The video and cine controls (video-view.ts) wrap rather than run off the screen. */
+  .toolbar .play-bar { flex-wrap: wrap; row-gap: 4px; max-width: 100%; }
+  .tool-btns > * { flex: none; max-width: 100%; }
+}
+.more-title { overflow-wrap: anywhere; }
+.more-items { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 4px; }
+.choice-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 4px; }
+.choice {
+  display: flex; align-items: center; width: 100%; min-height: 44px; padding: 10px 14px; text-align: left;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; cursor: pointer; overflow-wrap: anywhere;
+}
+.choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }

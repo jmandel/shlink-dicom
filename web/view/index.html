@@ -39,6 +39,10 @@
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
     </div>
+    <!-- Narrow screens: the report, downloads and the encryption details live in one menu. -->
+    <button id="btn-more" class="btn btn-ghost btn-more hidden" type="button" aria-haspopup="dialog" aria-label="More: report, download, encryption">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>
+    </button>
   </header>
 
   <main id="main">
@@ -122,6 +126,9 @@
             <option value="area">Area</option>
             <option value="clear">Clear</option>
           </select>
+          <!-- Narrow screens: display choices and measure tools open in sheets. -->
+          <button id="btn-display" class="btn compact-only hidden" type="button" aria-haspopup="dialog">Display</button>
+          <button id="btn-measure" class="btn compact-only" type="button" aria-haspopup="dialog">Measure</button>
           <button id="btn-reset" class="btn" type="button" title="Reset window, zoom and pan">Reset</button>
         </div>
       </div>
@@ -155,6 +162,27 @@
     <div class="sheet-grip" aria-hidden="true"></div>
     <h2 id="label-title">Slide label and glass slide</h2>
     <div id="label-images" class="label-images"></div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-more" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="more-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="more-title" class="more-title"></h2>
+    <div id="more-items" class="more-items"></div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-display" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="display-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="display-title">Display</h2>
+    <div id="display-items" class="choice-list"></div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-measure" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="measure-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="measure-title">Measure</h2>
+    <div id="measure-items" class="choice-list"></div>
     <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
   </section>
 

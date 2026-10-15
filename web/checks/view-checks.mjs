@@ -2,8 +2,10 @@
 //   node web/checks/view-checks.mjs [--only=name] [--perf]
 // Each run makes fresh test links first (web/checks/fixtures.ts) and deletes them at the end.
 // Screenshots go to docs/shots/view/. Exits non-zero if any check fails.
+import { offered, openDownloads, openPlaneOptions, openReport, openTrust, pickPlane, pickPreset } from "./ui.mjs";
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { downloadMatrix } from "./download-matrix.mjs";
+import { bigTextOn, overflowAudit } from "./overflow.mjs";
 import { darkAudit } from "./dark.mjs";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -188,8 +190,7 @@ async function flowPublic(dev) {
   }
 
   // Download menu.
-  await page.click("#btn-download-menu");
-  await page.waitForSelector("#sheet-download:not(.hidden)");
+  await openDownloads(page);
   await page.waitForTimeout(250);
   await page.screenshot({ path: `${SHOTS}${dev}-download-sheet.png` });
   if (dev !== "desktop") await layoutChecks(page, `${label} download sheet`, dev);
@@ -214,8 +215,7 @@ async function flowPublic(dev) {
   await page.click("#sheet-download [data-close]");
 
   // Trust sheet.
-  await page.click("#btn-trust");
-  await page.waitForSelector("#sheet-trust:not(.hidden)");
+  await openTrust(page);
   await page.waitForTimeout(250);
   await page.screenshot({ path: `${SHOTS}${dev}-trust.png` });
   const trust = await page.textContent("#trust-facts");
@@ -381,7 +381,7 @@ async function flowCt(dev) {
   await openFirstStudy(page);
   const opts = await page.locator("#preset option").allTextContents();
   check(`${label}: CT window presets`, opts.join(",") === "Auto,Soft tissue,Lung,Bone,Brain", opts.join(", "));
-  await page.selectOption("#preset", "lung");
+  await pickPreset(page, "lung");
   const s = await state(page);
   check(`${label}: Lung preset sets W 1500 L −600`, s.ww === 1500 && s.wc === -600, `W ${s.ww} L ${s.wc}`);
   await page.waitForTimeout(200);
@@ -391,7 +391,7 @@ async function flowCt(dev) {
   await page.locator(".study-open").nth(1).click();
   await page.waitForFunction(() => /2048/.test(document.querySelector("#hud-tr").textContent));
   const dxOpts = await page.locator("#preset option").count();
-  check(`${label}: no preset menu for DX (Auto only)`, !(await page.isVisible("#preset")), `${dxOpts} option(s)`);
+  check(`${label}: no preset menu for DX (Auto only)`, !(await offered(page, "preset")), `${dxOpts} option(s)`);
   await page.waitForTimeout(200);
   await page.screenshot({ path: `${SHOTS}${dev}-dx2048.png` });
   check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
@@ -426,8 +426,8 @@ async function flowReports(dev) {
     check(`${label}: images and report side by side`, box.x + box.width <= panel.x + 1, `stage ends ${Math.round(box.x + box.width)}, panel starts ${Math.round(panel.x)}`);
   } else {
     check(`${label}: report closed until asked for on a phone`, !(await page.isVisible("#report-panel")));
-    await page.click("#btn-report");
-    check(`${label}: Report button opens it`, await page.isVisible("#report-panel"));
+    await openReport(page);
+    check(`${label}: Report (in the More sheet) opens it`, await page.isVisible("#report-panel"));
   }
   await page.locator("#report-panel .report-tab", { hasText: "PDF" }).click();
   await page.waitForSelector("#report-panel .pdf-pages[data-rendered]", { timeout: 20000 });
@@ -662,7 +662,7 @@ async function flowDownloads(dev) {
     const name = (await page.textContent("#top-title")).trim();
     const slide = await page.evaluate(() => document.body.classList.contains("slide-mode"));
     await downloadMatrix(page, `${label} ${name} ${slide ? "slide" : "acquired"}`, O, check, { image: true, series: true, study: dev === "desktop" });
-    if (await page.isVisible("#view-plane")) {
+    if (await offered(page, "view-plane")) {
       for (const plane of ["sagittal", "coronal"]) {
         await page.evaluate((p) => window.__viewHooks.enterMpr(p), plane);
         await idle();
@@ -812,19 +812,16 @@ async function flowDark(dev) {
     const name = (await page.textContent("#top-title")).trim().replace(/[^A-Za-z0-9]+/g, "-").slice(0, 30);
     await darkAudit(page, `${label} ${name}`, check, `${dev}-${name}`);
     if (si === 0) {
-      if (await page.isVisible("#btn-report")) {
-        if ((await page.getAttribute("#btn-report", "aria-expanded")) !== "true") await page.click("#btn-report");
+      if (await openReport(page)) {
         await page.waitForTimeout(600);
         await darkAudit(page, `${label} reports panel`, check, `${dev}-reports`);
         // On phones the panel covers the screen: close it.
         if (dev !== "desktop") await page.click("#btn-report-close");
       }
-      await page.click("#btn-download-menu");
-      await page.waitForSelector("#sheet-download:not(.hidden)");
+      await openDownloads(page);
       await darkAudit(page, `${label} download menu`, check, `${dev}-download`);
       await page.click("#sheet-download [data-close]");
-      await page.click("#btn-trust");
-      await page.waitForSelector("#sheet-trust:not(.hidden)");
+      await openTrust(page);
       await darkAudit(page, `${label} trust sheet`, check, `${dev}-trust`);
       await page.click("#sheet-trust [data-close]");
     }
@@ -850,12 +847,11 @@ async function flowMprUi(dev) {
   await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
   const opts = await page.locator("#view-plane option").allTextContents();
   check(`${label}: plane menu`, opts.join(",") === "As acquired,Axial,Sagittal,Coronal", opts.join(", "));
-  await page.selectOption("#view-plane", "coronal");
+  await pickPlane(page, "coronal");
   await page.waitForFunction(() => window.__viewHooks.current().mpr === "coronal" && !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
   const hud = await page.textContent("#hud-tl");
   check(`${label}: a reformat says "Reformatted in the viewer"`, /Coronal · \d+\/\d+\nReformatted in the viewer/.test(hud), hud.replace(/\n/g, " | "));
-  await page.click("#btn-plane-opts");
-  await page.waitForSelector("#sheet-plane:not(.hidden)");
+  await openPlaneOptions(page);
   await page.locator("#plane-tilt").fill("15");
   await page.selectOption("#slab-thickness", "10");
   await page.waitForTimeout(300);
@@ -869,7 +865,7 @@ async function flowMprUi(dev) {
   await page.click("#plane-reset");
   await page.waitForFunction(() => !/tilted|average/.test(document.querySelector("#hud-tl").textContent), null, { timeout: 30000 });
   await page.click("#sheet-plane [data-close]");
-  await page.selectOption("#view-plane", "");
+  await pickPlane(page, "");
   await page.waitForFunction(() => !window.__viewHooks.current().mpr);
   const hud3 = await page.textContent("#hud-tl");
   check(`${label}: "As acquired" shows the stored images, unlabelled`, !/Reformatted/.test(hud3), hud3.replace(/\n/g, " | "));
@@ -1067,6 +1063,76 @@ async function flowTouchReset(dev) {
   await context.close();
 }
 
+// No sideways overflow on narrow screens: every state of the sample at 320–480 px wide, portrait
+// and landscape, normal and doubled text (overflow.mjs), light and dark.
+async function flowOverflow() {
+  const widths = (process.env.OVERFLOW_WIDTHS ?? "320,360,390,412,480").split(",").map(Number);
+  for (const w of widths)
+    for (const orient of ["portrait", "landscape"])
+      for (const text of [1, 2])
+        for (const scheme of ["light", "dark"]) {
+          const h = Math.round(w * 2.16);
+          const viewport = orient === "portrait" ? { width: w, height: h } : { width: h, height: w };
+          const label = `overflow ${viewport.width}×${viewport.height} ${text === 2 ? "200% text" : "100% text"} ${scheme}`;
+          const context = await browser.newContext({ viewport, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme: scheme });
+          if (text === 2) await bigTextOn(context);
+          const page = await context.newPage();
+          const big = () => null;
+          const shoot = orient === "portrait" && text === 1 && scheme === "light" && (w === 390 || w === 412);
+          const audit = async (state) => {
+            await page.waitForTimeout(300);
+            const probs = await overflowAudit(page);
+            check(`${label}: ${state}`, probs.length === 0, probs.slice(0, 3).join("; "));
+            if (shoot) await page.screenshot({ path: `${SHOTS}layout-${w}-${state.replace(/[^a-z0-9]+/gi, "-")}.png` });
+          };
+          const closeSheets = () => page.evaluate(() => document.querySelector(".sheet:not(.hidden) [data-close]")?.click());
+          try {
+            await page.goto(viewUrl(F.publicLink));
+            await big();
+            await waitOverview(page);
+            await audit("overview");
+            for (const [study, state] of [[/CT/, "CT"], [/BRAIN/, "MRI"], [/HAND AND WRIST/, "X-ray"], [/Histo/, "slide"]]) {
+              if (await page.isVisible("#btn-back")) {
+                await page.click("#btn-back");
+                await page.waitForSelector("#screen-overview:not(.hidden)");
+              }
+              const n = await page.locator(".study-open").count();
+              for (let i = 0; i < n; i++) {
+                if (study.test(await page.locator(".study-card .study-title").nth(i).textContent())) {
+                  await page.locator(".study-open").nth(i).click();
+                  break;
+                }
+              }
+              await page.waitForSelector("#screen-viewer:not(.hidden)");
+              await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+              await audit(state);
+              if (state === "CT") {
+                if (await openReport(page)) {
+                  await audit("CT report");
+                  if (await page.isVisible("#btn-report-close")) await page.click("#btn-report-close");
+                }
+                if (await page.isVisible("#btn-more")) {
+                  await page.click("#btn-more");
+                  await audit("More sheet");
+                  await closeSheets();
+                }
+                await openDownloads(page);
+                await audit("download sheet");
+                await closeSheets();
+                if (await page.isVisible("#btn-display")) {
+                  await page.click("#btn-display");
+                  await audit("display sheet");
+                  await closeSheets();
+                }
+              }
+            }
+          } catch (e) {
+            check(`${label}: ran`, false, String(e).slice(0, 200));
+          }
+          await context.close();
+        }
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 const flows = {
@@ -1081,6 +1147,7 @@ const flows = {
   thumbs: () => Promise.all(["desktop", "phone390"].map(flowThumbs)),
   dark: () => Promise.all(["desktop", "phone390"].map(flowDark)),
   "mpr-ui": () => Promise.all(["desktop", "phone390"].map(flowMprUi)),
+  overflow: flowOverflow,
   "touch-reset": async () => {
     for (const dev of ["phone390", "desktop"]) await flowTouchReset(dev);
   },

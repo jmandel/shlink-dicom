@@ -3,6 +3,7 @@
 // originals. Shared by view-checks (the sample) and object-checks (objects, video).
 //   originals: { sop: { path, size, series, study } } for every file in the share
 //   (sample-originals.py makes it from a directory of the shared files).
+import { downloadDefault, openDownloads } from "./ui.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -23,10 +24,7 @@ async function save(page, choice, tag) {
 async function reopen(page) {
   await page.waitForSelector("#dl-status:has-text('Saved')", { timeout: 300000 });
   await page.click("#sheet-download [data-close]");
-  await page.click("#btn-download-menu", { timeout: 10000 }).catch(async (e) => {
-    await page.screenshot({ path: "/tmp/dlm-reopen.png" });
-    throw e;
-  });
+  await openDownloads(page);
   await page.waitForSelector("#sheet-download .dl-option");
 }
 
@@ -53,13 +51,13 @@ export async function downloadMatrix(page, label, originals, check, downloads = 
   const series = all.filter((o) => o.series === cur.series), study = all.filter((o) => o.study === cur.study);
   const want = { image: cur.onScreen?.uid ? originals[cur.onScreen.uid]?.size : undefined, series: cur.series ? sum(series) : undefined, study: study.length ? sum(study) : undefined, all: sum(all) };
   // The button: the default choice and its size.
-  const aria = await page.getAttribute("#btn-download", "aria-label");
+  // (Wide screens: the top bar's button; narrow: the More sheet's first download.)
+  const shown = await downloadDefault(page);
   const def = "study";
   const defBytes = want.study;
-  check(`${label}: button offers the ${def} by default, with its size`, new RegExp(`^Download this ${def}, `).test(aria ?? "") && (await page.isVisible("#dl-size")), aria);
+  check(`${label}: the study is the default download, with its size`, /^Download (this )?study/.test(shown.label ?? "") && /\d/.test(shown.size), `${shown.label}`);
   // The menu.
-  await page.click("#btn-download-menu");
-  await page.waitForSelector("#sheet-download:not(.hidden)");
+  await openDownloads(page);
   const opts = await page.$$eval("#sheet-download .dl-option", (bs) => bs.map((b) => ({ choice: b.dataset.choice, bytes: b.dataset.bytes === undefined ? undefined : Number(b.dataset.bytes), reason: b.dataset.reason, disabled: b.disabled, height: b.getBoundingClientRect().height })));
   const got = Object.fromEntries(opts.filter((o) => !o.disabled).map((o) => [o.choice, o.bytes]));
   const bad = Object.entries(want).filter(([k, v]) => got[k] !== v).map(([k, v]) => `${k}: ${got[k]} vs ${v}`);
