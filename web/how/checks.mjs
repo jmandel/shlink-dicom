@@ -1,25 +1,43 @@
-// Scripted headless-Chromium checks for the /how tour. Needs the server on BASE (default
-// localhost:3333) serving a fresh `bun web/build.ts`.
-//   node web/how/checks.mjs [--only=desktop|phone390] [--quick]
-// Runs: desktop and phone, with the details off and on; then the dark scheme with the details on.
-// Screenshots go to docs/shots/how/ (dark ones to docs/shots/dark/). Exits non-zero on any failure.
+// Scripted headless-Chromium checks for /how, the plain one-column page. Needs a server on BASE
+// (default http://localhost:3360) serving a fresh `bun web/build.ts`.
+//   BASE=http://localhost:3360 node web/how/checks.mjs [--only=360|390|1440] [--light]
+// For each width (360, 390, 1440) and scheme (light, dark): every step renders with numbers from the
+// live sample, with every "How exactly" closed and then open; opening only adds; no horizontal
+// scroll; no main-thread task over 100 ms. In the light runs also: Copy and Open, the tamper switch,
+// share then revoke (404), and the receiver, test vector and decoder comparison in the worker.
+// Screenshots: docs/shots/how/ (dark ones in docs/shots/dark/). Exits non-zero on any failure.
 import { launchBrowser, pageErrorCheck } from "../checks/browser.mjs";
 import { darkAudit } from "../checks/dark.mjs";
 import { mkdirSync } from "node:fs";
 
-const BASE = process.env.BASE ?? "http://localhost:3333";
+const BASE = process.env.BASE ?? "http://localhost:3360";
 const SHOTS = new URL("../../docs/shots/how/", import.meta.url).pathname;
 const DARK_SHOTS = new URL("../../docs/shots/dark/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
 mkdirSync(DARK_SHOTS, { recursive: true });
 const only = process.argv.find((a) => a.startsWith("--only="))?.slice(7);
-const quick = process.argv.includes("--quick");
+const lightOnly = process.argv.includes("--light");
 
-const DEVICES = {
-  desktop: { viewport: { width: 1440, height: 900 } },
-  phone390: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
+const WIDTHS = {
+  360: { viewport: { width: 360, height: 740 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
+  390: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
+  1440: { viewport: { width: 1440, height: 900 } },
 };
-const STEPS = ["link", "index", "pieces", "host", "unlock", "pixels", "compressed", "less", "share"];
+const STEPS = ["link", "jwe", "bundle", "study", "file", "host", "gcm", "dicom", "less", "share", "end"];
+/** What each step shows without its expander: these must stay present and visible when it opens. */
+const PLAIN = {
+  link: [".qr svg", "#link-copy", "#link-open", "#link .pic pre.code"],
+  jwe: ["#jwe .pic pre.code", "#jwe .pic .facts"],
+  bundle: ["#bundle .pic pre.code"],
+  study: ["#study .pic pre.code", "#study .pic p.cap"],
+  file: ["#file .strip", "#file .thumb.this canvas", "#file .pic pre.code"],
+  host: ["#host .host-log .req"],
+  gcm: ["#gcm .band-box canvas", "#gcm .verdict", "#gcm .switch"],
+  dicom: ["#dicom .pic pre.code", "#dicom .stage canvas", "#wl-c", "#wl-w"],
+  less: ["#less .counter", "#less .stage canvas", "#less-slider"],
+  share: ["#share .study-list", "#sh-make"],
+  end: ["#open-viewer"],
+};
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -27,93 +45,46 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${String(detail).slice(0, 220)}` : ""}`);
 };
 const browser = await launchBrowser();
-
-// Requests meant to fail: everything under a link after it is revoked.
 const expected404 = (url) => /\/(shl|cap)\//.test(url);
 
-/** Records main-thread tasks over 100 ms (Long Tasks API). */
 function longTaskWatch() {
   window.__long = [];
   try {
     new PerformanceObserver((l) => {
-      for (const e of l.getEntries()) if (e.duration > 100) window.__long.push(`${Math.round(e.duration)} ms during ${window.__how?.current?.() ?? "load"}`);
+      for (const e of l.getEntries()) if (e.duration > 100) window.__long.push(Math.round(e.duration));
     }).observe({ type: "longtask", buffered: true });
   } catch {}
 }
 
-async function scrollToStep(page, id) {
-  await page.evaluate((id) => {
-    const el = document.getElementById(id);
-    const wide = innerWidth >= 960;
-    const pb = document.querySelector(".panel-wrap").getBoundingClientRect().bottom;
-    const target = wide ? 110 : Math.min(pb, innerHeight * 0.6) + 8;
-    window.scrollTo(0, el.getBoundingClientRect().top + scrollY - target);
-  }, id);
-  await page.waitForFunction((id) => window.__how?.current() === id, id, { timeout: 5000 }).catch(() => {});
-  await page.waitForTimeout(400);
-  return page.evaluate(() => window.__how.current());
-}
+const text = async (page, sel) => (await page.locator(sel).first().textContent()) ?? "";
+const plainNum = (s) => s.replace(/,/g, "");
 
-const visible = (page, sel) => page.locator(sel).first().isVisible();
-const text = (page, sel) => page.locator(sel).first().textContent();
-const tap = (page, sel, touch) => (touch ? page.locator(sel).first().tap() : page.locator(sel).first().click());
-
-/** Mean brightness of a canvas (0..255); 0 when blank. */
-const canvasLevel = (page, sel) =>
-  page.evaluate((sel) => {
-    const c = document.querySelector(sel);
-    if (!c || !c.width) return 0;
-    let d;
-    try {
-      d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-    } catch {
-      const t = document.createElement("canvas");
-      t.width = c.width;
-      t.height = c.height;
-      t.getContext("2d").drawImage(c, 0, 0);
-      d = t.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+/** Size and visibility of each plain element of a step. */
+const measure = (page, sels) =>
+  page.evaluate((sels) => {
+    const out = {};
+    for (const s of sels) {
+      const els = [...document.querySelectorAll(s)];
+      out[s] = els.map((el) => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return { w: Math.round(r.width), h: Math.round(r.height), vis: r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none" && !el.closest(".hidden") };
+      });
     }
-    let s = 0, n = 0;
-    for (let i = 0; i < d.length; i += 4 * 61) (s += d[i] + d[i + 1] + d[i + 2]), n++;
-    return s / n / 3;
-  }, sel);
+    return out;
+  }, sels);
 
-async function layout(page, label, coarse) {
-  const r = await page.evaluate((coarse) => {
-    const overflow = document.documentElement.scrollWidth - window.innerWidth;
-    const small = [];
-    if (coarse) {
-      for (const el of document.querySelectorAll("button, a.btn, select, input, .switch")) {
-        if (el.closest(".hidden") || el.closest(".scene:not(.on)")) continue;
-        const s = getComputedStyle(el);
-        if (s.display === "none" || s.visibility === "hidden") continue;
-        let b = el.getBoundingClientRect();
-        if (el.matches("input[type=checkbox]") && el.closest("label")) b = el.closest("label").getBoundingClientRect();
-        if (!b.width || !b.height) continue;
-        if (b.height < 43.5 || b.width < 43.5) small.push(`${el.tagName.toLowerCase()}#${el.id || el.className} ${Math.round(b.width)}×${Math.round(b.height)}`);
-      }
-    }
-    return { overflow, small };
-  }, coarse);
-  check(`${label}: no horizontal overflow`, r.overflow <= 0, `scrollWidth − innerWidth = ${r.overflow}`);
-  if (coarse) check(`${label}: targets ≥ 44 px`, r.small.length === 0, r.small.slice(0, 8).join(", "));
-}
-
-async function run(dev, details, dark) {
-  const touch = dev !== "desktop";
-  const tag = `${dark ? "dark " : ""}${dev} details ${details ? "on" : "off"}`;
+async function run(width, dark) {
+  const touch = width !== "1440";
+  const tag = `${width}px ${dark ? "dark" : "light"}`;
   const L = (s) => `${tag}: ${s}`;
   const shot = async (name, full = false) => {
-    const p = dark ? `${DARK_SHOTS}how-${dev}-${name}.png` : `${SHOTS}${dev}-${details ? "d" : "plain"}-${name}.png`;
-    await page.screenshot({ path: p, fullPage: full });
+    const path = dark ? `${DARK_SHOTS}how-${width}-${name}.png` : `${SHOTS}${width}-${name}.png`;
+    await page.screenshot({ path, fullPage: full });
   };
-  const context = await browser.newContext({ ...DEVICES[dev], colorScheme: dark ? "dark" : "light" });
+  const context = await browser.newContext({ ...WIDTHS[width], colorScheme: dark ? "dark" : "light" });
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE }).catch(() => {});
   await context.addInitScript(longTaskWatch);
-  await context.addInitScript((d) => {
-    try {
-      localStorage.setItem("how-details", d ? "1" : "0");
-    } catch {}
-  }, details);
   const page = await context.newPage();
   const errors = [];
   page.on("console", (m) => {
@@ -126,14 +97,26 @@ async function run(dev, details, dark) {
   });
 
   await page.goto(`${BASE}/how`);
-  await page.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok") && window.__how?.scenes.size === 9, null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok") && window.__how, null, { timeout: 30000 });
   check(L("sample opens"), true, await text(page, "#status"));
-  check(L(`details switch ${details ? "on" : "off"} and remembered`), (await page.isChecked("#details")) === details && (await page.evaluate(() => document.body.classList.contains("details"))) === details);
-  // The thread, recomputed here from the decrypted Bundle JSON (PROPOSAL.md §8.1): each series is
-  // in its own linked-file, else its study's; offsets run per file through the series in order.
+
+  // Load every step by scrolling to it once, as a reader would.
+  for (const id of STEPS) {
+    await page.locator(`#${id}`).scrollIntoViewIfNeeded();
+    await page.waitForFunction((id) => document.getElementById(id)?.dataset.ready, id, { timeout: 30000 }).catch(() => {});
+  }
+  const ready = await page.evaluate(() => [...document.querySelectorAll("section.step")].map((s) => `${s.id}:${s.dataset.ready ?? "-"}`));
+  check(L("every step renders"), ready.every((r) => r.endsWith(":1")), ready.join(" "));
+  // Pictures that finish after mounting.
+  await page.waitForSelector("#gcm .verdict.good", { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => document.querySelector("#file .thumb.this canvas") && /fetched of/.test(document.querySelector("#less .counter")?.textContent ?? ""), null, { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(800);
+
+  // The numbers, recomputed here from the decrypted Bundle (PROPOSAL.md §8.1).
   const truth = await page.evaluate(() => {
     const { S } = window.__how;
-    const study = S.share.index.bundle.entry.map((e) => e.resource).find((r) => r?.resourceType === "ImagingStudy" && (r.series ?? []).some((x) => x.uid === S.series.uid));
+    const bundle = S.share.index.bundle;
+    const study = bundle.entry.map((e) => e.resource).find((r) => r?.resourceType === "ImagingStudy" && (r.series ?? []).some((x) => x.uid === S.series.uid));
     const fileOf = (el) => el.extension?.find((x) => /linked-file$/.test(x.url))?.extension.find((x) => x.url === "id").valueString;
     const len = (i) => i.extension.find((x) => /instance-length$/.test(x.url)).valueDecimal;
     const se = study.series.find((x) => x.uid === S.series.uid);
@@ -144,197 +127,164 @@ async function run(dev, details, dark) {
     const off = before + lens.slice(0, S.slice).reduce((a, b) => a + b, 0), len0 = lens[S.slice];
     const first = Math.floor(off / 65520), last = Math.floor((off + len0 - 1) / 65520);
     const total = inFile.flatMap((x) => x.instance).map(len).reduce((a, b) => a + b, 0), C = total + 16 * Math.ceil(total / 65520);
-    return { off, len: len0, first, last, range: `bytes=${first * 65536}-${Math.min(C, (last + 1) * 65536) - 1}`, slice: S.slice, n: lens.length };
+    return { off, len: len0, first, last, range: `bytes=${first * 65536}-${Math.min(C, (last + 1) * 65536) - 1}`, entries: bundle.entry.length, jwe: S.jwe.length, json: S.share.bundleBytes.length, url: S.share.resolver.payload.url, ranges: S.requests.filter((r) => r.status === 206).map((r) => r.range) };
   });
+  const jweBytes = (await (await page.request.get(truth.url)).body()).length;
+  check(L("2 JWE: sizes shown match the file and its decryption"), plainNum(await text(page, "#jwe .facts")).includes(`(${jweBytes} bytes)`) && plainNum(await text(page, "#jwe .facts")).includes(`(${truth.json} bytes)`), `${jweBytes} / ${truth.json}`);
+  check(L("3 Bundle: every entry listed"), (await text(page, "#bundle .pic .cap")).includes(`(${truth.entries} entries)`) && /DiagnosticReport/.test(await text(page, "#bundle .pic")));
+  const st = plainNum(await text(page, "#study .pic"));
+  check(L("4 ImagingStudy: slice offset and length match the Bundle; the key is left out"), st.includes(`${truth.len} bytes starting at byte ${truth.off} `) && /linked-file/.test(st) && /left out here/.test(st), `${truth.len} @ ${truth.off}`);
+  const fx = plainNum(await text(page, "#file .pic pre.code"));
+  check(L("5 file: record range and Range header match, and that request was made"), fx.includes(`= ${truth.first}`) && fx.includes(`= ${truth.last}`) && fx.includes(`Range: ${truth.range}`) && truth.ranges.includes(truth.range), truth.range);
+  check(L("5 file: the slice's records light up and the slice is decoded"), (await page.locator("#file .rec.got").count()) === truth.last - truth.first + 1 && (await page.locator("#file .thumb.this canvas").count()) === 1);
+  const rows = await page.locator("#host .host-log .req").count();
+  check(L("6 server: its requests listed"), rows >= 3 && /\.bin/.test(await text(page, "#host .host-log")), `${rows} lines`);
+  check(L("7 tag: every record passes"), /passed their tag check/.test(await text(page, "#gcm .verdict")));
+  const dh = await text(page, "#dicom .pic pre.code");
+  check(L("8 DICOM: header tags and the pixels"), /Example\^Josh/.test(dh) && /Pixel Data/.test(dh) && /512/.test(dh) && (await page.locator("#dicom .stage canvas").count()) === 1);
+  check(L("9 on demand: counter against the study's file"), /fetched of the .* encrypted file/.test(await text(page, "#less .counter")));
 
-  for (const id of STEPS) {
-    const cur = await scrollToStep(page, id);
-    check(L(`step ${id}: its scene is shown`), cur === id && (await page.locator(`.scene[data-scene="${id}"].on`).count()) === 1, `current ${cur}`);
-    const dShown = await page.locator(`#${id} .d`).first().isVisible().catch(() => false);
-    check(L(`step ${id}: details layer ${details ? "shown" : "hidden"}`), dShown === details);
-
-    if (id === "link") {
-      check(L("1 link: QR code and link card"), (await page.locator(".qr svg").count()) >= 1 && /Josh Example/.test(await text(page, ".linkcard")));
-      if (details) check(L("1 link: decoded JSON with url and key"), /"key"/.test(await text(page, '.scene[data-scene="link"] .json')));
-    }
-    if (id === "index") {
-      await page.waitForFunction(() => document.querySelector(".toc-tree .this:not(.hidden-item)"), null, { timeout: 8000 });
-      const t = await text(page, ".toc-tree .this");
-      check(L("2 index: unfolds to this slice"), t.includes(`Slice ${truth.slice + 1} of ${truth.n}`) && t.replace(/,/g, "").includes(String(truth.len)), t);
-      if (details) {
-        const d = (await text(page, "#d-index")).replace(/,/g, "");
-        check(L("2 index: numbers match the Bundle"), d.includes(`starting at byte ${truth.off} `) && d.includes(`slice is ${truth.len} bytes`), d.slice(0, 160));
+  // Opening every expander only adds.
+  const sels = Object.values(PLAIN).flat();
+  const before = await measure(page, sels);
+  const missing = Object.entries(before).filter(([, v]) => !v.length || v.some((x) => !x.vis)).map(([s]) => s);
+  check(L("closed: every plain element present and visible"), missing.length === 0, missing.join(", "));
+  await shot("closed", true);
+  const closedOverflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+  for (const d of await page.$$("details.exact")) await d.evaluate((e) => (e.open = true));
+  await page.waitForTimeout(500);
+  const after = await measure(page, sels);
+  const changed = sels.filter((s) => {
+    const a = before[s], b = after[s];
+    return a.length !== b.length || b.some((x, i) => !x.vis || Math.abs(x.h - a[i].h) > 2 || Math.abs(x.w - a[i].w) > 2);
+  });
+  check(L("opening every “How exactly” only adds: plain elements unchanged"), changed.length === 0, changed.join(", "));
+  const added = await page.evaluate(() => [...document.querySelectorAll(".exact-body")].every((b) => b.getBoundingClientRect().height > 20));
+  check(L("open: every expander shows its details"), added);
+  await shot("open", true);
+  const openOverflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+  check(L("no horizontal scroll, closed and open"), closedOverflow <= 0 && openOverflow <= 0, `${closedOverflow} / ${openOverflow}`);
+  if (touch) {
+    const small = await page.evaluate(() => {
+      const out = [];
+      for (const el of document.querySelectorAll("button, a.btn, input, select, summary, .switch")) {
+        if (el.closest(".hidden")) continue;
+        let r = el.getBoundingClientRect();
+        if (el.matches("input[type=checkbox]") && el.closest("label")) r = el.closest("label").getBoundingClientRect();
+        if (el.matches(".link-field")) continue;
+        if (!r.width || !r.height) continue;
+        if (r.height < 43.5 || r.width < 43.5) out.push(`${el.tagName.toLowerCase()}#${el.id || el.className} ${Math.round(r.width)}×${Math.round(r.height)}`);
       }
-    }
-    if (id === "pieces") {
-      await page.waitForFunction(() => document.querySelectorAll(".thumb canvas").length > 0, null, { timeout: 10000 });
-      await page.waitForTimeout(800);
-      const lvl = await canvasLevel(page, ".thumb.this canvas");
-      const reqOk = await page.evaluate((range) => window.__how.S.requests.some((r) => r.range === range && r.status === 206), truth.range);
-      check(L("3 pieces: the slice's Range request was made and the slice decoded"), reqOk && lvl > 5, `${truth.range}; brightness ${lvl.toFixed(1)}`);
-      const lit = await page.locator(".piece.got").count();
-      check(L("3 pieces: the slice's pieces light up"), lit === truth.last - truth.first + 1, `${lit} lit, expected ${truth.last - truth.first + 1}`);
-      if (details) check(L("3 pieces: Range header shown matches"), (await text(page, ".range-line")).includes(truth.range) && (await text(page, "#d-pieces")).includes(truth.range));
-      // Drag across the strip: a new request, images inside appear, cut ones say which piece they need.
-      const before = await page.evaluate(() => window.__how.S.requests.length);
-      const box = await page.locator(".strip").boundingBox();
-      const cells = await page.locator(".piece").count();
-      const x = (k) => box.x + ((k + 0.5) / cells) * box.width;
-      await page.mouse.move(x(0), box.y + box.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(x(cells - 1), box.y + box.height / 2, { steps: 6 });
-      await page.mouse.up();
-      await page.waitForFunction((n) => window.__how.S.requests.length > n, before, { timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout(1200);
-      const cut = await page.locator(".thumb .cut").count(), imgs = await page.locator(".thumb canvas").count();
-      const after = await page.evaluate(() => window.__how.S.requests.length);
-      check(L("3 pieces: dragging a new choice fetches it and shows whole and cut images"), after > before && imgs >= 1 && cut >= 1, `${after - before} new request(s); ${imgs} images, ${cut} cut`);
-      await shot("3-pieces");
-    }
-    if (id === "host") {
-      const rows = await page.locator(".host-log .req").count();
-      const n = await page.evaluate(() => Math.min(60, window.__how.S.requests.length));
-      check(L("3b host: every request listed as the server receives it"), rows === n && /\.bin/.test(await text(page, ".host-log")), `${rows} rows, ${n} requests`);
-      await shot("3b-host");
-    }
-    if (id === "unlock") {
-      await page.waitForSelector(".verdict.good", { timeout: 15000 });
-      check(L("4 unlock: every piece unlocked and checked"), (await canvasLevel(page, ".band-box canvas")) > 5, await text(page, ".scene.on .verdict"));
-      await tap(page, "#unlock .switch", touch);
-      await page.waitForSelector(".scene.on .verdict.bad", { timeout: 15000 });
-      const bad = await text(page, ".scene.on .verdict");
-      check(L("4 unlock: tamper switch makes a piece refused"), /refused/.test(bad) && /flipped/.test(bad), bad);
-      await shot("4-tampered");
-      await tap(page, "#unlock .switch", touch);
-      await page.waitForSelector(".scene.on .verdict.good", { timeout: 15000 });
-      check(L("4 unlock: switch off, all pieces pass again"), true);
-    }
-    if (id === "pixels") {
-      await page.waitForFunction(() => /Example/.test(document.querySelector(".hdr")?.textContent ?? ""), null, { timeout: 15000 });
-      const hd = await text(page, ".hdr");
-      check(L("5 pixels: header shows the file marker, patient, size and pixel start"), /DICM/.test(hd) && /Example\^Josh/.test(hd) && /512 × 512/.test(hd) && /start at byte/.test(hd), hd.slice(0, 120));
-      await page.waitForTimeout(500);
-      const lvl0 = await canvasLevel(page, '.scene[data-scene="pixels"] .stage canvas');
-      await page.locator("#wl-c").fill("95");
-      await page.waitForTimeout(500);
-      const lvl1 = await canvasLevel(page, '.scene[data-scene="pixels"] .stage canvas');
-      check(L("5 pixels: the slice is drawn and brightness changes it"), lvl0 > 3 && Math.abs(lvl1 - lvl0) > 3, `${lvl0.toFixed(1)} → ${lvl1.toFixed(1)}`);
-      if (details) check(L("5 pixels: transfer syntax and window in the details"), /1\.2\.840\.10008\.1\.2\.1/.test(await text(page, "#d-pixels")));
-      await shot("5-pixels");
-    }
-    if (id === "compressed") {
-      await page.waitForFunction(() => /In the file/.test(document.querySelector('.scene[data-scene="compressed"]')?.textContent ?? ""), null, { timeout: 15000 });
-      await page.waitForTimeout(400);
-      const size = (await page.request.get(`${BASE}/how/compressed.dcm`)).body().then((b) => b.length);
-      const lvl = await canvasLevel(page, '.scene[data-scene="compressed"] .stage canvas');
-      check(L("5b compressed: decoded and drawn"), lvl > 3, `brightness ${lvl.toFixed(1)}`);
-      if (details) {
-        const d = (await text(page, "#d-compressed")).replace(/,/g, "");
-        check(L("5b compressed: file size shown matches the file"), d.includes(`${await size} bytes in the file`), d.slice(0, 120));
-      }
-      await shot("5b-compressed");
-    }
-    if (id === "less") {
-      await page.waitForFunction(() => /of .* shared/.test(document.querySelector('.scene[data-scene="less"] .counter')?.textContent ?? ""), null, { timeout: 15000 });
-      const c0 = await page.evaluate(() => window.__how.S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0));
-      await page.locator('.scene[data-scene="less"] .scrub input').fill("2");
-      await page.waitForFunction((c0) => window.__how.S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0) > c0, c0, { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(600);
-      const c1 = await page.evaluate(() => window.__how.S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0));
-      check(L("6 less: scrolling to another slice fetches only its pieces"), c1 > c0 && c1 - c0 < 2_000_000, `+${c1 - c0} bytes`);
-      if (!quick) {
-        await tap(page, "#less-slide", touch);
-        await page.waitForFunction(() => /of the slide's/.test(document.querySelector('.scene[data-scene="less"] .counter')?.textContent ?? ""), null, { timeout: 30000 });
-        await page.waitForTimeout(2500);
-        const s0 = await text(page, '.scene[data-scene="less"] .counter');
-        for (let k = 0; k < 3; k++) {
-          await tap(page, '[aria-label="Zoom in"]', touch);
-          await page.waitForTimeout(2000);
-        }
-        const s1 = await text(page, '.scene[data-scene="less"] .counter');
-        check(L("6 less: zooming the slide fetches a little more of it"), s0 !== s1 && /of the slide's/.test(s1), `${s0} → ${s1}`);
-        await shot("6-slide");
-        await tap(page, "#less-mri", touch);
-      }
-    }
-    if (id === "share" && !quick && !dark) {
-      await tap(page, "#sh-make", touch);
-      await page.waitForFunction(() => /A new link/.test(document.querySelector('.scene[data-scene="share"]')?.textContent ?? ""), null, { timeout: 20000 });
-      check(L("7 share: a link to the MRI only is made"), true);
-      await tap(page, "#sh-open", touch);
-      await page.waitForFunction(() => /Opened|did not open/.test(document.querySelector('.scene[data-scene="share"] .big-status')?.textContent ?? ""), null, { timeout: 20000 });
-      const o = await text(page, '.scene[data-scene="share"] .big-status');
-      check(L("7 share: the new link opens with one study and the slice"), /lists 1 study/.test(o), o);
-      await tap(page, "#sh-revoke", touch);
-      await page.waitForFunction(() => /Revoked/.test(document.querySelector('.scene[data-scene="share"]')?.textContent ?? ""), null, { timeout: 15000 });
-      await tap(page, "#sh-open", touch);
-      await page.waitForFunction(() => /404|did not open/.test(document.querySelector('.scene[data-scene="share"] .big-status')?.textContent ?? ""), null, { timeout: 20000 });
-      const r = await text(page, '.scene[data-scene="share"] .big-status');
-      check(L("7 share: after revoking, the next request gets 404"), /404/.test(r), r);
-      if (details) {
-        await page.waitForFunction(() => document.querySelectorAll("#d-share-log .req").length >= 2, null, { timeout: 10000 }).catch(() => {});
-        check(L("7 share: the server's own access log is shown"), (await page.locator("#d-share-log .req").count()) >= 2);
-      }
-      await shot("7-share");
-    }
-    if (dark) await darkAudit(page, L(`step ${id}`), check, `how-${dev}-${id}`);
-    else if (!["pieces", "host", "pixels", "compressed", "share"].includes(id) || id === "link") await shot(`${STEPS.indexOf(id) + 1}-${id}`);
-  }
-
-  // The ending.
-  await page.locator("#end").scrollIntoViewIfNeeded();
-  const href = await page.getAttribute("#open-viewer", "href");
-  check(L("end: “Open the sample” opens the viewer on the sample link"), /\/view#shlink:\//.test(href ?? ""), href?.slice(0, 50));
-  check(L(`end: build-your-own section ${details ? "shown" : "hidden"}`), (await visible(page, ".end-details")) === details);
-  if (details && !dark && !quick) {
-    await tap(page, "#rx-run", touch);
-    await page.waitForFunction(() => /returned|threw/.test(document.querySelector("#rx-out")?.textContent ?? ""), null, { timeout: 20000 });
-    const rx = await text(page, "#rx-out");
-    check(L("end: the reference receiver runs in a worker on the sample"), /"matchesBundle": true/.test(rx), rx.replace(/\s+/g, " ").slice(0, 160));
-    await tap(page, "#tv-run", touch);
-    await page.waitForFunction(() => /Tampering/.test(document.querySelector("#tv-out")?.textContent ?? ""), null, { timeout: 20000 });
-    const tv = await text(page, "#tv-out");
-    check(L("end: test vector matches appendix B"), !tv.includes("✗") && (tv.match(/✓/g) ?? []).length >= 7, `${(tv.match(/✓/g) ?? []).length} ✓`);
-    await tap(page, "#bx-run", touch);
-    await page.waitForSelector('#bx-progress [role="progressbar"]', { timeout: 5000 });
-    await page.waitForFunction(() => document.querySelectorAll("#bx-out tbody tr").length || /error|failed/i.test(document.querySelector("#bx-out")?.textContent ?? ""), null, { timeout: 120000 });
-    const bx = await text(page, "#bx-out");
-    const pb = await page.evaluate(() => {
-      const b = document.querySelector('#bx-progress [role="progressbar"]');
-      return [b.getAttribute("aria-valuenow"), b.getAttribute("aria-valuemax")];
+      return out;
     });
-    check(L("end: decoder comparison finishes with real progress, same pixels"), (await page.locator("#bx-out tbody tr").count()) === 3 && !/\bno\b/.test(bx) && pb[0] === pb[1], `${pb.join("/")}: ${bx.replace(/\s+/g, " ").slice(0, 200)}`);
-    await shot("end-details");
+    check(L("targets ≥ 44 px"), small.length === 0, small.slice(0, 6).join(", "));
+  }
+  for (const d of await page.$$("details.exact")) await d.evaluate((e) => (e.open = false));
+
+  if (dark) {
+    for (const id of STEPS) {
+      await page.locator(`#${id}`).scrollIntoViewIfNeeded();
+      await darkAudit(page, L(`step ${id}`), check, `how-${width}-${id}`);
+    }
+  } else {
+    // Copy and Open.
+    await page.locator("#link-copy").scrollIntoViewIfNeeded();
+    await page.locator("#link-copy").click();
+    await page.waitForTimeout(300);
+    const href = await page.getAttribute("#link-open", "href");
+    const clip = await page.evaluate(() => navigator.clipboard.readText().catch(() => ""));
+    check(L("1 Copy link copies the viewer link and says so"), (await text(page, "#link-copy")) === "Copied" && clip === href, clip.slice(0, 50));
+    const [viewer] = await Promise.all([context.waitForEvent("page"), page.locator("#link-open").click()]);
+    await viewer.waitForLoadState();
+    check(L("1 Open link opens the sample in the viewer, in a new tab"), /\/view#shlink:\//.test(viewer.url()) && (await page.getAttribute("#link-open", "target")) === "_blank", viewer.url().slice(0, 60));
+    await viewer.close();
+
+    // Drag across the records: a new request, whole and cut images.
+    await page.locator("#file .strip").scrollIntoViewIfNeeded();
+    const n0 = await page.evaluate(() => window.__how.S.requests.length);
+    const box = await page.locator("#file .strip").boundingBox();
+    const cells = await page.locator("#file .rec").count();
+    const x = (k) => box.x + ((k + 0.5) / cells) * box.width;
+    await page.mouse.move(x(0), box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x(cells - 1), box.y + box.height / 2, { steps: 6 });
+    await page.mouse.up();
+    await page.waitForFunction((n) => window.__how.S.requests.length > n, n0, { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+    check(L("5 dragging across records fetches them; whole images appear, cut ones say which record they need"), (await page.evaluate(() => window.__how.S.requests.length)) > n0 && (await page.locator("#file .thumb canvas").count()) >= 1 && (await page.locator("#file .thumb .cut").count()) >= 1);
+
+    // Tamper.
+    await page.locator("#gcm .switch").scrollIntoViewIfNeeded();
+    await page.locator("#gcm .switch").click();
+    await page.waitForSelector("#gcm .verdict.bad", { timeout: 15000 });
+    const bad = await text(page, "#gcm .verdict");
+    check(L("7 the tamper switch makes a record fail its tag check"), /failed its tag check/.test(bad) && /flipped/.test(bad), bad);
+    await page.locator("#gcm").screenshot({ path: `${SHOTS}${width}-tampered.png` });
+    await page.locator("#gcm .switch").click();
+    await page.waitForSelector("#gcm .verdict.good", { timeout: 15000 });
+
+    // Brightness, and scrolling the series.
+    await page.locator("#wl-c").fill("95");
+    check(L("8 brightness changes the window"), /Window centre/.test(await text(page, "#dicom .pic")));
+    const c0 = await text(page, "#less .counter");
+    await page.locator("#less-slider").fill("2");
+    await page.waitForFunction((c0) => document.querySelector("#less .counter").textContent !== c0, c0, { timeout: 10000 }).catch(() => {});
+    check(L("9 moving to another slice fetches only its records"), (await text(page, "#less .counter")) !== c0, `${c0} → ${await text(page, "#less .counter")}`);
+
+    // Share, open, revoke, open again.
+    await page.locator("#sh-make").scrollIntoViewIfNeeded();
+    await page.locator("#sh-make").click();
+    await page.waitForFunction(() => /A new link/.test(document.querySelector("#share .share-result")?.textContent ?? ""), null, { timeout: 20000 });
+    check(L("10 a new link to the MRI only, with its QR code, Copy and Open"), (await page.locator("#share .qr svg").count()) === 1 && (await page.locator("#newlink-copy").count()) === 1 && /\/view#shlink:\//.test((await page.getAttribute("#newlink-open", "href")) ?? ""));
+    await page.locator("#sh-open").click();
+    await page.waitForFunction(() => /Opened|did not open/.test(document.querySelector("#share .status-line")?.textContent ?? ""), null, { timeout: 20000 });
+    check(L("10 the new link opens with one ImagingStudy"), /lists 1 ImagingStudy/.test(await text(page, "#share .status-line")), await text(page, "#share .status-line"));
+    await page.locator("#sh-revoke").click();
+    await page.waitForFunction(() => /Revoked/.test(document.querySelector("#share .share-result")?.textContent ?? ""), null, { timeout: 15000 });
+    await page.locator("#sh-open").click();
+    await page.waitForFunction(() => /404|did not open/.test(document.querySelector("#share .status-line")?.textContent ?? ""), null, { timeout: 20000 });
+    check(L("10 after revoking, the server answers 404"), /404/.test(await text(page, "#share .status-line")), await text(page, "#share .status-line"));
+    await page.locator("#share details.exact").evaluate((e) => (e.open = true));
+    await page.waitForFunction(() => document.querySelectorAll("#share .exact-body .req").length >= 2, null, { timeout: 10000 }).catch(() => {});
+    check(L("10 the server's access log for the copy is shown"), (await page.locator("#share .exact-body .req").count()) >= 2);
+    await page.locator("#share").screenshot({ path: `${SHOTS}${width}-revoked.png` });
+
+    // Build your own: receiver, test vector, decoder comparison, all in the worker.
+    if (width !== "360") {
+      await page.locator("#end details.exact").evaluate((e) => (e.open = true));
+      await page.locator("#rx-run").scrollIntoViewIfNeeded();
+      await page.locator("#rx-run").click();
+      await page.waitForFunction(() => /returned|threw/.test(document.querySelector("#rx-out")?.textContent ?? ""), null, { timeout: 20000 });
+      check(L("end: the reference receiver runs in a worker on the sample"), /"matchesBundle": true/.test(await text(page, "#rx-out")));
+      await page.locator("#tv-run").click();
+      await page.waitForFunction(() => /Tampering/.test(document.querySelector("#tv-out")?.textContent ?? ""), null, { timeout: 20000 });
+      const tv = await text(page, "#tv-out");
+      check(L("end: test vector matches appendix B"), !tv.includes("✗") && (tv.match(/✓/g) ?? []).length >= 7);
+      await page.locator("#bx-run").click();
+      await page.waitForFunction(() => document.querySelectorAll("#bx-out tbody tr").length || /error|fail/i.test(document.querySelector("#bx-out")?.textContent ?? ""), null, { timeout: 120000 });
+      const pb = await page.evaluate(() => {
+        const b = document.querySelector('#bx-progress [role="progressbar"]');
+        return [b?.getAttribute("aria-valuenow"), b?.getAttribute("aria-valuemax")];
+      });
+      check(L("end: decoder comparison finishes with real progress and the same pixels"), (await page.locator("#bx-out tbody tr").count()) === 3 && !/\bno\b/.test(await text(page, "#bx-out tbody")) && pb[0] === pb[1], pb.join("/"));
+    }
   }
 
   const long = await page.evaluate(() => window.__long);
   check(L("no main-thread task over 100 ms"), long.length === 0, long.join(", "));
-  if (!dark) await layout(page, L("layout"), touch);
-  if (!dark && details) await shot("full", true);
   check(L("no console errors"), errors.length === 0, errors.slice(0, 4).join(" | "));
   await context.close();
 }
 
-const runs = [];
-for (const dev of Object.keys(DEVICES)) for (const details of [false, true]) runs.push([dev, details, false]);
-for (const dev of Object.keys(DEVICES)) runs.push([dev, true, true]);
-for (const [dev, details, dark] of runs) {
-  if (only && only !== dev && !(only === "dark" && dark)) continue;
-  try {
-    await run(dev, details, dark);
-  } catch (e) {
-    check(`${dark ? "dark " : ""}${dev} details ${details ? "on" : "off"}: run completed`, false, e.message.split("\n")[0]);
+for (const width of Object.keys(WIDTHS)) {
+  if (only && only !== width) continue;
+  for (const dark of lightOnly ? [false] : [false, true]) {
+    try {
+      await run(width, dark);
+    } catch (e) {
+      check(`${width}px ${dark ? "dark" : "light"}: run completed`, false, e.message.split("\n")[0]);
+    }
   }
-}
-// Reduced motion: the tour still runs, with cuts instead of transitions.
-{
-  const ctx = await browser.newContext({ ...DEVICES.desktop, reducedMotion: "reduce" });
-  const p = await ctx.newPage();
-  await p.goto(`${BASE}/how`);
-  await p.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok"), null, { timeout: 30000 });
-  const t = await p.evaluate(() => getComputedStyle(document.querySelector(".scene")).transitionDuration);
-  check("reduced motion: scenes cut without transitions", /^0s/.test(t), t);
-  await ctx.close();
 }
 pageErrorCheck(browser, check);
 await browser.close();

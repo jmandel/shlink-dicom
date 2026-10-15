@@ -1,5 +1,5 @@
-// Shared state for the tour: the opened sample, the thread (one slice of the brain MRI), the
-// requests this page made, the decoder pool, and small DOM helpers.
+// Shared state for /how: the opened sample, the slice the page follows (one slice of the brain
+// MRI), the requests this page made, the decoder pool, and small DOM helpers.
 import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, type FileEntry, type OpenShare, type RequestEvent, type SeriesEntry, type SiteConfig, type StudyEntry } from "../core/index";
 import type { DecoderPool } from "../core/images";
 
@@ -15,7 +15,6 @@ export function recordLength(f: FileEntry, i: number): number {
 }
 
 type Handler = (...a: any[]) => void;
-export type Ev = "ready" | "request" | "details" | "step";
 
 export const S = {
   cfg: null as SiteConfig | null,
@@ -25,29 +24,19 @@ export const S = {
   pool: null as Promise<DecoderPool> | null,
   /** The compact JWE as fetched (for its header and size). */
   jwe: "",
-  /** The thread: one slice of the brain MRI. */
+  /** The slice the page follows. */
   study: null as StudyEntry | null,
   series: null as SeriesEntry | null,
   slice: 0,
   requests: [] as Req[],
-  details: false,
   /** Tamper switch: flip one bit of the next response whose Range header matches. */
   tamper: { range: null as string | null, flipped: null as null | { byte: number; bit: number } },
   handlers: new Map<string, Set<Handler>>(),
 };
 
-export function on(ev: Ev, fn: Handler) {
-  if (!S.handlers.has(ev)) S.handlers.set(ev, new Set());
-  S.handlers.get(ev)!.add(fn);
-}
-export function emit(ev: Ev, ...a: any[]) {
-  for (const fn of S.handlers.get(ev) ?? []) {
-    try {
-      fn(...a);
-    } catch (e) {
-      console.warn(e);
-    }
-  }
+export function onRequest(fn: (r: Req) => void) {
+  if (!S.handlers.has("request")) S.handlers.set("request", new Set());
+  S.handlers.get("request")!.add(fn);
 }
 
 let reqId = 0;
@@ -58,11 +47,18 @@ export function logRequest(e: RequestEvent) {
   } catch {}
   const r: Req = { ...e, id: ++reqId, time: new Date(), recipient };
   S.requests.push(r);
-  emit("request", r);
+  for (const fn of S.handlers.get("request") ?? []) {
+    try {
+      fn(r);
+    } catch (err) {
+      console.warn(err);
+    }
+  }
 }
 
-/** Ciphertext bytes this page has received from the host. */
-export const bytesFetched = () => S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0);
+/** Ciphertext bytes this page has received for pieces of `fileId` (or of any file). */
+export const bytesFetched = (fileId?: string) =>
+  S.requests.reduce((a, r) => a + (r.status < 300 && r.purpose === "file" && (!fileId || r.url.includes(`/${fileId}.bin`)) ? r.bytes : 0), 0);
 
 // DOM helpers
 export const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -114,11 +110,53 @@ export function progressBar(label: string) {
   };
 }
 
-/** Request path with long random ids shortened. */
-export function shortPath(url: string): string {
+/** One request as a log line: method, path, status; then range, bytes and recipient. */
+export function reqRow(r: { method: string; url: string; range?: string; status: number; bytes: number; recipient?: string | null }, full = false) {
+  const ok = r.status >= 200 && r.status < 300;
+  let path = r.url;
   try {
-    return new URL(url).pathname.replace(/[A-Za-z0-9_-]{20,}/g, (m) => short(m, 6, 3));
-  } catch {
-    return url;
-  }
+    path = new URL(r.url).pathname;
+  } catch {}
+  if (!full) path = path.replace(/[A-Za-z0-9_-]{20,}/g, (m) => short(m, 6, 3));
+  const x = [r.range ? `Range: ${r.range}` : null, `${n(r.bytes)} bytes`, r.recipient ? `recipient=${r.recipient}` : null].filter(Boolean).join(" · ");
+  return h("div", { class: "req" }, h("span", { class: "m", text: r.method }), h("span", { class: "p", text: path }), h("span", { class: `s ${ok ? "ok" : "bad"}`, text: String(r.status) }), h("span", { class: "x", text: x }));
 }
+
+/** Copy and Open buttons for a link (you can't scan a QR code on your own screen). */
+export function linkButtons(url: string, idPrefix: string): HTMLElement {
+  const field = h("input", { class: "link-field hidden", type: "text", readonly: true, value: url, "aria-label": "The link" }) as HTMLInputElement;
+  const copy = h("button", { class: "btn", type: "button", id: `${idPrefix}-copy`, text: "Copy link" });
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      copy.textContent = "Copied";
+      setTimeout(() => (copy.textContent = "Copy link"), 2000);
+    } catch {
+      // No clipboard access: show the link selected, ready to copy by hand.
+      field.classList.remove("hidden");
+      field.focus();
+      field.select();
+      copy.textContent = "Selected: copy it";
+    }
+  });
+  const open = h("a", { class: "btn", id: `${idPrefix}-open`, href: url, target: "_blank", rel: "noopener", text: "Open link" });
+  return h("div", { class: "link-actions" }, h("div", { class: "row" }, copy, open), field);
+}
+
+/**
+ * A code excerpt: lines matching any of `marks` are highlighted. `label` names it for screen
+ * readers ("The decoded payload").
+ */
+export function excerpt(text: string, marks: RegExp[] = [], label = ""): HTMLElement {
+  const pre = h("pre", { class: "code", tabindex: "0", ...(label ? { "aria-label": label } : {}) });
+  const lines = text.split("\n");
+  lines.forEach((line, i) => {
+    const hit = marks.some((m) => m.test(line));
+    pre.append(hit ? h("mark", { text: line }) : line, i < lines.length - 1 ? "\n" : "");
+  });
+  return pre;
+}
+
+/** Plain text in the "How exactly" layer. */
+export const para = (...kids: (Node | string)[]) => h("p", {}, ...kids);
+export const code = (t: string) => h("code", { text: t });

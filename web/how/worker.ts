@@ -1,4 +1,4 @@
-// Worker for the tour's ending: runs the reference receiver, checks the test vector, and times our
+// Worker for /how's last section: runs the reference receiver, checks the test vector, and times our
 // decoder against C libraries compiled to WebAssembly. Nothing here runs on the page's thread.
 import { receive } from "./receiver.js";
 import { WasmDecoder } from "../../viewer-kit/src/wasm-decoder";

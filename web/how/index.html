@@ -16,180 +16,91 @@
       <span>Start</span>
     </a>
     <span class="how-top-title">How it works</span>
-    <label class="switch">
-      <input id="details" type="checkbox" role="switch" />
-      <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
-      <span>Show the details</span>
-    </label>
   </header>
 
-  <main>
-    <section class="hero">
-      <h1>How it works</h1>
-      <p class="lede">Follow one slice of a brain MRI from a link to the picture on your screen. The tour uses a real shared study and runs in your browser.</p>
-      <p id="status" class="status" role="status"><span class="spinner-sm" aria-hidden="true"></span> Opening the sample link…</p>
+  <main class="page-how">
+    <h1>How it works</h1>
+    <p class="lede">A SMART Health Link can carry a whole imaging study. This page opens the site's sample link and follows one slice of a brain MRI through each layer, from the link to the picture. Every excerpt below comes from the live sample, through real requests and decryption in your browser.</p>
+    <p id="status" class="status" role="status"><span class="spinner-sm" aria-hidden="true"></span> Opening the sample link…</p>
+
+    <section class="step" id="link">
+      <h2><span class="n">1</span> The SMART Health Link</h2>
+      <p>A SMART Health Link is <code>shlink:/</code> followed by a small JSON payload, encoded so it fits in a URL or a QR code. The payload says where the shared data is (<code>url</code>) and holds the key that decrypts it (<code>key</code>). Your browser never sends the key to the server.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
     </section>
 
-    <div class="tour">
-      <div class="panel-wrap">
-        <div id="panel" class="panel" aria-live="polite"></div>
-      </div>
+    <section class="step" id="jwe">
+      <h2><span class="n">2</span> The JWE</h2>
+      <p>The <code>url</code> points to one file: a JWE (JSON Web Encryption), encrypted bytes with a short JSON header. Your browser downloads it and decrypts it with the link's key.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-      <div class="steps">
-        <article class="step" id="link" data-step="link">
-          <p class="step-n">1</p>
-          <h2>The link</h2>
-          <p class="plain">A SMART Health Link holds two things: where the data is, and a key to unlock it. Your browser never sends the key to the server.</p>
-          <div class="d">
-            <p>The link is <code>shlink:/</code> followed by JSON written in base64url (bytes spelled with letters, digits, <code>-</code> and <code>_</code>). The panel shows the JSON:</p>
-            <ul>
-              <li><code>url</code>: where the locked index is.</li>
-              <li><code>key</code>: 32 random bytes that unlock it.</li>
-              <li><code>flag</code> <code>U</code>: the address is the file itself, so one GET fetches it.</li>
-              <li><code>label</code>: a name for the recipient to see.</li>
-            </ul>
-            <p>In an address that opens a viewer, the link comes after <code>#</code>. That part of an address, the fragment, stays in the browser: it is not part of the request.</p>
-          </div>
-        </article>
+    <section class="step" id="bundle">
+      <h2><span class="n">3</span> The FHIR Bundle</h2>
+      <p>Inside the JWE is a FHIR Bundle: a list of health records in the FHIR standard. This one holds the Patient, an ImagingStudy for each study, and a DiagnosticReport for each radiology report.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="index" data-step="index">
-          <p class="step-n">2</p>
-          <h2>The index</h2>
-          <p class="plain">Your browser downloads one small locked file, unlocks it with the key, and finds a table of contents for everything shared.</p>
-          <div class="d">
-            <p>The locked file is a JWE (JSON Web Encryption): a header, a random starting value and the ciphertext, sealed with AES-256-GCM. Unlocked and unzipped, it is a FHIR Bundle, the standard format for health records.</p>
-            <p>The Bundle holds the patient and one ImagingStudy per study. For every image, the ImagingStudy gives its length in bytes. It names one file for the whole study, with that file's own key; a series added later can name a file of its own.</p>
-            <p id="d-index" class="nums"></p>
-          </div>
-        </article>
+    <section class="step" id="study">
+      <h2><span class="n">4</span> The ImagingStudy</h2>
+      <p>An ImagingStudy lists a study's series and, in each series, its instances: one per DICOM file, usually one image. Two extensions connect it to the images. <code>linked-file</code> names the encrypted file that holds the study and carries that file's own key. <code>instance-length</code> gives each instance's size in bytes.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="pieces" data-step="pieces">
-          <p class="step-n">3</p>
-          <h2>The pieces</h2>
-          <p class="plain">Each study is stored as one file of small locked pieces. Your browser asks for just the pieces that hold this slice.</p>
-          <p class="try">Drag across the pieces to choose others. Every image wholly inside your choice appears.</p>
-          <div class="d">
-            <p>Each piece, called a record, holds 65,520 bytes of the original files and a 16-byte seal, so it takes 65,536 bytes on the server. The study's images sit end to end, series by series, so an image at bytes <i>a</i> to <i>b</i> is in pieces ⌊<i>a</i> ÷ 65,520⌋ to ⌊<i>b</i> ÷ 65,520⌋.</p>
-            <p id="d-pieces" class="nums"></p>
-            <div id="d-requests" class="reqs"></div>
-          </div>
-        </article>
+    <section class="step" id="file">
+      <h2><span class="n">5</span> The encrypted file and its records</h2>
+      <p>The encrypted file holds the study's DICOM files end to end, cut into 64 KiB records that are each encrypted on their own. Adding up the instance lengths gives where this slice starts, so your browser asks for just its records with one HTTP Range request (a request for a byte range of a file).</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="host" data-step="host">
-          <p class="step-n">3b</p>
-          <h2>What the server sees</h2>
-          <p class="plain">The server that delivers the pieces can't read them. This is what it gets from your visit.</p>
-          <p class="plain2">It also sees your network address and the time, as any web server does.</p>
-          <div class="d">
-            <p>Each line is one request. The file names are random and the key never leaves the browser, so names, dates and pixels stay hidden. The server sees one file per study, not how many series it holds, but the pieces a viewer reads show where those images begin and end, and the sizes can hint at what kind of study it is.</p>
-            <p>For each request the server logs the time, the link, the method, the path, the range, the status, the bytes sent and the <code>recipient</code> name the browser gives. Step 7 shows that log for a link you make.</p>
-          </div>
-        </article>
+    <section class="step" id="host">
+      <h2><span class="n">6</span> What the server sees</h2>
+      <p>The server that holds the encrypted file can't decrypt it. These are the requests this page has sent it: random ids and byte ranges. Like any web server, it also sees your network address and the time.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="unlock" data-step="unlock">
-          <p class="step-n">4</p>
-          <h2>Unlocking</h2>
-          <p class="plain">Each piece is sealed, so any change is detected.</p>
-          <div class="try-row">
-            <label class="switch">
-              <input id="tamper" type="checkbox" role="switch" />
-              <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
-              <span>Change one bit on the way</span>
-            </label>
-            <button id="refetch" class="btn" type="button">Fetch the pieces again</button>
-          </div>
-          <div class="d">
-            <p>The seal is AES-256-GCM. Each piece is unlocked with the file's key and a nonce (a number used once) equal to the piece's number, and must match its 16-byte tag. A changed bit fails the tag, and so does a piece moved to another place, because its nonce no longer matches. So each piece is checked on its own, as soon as it arrives.</p>
-            <div id="d-unlock" class="reqs"></div>
-            <p>The panel draws the slice from its pieces. Each piece holds a band of the image's rows. Locked, the band is noise; once its seal matches, the rows appear.</p>
-          </div>
-        </article>
+    <section class="step" id="gcm">
+      <h2><span class="n">7</span> The AES-256-GCM tag</h2>
+      <p>Each record is encrypted with AES-256-GCM, which adds a 16-byte tag. Decryption checks the tag, so a record changed by even one bit is refused. Try it with the switch.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="pixels" data-step="pixels">
-          <p class="step-n">5</p>
-          <h2>Bytes to pixels</h2>
-          <p class="plain">Inside is the original scanner file. Its header says what the image is; the rest is the picture.</p>
-          <div class="try-row sliders">
-            <label class="field"><span class="field-label">Brightness</span><input id="wl-c" type="range" min="0" max="100" value="50" /></label>
-            <label class="field"><span class="field-label">Contrast</span><input id="wl-w" type="range" min="0" max="100" value="50" /></label>
-          </div>
-          <div class="d">
-            <p>The header is a list of DICOM attributes, each with a numbered tag. The panel shows a few of them as stored, and where the pixels begin.</p>
-            <p id="d-pixels" class="nums"></p>
-          </div>
-        </article>
+    <section class="step" id="dicom">
+      <h2><span class="n">8</span> The DICOM header and Pixel Data</h2>
+      <p>Decrypted, the bytes are the scanner's original DICOM file: a header of tagged attributes, then the Pixel Data, the image itself.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="compressed" data-step="compressed">
-          <p class="step-n">5b</p>
-          <h2>A compressed image</h2>
-          <p class="plain">Many scanners compress their images. Your browser decodes them itself.</p>
-          <p class="plain2">The sample's images are not compressed, so this slice comes from a public research collection.</p>
-          <div class="d">
-            <p id="d-compressed" class="nums"></p>
-          </div>
-        </article>
+    <section class="step" id="less">
+      <h2><span class="n">9</span> Range requests on demand</h2>
+      <p>Your browser fetches the records for the images you look at, and nothing else. Move the slider and watch the count.</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="less" data-step="less">
-          <p class="step-n">6</p>
-          <h2>Fetching less</h2>
-          <p class="plain">You only download what you look at.</p>
-          <div class="try-row" role="group" aria-label="What to look at">
-            <button id="less-mri" class="btn" type="button" aria-pressed="true">Scroll the MRI</button>
-            <button id="less-slide" class="btn" type="button" aria-pressed="false">Zoom the slide</button>
-          </div>
-          <div class="d">
-            <p id="d-less" class="nums"></p>
-            <div id="d-less-reqs" class="reqs"></div>
-          </div>
-        </article>
+    <section class="step" id="share">
+      <h2><span class="n">10</span> A second link, then revocation</h2>
+      <p>Make a new SMART Health Link to just the MRI, open it, then revoke it. After that the server answers 404 (not found).</p>
+      <div class="pic" data-pic></div>
+      <details class="exact"><summary>How exactly</summary><div class="exact-body" data-exact></div></details>
+    </section>
 
-        <article class="step" id="share" data-step="share">
-          <p class="step-n">7</p>
-          <h2>Share and revoke</h2>
-          <p class="plain">You can share part of what you have, and take it back.</p>
-          <div class="try-row">
-            <button id="sh-make" class="btn btn-primary" type="button" disabled>Make a link to the MRI only</button>
-            <button id="sh-open" class="btn" type="button" disabled>Open it</button>
-            <button id="sh-revoke" class="btn btn-danger" type="button" disabled>Revoke it</button>
-          </div>
-          <div class="d">
-            <p>The new link has its own key and its own index, which lists only the MRI. The pieces are not locked again: the new index names the same files, with the same file keys.</p>
-            <p>After revocation the server answers 404 (not found) for the link and for its files. Revoking stops new downloads; it can't take back what a recipient has already downloaded.</p>
-            <p id="d-share" class="nums"></p>
-            <div id="d-share-log" class="reqs"></div>
-          </div>
-        </article>
-      </div>
-    </div>
-
-    <section class="ending" id="end">
-      <h2>Now open it yourself</h2>
-      <p>The full viewer, on the same sample: every study, the reports, and the originals to download.</p>
+    <section class="step" id="end">
+      <h2>Open it yourself</h2>
+      <p>The full viewer, on the same sample: every study, the reports, and the original files to download.</p>
       <div class="row wrap">
         <a id="open-viewer" class="btn btn-primary" href="../view">Open the sample</a>
         <a class="btn" href="../share">Share your own</a>
       </div>
-
-      <div class="d end-details">
-        <h2>Build your own</h2>
-        <p>This receiver resolves the sample link with only <code>fetch</code> and WebCrypto, reads the first image of a series with one Range request, and checks every piece. It runs here in a worker, and the same file runs in Node 24 and Bun.</p>
-        <pre id="rx-code" class="code" tabindex="0"></pre>
-        <div class="row wrap">
-          <button id="rx-run" class="btn btn-primary" type="button" disabled>Run it on the sample</button>
-          <a class="btn" href="../how/receiver.mjs" download="receiver.mjs">Download</a>
-        </div>
-        <pre id="rx-out" class="json-block hidden" aria-live="polite"></pre>
-        <p>The protocol: <a id="spec-link" href="https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md">the specification</a>, with a <a href="https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md#appendix-b-test-vector">test vector</a> for the piece format.</p>
-        <button id="tv-run" class="btn" type="button">Check the test vector here</button>
-        <dl id="tv-out" class="facts"></dl>
-
-        <h2>Decoder speed</h2>
-        <p>Our decoders against the C libraries a browser viewer would otherwise use (OpenJPEG, OpenJPH and CharLS, compiled to WebAssembly), on the same files, in a worker on this device.</p>
-        <button id="bx-run" class="btn" type="button">Run the comparison</button>
-        <div id="bx-progress"></div>
-        <div id="bx-out"></div>
-        <p class="small muted">How we check that the decoders are right: <a href="https://github.com/jmandel/shlink-dicom/tree/main/codec-corpus">the codec corpus</a> and <a href="https://github.com/jmandel/shlink-dicom/tree/main/codecs/bench">the benchmarks</a>.</p>
-      </div>
+      <details class="exact"><summary>Build your own</summary><div class="exact-body" data-exact></div></details>
     </section>
   </main>
 
