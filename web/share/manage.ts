@@ -67,7 +67,7 @@ function confirmBox(title: string, text: string, ok: string): Promise<boolean> {
     return;
   }
   index = parseStudyIndex(owner);
-  for (const st of index.studies) for (const se of st.series) fileStudy.set(se.fileId, st);
+  for (const st of index.studies) for (const f of st.files) fileStudy.set(f.fileId, st);
   const title = index.studies.map(studyName).join(", ");
   if (!savedShares().some((s) => s.sid === cred.sid)) saveShare({ ...cred, title, createdAt: share.createdAt, apiBase: cfg.apiBase });
   await loadEvents();
@@ -169,7 +169,7 @@ function refreshStatus() {
 
 function linkStudies(l: LinkResource): StudyEntry[] {
   const files = new Set(l.allowedFiles.map((f) => f.replace(/\.bin$/, "")));
-  return index.studies.filter((st) => st.series.some((se) => files.has(se.fileId)));
+  return index.studies.filter((st) => st.files.some((f) => files.has(f.fileId)));
 }
 
 function linkState(l: LinkResource): { text: string; cls: string } {

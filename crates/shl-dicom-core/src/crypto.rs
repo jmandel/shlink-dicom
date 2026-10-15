@@ -37,8 +37,8 @@ pub fn record_nonce(record_index: u64) -> [u8; 12] {
     n
 }
 
-pub fn encrypt_series(plaintext: &[u8], series_key: &[u8; 32]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new(series_key.into());
+pub fn encrypt_file(plaintext: &[u8], file_key: &[u8; 32]) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new(file_key.into());
     let n = record_count(plaintext.len() as u64);
     let mut out = Vec::with_capacity(ciphertext_length(plaintext.len() as u64) as usize);
 
@@ -65,7 +65,7 @@ pub fn decrypt_range(
     start: u64,
     end: u64,
     plaintext_len: u64,
-    series_key: &[u8; 32],
+    file_key: &[u8; 32],
 ) -> Result<Vec<u8>> {
     let r = ciphertext_range(start, end, plaintext_len)?;
     if ciphertext_slice.len() != r.expected_ciphertext_len() {
@@ -75,7 +75,7 @@ pub fn decrypt_range(
         });
     }
 
-    let cipher = Aes256Gcm::new(series_key.into());
+    let cipher = Aes256Gcm::new(file_key.into());
     let total_records = record_count(plaintext_len);
     let mut joined = Vec::with_capacity(
         ((r.last_record - r.first_record + 1) * RECORD_PLAINTEXT) as usize,

@@ -1,6 +1,6 @@
-// Series-file record decryption with WebCrypto (PROPOSAL.md §9).
+// Record decryption of the encrypted (linked) files with WebCrypto (PROPOSAL.md §9).
 //
-// A series file is a run of AES-256-GCM records: every record but the last is 65,536 bytes
+// An encrypted file is a run of AES-256-GCM records: every record but the last is 65,536 bytes
 // (65,520 bytes of ciphertext followed by a 16-byte tag), and record i uses the nonce
 // uint96_be(i). decryptRecords() verifies every record's tag, keeps a bounded number of
 // crypto.subtle.decrypt calls in flight, and returns the plaintext in record order.
@@ -18,13 +18,13 @@ export interface DecryptRecordsOptions {
   /** Maximum crypto.subtle.decrypt calls in flight (default DEFAULT_CONCURRENCY). */
   concurrency?: number;
   /**
-   * The series' total plaintext length (from the Bundle's instance lengths). When given, every
+   * The file's total plaintext length (from the Bundle's instance lengths). When given, every
    * record's length is checked against §9: records before the last must be 65,536 bytes, the
-   * series' final record must be its remainder plus 16, and the range must not run past the end.
+   * file's final record must be its remainder plus 16, and the range must not run past the end.
    * Without it, only the tags are checked, so a range missing whole trailing records is not
    * detected: the caller must compare lengths itself, as PROPOSAL.md §9.3 says.
    */
-  seriesPlaintextLength?: number;
+  filePlaintextLength?: number;
   /**
    * Where to write the plaintext. Must be at least the plaintext length; the result is a view
    * of its first bytes. Use it to decrypt straight into a buffer the decoder already owns (for
@@ -34,7 +34,7 @@ export interface DecryptRecordsOptions {
   output?: Uint8Array;
   /**
    * Return only plaintext bytes [start, start + length) of the decrypted run, counted from the
-   * start of the first record (for a read of series bytes [a, b): start = a − 65,520·first,
+   * start of the first record (for a read of file bytes [a, b): start = a − 65,520·first,
    * length = b − a, as in PROPOSAL.md §9.3). Every record is still verified. Each record's
    * plaintext is copied once, straight to its place in the result, so one instance can be
    * decrypted into an ArrayBuffer of exactly its size and transferred to a decoder worker.
@@ -44,20 +44,20 @@ export interface DecryptRecordsOptions {
   signal?: AbortSignal;
 }
 
-/** A record failed authentication, or its length is wrong for its position in the series. */
+/** A record failed authentication, or its length is wrong for its position in the file. */
 export class RecordAuthenticationError extends Error {
   constructor(
     readonly recordIndex: number,
     readonly reason: string,
   ) {
-    super(`series record ${recordIndex}: ${reason}`);
+    super(`record ${recordIndex}: ${reason}`);
     this.name = "RecordAuthenticationError";
   }
 }
 
-/** Imports a 32-byte series key as a non-extractable AES-GCM key usable only to decrypt. */
-export async function importSeriesKey(raw: Uint8Array): Promise<CryptoKey> {
-  if (raw.length !== 32) throw new Error(`series key must be 32 bytes, got ${raw.length}`);
+/** Imports a 32-byte file key as a non-extractable AES-GCM key usable only to decrypt. */
+export async function importFileKey(raw: Uint8Array): Promise<CryptoKey> {
+  if (raw.length !== 32) throw new Error(`file key must be 32 bytes, got ${raw.length}`);
   return crypto.subtle.importKey("raw", raw as Uint8Array<ArrayBuffer>, { name: "AES-GCM" }, false, ["decrypt"]);
 }
 
@@ -81,7 +81,7 @@ export function plaintextLengthOf(ciphertextLength: number): number {
 
 /**
  * Decrypts and verifies the records in `ciphertext`, the first of which is record
- * `firstRecordIndex` of its series file. Resolves with the concatenated plaintext, in order.
+ * `firstRecordIndex` of its file. Resolves with the concatenated plaintext, in order.
  * Rejects with RecordAuthenticationError if any record fails; the output is zeroed then.
  *
  * `ciphertext` must not be backed by a SharedArrayBuffer (WebCrypto refuses those).
@@ -100,10 +100,10 @@ export async function decryptRecords(
   const lastLen = len - (count - 1) * RECORD_CIPHERTEXT;
   if (lastLen < TAG) throw new RecordAuthenticationError(lastIndex, `${lastLen} bytes is shorter than a tag`);
 
-  if (opts.seriesPlaintextLength !== undefined) {
-    const P = opts.seriesPlaintextLength;
+  if (opts.filePlaintextLength !== undefined) {
+    const P = opts.filePlaintextLength;
     const total = Math.max(1, Math.ceil(P / RECORD_PLAINTEXT));
-    if (lastIndex >= total) throw new RecordAuthenticationError(lastIndex, `series has only ${total} records`);
+    if (lastIndex >= total) throw new RecordAuthenticationError(lastIndex, `file has only ${total} records`);
     if (lastIndex === total - 1) {
       const want = P - lastIndex * RECORD_PLAINTEXT + TAG;
       if (lastLen !== want) throw new RecordAuthenticationError(lastIndex, `final record is ${lastLen} bytes, expected ${want}`);

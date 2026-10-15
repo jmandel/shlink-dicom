@@ -2,9 +2,9 @@
 //   const s = await packAndShare(base, files, { addOffsetTables });
 //   const link = await s.mint(s.bundle, { label: "…" });
 import { readFileSync } from "node:fs";
-import { encodeShlink, encryptJwe, randomKeyB64 } from "../core/index";
+import { encodeShlink, encryptJwe, parseStudyIndex, randomKeyB64 } from "../core/index";
 import { Collection } from "../share/lib/ingest";
-import { buildBundle, encryptSeries, planSeriesFiles } from "../share/lib/pack";
+import { buildBundle, encryptFile, planStudyFiles } from "../share/lib/pack";
 import { addOffsetTables } from "../share/lib/offset-tables";
 import { initSync } from "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
@@ -31,17 +31,9 @@ const j = async (r: Response) => {
   return r.json();
 };
 
-/** Series file ids of a Bundle, as `{fileId}.bin`. */
+/** The files a Bundle links, as `{fileId}.bin`. */
 function bundleFiles(bundle: any): string[] {
-  const files: string[] = [];
-  for (const e of bundle.entry) {
-    for (const s of e.resource?.series ?? []) {
-      const ext = (s.extension ?? []).find((x: any) => x.url.endsWith("/series-file"));
-      const id = ext?.extension?.find((x: any) => x.url === "id")?.valueString;
-      if (id) files.push(`${id}.bin`);
-    }
-  }
-  return files;
+  return parseStudyIndex(bundle).studies.flatMap((st) => st.files.map((f) => `${f.fileId}.bin`));
 }
 
 /** Links over an existing share (for example a clone of the sample). */
@@ -86,13 +78,13 @@ export async function packAndShare(
     initSync({ module: readFileSync(`${root}crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm`) });
     tablesAdded = await addOffsetTables(studies.flatMap((s) => s.series));
   }
-  const packed = planSeriesFiles(studies);
+  const packed = planStudyFiles(studies);
   const created = await j(await fetch(`${base}/api/shares`, { method: "POST" }));
   const sid: string = created.share.id, token: string = created.controlToken;
   const auth = { Authorization: `Bearer ${token}` };
   let ciphertextBytes = 0, plaintextBytes = 0;
   for (const p of packed) {
-    const ct = await encryptSeries(p);
+    const ct = await encryptFile(p);
     ciphertextBytes += ct.length;
     plaintextBytes += p.plaintextLength;
     await j(

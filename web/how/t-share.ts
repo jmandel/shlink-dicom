@@ -61,7 +61,7 @@ export function shareScene(): Scene {
           return true;
         }),
       };
-      const files = [...new Set(S.study!.series.map((s) => `${((s as any).file ?? s).fileId}.bin`))];
+      const files = S.study!.files.map((f) => `${f.fileId}.bin`);
       const label = `MRI only (${S.study!.description ?? "MRI"})`;
       const headers = { Authorization: `Bearer ${c.controlToken}`, "Content-Type": "application/json" };
       const link = await j(await fetch(api(`/api/shares/${c.share.id}/links`), { method: "POST", headers, body: JSON.stringify({ label, allowedFiles: files }) }));

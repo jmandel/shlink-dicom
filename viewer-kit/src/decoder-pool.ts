@@ -47,7 +47,7 @@ export interface DecodeOptions {
    */
   scale?: number;
   /**
-   * The input is series-file ciphertext (PROPOSAL.md §9): the worker verifies and decrypts it with
+   * The input is linked-file ciphertext (PROPOSAL.md §9): the worker verifies and decrypts it with
    * WebCrypto (record-decrypt.ts) and decodes the plaintext window. A record that fails its check
    * rejects with RecordAuthenticationError and nothing is decoded.
    */
@@ -64,12 +64,12 @@ export interface DecodeOptions {
 
 /** How to decrypt a ciphertext input (see record-decrypt.ts decryptRecords). */
 export interface EncryptedInput {
-  /** Non-extractable AES-GCM series key (structured-cloneable; posted with the job). */
+  /** Non-extractable AES-GCM file key (structured-cloneable; posted with the job). */
   key: CryptoKey;
-  /** Index of the input's first record in its series file. */
+  /** Index of the input's first record in its file. */
   firstRecord: number;
-  /** The series' plaintext length, for the record-length checks. */
-  seriesPlaintextLength: number;
+  /** The file's plaintext length, for the record-length checks. */
+  filePlaintextLength: number;
   /** Plaintext bytes to keep, counted from the start of the first record. */
   window: { start: number; length: number };
 }
@@ -213,7 +213,7 @@ export class DecoderPool {
   }
 
   /**
-   * Verify and decrypt series-file ciphertext on a worker; resolves with the plaintext window.
+   * Verify and decrypt linked-file ciphertext on a worker; resolves with the plaintext window.
    * Keeps the main thread free of decryption (bulk downloads, whole-slide record reads).
    */
   decrypt(ciphertext: ArrayBuffer | Uint8Array, encrypted: EncryptedInput, opts: Pick<DecodeOptions, "priority" | "signal" | "copy"> = {}): Promise<Uint8Array> {

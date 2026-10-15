@@ -120,7 +120,7 @@
 
 ## 5. How the files are encrypted and found
 
-- **Files:** one encrypted file per study by default, made of 64 KiB AES-256-GCM records, each record's nonce being its index. A series added later can go in its own file. Update this if the study-file change has landed by publication; otherwise say "per series" [[VERIFY]].
+- **Files:** one encrypted file per study by default, made of 64 KiB AES-256-GCM records, each record's nonce being its index. A series added later can go in its own file.
 - **Index:** the ImagingStudy index gives every instance's length, so a byte range maps straight to records.
 - **What the host sees:** random file names, sizes and byte ranges, and nothing else. At rest it can't see how many series a study has; while someone views, the ranges they read reveal where series and instances begin and end.
 - **What's deliberately left out:** compression and ZIP, one line each on why.

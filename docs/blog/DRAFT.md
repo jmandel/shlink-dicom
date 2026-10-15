@@ -30,9 +30,9 @@ When you open the link and pick the brain MRI, the browser runs six steps:
 
 1. **Read the URL fragment.** The `#shlink:/...` fragment stays in the browser and holds the retrieval URL, the 32-byte link key, and mode flags.
 2. **Fetch and decrypt the FHIR Bundle.** The viewer downloads `bundle.jwe` ([[MEASURE: exact bundle.jwe byte size on shlink-dicom.exe.xyz public sample, Playwright network capture]]) and decrypts it with AES-256-GCM and DEFLATE decompression.
-3. **Read the ImagingStudy index.** Each series in the ImagingStudy resource names an encrypted series file, carries that series' 32-byte key, and lists every DICOM instance in order with its byte length.
+3. **Read the ImagingStudy index.** The ImagingStudy resource names the study's encrypted file, carries that file's 32-byte key, and lists every series and DICOM instance in order with its byte length.
 4. **Request the byte range for one slice.** To display the middle slice of the axial T2 series, the viewer maps the slice's byte offset to the 64 KiB encrypted records that cover it and sends a single HTTP `Range` request (`206 Partial Content`) for those records.
-5. **Authenticate and decrypt the records.** WebCrypto verifies the 16-byte AES-GCM tag on each 64 KiB record using the series key and the record number as the nonce, then trims out the slice's DICOM bytes.
+5. **Authenticate and decrypt the records.** WebCrypto verifies the 16-byte AES-GCM tag on each 64 KiB record using the file key and the record number as the nonce, then trims out the slice's DICOM bytes.
 6. **Decode and draw the pixels.** A Web Worker decodes the DICOM frame in WebAssembly and hands the pixels to the WebGL2 renderer.
 
 Opening the sample fetches [[MEASURE: bytes fetched to first image and first thumbnail strip vs total study size on shlink-dicom.exe.xyz, scripted Playwright + PerformanceResourceTiming run]] and draws the first image in [[MEASURE: median time to first image in ms across 3 runs in Chromium, scripted Playwright run]].
@@ -47,13 +47,13 @@ Opening the sample fetches [[MEASURE: bytes fetched to first image and first thu
 
 ## How the files are encrypted and found
 
-A standard SMART Health Link works well when the payload is a few kilobytes of FHIR JSON, because the client downloads and decrypts the whole file at once. A CT or MRI study is tens or hundreds of megabytes, and a whole-slide pathology image is over a gigabyte. We keep the FHIR Bundle small and store each DICOM series as a sequence of fixed-size 64 KiB encrypted records alongside it:
+A standard SMART Health Link works well when the payload is a few kilobytes of FHIR JSON, because the client downloads and decrypts the whole file at once. A CT or MRI study is tens or hundreds of megabytes, and a whole-slide pathology image is over a gigabyte. We keep the FHIR Bundle small and store each DICOM study as a sequence of fixed-size 64 KiB encrypted records alongside it:
 
-- **One file per series, in 64 KiB records.** Every full record holds 65,520 bytes of concatenated DICOM files plus a 16-byte AES-256-GCM authentication tag, totaling 65,536 bytes on disk [[VERIFY: 65,520 B plaintext + 16 B tag = 65,536 B record, PROPOSAL.md §9.2]]. Each record uses its 0-based record index as the 96-bit nonce, so any record range can be fetched with an HTTP `Range` request and verified on its own.
-- **A random 32-byte key per series.** Each series file has its own random key, stored alongside its random 22-character file ID inside the ImagingStudy resource [[VERIFY: series-file extension with id and key, PROPOSAL.md §7.2]]. When you create a second link that shares only one study from a multi-study share, the browser encrypts a new `bundle.jwe` carrying only the keys for that study's series, without re-encrypting or re-uploading any series files.
+- **One file per study, in 64 KiB records.** Every full record holds 65,520 bytes of concatenated DICOM files plus a 16-byte AES-256-GCM authentication tag, totaling 65,536 bytes on disk [[VERIFY: 65,520 B plaintext + 16 B tag = 65,536 B record, PROPOSAL.md §9.2]]. Each record uses its 0-based record index as the 96-bit nonce, so any record range can be fetched with an HTTP `Range` request and verified on its own.
+- **A random 32-byte key per study.** Each study's file has its own random key, stored alongside its random 22-character file ID inside the ImagingStudy resource [[VERIFY: linked-file extension with id and key, PROPOSAL.md §8.1]]. A series added to a study later can go in a file of its own. When you create a second link that shares only one study from a multi-study share, the browser encrypts a new `bundle.jwe` carrying only that study's key, without re-encrypting or re-uploading any files.
 - **The ImagingStudy resource is the byte-offset index.** Each instance entry carries its byte length, so summing earlier lengths gives the exact byte span of any slice [[VERIFY: length extension on series.instance, PROPOSAL.md §7.3]]. Listing 2,000 instances takes about 470 KB of FHIR JSON, which compresses to about 61 KB inside `bundle.jwe` [[VERIFY: 470 KB JSON / 61 KB deflated for 2,000 instances, docs/PROCESS-NOTES.md §2.10]].
-- **An opaque host.** The host stores and serves `bundle.jwe` and the encrypted series files. It sees random file names, file sizes, and 64 KiB-aligned byte ranges, and nothing else.
-- **No outer compression and no ZIP wrapper.** Compressing an entire series file with DEFLATE or gzip would make byte offsets unpredictable and break random access; pixel compression already lives inside each DICOM file. A ZIP wrapper would only duplicate the directory and byte offsets that the ImagingStudy resource already carries.
+- **An opaque host.** The host stores and serves `bundle.jwe` and the encrypted study files. It sees random file names, file sizes, and 64 KiB-aligned byte ranges, and nothing else.
+- **No outer compression and no ZIP wrapper.** Compressing an entire file with DEFLATE or gzip would make byte offsets unpredictable and break random access; pixel compression already lives inside each DICOM file. A ZIP wrapper would only duplicate the directory and byte offsets that the ImagingStudy resource already carries.
 
 **[FIGURE F4] How one slice is found and decrypted.** *An instance's cumulative byte offset in the ImagingStudy resource maps to the 64 KiB ciphertext records that cover it.*
 
@@ -69,7 +69,7 @@ A standard SMART Health Link works well when the payload is a few kilobytes of F
 
 The [sharing flow](https://shlink-dicom.exe.xyz/share) accepts imaging from local files or a hospital CD (skipping Windows viewer executables and wrapping bare DICOM files in Part 10 headers [[VERIFY: eFilmLite non-DICOM filtering and Part 10 wrapping, docs/PROCESS-NOTES-pi.md §3]]), from an existing SMART Health Link, or from a SMART on FHIR imaging portal. For the portal flow we built a standalone sandbox following the [Argonaut SMART Imaging Access Implementation Guide](https://build.fhir.org/ig/argonautproject/smart-imaging/) [[VERIFY: sandbox implementation details, docs/PROCESS-NOTES.md §10]], and filed two issues on the draft guide ([#2](https://github.com/argonautproject/smart-imaging/issues/2) on missing token response fields and [#3](https://github.com/argonautproject/smart-imaging/issues/3) on transfer-syntax negotiation) [[VERIFY: 14 ambiguities and issues #2 and #3, docs/PROCESS-NOTES.md §10–11]].
 
-The review step shows what is in each study with series thumbnails, slice counts, and sizes, and can insert a frame offset table into multi-frame slides that lack one [[VERIFY: pack-time Basic Offset Table insertion, docs/COORDINATION.md]]. You then pick which studies to include, set a label, an optional passcode, and an expiry up to 31 days [[VERIFY: 31-day max expiry, docs/PROCESS-NOTES.md §12]], and the browser encrypts and uploads the series files.
+The review step shows what is in each study with series thumbnails, slice counts, and sizes, and can insert a frame offset table into multi-frame slides that lack one [[VERIFY: pack-time Basic Offset Table insertion, docs/COORDINATION.md]]. You then pick which studies to include, set a label, an optional passcode, and an expiry up to 31 days [[VERIFY: 31-day max expiry, docs/PROCESS-NOTES.md §12]], and the browser encrypts and uploads one file per study.
 
 **[SCREENSHOT S24]** *The passcode prompt on a phone when opening a passcode-protected link.*
 
@@ -83,7 +83,7 @@ At hand-over you receive the recipient's link and QR code, plus a management lin
 
 **[SCREENSHOT S14]** *Reviewing study cards and thumbnails before encrypting.*
 
-**[SCREENSHOT S15]** *Encrypting series files in the browser and uploading ciphertext.*
+**[SCREENSHOT S15]** *Encrypting study files in the browser and uploading ciphertext.*
 
 **[SCREENSHOT S16]** *The hand-over screen with the recipient's QR code and the management link.*
 
@@ -123,7 +123,7 @@ For whole-slide pathology images, the viewer maps each visible viewport tile thr
 
 **[FIGURE F10] Decode speed versus the C libraries.** *Decode time per megapixel in WebAssembly and native builds compared with the reference C libraries.*
 
-**[FIGURE F11] A slide, streamed.** *Panning and zooming to full resolution on a 1.2 GB pathology slide fetches 13.8 MB (1.15%) of the encrypted series file.*
+**[FIGURE F11] A slide, streamed.** *Panning and zooming to full resolution on a 1.2 GB pathology slide fetches 13.8 MB (1.15%) of the encrypted file.*
 
 **[SCREENSHOT S18]** *The whole-slide viewer at full resolution on desktop with the live streaming stats panel.*
 

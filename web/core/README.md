@@ -42,8 +42,8 @@ vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); /
 | `new LinkResolver(link, { recipient?, onRequest?, fetch? })` | One link. Properties: `payload`, `label`, `expires`, `needsPasscode`, `isDirect`, `isLongLived`, `base`. |
 | `resolver.open(passcode?)` | U mode: GETs the file. Manifest mode: POSTs `{recipient, passcode}`, then GETs `files[0].location`. Decrypts the JWE and returns `{ bundleBytes, baseUrl, manifest }`. Checks `exp` before any request. |
 | `resolver.fetchRange(plan, signal?)` | One Range read of `{fileId}.bin` against the base URL, with `?recipient=`. In manifest mode a 404 re-resolves the manifest once, with the remembered passcode, for a fresh `/cap/` prefix, then retries. Checks the byte count. A 200 answer is sliced locally. |
-| `resolver.seriesUrl(fileId)` | The URL it reads from. |
-| `onRequest(e: RequestEvent)` | Called for every exchange: `{ method, url, range, status, bytes, ms, purpose: "manifest" \| "bundle" \| "series" }`. Use it for network panels. |
+| `resolver.fileUrl(fileId)` | The URL it reads from. |
+| `onRequest(e: RequestEvent)` | Called for every exchange: `{ method, url, range, status, bytes, ms, purpose: "manifest" \| "bundle" \| "file" }`. Use it for network panels. |
 | `decryptJwe(compact, key)` / `encryptJwe(bytes, key)` | Compact JWE: `dir`, `A256GCM`, `zip: DEF`. Uses WebCrypto and `(De)CompressionStream("deflate-raw")`. |
 | `randomKeyB64()` | 32 random bytes, base64url. |
 
@@ -67,11 +67,14 @@ vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); /
 
 ```ts
 StudyIndex  { lastUpdated, patient: { name, birthDate, id }, reports: ReportEntry[], studies: StudyEntry[], bundle }
-StudyEntry  { id, studyInstanceUid, description, started, modalities[], notes[], numberOfSeries, numberOfInstances, bytes, series[] }
-SeriesEntry { uid, number, modality, description, bodySite, fileId, key, plaintextLength, ciphertextLength, recordCount, instances[] }
+StudyEntry  { id, studyInstanceUid, description, started, modalities[], notes[], accession, files[], numberOfSeries, numberOfInstances, bytes, series[] }
+FileEntry   { fileId, key, plaintextLength, ciphertextLength, recordCount }
+SeriesEntry { uid, number, modality, description, bodySite, id, file, offset, bytes, firstRecord, lastRecord, instances[] }
 InstanceEntry { uid, sopClass, number, offset, length, firstRecord, lastRecord }
 ReportEntry { id, status, title, conclusion, issued, effective, studyIds[], text }
 ```
+
+Each series is in a file: its own `linked-file`, else its study's. Offsets run per file, through the series and instances in Bundle order (PROPOSAL.md §8.1), so `instance.offset` and `series.offset` are positions in `series.file`. There is one `FileEntry` object per file id, shared by its series; `study.files` lists them in first-use order. `series.bytes` is the series' own size; `series.file.plaintextLength` is the whole file's. Several series share a file, so key caches and maps by `series.id` (`${file.fileId}@${offset}`), not by the file id.
 
 The field names match the Rust `StudyIndex` in `shl-dicom-core`, with additions.
 
@@ -83,7 +86,7 @@ Helpers:
 
 - Constants: `RECORD_PLAINTEXT` (65,520), `TAG` (16) and `RECORD_CIPHERTEXT` (65,536).
 - `recordCount(P)`, `ciphertextLength(P)` and `recordNonce(i)`.
-- `planInstances(series, first, last?)`, `planBytes(series, a, b)` and `planSeries(series)` each return a `RangePlan`: `{ fileId, firstInstance, lastInstance, plaintextStart, plaintextEnd, firstRecord, lastRecord, ciphertextStart, ciphertextEnd, rangeHeader }`.
+- `planInstances(series, first, last?)`, `planBytes(series, a, b)` (bytes of the series' file) and `planSeries(series)` each return a `RangePlan` in `series.file`: `{ fileId, firstInstance, lastInstance, plaintextStart, plaintextEnd, firstRecord, lastRecord, ciphertextStart, ciphertextEnd, rangeHeader }`.
 - `planRuns(series, maxBytes = 8 MiB)` splits a series into consecutive runs of instances, for streaming downloads.
 
 ### Record decryption: `decrypt.ts`
@@ -98,18 +101,18 @@ Both implementations run viewer-kit's `record-decrypt.ts` (WebCrypto AES-256-GCM
 - `WebCryptoDecryptor` (the default in `openShare`) decrypts on the calling thread. The How page uses it to show single records being checked.
 - `PoolDecryptor(pool)` (`images.ts`) decrypts in the decoder workers. The View page uses it, so its main thread never runs AES.
 
-Helpers: `seriesKey(series)` imports a series key once as a non-extractable, decrypt-only `CryptoKey`; `decryptParams(series, plan)` gives `decryptRecords`' arguments (first record, window, series length) for a plan.
+Helpers: `seriesKey(series)` imports the key of the series' file once per file as a non-extractable, decrypt-only `CryptoKey`; `decryptParams(series, plan)` gives `decryptRecords`' arguments (first record, window, file length) for a plan.
 
 **Failures.** A record that fails its tag, or whose length is wrong for its position, throws `RecordAuthenticationError` (`recordIndex`, `reason`). No bytes from it are returned.
 
 ### Loading: `loader.ts`, `share.ts`
 
-**`new InstanceLoader(resolver, decryptor, opts?)`** fetches series ciphertext through one priority queue.
+**`new InstanceLoader(resolver, decryptor, opts?)`** fetches ciphertext through one priority queue.
 
 Options:
 - `concurrency`: requests in flight, default 6;
 - `cacheBytes`: instance ciphertext kept for re-use (a thumbnail and the full image start from the same bytes), default 96 MiB;
-- `onRecords(fileId, first, last, "fetching" | "verified" | "failed")`: for record maps and the trust count;
+- `onRecords(fileId, first, last, "fetching" | "verified" | "failed")`: records of a file, for record maps and the trust count;
 - `onBytes(n)`.
 
 Methods:
@@ -117,7 +120,7 @@ Methods:
 - `instance(series, i, o)` returns one verified, decrypted Part 10 file (through the decryptor).
 - `run(series, plan, o)` returns the instances of a multi-instance plan from one Range read, verified and decrypted. It is used by downloads and is not cached.
 - `report(plan, state)` records a verify outcome from a decryptor running elsewhere (ImageStore's worker jobs).
-- `cancelQueued((fileId, priority) => boolean)` drops queued requests, for example the prefetch of a series the user has left.
+- `cancelQueued((seriesId, priority) => boolean)` drops queued requests, for example the prefetch of a series the user has left (`seriesId` is `SeriesEntry.id`).
 - `bytesFetched`.
 
 `FetchPriority` is `{ Visible: 0, Near: 1, Prefetch: 2, Background: 3 }`, the same numbers as viewer-kit's `Priority`.
@@ -127,7 +130,7 @@ Methods:
 ### Decoding and the frame cache: `images.ts` (browser)
 
 - `getDecoderPool(workers?)` returns the page's viewer-kit `DecoderPool`. It loads `assets/decoder-worker.js` and `assets/shl_dicom_decode.wasm`.
-- `new ImageStore(loader, pool, budgetBytes?)` keeps an LRU of raw decoded images, keyed by `${fileId}/${index}` (and `…@1/2^s` when reduced). The default budget is `min(512 MiB, deviceMemory × 64 MiB)`, at least 128 MiB.
+- `new ImageStore(loader, pool, budgetBytes?)` keeps an LRU of raw decoded images, keyed by `${series.id}/${index}` (and `…@1/2^s` when reduced). The default budget is `min(512 MiB, deviceMemory × 64 MiB)`, at least 128 MiB.
   - `get(series, i, { priority, signal, scale })` takes the instance's ciphertext from the loader and hands it to one worker job that verifies, decrypts and decodes it; the main thread gets pixels only. The same priority orders the fetch and the decode. With `scale` (thumbnails) it decodes at 1/2^scale, falls back to full size when the decoder reports the syntax as unsupported at that scale, and returns a cached full-size image when there is one.
   - `peek(series, i)` returns the cached full-size image without loading anything.
 - `PoolDecryptor(pool)`: see above.

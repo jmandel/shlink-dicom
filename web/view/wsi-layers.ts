@@ -77,11 +77,11 @@ export async function findLayers(share: OpenShare, slide: SeriesEntry, others: S
     if (!h.referencedSeries.includes(slide.uid)) continue;
     const bytes = se.instances.reduce((a, i) => a + i.length, 0);
     if (ann) {
-      out.push({ kind: "annotations", id: `ann:${se.fileId}`, series: se, title: se.description || "Annotations", detail: "", visible: false, state: "idle", error: "", bytes, data: null, groupVisible: [], colors: [], drawn: 0 });
+      out.push({ kind: "annotations", id: `ann:${se.id}`, series: se, title: se.description || "Annotations", detail: "", visible: false, state: "idle", error: "", bytes, data: null, groupVisible: [], colors: [], drawn: 0 });
     } else if (h.dimensionOrganization.startsWith("TILED") || h.totalColumns) {
       const labels = h.segments.map((g) => g.label).filter(Boolean);
       out.push({
-        kind: "segmentation", id: `seg:${se.fileId}`, series: se,
+        kind: "segmentation", id: `seg:${se.id}`, series: se,
         title: se.description || labels.join(", ") || "Segmentation",
         detail: `${h.segmentationType === "FRACTIONAL" ? "Fractional" : "Binary"} segmentation`,
         visible: false, state: "idle", error: "", bytes, ss: null, segmentVisible: [], scale: 1, offset: [0, 0],

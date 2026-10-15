@@ -111,7 +111,7 @@ export class Layers {
             (async () => {
               const bytes = await this.loader().instance(se, index);
               const { ds } = await parseDicom(bytes);
-              const base = { id: `${se.fileId}/${index}`, kind, series: se, index, frameOfReference: ds.str(T.FrameOfReferenceUID) };
+              const base = { id: `${se.id}/${index}`, kind, series: se, index, frameOfReference: ds.str(T.FrameOfReferenceUID) };
               if (kind === "seg") {
                 const seg = readSegmentation(ds);
                 this.layers.push({ ...base, kind, name: se.description ?? "Segmentation", refSeries: seg.referenced.map((r) => r.series), seg, segPixels: undefined, frameOfReference: seg.frameOfReference });

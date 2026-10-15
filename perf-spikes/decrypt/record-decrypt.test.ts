@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   decryptRecords,
-  importSeriesKey,
+  importFileKey,
   plaintextLengthOf,
   RECORD_CIPHERTEXT as RC,
   RECORD_PLAINTEXT as RP,
@@ -21,7 +21,7 @@ const load = (id: string) => ({
 });
 const vector = load("vector");
 const wrist = load("wrist");
-const keyOf = (m: { seriesKeyHex: string }) => importSeriesKey(new Uint8Array(Buffer.from(m.seriesKeyHex, "hex")));
+const keyOf = (m: { keyHex: string }) => importFileKey(new Uint8Array(Buffer.from(m.keyHex, "hex")));
 
 async function rejectsAt(p: Promise<unknown>, recordIndex: number) {
   const e = await p.then(
@@ -34,7 +34,7 @@ async function rejectsAt(p: Promise<unknown>, recordIndex: number) {
 
 describe("Appendix B test vector", () => {
   test("key is the documented one", () => {
-    expect(vector.meta.seriesKeyHex).toBe("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
+    expect(vector.meta.keyHex).toBe("202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
     expect(vector.ct.length).toBe(150048);
   });
 
@@ -46,7 +46,7 @@ describe("Appendix B test vector", () => {
 
   for (const concurrency of [1, 2, 8, 64]) {
     test(`whole file decrypts (concurrency ${concurrency})`, async () => {
-      const pt = await decryptRecords(await keyOf(vector.meta), vector.ct, 0, { concurrency, seriesPlaintextLength: 150000 });
+      const pt = await decryptRecords(await keyOf(vector.meta), vector.ct, 0, { concurrency, filePlaintextLength: 150000 });
       expect(pt.length).toBe(150000);
       expect(await sha256(pt)).toBe("02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b");
       expect(pt.every((b, k) => b === k % 251)).toBe(true);
@@ -54,14 +54,14 @@ describe("Appendix B test vector", () => {
   }
 
   test("range read of instance 2 (records 1–2)", async () => {
-    const pt = await decryptRecords(await keyOf(vector.meta), vector.ct.subarray(65536, 150048), 1, { seriesPlaintextLength: 150000 });
+    const pt = await decryptRecords(await keyOf(vector.meta), vector.ct.subarray(65536, 150048), 1, { filePlaintextLength: 150000 });
     const inst2 = pt.subarray(70000 - RP, 70000 - RP + 80000);
     expect(inst2.every((b, k) => b === (70000 + k) % 251)).toBe(true);
   });
 
   test("window returns exactly instance 2 from records 1–2", async () => {
     const pt = await decryptRecords(await keyOf(vector.meta), vector.ct.subarray(65536, 150048), 1, {
-      seriesPlaintextLength: 150000,
+      filePlaintextLength: 150000,
       window: { start: 70000 - RP, length: 80000 },
     });
     expect(pt.length).toBe(80000);
@@ -91,7 +91,7 @@ describe("Appendix B test vector", () => {
 
 describe("tampering is rejected", () => {
   const key = () => keyOf(vector.meta);
-  const P = { seriesPlaintextLength: 150000 };
+  const P = { filePlaintextLength: 150000 };
 
   test("flipped ciphertext bit", async () => {
     const t = vector.ct.slice();
@@ -121,7 +121,7 @@ describe("tampering is rejected", () => {
     await rejectsAt(decryptRecords(await key(), vector.ct.subarray(0, vector.ct.length - 1), 0, P), 2);
   });
 
-  test("a non-final record cut short (needs seriesPlaintextLength)", async () => {
+  test("a non-final record cut short (needs filePlaintextLength)", async () => {
     // Without the series length this would just fail the tag; with it, it fails before any call.
     await rejectsAt(decryptRecords(await key(), vector.ct.subarray(0, 2 * RC - 100), 0, P), 1);
   });
@@ -144,7 +144,7 @@ describe("tampering is rejected", () => {
   });
 
   test("wrong key", async () => {
-    const other = await importSeriesKey(Uint8Array.from({ length: 32 }, (_, i) => 255 - i));
+    const other = await importFileKey(Uint8Array.from({ length: 32 }, (_, i) => 255 - i));
     const e = await decryptRecords(other, vector.ct, 0).catch((e) => e);
     expect(e).toBeInstanceOf(RecordAuthenticationError);
   });
@@ -160,7 +160,7 @@ describe("tampering is rejected", () => {
 
 describe("real series file (wrist-low-res, 3 Part 10 instances)", () => {
   test("decrypts to the original DICOM bytes", async () => {
-    const pt = await decryptRecords(await keyOf(wrist.meta), wrist.ct, 0, { seriesPlaintextLength: wrist.meta.plaintextLength });
+    const pt = await decryptRecords(await keyOf(wrist.meta), wrist.ct, 0, { filePlaintextLength: wrist.meta.plaintextLength });
     expect(await sha256(pt)).toBe(wrist.meta.plaintextSha256);
     let off = 0;
     for (const n of wrist.meta.instanceLengths) {
@@ -182,7 +182,7 @@ describe("helpers", () => {
     expect(k.extractable).toBe(false);
     expect(k.usages).toEqual(["decrypt"]);
     expect(crypto.subtle.exportKey("raw", k)).rejects.toThrow();
-    expect(importSeriesKey(new Uint8Array(16))).rejects.toThrow();
+    expect(importFileKey(new Uint8Array(16))).rejects.toThrow();
   });
 
   test("nonce is uint96_be(i)", () => {

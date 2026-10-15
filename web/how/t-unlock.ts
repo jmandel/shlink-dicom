@@ -4,7 +4,7 @@
 // and that piece is refused.
 import { decryptParams, parseDicomSync, planBytes, planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordNonce, RecordAuthenticationError, T } from "../core/index";
 import type { Scene } from "./how";
-import { $, fileOf, h, hex, n, recordLength, S, wait } from "./state";
+import { $, h, hex, n, recordLength, S, wait } from "./state";
 
 interface Geometry {
   rows: number;
@@ -20,7 +20,7 @@ interface Geometry {
 
 export function unlockScene(): Scene {
   const series = S.series!;
-  const f = fileOf(series);
+  const f = series.file;
   const inst = series.instances[S.slice];
   const recs: number[] = [];
   for (let r = inst.firstRecord; r <= inst.lastRecord; r++) recs.push(r);

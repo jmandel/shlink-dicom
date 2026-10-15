@@ -7,14 +7,14 @@ import { autoWindow } from "../core/wl";
 import { isSlideSeries, levelForScale, type Pyramid } from "../core/wsi";
 import { SlideSource } from "../core/wsi-source";
 import type { Scene } from "./how";
-import { $, bytesFetched, fileOf, h, mb, n, on, S, type Req } from "./state";
+import { $, bytesFetched, h, mb, n, on, S, type Req } from "./state";
 import { reqRow } from "./t-pieces";
 
 /** Total ciphertext of every file the link shares. */
 function sharedBytes(): number {
   const seen = new Map<string, number>();
   for (const st of S.share!.index.studies) for (const se of st.series) {
-    const f = fileOf(se);
+    const f = se.file;
     seen.set(f.fileId, f.ciphertextLength);
   }
   return [...seen.values()].reduce((a, b) => a + b, 0);
@@ -151,7 +151,7 @@ export function lessScene(): Scene {
       (cbar.firstElementChild as HTMLElement).style.width = `${(100 * got) / total}%`;
     } else if (slide) {
       const got = slide.src.reader.stats.bytes;
-      const size = fileOf(slideSeries!).ciphertextLength;
+      const size = slide.src.ciphertextBytes;
       counter.innerHTML = "";
       counter.append(h("b", { text: mb(got) }), ` of the slide's ${mb(size)}.`);
       (cbar.firstElementChild as HTMLElement).style.width = `${(100 * got) / size}%`;
@@ -174,7 +174,7 @@ export function lessScene(): Scene {
     const w = autoWindow(img);
     vp.show(img, 0, { windowCenter: w.center, windowWidth: w.width });
     shown++;
-    const reqs = S.requests.filter((r) => r.purpose === "series").length;
+    const reqs = S.requests.filter((r) => r.purpose === "file").length;
     const pieces = series.instances[i].lastRecord - series.instances[i].firstRecord + 1;
     $("d-less").textContent = `Each slice is about ${mb(series.instances[i].length)}, in ${pieces} pieces of ${n(RECORD_PLAINTEXT)} bytes. ${plural(shown, "slice")} shown here so far; a slice seen before comes from memory, with no new request. This page has made ${plural(reqs, "request")} for pieces.`;
     update();

@@ -75,7 +75,7 @@ export class PoolDecryptor implements RecordDecryptor {
 }
 
 /**
- * Decoded instances by `${fileId}/${index}` (and `…@1/2^s` when reduced): ciphertext from the
+ * Decoded instances by `${series.id}/${index}` (and `…@1/2^s` when reduced): ciphertext from the
  * InstanceLoader goes to one decoder-worker job that verifies, decrypts and decodes it, so the
  * main thread never decrypts. Results go in an LRU of raw frames.
  */
@@ -92,7 +92,7 @@ export class ImageStore {
   }
 
   static key(series: SeriesEntry, i: number, scale = 0) {
-    return scale ? `${series.fileId}/${i}@1/${2 ** scale}` : `${series.fileId}/${i}`;
+    return scale ? `${series.id}/${i}@1/${2 ** scale}` : `${series.id}/${i}`;
   }
 
   /** The full-size image if it is cached, without loading. */

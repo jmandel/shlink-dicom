@@ -61,12 +61,13 @@ class LinkSeriesBytes implements Bytes {
     readonly se: SeriesEntry,
   ) {}
   get size() {
-    return this.se.plaintextLength;
+    return this.se.bytes;
   }
+  /** Bytes [a, b) of the series, which starts at se.offset in its file. */
   async read(a: number, b: number) {
     b = Math.min(b, this.size);
     if (a >= b) return new Uint8Array(0);
-    const plan = planBytes(this.se, a, b);
+    const plan = planBytes(this.se, this.se.offset + a, this.se.offset + b);
     // A read that stalls fails after a minute; the upload waits it out and asks again.
     const ct = await this.share.resolver.fetchRange(plan, AbortSignal.timeout(60000));
     return this.share.decryptor.decrypt(this.se, plan, ct);
@@ -75,7 +76,7 @@ class LinkSeriesBytes implements Bytes {
 
 /**
  * Opens a SMART Health Link's studies from its Bundle without downloading them. Images are read
- * when they are shown or packed, as byte ranges of the link's encrypted series files.
+ * when they are shown or packed, as byte ranges of the link's encrypted files.
  */
 export async function loadLink(share: OpenShare, col: Collection, on: OnProgress) {
   const idx = share.index;
@@ -100,7 +101,8 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
           instanceNumber: inst.number != null ? String(inst.number) : "",
           accessionNumber: st.accession ?? "",
         });
-        col.addWithHeader(`${se.description ?? se.uid}/${k + 1}`, new SubBytes(src, inst.offset, inst.length), h);
+        // inst.offset is in the file; the series source starts at se.offset.
+        col.addWithHeader(`${se.description ?? se.uid}/${k + 1}`, new SubBytes(src, inst.offset - se.offset, inst.length), h);
       }
     }
     on(col, { doing: "Reading the link's Bundle" });

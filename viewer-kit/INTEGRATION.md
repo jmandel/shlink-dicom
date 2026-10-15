@@ -30,8 +30,8 @@ const pool = await DecoderPool.create({ wasm: "shl_dicom_decode.wasm", workerUrl
 // jxlWasm: the JPEG XL module; default shl_dicom_decode_jxl.wasm next to `wasm` (see "JPEG XL")
 
 const img = await pool.decode(bytes, { priority: Priority.Visible, key, signal });
-const img2 = await pool.decode(ciphertext, { encrypted: { key: cryptoKey, firstRecord, seriesPlaintextLength, window } });
-const plain = await pool.decrypt(ciphertext, { key: cryptoKey, firstRecord, seriesPlaintextLength, window });
+const img2 = await pool.decode(ciphertext, { encrypted: { key: cryptoKey, firstRecord, filePlaintextLength, window } });
+const plain = await pool.decrypt(ciphertext, { key: cryptoKey, firstRecord, filePlaintextLength, window });
 // img: DecodedImage = canonical pixels (CONTRACT.md) + rows, columns, frames, samplesPerPixel,
 //      bitsAllocated, bitsStored, pixelRepresentation, float, photometric, rescaleSlope/Intercept,
 //      windowCenter/Width (first value, or null), minValue/maxValue, realWorldValueMapping,
@@ -63,14 +63,14 @@ renderer.setView({ windowCenter, windowWidth, zoom, panX, panY, interpolation, i
 
 ## Encrypted input
 
-Series files (PROPOSAL.md §9) are decrypted in the workers, so the main thread never runs AES and the series key never enters wasm memory. `record-decrypt.ts` (WebCrypto) does the work; `web/core` calls it through the pool:
+Linked files (PROPOSAL.md §9) are decrypted in the workers, so the main thread never runs AES and the file key never enters wasm memory. `record-decrypt.ts` (WebCrypto) does the work; `web/core` calls it through the pool:
 
 ```ts
-const key = await importSeriesKey(rawKey);   // non-extractable, decrypt-only; posted with each job
+const key = await importFileKey(rawKey);   // non-extractable, decrypt-only; posted with each job
 const encrypted = {
   key,
   firstRecord: plan.firstRecord,                                  // first record in the ciphertext
-  seriesPlaintextLength: series.plaintextLength,                  // for the record-length checks
+  filePlaintextLength: series.file.plaintextLength,                 // for the record-length checks
   window: { start: plan.plaintextStart - plan.firstRecord * 65520, length: plan.plaintextEnd - plan.plaintextStart },
 };
 const img = await pool.decode(ciphertext, { encrypted, key: `${fileId}/${i}`, priority });  // decrypt + decode in one job

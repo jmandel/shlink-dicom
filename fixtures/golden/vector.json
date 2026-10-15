@@ -1,25 +1,67 @@
 {
   "shlKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
-  "fileId": "AAECAwQFBgcICQoLDA0ODw",
-  "seriesKey": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
-  "seriesKeyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-  "instanceLengths": [
-    70000,
-    80000
+  "files": [
+    {
+      "fileId": "AAECAwQFBgcICQoLDA0ODw",
+      "key": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+      "keyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "instanceLengths": [
+        70000,
+        80000
+      ],
+      "plaintextLength": 150000,
+      "ciphertextLength": 150048,
+      "plaintextSha256": "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b",
+      "ciphertextSha256": "f3205658d3fee29b343d3ba3ef20f52b3e66c2cb05974a93b65504866665fc4e",
+      "recordTags": [
+        "9a8421bd6740aeac5eb211cf59511b2f",
+        "4cd810f700957e87ae68edc29e40caf9",
+        "cf980ddc661684644fa17e5b00b08819"
+      ],
+      "instance2Range": {
+        "first": 1,
+        "last": 2,
+        "from": 65536,
+        "to": 150048
+      }
+    },
+    {
+      "fileId": "EBESExQVFhcYGRobHB0eHw",
+      "key": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+      "keyHex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "instanceLengths": [
+        20000
+      ],
+      "plaintextLength": 20000,
+      "ciphertextLength": 20016,
+      "plaintextSha256": "634ea1475721847569e54de94076768333415624e9558342fd10ed6d078d9739",
+      "ciphertextSha256": "acfa75bf344f92fbe3c3122d8391a65c60e12b384ef4459d2c9c5d793488f41c",
+      "recordTags": [
+        "33f76b60464e2cba93246985761a70eb"
+      ]
+    }
   ],
-  "plaintextLength": 150000,
-  "ciphertextLength": 150048,
-  "plaintextSha256": "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b",
-  "ciphertextSha256": "f3205658d3fee29b343d3ba3ef20f52b3e66c2cb05974a93b65504866665fc4e",
-  "recordTags": [
-    "9a8421bd6740aeac5eb211cf59511b2f",
-    "4cd810f700957e87ae68edc29e40caf9",
-    "cf980ddc661684644fa17e5b00b08819"
-  ],
-  "instance2Range": {
-    "first": 1,
-    "last": 2,
-    "from": 65536,
-    "to": 150048
-  }
+  "layout": [
+    {
+      "series": 0,
+      "instance": 0,
+      "fileId": "AAECAwQFBgcICQoLDA0ODw",
+      "offset": 0,
+      "length": 70000
+    },
+    {
+      "series": 1,
+      "instance": 0,
+      "fileId": "AAECAwQFBgcICQoLDA0ODw",
+      "offset": 70000,
+      "length": 80000
+    },
+    {
+      "series": 2,
+      "instance": 0,
+      "fileId": "EBESExQVFhcYGRobHB0eHw",
+      "offset": 0,
+      "length": 20000
+    }
+  ]
 }

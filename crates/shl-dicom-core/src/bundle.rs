@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::{
@@ -6,9 +7,12 @@ use crate::{
     Error, Result,
 };
 
-pub const PROFILE_URL: &str = "https://example.org/shl-dicom/v1";
-pub const EXT_SERIES_FILE: &str = "https://example.org/shl-dicom/series-file";
-pub const EXT_LENGTH: &str = "https://example.org/shl-dicom/length";
+pub const PROFILE_URL: &str =
+    "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/dicom-imaging-study";
+pub const EXT_LINKED_FILE: &str =
+    "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file";
+pub const EXT_INSTANCE_LENGTH: &str =
+    "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/instance-length";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +42,27 @@ pub struct StudySummary {
     pub started: Option<String>,
     pub number_of_series: usize,
     pub number_of_instances: usize,
+    /// The distinct files this study's series use, in first-use order.
+    pub files: Vec<FileSummary>,
     pub series: Vec<SeriesSummary>,
+}
+
+/// One encrypted file (`{file_id}.bin`): its key and lengths (PROPOSAL.md §8.1, §9.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSummary {
+    pub file_id: String,
+    pub key: String,
+    /// Plaintext length P: the instances of every series in the file.
+    pub plaintext_length: u64,
+    pub ciphertext_length: u64,
+    pub record_count: u64,
+}
+
+impl FileSummary {
+    pub fn key_bytes(&self) -> Result<[u8; 32]> {
+        decode_key_32(&self.key)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,18 +72,16 @@ pub struct SeriesSummary {
     pub number: Option<i32>,
     pub modality: Option<String>,
     pub description: Option<String>,
-    pub file_id: String,
-    pub key: String,
-    pub plaintext_length: u64,
-    pub ciphertext_length: u64,
-    pub record_count: u64,
+    /// The file this series is in.
+    pub file: FileSummary,
+    /// Plaintext offset of the series' first instance in its file.
+    pub offset: u64,
+    /// Sum of the series' instance lengths.
+    pub bytes: u64,
+    /// First and last records covering the series in its file.
+    pub first_record: u64,
+    pub last_record: u64,
     pub instances: Vec<InstanceSummary>,
-}
-
-impl SeriesSummary {
-    pub fn key_bytes(&self) -> Result<[u8; 32]> {
-        decode_key_32(&self.key)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +90,7 @@ pub struct InstanceSummary {
     pub uid: String,
     pub sop_class: String,
     pub number: Option<i32>,
+    /// Plaintext offset of this Part 10 file in its series' file.
     pub offset: u64,
     pub length: u64,
     pub first_record: u64,
@@ -92,7 +115,16 @@ pub struct StudyBuildInput {
     /// Accession Number (0008,0050), written as an ImagingStudy identifier of type ACSN.
     pub accession: Option<String>,
     pub note: Option<String>,
+    /// The study's file, written as `linked-file` on the ImagingStudy.
+    pub file: LinkedFileInput,
     pub series: Vec<SeriesBuildInput>,
+}
+
+/// A `linked-file`: the file id and its base64url key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedFileInput {
+    pub file_id: String,
+    pub key_b64: String,
 }
 
 #[derive(Debug, Clone)]
@@ -101,9 +133,19 @@ pub struct SeriesBuildInput {
     pub number: Option<i32>,
     pub modality: Option<String>,
     pub description: Option<String>,
-    pub file_id: String,
-    pub key_b64: String,
+    /// A file of the series' own (a series added to the study later); None for the study's file.
+    pub file: Option<LinkedFileInput>,
     pub instances: Vec<InstanceBuildInput>,
+}
+
+fn linked_file_json(f: &LinkedFileInput) -> Value {
+    json!([{
+        "url": EXT_LINKED_FILE,
+        "extension": [
+            { "url": "id", "valueString": f.file_id },
+            { "url": "key", "valueString": f.key_b64 }
+        ]
+    }])
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +213,7 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
                         };
                         let mut inst_obj = json!({
                             "extension": [{
-                                "url": EXT_LENGTH,
+                                "url": EXT_INSTANCE_LENGTH,
                                 "valueDecimal": inst.length,
                             }],
                             "uid": inst.uid,
@@ -189,13 +231,6 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
 
                 let modality_code = se.modality.as_deref().unwrap_or("OT");
                 let mut se_obj = json!({
-                    "extension": [{
-                        "url": EXT_SERIES_FILE,
-                        "extension": [
-                            { "url": "id", "valueString": se.file_id },
-                            { "url": "key", "valueString": se.key_b64 }
-                        ]
-                    }],
                     "uid": se.uid,
                     "modality": {
                         "system": "http://dicom.nema.org/resources/ontology/DCM",
@@ -204,6 +239,9 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
                     "numberOfInstances": se.instances.len(),
                     "instance": instances_json,
                 });
+                if let Some(f) = se.file.as_ref().filter(|f| *f != &study.file) {
+                    se_obj["extension"] = linked_file_json(f);
+                }
                 if let Some(num) = se.number {
                     se_obj["number"] = json!(num);
                 }
@@ -225,6 +263,7 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
             "meta": {
                 "profile": [PROFILE_URL]
             },
+            "extension": linked_file_json(&study.file),
             "status": "available",
             "identifier": [{
                 "system": "urn:dicom:uid",
@@ -267,9 +306,12 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
     })
 }
 
-/// Builds a link-specific FHIR R4 Bundle from an owner's full Bundle by keeping only
-/// the series whose `fileId` is in `selected_file_ids` (or all series if `selected_file_ids` is empty).
-/// Updates `numberOfSeries`, `numberOfInstances`, and adds a partial-study `note` if series were filtered.
+/// Builds a link-specific FHIR R4 Bundle from an owner's full Bundle by keeping only the series
+/// whose file (their own `linked-file`, else the study's) is in `selected_file_ids`, or everything
+/// if `selected_file_ids` is empty. A file is kept or dropped whole, so a link never carries the
+/// key of a file holding series it does not list. Updates `numberOfSeries` and
+/// `numberOfInstances`, drops a study-level `linked-file` that no kept series uses, and adds a
+/// partial-study `note` if series were dropped.
 pub fn subset_fhir_bundle(
     owner_bundle: &Value,
     selected_file_ids: &[String],
@@ -300,21 +342,25 @@ pub fn subset_fhir_bundle(
         let Some(series_arr) = res.get("series").and_then(Value::as_array) else {
             continue;
         };
+        let study_file = extract_linked_file(res)?;
         let orig_series_count = series_arr.len();
         let mut kept_series = Vec::new();
         let mut kept_instances = 0usize;
+        let mut study_file_used = false;
 
         for se in series_arr {
-            if let Some((fid, _)) = extract_series_file_ext(se)? {
-                if selected_file_ids.iter().any(|s| s == &fid) {
-                    let inst_count = se
-                        .get("instance")
-                        .and_then(Value::as_array)
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    kept_instances += inst_count;
-                    kept_series.push(se.clone());
-                }
+            let own = extract_linked_file(se)?;
+            let Some((fid, _)) = own.as_ref().or(study_file.as_ref()) else {
+                continue;
+            };
+            if selected_file_ids.iter().any(|s| s == fid) {
+                study_file_used |= own.is_none();
+                kept_instances += se
+                    .get("instance")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                kept_series.push(se.clone());
             }
         }
 
@@ -326,6 +372,14 @@ pub fn subset_fhir_bundle(
         new_study["numberOfSeries"] = json!(kept_series.len());
         new_study["numberOfInstances"] = json!(kept_instances);
         new_study["series"] = json!(kept_series);
+        if !study_file_used {
+            if let Some(exts) = new_study.get_mut("extension").and_then(Value::as_array_mut) {
+                exts.retain(|e| e.get("url").and_then(Value::as_str) != Some(EXT_LINKED_FILE));
+                if exts.is_empty() {
+                    new_study.as_object_mut().unwrap().remove("extension");
+                }
+            }
+        }
         if kept_series.len() < orig_series_count {
             new_study["note"] = json!([{
                 "text": format!(
@@ -435,6 +489,14 @@ pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
             }
             "ImagingStudy" => {
                 if let Some(study) = parse_imaging_study(res)? {
+                    for f in &study.files {
+                        if studies.iter().any(|st: &StudySummary| st.files.iter().any(|g| g.file_id == f.file_id)) {
+                            return Err(Error::InvalidBundle(format!(
+                                "file {} is linked from two ImagingStudy resources",
+                                f.file_id
+                            )));
+                        }
+                    }
                     studies.push(study);
                 }
             }
@@ -473,17 +535,43 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
     let Some(series_arr) = res.get("series").and_then(Value::as_array) else {
         return Ok(None);
     };
-
-    let mut series_list = Vec::new();
+    let study_file = extract_linked_file(res)?;
+    let mut own_files = Vec::with_capacity(series_arr.len());
     for se_val in series_arr {
-        let Some((file_id, key)) = extract_series_file_ext(se_val)? else {
-            continue;
-        };
+        own_files.push(extract_linked_file(se_val)?);
+    }
+    // An ImagingStudy without any linked-file is ordinary FHIR, not shared under this profile.
+    if study_file.is_none() && own_files.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+
+    // Walk series and instances in array order with a running offset per file (§8.1).
+    // `files` holds (file_id, key, running offset) in first-use order.
+    let mut files: Vec<(String, String, u64)> = Vec::new();
+    let mut file_index: HashMap<String, usize> = HashMap::new();
+    let mut pending = Vec::with_capacity(series_arr.len());
+    for (se_val, own) in series_arr.iter().zip(own_files) {
         let uid = se_val
             .get("uid")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidBundle("series missing uid".into()))?
             .to_string();
+        let (file_id, key) = own
+            .or_else(|| study_file.clone())
+            .ok_or_else(|| Error::InvalidBundle(format!("series {uid} has no linked-file")))?;
+        let fi = match file_index.get(&file_id) {
+            Some(&fi) => {
+                if files[fi].1 != key {
+                    return Err(Error::InvalidBundle(format!("file {file_id} is given two keys")));
+                }
+                fi
+            }
+            None => {
+                files.push((file_id.clone(), key, 0));
+                file_index.insert(file_id, files.len() - 1);
+                files.len() - 1
+            }
+        };
         let number = se_val.get("number").and_then(Value::as_i64).map(|n| n as i32);
         let modality = se_val
             .get("modality")
@@ -499,10 +587,13 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
             .get("instance")
             .and_then(Value::as_array)
             .ok_or_else(|| Error::InvalidBundle("series missing instance array".into()))?;
+        if inst_arr.is_empty() {
+            return Err(Error::InvalidBundle(format!("series {uid} lists no instances")));
+        }
 
-        let mut offset = 0u64;
+        let start = files[fi].2;
+        let mut offset = start;
         let mut instances = Vec::with_capacity(inst_arr.len());
-
         for inst_val in inst_arr {
             let length = extract_instance_length(inst_val)?;
             if length == 0 {
@@ -521,42 +612,46 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
                 .unwrap_or_default();
             let inst_num = inst_val.get("number").and_then(Value::as_i64).map(|n| n as i32);
 
-            let first_record = offset / RECORD_PLAINTEXT;
-            let last_record = (offset + length - 1) / RECORD_PLAINTEXT;
-
             instances.push(InstanceSummary {
                 uid: inst_uid,
                 sop_class,
                 number: inst_num,
                 offset,
                 length,
-                first_record,
-                last_record,
+                first_record: offset / RECORD_PLAINTEXT,
+                last_record: (offset + length - 1) / RECORD_PLAINTEXT,
             });
             offset += length;
         }
+        files[fi].2 = offset;
+        pending.push((fi, uid, number, modality, se_desc, start, offset - start, instances));
+    }
 
-        let plaintext_length = offset;
-        let ciphertext_len = ciphertext_length(plaintext_length);
-        let rec_count = record_count(plaintext_length);
-
-        series_list.push(SeriesSummary {
+    let file_summaries: Vec<FileSummary> = files
+        .into_iter()
+        .map(|(file_id, key, p)| FileSummary {
+            file_id,
+            key,
+            plaintext_length: p,
+            ciphertext_length: ciphertext_length(p),
+            record_count: record_count(p),
+        })
+        .collect();
+    let series_list: Vec<SeriesSummary> = pending
+        .into_iter()
+        .map(|(fi, uid, number, modality, description, offset, bytes, instances)| SeriesSummary {
             uid,
             number,
             modality,
-            description: se_desc,
-            file_id,
-            key,
-            plaintext_length,
-            ciphertext_length: ciphertext_len,
-            record_count: rec_count,
+            description,
+            file: file_summaries[fi].clone(),
+            offset,
+            bytes,
+            first_record: offset / RECORD_PLAINTEXT,
+            last_record: (offset + bytes - 1) / RECORD_PLAINTEXT,
             instances,
-        });
-    }
-
-    if series_list.is_empty() {
-        return Ok(None);
-    }
+        })
+        .collect();
 
     let number_of_instances = series_list.iter().map(|s| s.instances.len()).sum();
     let number_of_series = series_list.len();
@@ -568,20 +663,22 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
         started,
         number_of_series,
         number_of_instances,
+        files: file_summaries,
         series: series_list,
     }))
 }
 
-fn extract_series_file_ext(se_val: &Value) -> Result<Option<(String, String)>> {
-    let Some(exts) = se_val.get("extension").and_then(Value::as_array) else {
+/// The `linked-file` extension on an ImagingStudy or a series, as (file id, key), checked.
+fn extract_linked_file(el: &Value) -> Result<Option<(String, String)>> {
+    let Some(exts) = el.get("extension").and_then(Value::as_array) else {
         return Ok(None);
     };
     for ext in exts {
-        if ext.get("url").and_then(Value::as_str) == Some(EXT_SERIES_FILE) {
+        if ext.get("url").and_then(Value::as_str) == Some(EXT_LINKED_FILE) {
             let sub = ext
                 .get("extension")
                 .and_then(Value::as_array)
-                .ok_or_else(|| Error::InvalidBundle("series-file missing sub-extensions".into()))?;
+                .ok_or_else(|| Error::InvalidBundle("linked-file missing sub-extensions".into()))?;
             let mut file_id = None;
             let mut key = None;
             for item in sub {
@@ -591,8 +688,11 @@ fn extract_series_file_ext(se_val: &Value) -> Result<Option<(String, String)>> {
                     _ => {}
                 }
             }
-            let file_id = file_id.ok_or_else(|| Error::InvalidBundle("series-file missing id".into()))?;
-            let key = key.ok_or_else(|| Error::InvalidBundle("series-file missing key".into()))?;
+            let file_id = file_id.ok_or_else(|| Error::InvalidBundle("linked-file missing id".into()))?;
+            let key = key.ok_or_else(|| Error::InvalidBundle("linked-file missing key".into()))?;
+            if file_id.len() != 22 || !file_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+                return Err(Error::InvalidBundle(format!("bad file id {file_id}")));
+            }
             let _ = decode_key_32(&key)?;
             return Ok(Some((file_id, key)));
         }
@@ -606,7 +706,7 @@ fn extract_instance_length(inst_val: &Value) -> Result<u64> {
         .and_then(Value::as_array)
         .ok_or_else(|| Error::InvalidBundle("instance missing extension array".into()))?;
     for ext in exts {
-        if ext.get("url").and_then(Value::as_str) == Some(EXT_LENGTH) {
+        if ext.get("url").and_then(Value::as_str) == Some(EXT_INSTANCE_LENGTH) {
             if let Some(n) = ext.get("valueDecimal").and_then(Value::as_u64) {
                 return Ok(n);
             }
@@ -617,7 +717,7 @@ fn extract_instance_length(inst_val: &Value) -> Result<u64> {
             }
         }
     }
-    Err(Error::InvalidBundle("instance missing valid length extension".into()))
+    Err(Error::InvalidBundle("instance missing valid instance-length extension".into()))
 }
 
 /// A random (version 4) `urn:uuid:` for Bundle.entry.fullUrl.

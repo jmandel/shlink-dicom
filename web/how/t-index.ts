@@ -1,8 +1,8 @@
 // Step 2: the index. The locked file unlocks, and the table of contents unfolds from the studies
 // to the series to this slice.
-import { formatPersonName, studyTitle, b64urlDecode, fromUtf8, EXT_SERIES_FILE } from "../core/index";
+import { formatPersonName, studyTitle, b64urlDecode, fromUtf8, EXT_LINKED_FILE } from "../core/index";
 import type { Scene } from "./how";
-import { $, fileOf, h, mb, n, S, wait } from "./state";
+import { $, h, mb, n, S, wait } from "./state";
 
 /** The slice's entries in the decrypted Bundle JSON (for the details layer). */
 function sliceJson() {
@@ -13,8 +13,9 @@ function sliceJson() {
     for (const se of r.series ?? []) {
       if (se.uid !== S.series!.uid) continue;
       const inst = se.instance?.[S.slice];
-      const file = (se.extension ?? []).find((x: any) => x.url === EXT_SERIES_FILE || /file$/.test(x.url ?? ""));
-      return { series: { uid: se.uid, description: se.description, extension: file ? [file] : undefined }, instance: inst };
+      // The series' own linked-file, else the study's.
+      const file = [se, r].map((x) => (x.extension ?? []).find((e: any) => e.url === EXT_LINKED_FILE)).find(Boolean);
+      return { series: { uid: se.uid, description: se.description }, file, instance: inst };
     }
   }
   return null;
@@ -58,7 +59,7 @@ export function indexScene(): Scene {
 
   const scroller = h("div", { class: "grow", style: "overflow:auto" }, tree);
   const el = h("section", { class: "scene", "data-scene": "index", "aria-label": "The index" }, h("p", { class: "scene-title", text: "The index" }), locked, scroller, det);
-  const f = fileOf(S.series!);
+  const f = S.series!.file;
   const inst = S.series!.instances[S.slice];
   $("d-index").textContent = `Here: ${n(jweBytes)} bytes locked, ${n(S.share!.bundleBytes.length)} bytes of JSON once unlocked. Our slice is ${n(inst.length)} bytes, starting at byte ${n(inst.offset)} of file ${f.fileId}.bin, which is ${n(f.plaintextLength)} bytes long.`;
 

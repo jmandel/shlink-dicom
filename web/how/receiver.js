@@ -4,7 +4,8 @@
 const b64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 const aesKey = (raw) => crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
 const ext = (o, url) => o.extension?.find((e) => e.url === url);
-const LENGTH = "https://example.org/shl-dicom/length";
+const SD = "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/";
+const LENGTH = SD + "instance-length", LINKED = SD + "linked-file";
 const R = 65520; // plaintext bytes per record; 65,536 with the tag
 
 export async function receive(shlink) {
@@ -23,17 +24,19 @@ export async function receive(shlink) {
   }
   const bundle = JSON.parse(new TextDecoder().decode(plain));
 
-  // 3. The first series: its file id and key, and the lengths of its instances.
+  // 3. The first series' file: its own linked-file, else the study's. The file holds every
+  //    instance of the series that use it, in Bundle order, so the first series starts at 0.
   const study = bundle.entry.map((e) => e.resource).find((r) => r.resourceType === "ImagingStudy");
-  const series = study.series[0];
-  const file = ext(series, "https://example.org/shl-dicom/series-file").extension;
-  const fileId = file.find((e) => e.url === "id").valueString;
-  const key = await aesKey(b64(file.find((e) => e.url === "key").valueString));
-  const lengths = series.instance.map((i) => ext(i, LENGTH).valueDecimal);
-  const P = lengths.reduce((a, b) => a + b, 0), C = P + 16 * Math.ceil(P / R);
+  const fileOf = (s) => (ext(s, LINKED) ?? ext(study, LINKED)).extension;
+  const sub = (f, name) => f.find((e) => e.url === name).valueString;
+  const series = study.series[0], fileId = sub(fileOf(series), "id");
+  const key = await aesKey(b64(sub(fileOf(series), "key")));
+  const len = (i) => ext(i, LENGTH).valueDecimal, first = len(series.instance[0]);
+  const P = study.series.filter((s) => sub(fileOf(s), "id") === fileId).flatMap((s) => s.instance).reduce((a, i) => a + len(i), 0);
+  const C = P + 16 * Math.ceil(P / R);
 
-  // 4. One Range request for the records holding bytes [0, lengths[0]) of the series.
-  const last = Math.floor((lengths[0] - 1) / R), end = Math.min(C, (last + 1) * 65536);
+  // 4. One Range request for the records holding bytes [0, first) of the file.
+  const last = Math.floor((first - 1) / R), end = Math.min(C, (last + 1) * 65536);
   const res = await fetch(new URL(`${fileId}.bin?recipient=50-line+receiver`, link.url), { headers: { Range: `bytes=0-${end - 1}` } });
   const body = new Uint8Array(await res.arrayBuffer()).subarray(0, end);
   if (body.length !== end) throw new Error(`expected ${end} bytes, got ${body.length}`);
@@ -57,7 +60,7 @@ export async function receive(shlink) {
     p = at + len;
   }
   return {
-    series: series.description, modality: series.modality?.code, bytes: lengths[0], records: last + 1,
+    series: series.description, modality: series.modality?.code, bytes: first, records: last + 1,
     sopClassUid: meta[2], sopInstanceUid: meta[3], transferSyntax: meta[0x10],
     matchesBundle: meta[3] === series.instance[0].uid,
   };

@@ -139,7 +139,7 @@ export class SlideSession {
   private async fetchTile(level: number, tx: number, ty: number, plane: number, path: number, priority: number, signal: AbortSignal): Promise<TileEntry> {
     const file = await this.src.tileFile(level, tx, ty, plane, path, { priority, signal });
     if (!file) return { bmp: null, bytes: 0 };
-    const img = await this.pool.decode(file, { priority, signal, key: `${this.src.series.fileId}/wsi/${tileKey(level, tx, ty, plane, path)}/${this.gen}` });
+    const img = await this.pool.decode(file, { priority, signal, key: `${this.src.series.id}/wsi/${tileKey(level, tx, ty, plane, path)}/${this.gen}` });
     this.metrics.tilesDecoded++;
     if (this.metrics.decodeMs.length < 2000) this.metrics.decodeMs.push(img.decodeMs);
     this.metrics.marks.firstDecode ??= performance.now();
@@ -274,7 +274,7 @@ type Records = (fileId: string, a: number, b: number, s: "fetching" | "verified"
 
 /** The session of a series, created once per page (headers are read once). */
 export function slideSession(share: OpenShare, series: SeriesEntry, pool: DecoderPool, o: { onRecords?: Records; mode?: BitmapMode } = {}): Promise<SlideSession> {
-  let s = sessions.get(series.fileId);
+  let s = sessions.get(series.id);
   if (!s) {
     const t0 = performance.now();
     s = SlideSource.open(share, series, { onRecords: o.onRecords }).then((src) => {
@@ -283,8 +283,8 @@ export function slideSession(share: OpenShare, series: SeriesEntry, pool: Decode
       ss.metrics.marks.headers = performance.now();
       return ss;
     });
-    s.catch(() => sessions.delete(series.fileId));
-    sessions.set(series.fileId, s);
+    s.catch(() => sessions.delete(series.id));
+    sessions.set(series.id, s);
   }
   return s;
 }

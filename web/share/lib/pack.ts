@@ -1,57 +1,57 @@
 // Packing on the device (PROPOSAL.md §8, §9, §11.1): one random file id and one random 32-byte key
-// per series, the series' Part 10 files laid end to end and encrypted in 65,520-byte records with
-// AES-256-GCM (nonce = record index), and the FHIR Bundle that lists them.
+// per study, the study's Part 10 files laid end to end (series by series, in Bundle order) and
+// encrypted in 65,520-byte records with AES-256-GCM (nonce = record index), and the FHIR Bundle
+// that lists them, with linked-file on each ImagingStudy.
 import { b64urlDecode, b64urlEncode } from "../../core/b64";
 import { ConcatBytes } from "./bytes";
-import { EXT_LENGTH, EXT_SERIES_FILE, PROFILE_URL } from "../../core/bundle";
+import { EXT_INSTANCE_LENGTH, EXT_LINKED_FILE, PROFILE_URL } from "../../core/bundle";
 import { randomKeyB64 } from "../../core/jwe";
 import { RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
-import type { Collection, SeriesModel, StudyModel } from "./ingest";
+import type { Collection, Instance, StudyModel } from "./ingest";
 
 const ACSN = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0203", code: "ACSN" }] };
 
-export interface PackedSeries {
+/** One study's encrypted file. */
+export interface PackedFile {
   study: StudyModel;
-  series: SeriesModel;
+  /** The study's instances in file order: its series in order, each series' instances in order. */
+  instances: Instance[];
   fileId: string;
   key: string;
   plaintextLength: number;
   records: number;
 }
 
-/** Draws a file id and a key for each series of the included studies. */
-export function planSeriesFiles(studies: StudyModel[]): PackedSeries[] {
-  const out: PackedSeries[] = [];
-  for (const study of studies) {
-    for (const series of study.series) {
-      const P = series.instances.reduce((a, i) => a + i.src.size, 0);
-      out.push({
-        study,
-        series,
-        fileId: b64urlEncode(crypto.getRandomValues(new Uint8Array(16))),
-        key: randomKeyB64(),
-        plaintextLength: P,
-        records: recordCount(P),
-      });
-    }
-  }
-  return out;
+/** Draws a file id and a key for each included study (§11.1: one file per study). */
+export function planStudyFiles(studies: StudyModel[]): PackedFile[] {
+  return studies.map((study) => {
+    const instances = study.series.flatMap((s) => s.instances);
+    const P = instances.reduce((a, i) => a + i.src.size, 0);
+    return {
+      study,
+      instances,
+      fileId: b64urlEncode(crypto.getRandomValues(new Uint8Array(16))),
+      key: randomKeyB64(),
+      plaintextLength: P,
+      records: recordCount(P),
+    };
+  });
 }
 
-/** The series file's length: P + 16·n (§9.2). */
+/** The file's length: P + 16·n (§9.2). */
 export const ciphertextSize = (p: { plaintextLength: number; records: number }) => p.plaintextLength + TAG * p.records;
 
 /** Records per upload chunk: 8 MiB of ciphertext. */
 export const CHUNK_RECORDS = 128;
 
 /**
- * Encrypts records [first, last) of a series file (§9.2), reading only their plaintext from the
+ * Encrypts records [first, last) of a file (§9.2), reading only their plaintext from the
  * instances' byte sources. Returns that part of the ciphertext.
  */
-export async function encryptRecords(p: PackedSeries, key: CryptoKey, first: number, last: number): Promise<Uint8Array> {
+export async function encryptRecords(p: PackedFile, key: CryptoKey, first: number, last: number): Promise<Uint8Array> {
   const P = p.plaintextLength;
   const a = first * RECORD_PLAINTEXT, b = Math.min(P, last * RECORD_PLAINTEXT);
-  const plain = await new ConcatBytes(p.series.instances.map((i) => i.src)).read(a, b);
+  const plain = await new ConcatBytes(p.instances.map((i) => i.src)).read(a, b);
   const out = new Uint8Array(b - a + TAG * (last - first));
   await Promise.all(
     Array.from({ length: last - first }, async (_, k) => {
@@ -64,13 +64,13 @@ export async function encryptRecords(p: PackedSeries, key: CryptoKey, first: num
   return out;
 }
 
-export function seriesKey(p: PackedSeries): Promise<CryptoKey> {
+export function fileKey(p: PackedFile): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", b64urlDecode(p.key), "AES-GCM", false, ["encrypt"]);
 }
 
-/** The whole series file in memory, for scripts and small test fixtures. /share streams instead. */
-export async function encryptSeries(p: PackedSeries): Promise<Uint8Array> {
-  const key = await seriesKey(p);
+/** The whole file in memory, for scripts and small test fixtures. /share streams instead. */
+export async function encryptFile(p: PackedFile): Promise<Uint8Array> {
+  const key = await fileKey(p);
   const out = new Uint8Array(ciphertextSize(p));
   for (let r = 0; r < p.records; r += CHUNK_RECORDS) {
     out.set(await encryptRecords(p, key, r, Math.min(p.records, r + CHUNK_RECORDS)), r * (RECORD_PLAINTEXT + TAG));
@@ -86,7 +86,7 @@ const DR_KEEP = ["status", "category", "code", "effectiveDateTime", "effectivePe
  * (by fullUrl) and names the study by UID; each ImagingStudy carries the Study Instance UID and the
  * accession number, so a report can be matched either way.
  */
-export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated = new Date().toISOString()): any {
+export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated = new Date().toISOString()): any {
   const patient: any = { resourceType: "Patient", id: "p1" };
   if (col.patient.name) {
     const parts = col.patient.name.split(" ");
@@ -95,20 +95,19 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
   if (col.patient.birthDate) patient.birthDate = col.patient.birthDate;
   if (col.patient.identifier.length) patient.identifier = col.patient.identifier;
   const entry: any[] = [{ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: patient }];
-  const studies: StudyModel[] = [];
-  for (const p of packed) if (!studies.includes(p.study)) studies.push(p.study);
   let reportN = 0;
-  studies.forEach((st, si) => {
+  packed.forEach((p, si) => {
+    const st = p.study;
     const id = `study-${si + 1}`;
-    const series = packed.filter((p) => p.study === st).map((p) => ({
-      extension: [{ url: EXT_SERIES_FILE, extension: [{ url: "id", valueString: p.fileId }, { url: "key", valueString: p.key }] }],
-      uid: p.series.uid,
-      ...(p.series.number != null ? { number: p.series.number } : {}),
-      modality: { system: "http://dicom.nema.org/resources/ontology/DCM", code: p.series.modality || "OT" },
-      ...(p.series.description ? { description: p.series.description } : {}),
-      numberOfInstances: p.series.instances.length,
-      instance: p.series.instances.map((inst) => ({
-        extension: [{ url: EXT_LENGTH, valueDecimal: inst.src.size }],
+    // Same order as p.instances, so offsets in the file follow the Bundle (§8.1).
+    const series = st.series.map((se) => ({
+      uid: se.uid,
+      ...(se.number != null ? { number: se.number } : {}),
+      modality: { system: "http://dicom.nema.org/resources/ontology/DCM", code: se.modality || "OT" },
+      ...(se.description ? { description: se.description } : {}),
+      numberOfInstances: se.instances.length,
+      instance: se.instances.map((inst) => ({
+        extension: [{ url: EXT_INSTANCE_LENGTH, valueDecimal: inst.src.size }],
         uid: inst.h.sopInstanceUid,
         sopClass: { system: "urn:ietf:rfc:3986", code: `urn:oid:${inst.h.sopClassUid}` },
         ...(inst.number != null ? { number: inst.number } : {}),
@@ -118,6 +117,7 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
       resourceType: "ImagingStudy",
       id,
       meta: { profile: [PROFILE_URL] },
+      extension: [{ url: EXT_LINKED_FILE, extension: [{ url: "id", valueString: p.fileId }, { url: "key", valueString: p.key }] }],
       status: "available",
       identifier: [
         { system: "urn:dicom:uid", value: `urn:oid:${st.uid}` },
@@ -150,13 +150,13 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
   return { resourceType: "Bundle", meta: { lastUpdated }, type: "collection", entry };
 }
 
-/** Series file ids of an ImagingStudy resource. */
+/** File ids an ImagingStudy resource links: its own linked-file and any on its series. */
 function studyFileIds(study: any): string[] {
   const out: string[] = [];
-  for (const se of study.series ?? []) {
-    const ext = (se.extension ?? []).find((x: any) => x.url === EXT_SERIES_FILE);
+  for (const el of [study, ...(study.series ?? [])]) {
+    const ext = (el.extension ?? []).find((x: any) => x.url === EXT_LINKED_FILE);
     const id = ext?.extension?.find((x: any) => x.url === "id")?.valueString;
-    if (id) out.push(id);
+    if (id && !out.includes(id)) out.push(id);
   }
   return out;
 }

@@ -1,6 +1,6 @@
 // Random-access byte sources, so the Share page can work with files far larger than memory. An
 // instance's bytes are read on demand from a File (or a slice of one), a staged copy in the
-// origin-private file system, a remote series file, or a short in-memory head.
+// origin-private file system, a series in a shared link, or a short in-memory head.
 
 export interface Bytes {
   readonly size: number;

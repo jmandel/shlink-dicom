@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use shl_dicom_core::{
-    bundle::{parse_study_index, PROFILE_URL},
-    crypto::{b64url_decode, decode_key_32, decrypt_range, encrypt_series},
+    bundle::{
+        build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput, InstanceBuildInput,
+        LinkedFileInput, SeriesBuildInput, StudyBuildInput, EXT_LINKED_FILE, PROFILE_URL,
+    },
+    crypto::{b64url_decode, decode_key_32, decrypt_range, encrypt_file},
     dicom_io::extract_dicom_from_tar_gz,
     jwe::{decrypt_bundle_jwe, encrypt_bundle_jwe},
     packer::{build_link_bundle, IngestSession},
@@ -17,7 +20,7 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[test]
 fn test_appendix_b_vector_and_f0_golden_share() {
-    let series_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
+    let file_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
     let total: usize = 150_000;
     let plaintext: Vec<u8> = (0..total).map(|k| (k % 251) as u8).collect();
 
@@ -26,7 +29,7 @@ fn test_appendix_b_vector_and_f0_golden_share() {
         "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b"
     );
 
-    let ct = encrypt_series(&plaintext, &series_key).unwrap();
+    let ct = encrypt_file(&plaintext, &file_key).unwrap();
     assert_eq!(ct.len(), 150_048);
     assert_eq!(ct.len() as u64, ciphertext_length(total as u64));
     assert_eq!(
@@ -51,7 +54,7 @@ fn test_appendix_b_vector_and_f0_golden_share() {
     }
 
     // Whole-file round trip
-    let whole = decrypt_range(&ct, 0, total as u64, total as u64, &series_key).unwrap();
+    let whole = decrypt_range(&ct, 0, total as u64, total as u64, &file_key).unwrap();
     assert_eq!(whole, plaintext);
 
     // Instance 2 range read [70000, 150000)
@@ -66,26 +69,51 @@ fn test_appendix_b_vector_and_f0_golden_share() {
         70_000,
         150_000,
         total as u64,
-        &series_key,
+        &file_key,
     )
     .unwrap();
     assert_eq!(inst2, &plaintext[70_000..150_000]);
 
-    // Also verify F0 golden share fixtures produced by TypeScript reference
+    // The golden share written by reference/test-vector.ts (PROPOSAL.md Appendix A): the study
+    // file holds series 2 and 997; series 3 has a file of its own.
     let golden_jwe = std::fs::read_to_string("../../fixtures/golden/bundle.jwe").unwrap();
     let golden_bin = std::fs::read("../../fixtures/golden/AAECAwQFBgcICQoLDA0ODw.bin").unwrap();
     assert_eq!(golden_bin, ct);
+    let added_bin = std::fs::read("../../fixtures/golden/EBESExQVFhcYGRobHB0eHw.bin").unwrap();
+    let added_key: [u8; 32] = std::array::from_fn(|i| 0x60 + i as u8);
+    let added_plain: Vec<u8> = (0..20_000usize).map(|k| (k % 241) as u8).collect();
+    assert_eq!(added_bin, encrypt_file(&added_plain, &added_key).unwrap());
+    assert_eq!(
+        sha256_hex(&added_bin),
+        "acfa75bf344f92fbe3c3122d8391a65c60e12b384ef4459d2c9c5d793488f41c"
+    );
 
     let shl_key = decode_key_32("QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8").unwrap();
     let bundle_bytes = decrypt_bundle_jwe(&golden_jwe, &shl_key).unwrap();
     let index = parse_study_index(&bundle_bytes).unwrap();
     assert_eq!(index.studies.len(), 1);
-    assert_eq!(index.studies[0].series.len(), 1);
+    let st = &index.studies[0];
+    let at: Vec<(&str, u64, u64)> = st
+        .series
+        .iter()
+        .map(|se| (se.file.file_id.as_str(), se.offset, se.bytes))
+        .collect();
     assert_eq!(
-        index.studies[0].series[0].file_id,
-        "AAECAwQFBgcICQoLDA0ODw"
+        at,
+        vec![
+            ("AAECAwQFBgcICQoLDA0ODw", 0, 70_000),
+            ("AAECAwQFBgcICQoLDA0ODw", 70_000, 80_000),
+            ("EBESExQVFhcYGRobHB0eHw", 0, 20_000),
+        ]
     );
-    assert_eq!(index.studies[0].series[0].instances.len(), 2);
+    assert_eq!(st.files.len(), 2);
+    assert_eq!(st.files[0].plaintext_length, 150_000);
+    assert_eq!(st.files[0].ciphertext_length, 150_048);
+    assert_eq!(st.files[1].plaintext_length, 20_000);
+    assert_eq!(st.series[1].file, st.files[0]);
+    assert_eq!(st.series[1].instances[0].offset, 70_000);
+    assert_eq!((st.series[1].first_record, st.series[1].last_record), (1, 2));
+    assert_eq!(st.series[2].file.key_bytes().unwrap(), added_key);
 }
 
 #[test]
@@ -96,7 +124,7 @@ fn test_range_and_record_edge_cases() {
     for mult in [1usize, 2usize] {
         let len = (RECORD_PLAINTEXT as usize) * mult;
         let pt: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
-        let ct = encrypt_series(&pt, &key).unwrap();
+        let ct = encrypt_file(&pt, &key).unwrap();
         assert_eq!(ct.len(), (RECORD_CIPHERTEXT as usize) * mult);
         let dec = decrypt_range(&ct, 0, len as u64, len as u64, &key).unwrap();
         assert_eq!(dec, pt);
@@ -105,7 +133,7 @@ fn test_range_and_record_edge_cases() {
     // 2. Instance spanning 4+ records (250,000 bytes), boundary starts, and short final record
     let len = 250_000u64;
     let pt: Vec<u8> = (0..len as usize).map(|i| (i * 7 % 255) as u8).collect();
-    let ct = encrypt_series(&pt, &key).unwrap();
+    let ct = encrypt_file(&pt, &key).unwrap();
 
     // Range starting on exact record boundary (65,520) and ending inside record 3
     let r_bound = ciphertext_range(65_520, 200_000, len).unwrap();
@@ -144,7 +172,7 @@ fn test_tamper_and_truncation() {
     let key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
     let total = 150_000u64;
     let pt: Vec<u8> = (0..total as usize).map(|k| (k % 251) as u8).collect();
-    let ct = encrypt_series(&pt, &key).unwrap();
+    let ct = encrypt_file(&pt, &key).unwrap();
 
     // Flipped bit
     let mut flipped = ct.clone();
@@ -256,19 +284,27 @@ fn synthetic_dicom(study: &str, series: &str, sop: &str, modality: &str, series_
     b
 }
 
-/// A two-study share built from synthetic files: a 4-slice CT given as a .tgz (each slice crosses
-/// a 65,520-byte record boundary) and a CR given as a loose file. Checks that packing keeps every
-/// file byte-identical, that whole-series and single-instance Range reads decrypt to the
-/// originals, and that a link Bundle can carry a subset.
+/// A two-study share built from synthetic files: a CT of two series (4 slices that each cross a
+/// 65,520-byte record boundary, and 2 small ones) given as a .tgz, and a CR given as a loose file.
+/// Checks one file per study, series order and offsets, that packing keeps every file
+/// byte-identical, that whole-series and single-instance Range reads decrypt to the originals,
+/// and that a link Bundle can carry a subset of studies.
 #[test]
 fn test_pack_and_lossless_roundtrip() {
     let ct_study = "2.25.1001";
     let ct_series = "2.25.1001.1";
-    let ct_files: Vec<(String, Vec<u8>)> = (0..4)
+    let ct_files: Vec<(String, String, Vec<u8>)> = (0..4)
         .map(|k| {
             let sop = format!("2.25.1001.1.{}", k + 1);
-            (format!("CT/{k}.dcm"), synthetic_dicom(ct_study, ct_series, &sop, "CT", 1, k + 1, 256, 200, k as u32 * 7919))
+            (format!("CT/{k}.dcm"), sop.clone(), synthetic_dicom(ct_study, ct_series, &sop, "CT", 2, k + 1, 256, 200, k as u32 * 7919))
         })
+        .collect();
+    let ct_files: Vec<(String, String, Vec<u8>)> = ct_files
+        .into_iter()
+        .chain((0..2).map(|k| {
+            let sop = format!("2.25.1001.2.{}", k + 1);
+            (format!("CT2/{k}.dcm"), sop.clone(), synthetic_dicom(ct_study, "2.25.1001.2", &sop, "CT", 1, k + 1, 128, 100, 31 + k as u32))
+        }))
         .collect();
     let cr = synthetic_dicom("2.25.2002", "2.25.2002.1", "2.25.2002.1.1", "CR", 1, 1, 512, 400, 42);
 
@@ -276,7 +312,7 @@ fn test_pack_and_lossless_roundtrip() {
     {
         let gz = flate2::write::GzEncoder::new(&mut tgz, flate2::Compression::fast());
         let mut tar = tar::Builder::new(gz);
-        for (name, bytes) in &ct_files {
+        for (name, _, bytes) in &ct_files {
             let mut h = tar::Header::new_gnu();
             h.set_size(bytes.len() as u64);
             h.set_mode(0o644);
@@ -287,8 +323,8 @@ fn test_pack_and_lossless_roundtrip() {
     }
 
     let mut original_hashes: HashMap<String, String> = HashMap::new();
-    for (k, (_, bytes)) in ct_files.iter().enumerate() {
-        original_hashes.insert(format!("2.25.1001.1.{}", k + 1), sha256_hex(bytes));
+    for (_, sop, bytes) in &ct_files {
+        original_hashes.insert(sop.clone(), sha256_hex(bytes));
     }
     original_hashes.insert("2.25.2002.1.1".into(), sha256_hex(&cr));
     for inst in extract_dicom_from_tar_gz(&tgz).unwrap() {
@@ -296,7 +332,7 @@ fn test_pack_and_lossless_roundtrip() {
     }
 
     let mut session = IngestSession::new();
-    assert_eq!(session.ingest_tar_gz(&tgz).unwrap(), 4);
+    assert_eq!(session.ingest_tar_gz(&tgz).unwrap(), 6);
     assert!(session.ingest_dicom_bytes("cr.dcm", cr.clone()).unwrap());
     let packed = session.pack("2026-10-14T16:00:00Z").unwrap();
     assert_eq!(packed.index.studies.len(), 2);
@@ -315,35 +351,68 @@ fn test_pack_and_lossless_roundtrip() {
     }
 
     let file_map: HashMap<String, &[u8]> = packed
-        .series_files
+        .files
         .iter()
         .map(|f| (f.file_id.clone(), f.ciphertext.as_slice()))
         .collect();
 
+    // One file per study; the CT study's two series are consecutive ranges of it.
+    assert_eq!(packed.files.len(), 2);
+    let ct_index = packed.index.studies.iter().find(|s| s.study_instance_uid == ct_study).unwrap();
+    assert_eq!(ct_index.files.len(), 1);
+    assert_eq!(
+        ct_index.series.iter().map(|s| s.uid.as_str()).collect::<Vec<_>>(),
+        vec!["2.25.1001.2", ct_series],
+        "series ordered by Series Number"
+    );
+    assert_eq!(ct_index.series[0].offset, 0);
+    assert_eq!(ct_index.series[1].offset, ct_index.series[0].bytes);
+    assert_eq!(ct_index.files[0].plaintext_length, ct_index.series.iter().map(|s| s.bytes).sum::<u64>());
+    for st in &imaging_studies {
+        assert_eq!(st["extension"][0]["url"], EXT_LINKED_FILE);
+        for se in st["series"].as_array().unwrap() {
+            assert!(se.get("extension").is_none(), "no series-level linked-file when packing a study");
+        }
+    }
+
     let mut verified_instances = 0usize;
     for study in &packed.index.studies {
+        for file in &study.files {
+            let ct = file_map.get(&file.file_id).expect("study file present");
+            assert_eq!(ct.len() as u64, ciphertext_length(file.plaintext_length));
+        }
         for series in &study.series {
-            let ct = file_map.get(&series.file_id).expect("series file present");
-            assert_eq!(ct.len() as u64, ciphertext_length(series.plaintext_length));
-            let series_key = series.key_bytes().unwrap();
+            let ct = file_map[&series.file.file_id];
+            let p = series.file.plaintext_length;
+            let file_key = series.file.key_bytes().unwrap();
 
-            // Whole series: decrypt, then cut at the Bundle's instance offsets.
-            let series_pt = decrypt_range(ct, 0, series.plaintext_length, series.plaintext_length, &series_key).unwrap();
+            // Whole series: one range of the file, cut at the Bundle's instance offsets.
+            let r = ciphertext_range(series.offset, series.offset + series.bytes, p).unwrap();
+            assert_eq!((r.first_record, r.last_record), (series.first_record, series.last_record));
+            let series_pt = decrypt_range(
+                &ct[r.ciphertext_start as usize..r.ciphertext_end as usize],
+                series.offset,
+                series.offset + series.bytes,
+                p,
+                &file_key,
+            )
+            .unwrap();
             for inst in &series.instances {
-                let bytes = &series_pt[inst.offset as usize..(inst.offset + inst.length) as usize];
+                let at = (inst.offset - series.offset) as usize;
+                let bytes = &series_pt[at..at + inst.length as usize];
                 assert_eq!(&sha256_hex(bytes), &original_hashes[&inst.uid]);
                 verified_instances += 1;
             }
 
             // One instance: the Range read §9.3 plans.
             for inst in &series.instances {
-                let r = ciphertext_range(inst.offset, inst.offset + inst.length, series.plaintext_length).unwrap();
+                let r = ciphertext_range(inst.offset, inst.offset + inst.length, p).unwrap();
                 let dcm = decrypt_range(
                     &ct[r.ciphertext_start as usize..r.ciphertext_end as usize],
                     inst.offset,
                     inst.offset + inst.length,
-                    series.plaintext_length,
-                    &series_key,
+                    p,
+                    &file_key,
                 )
                 .unwrap();
                 assert_eq!(&sha256_hex(&dcm), &original_hashes[&inst.uid]);
@@ -352,13 +421,114 @@ fn test_pack_and_lossless_roundtrip() {
     }
     assert_eq!(verified_instances, original_hashes.len());
 
-    // A link Bundle with one series.
-    let first_file_id = packed.index.studies[0].series[0].file_id.clone();
+    // A link Bundle with one study.
+    let first_file_id = packed.index.studies[0].files[0].file_id.clone();
     let link_shl_key = [0x55u8; 32];
     let link_out = build_link_bundle(&packed.owner_bundle_json, &[first_file_id.clone()], &link_shl_key, "2026-10-14T16:05:00Z").unwrap();
     assert_eq!(link_out.allowed_files, vec![format!("{first_file_id}.bin")]);
     let dec_link_bundle = decrypt_bundle_jwe(&link_out.bundle_jwe, &link_shl_key).unwrap();
     let link_index = parse_study_index(&dec_link_bundle).unwrap();
     assert_eq!(link_index.studies.len(), 1);
-    assert_eq!(link_index.studies[0].series.len(), 1);
+    assert_eq!(link_index.studies[0].series.len(), packed.index.studies[0].series.len());
+}
+
+fn build_input(series_override: Option<LinkedFileInput>) -> BundleBuildInput {
+    let inst = |uid: &str, length: u64| InstanceBuildInput {
+        uid: uid.into(),
+        sop_class_uid: "1.2.840.10008.5.1.4.1.1.2".into(),
+        number: Some(1),
+        length,
+    };
+    let series = |uid: &str, number: i32, insts: Vec<InstanceBuildInput>, file: Option<LinkedFileInput>| SeriesBuildInput {
+        uid: uid.into(),
+        number: Some(number),
+        modality: Some("CT".into()),
+        description: None,
+        file,
+        instances: insts,
+    };
+    let study_file = LinkedFileInput { file_id: "AAAAAAAAAAAAAAAAAAAAAA".into(), key_b64: "A".repeat(43) };
+    BundleBuildInput {
+        last_updated: "2026-10-15T00:00:00Z".into(),
+        patient_name: None,
+        patient_id: None,
+        patient_birth_date: None,
+        studies: vec![StudyBuildInput {
+            id: "study-1".into(),
+            study_instance_uid: "2.25.9".into(),
+            description: None,
+            started: None,
+            accession: None,
+            note: None,
+            file: study_file.clone(),
+            series: vec![
+                series("2.25.9.1", 1, vec![inst("2.25.9.1.1", 100_000), inst("2.25.9.1.2", 50_000)], Some(study_file)),
+                series("2.25.9.2", 2, vec![inst("2.25.9.2.1", 30_000)], series_override),
+                series("2.25.9.3", 3, vec![inst("2.25.9.3.1", 7)], None),
+            ],
+        }],
+    }
+}
+
+/// `linked-file` on the study is the default; a series-level `linked-file` overrides it; offsets
+/// run per file (PROPOSAL.md §8.1). A subset keeps or drops each file whole.
+#[test]
+fn test_linked_file_default_and_override() {
+    let added = LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) };
+    let bundle = build_fhir_bundle(&build_input(Some(added.clone())));
+    let st_json = &bundle["entry"][1]["resource"];
+    assert_eq!(st_json["extension"][0]["url"], EXT_LINKED_FILE);
+    // Only the override is written on a series (series 1 names the study's own file: not repeated).
+    let series_exts: Vec<bool> = st_json["series"].as_array().unwrap().iter().map(|s| s.get("extension").is_some()).collect();
+    assert_eq!(series_exts, vec![false, true, false]);
+
+    let index = parse_study_index(bundle.to_string().as_bytes()).unwrap();
+    let st = &index.studies[0];
+    let at: Vec<(&str, u64, u64)> = st.series.iter().map(|s| (&s.file.file_id[..1], s.offset, s.bytes)).collect();
+    assert_eq!(at, vec![("A", 0, 150_000), ("B", 0, 30_000), ("A", 150_000, 7)]);
+    assert_eq!(st.series[0].instances[1].offset, 100_000);
+    assert_eq!(st.series[2].instances[0].offset, 150_000);
+    assert_eq!(st.series[2].file.plaintext_length, 150_007);
+    assert_eq!(st.files.iter().map(|f| f.plaintext_length).collect::<Vec<_>>(), vec![150_007, 30_000]);
+    assert_eq!((st.series[2].first_record, st.series[2].last_record), (2, 2));
+
+    // Subset: only the added file. The study-level linked-file goes with the series it names.
+    let only_b = subset_fhir_bundle(&bundle, std::slice::from_ref(&added.file_id), "2026-10-15T01:00:00Z").unwrap();
+    let st_b = &only_b["entry"][1]["resource"];
+    assert!(st_b.get("extension").is_none(), "key of an unshared file left in the link Bundle");
+    assert_eq!(st_b["numberOfSeries"], 1);
+    let ib = parse_study_index(only_b.to_string().as_bytes()).unwrap();
+    assert_eq!(ib.studies[0].files.len(), 1);
+    assert_eq!(ib.studies[0].series[0].uid, "2.25.9.2");
+
+    // Subset: only the study file keeps both of its series, at the same offsets.
+    let only_a = subset_fhir_bundle(&bundle, &["AAAAAAAAAAAAAAAAAAAAAA".into()], "2026-10-15T01:00:00Z").unwrap();
+    let ia = parse_study_index(only_a.to_string().as_bytes()).unwrap();
+    let at: Vec<(&str, u64)> = ia.studies[0].series.iter().map(|s| (s.uid.as_str(), s.offset)).collect();
+    assert_eq!(at, vec![("2.25.9.1", 0), ("2.25.9.3", 150_000)]);
+}
+
+#[test]
+fn test_linked_file_errors() {
+    // One file id with two keys.
+    let clash = LinkedFileInput { file_id: "AAAAAAAAAAAAAAAAAAAAAA".into(), key_b64: format!("{}A", "C".repeat(42)) };
+    let mut bundle = build_fhir_bundle(&build_input(Some(clash)));
+    assert!(parse_study_index(bundle.to_string().as_bytes()).is_err());
+
+    // A series with no linked-file while the study has none.
+    bundle = build_fhir_bundle(&build_input(Some(LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) })));
+    bundle["entry"][1]["resource"].as_object_mut().unwrap().remove("extension");
+    assert!(parse_study_index(bundle.to_string().as_bytes()).is_err());
+
+    // An ImagingStudy without any linked-file is ordinary FHIR: skipped, not an error.
+    bundle = build_fhir_bundle(&build_input(None));
+    bundle["entry"][1]["resource"].as_object_mut().unwrap().remove("extension");
+    assert_eq!(parse_study_index(bundle.to_string().as_bytes()).unwrap().studies.len(), 0);
+
+    // One file linked from two ImagingStudy resources.
+    bundle = build_fhir_bundle(&build_input(None));
+    let mut second = bundle["entry"][1].clone();
+    second["resource"]["id"] = "study-2".into();
+    bundle["entry"].as_array_mut().unwrap().push(second);
+    assert!(parse_study_index(bundle.to_string().as_bytes()).is_err());
 }

@@ -1,6 +1,6 @@
 // Shared state for the tour: the opened sample, the thread (one slice of the brain MRI), the
 // requests this page made, the decoder pool, and small DOM helpers.
-import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, type OpenShare, type RequestEvent, type SeriesEntry, type SiteConfig, type StudyEntry } from "../core/index";
+import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, type FileEntry, type OpenShare, type RequestEvent, type SeriesEntry, type SiteConfig, type StudyEntry } from "../core/index";
 import type { DecoderPool } from "../core/images";
 
 export interface Req extends RequestEvent {
@@ -9,23 +9,8 @@ export interface Req extends RequestEvent {
   recipient: string | null;
 }
 
-/**
- * The file a series reads from. Today each series has its own file; with study-level files
- * (docs/STUDY-FILES-AND-S3-PLAN.md) series share one, under `series.file`. Everything the tour
- * says about "the file" comes through here.
- */
-export interface FileFacts {
-  fileId: string;
-  plaintextLength: number;
-  ciphertextLength: number;
-  recordCount: number;
-}
-export function fileOf(series: SeriesEntry): FileFacts {
-  const f = (series as any).file ?? series;
-  return { fileId: f.fileId, plaintextLength: f.plaintextLength, ciphertextLength: f.ciphertextLength, recordCount: f.recordCount };
-}
 /** Ciphertext length of record i of a file. */
-export function recordLength(f: FileFacts, i: number): number {
+export function recordLength(f: FileEntry, i: number): number {
   return i < f.recordCount - 1 ? RECORD_CIPHERTEXT : f.plaintextLength - i * RECORD_PLAINTEXT + TAG;
 }
 

@@ -1,11 +1,11 @@
 // Packs a slide folder for a static host (PROPOSAL.md §10, U mode; Appendix C), for slides too
 // large for the local server's upload limit. Records are encrypted one at a time.
 //   bun web/view/wsi-tools/static-pack.ts <name> <folder> [hostRoot] [hostUrl]
-// Writes <hostRoot>/<id>/ with two series files and two Bundles: bundle.jwe (the files as they
+// Writes <hostRoot>/<id>/ with two encrypted files and two Bundles: bundle.jwe (the files as they
 // are) and bundle-tables.jwe (offset tables added by the core packer's rewrite, through
 // shl-dicom-wasm's offset_table_patch_wasm). Adds <name> to /tmp/wsi-fixtures.json.
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { b64urlDecode, b64urlEncode, encodeShlink, encryptJwe, randomKeyB64, readDicomHeader, recordNonce, RECORD_PLAINTEXT } from "../../core/index";
+import { b64urlDecode, EXT_INSTANCE_LENGTH, EXT_LINKED_FILE, PROFILE_URL, b64urlEncode, encodeShlink, encryptJwe, randomKeyB64, readDicomHeader, recordNonce, RECORD_PLAINTEXT } from "../../core/index";
 import { initSync, offset_table_patch_wasm } from "../../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
 initSync({ module: readFileSync("crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm") });
@@ -96,15 +96,16 @@ const bundleFor = (s: Awaited<ReturnType<typeof writeSeries>>) => ({
     {
       fullUrl: "urn:uuid:s1",
       resource: {
-        resourceType: "ImagingStudy", id: "s1", meta: { profile: ["https://example.org/shl-dicom/v1"] }, status: "available",
+        resourceType: "ImagingStudy", id: "s1", meta: { profile: [PROFILE_URL] },
+        extension: [{ url: EXT_LINKED_FILE, extension: [{ url: "id", valueString: s.fileId }, { url: "key", valueString: s.keyB64 }] }],
+        status: "available",
         identifier: [{ system: "urn:dicom:uid", value: `urn:oid:${h0.studyInstanceUid}` }], subject: { reference: "Patient/p1" },
         description: h0.studyDescription || "Slide microscopy", numberOfSeries: 1, numberOfInstances: parts.length,
         series: [{
-          extension: [{ url: "https://example.org/shl-dicom/series-file", extension: [{ url: "id", valueString: s.fileId }, { url: "key", valueString: s.keyB64 }] }],
           uid: h0.seriesInstanceUid, modality: { system: "http://dicom.nema.org/resources/ontology/DCM", code: h0.modality || "SM" },
           description: h0.seriesDescription || undefined, numberOfInstances: parts.length,
           instance: parts.map((p, i) => ({
-            extension: [{ url: "https://example.org/shl-dicom/length", valueDecimal: s.lens[i] }],
+            extension: [{ url: EXT_INSTANCE_LENGTH, valueDecimal: s.lens[i] }],
             uid: p.h.sopInstanceUid,
             sopClass: { system: "urn:ietf:rfc:3986", code: `urn:oid:${p.h.sopClassUid}` },
             ...(p.h.instanceNumber ? { number: Number(p.h.instanceNumber) } : {}),

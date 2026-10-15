@@ -1,18 +1,31 @@
 // The ImagingStudy index: reads a decrypted SHL Bundle (PROPOSAL.md §8) into studies, series and
-// instances with their byte offsets in the series files, plus the Patient and DiagnosticReports.
+// instances with their byte offsets in the linked files, plus the Patient and DiagnosticReports.
 import { ciphertextLength, recordCount, RECORD_PLAINTEXT } from "./range";
 import { linkReports } from "./reports";
 import { seriesKind } from "./objects";
 
-export const PROFILE_URL = "https://example.org/shl-dicom/v1";
-export const EXT_SERIES_FILE = "https://example.org/shl-dicom/series-file";
-export const EXT_LENGTH = "https://example.org/shl-dicom/length";
+const SD = "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/";
+export const PROFILE_URL = SD + "dicom-imaging-study";
+export const EXT_LINKED_FILE = SD + "linked-file";
+export const EXT_INSTANCE_LENGTH = SD + "instance-length";
+
+/** One encrypted file, `{fileId}.bin` (PROPOSAL.md §8.1, §9). One object per fileId. */
+export interface FileEntry {
+  /** 22-character file id; the file is `{fileId}.bin` next to the Bundle. */
+  fileId: string;
+  /** 43-character base64url 32-byte encryption key. */
+  key: string;
+  /** Plaintext length of the file: every instance of every series in it. */
+  plaintextLength: number;
+  ciphertextLength: number;
+  recordCount: number;
+}
 
 export interface InstanceEntry {
   uid: string;
   sopClass: string;
   number: number | null;
-  /** Byte offset of this Part 10 file in the series plaintext. */
+  /** Byte offset of this Part 10 file in its series' file plaintext. */
   offset: number;
   length: number;
   firstRecord: number;
@@ -25,13 +38,20 @@ export interface SeriesEntry {
   modality: string | null;
   description: string | null;
   bodySite: string | null;
-  /** 22-character series file id; the file is `{fileId}.bin` next to the Bundle. */
-  fileId: string;
-  /** 43-character base64url series key. */
-  key: string;
-  plaintextLength: number;
-  ciphertextLength: number;
-  recordCount: number;
+  /**
+   * Identifies the series within the index: `${file.fileId}@${offset}`. Use it, not the file id,
+   * for cache keys and maps (several series share a file).
+   */
+  id: string;
+  /** The encrypted file this series is in. */
+  file: FileEntry;
+  /** Byte offset of the series' first instance in its file's plaintext. */
+  offset: number;
+  /** Sum of the series' instance lengths (its DICOM bytes). */
+  bytes: number;
+  /** First and last records covering the series in its file. */
+  firstRecord: number;
+  lastRecord: number;
   instances: InstanceEntry[];
 }
 
@@ -48,9 +68,11 @@ export interface StudyEntry {
   notes: string[];
   /** Accession number from ImagingStudy.identifier (type ACSN), when the Bundle carries one. */
   accession: string | null;
+  /** The distinct files the study's series are in, in first-use order. */
+  files: FileEntry[];
   numberOfSeries: number;
   numberOfInstances: number;
-  /** Sum of the series' plaintext lengths (the original DICOM bytes). */
+  /** Sum of the series' bytes (the original DICOM bytes). */
   bytes: number;
   series: SeriesEntry[];
 }
@@ -156,50 +178,80 @@ function decodeAttachmentText(att: any): string | null {
   }
 }
 
-function parseSeries(se: any): SeriesEntry | null {
-  const ext = (se.extension ?? []).find((e: any) => e?.url === EXT_SERIES_FILE);
+/** The `linked-file` on an ImagingStudy or a series, checked; null when there is none. */
+function linkedFile(el: any): { fileId: string; key: string } | null {
+  const ext = (el?.extension ?? []).find((e: any) => e?.url === EXT_LINKED_FILE);
   if (!ext) return null;
   const sub = (name: string) => str((ext.extension ?? []).find((e: any) => e?.url === name)?.valueString);
   const fileId = sub("id");
   const key = sub("key");
-  if (!fileId || !key) throw new InvalidBundleError("series-file extension without id or key");
-  if (!/^[A-Za-z0-9_-]{22}$/.test(fileId)) throw new InvalidBundleError(`bad series file id ${fileId}`);
-  if (!/^[A-Za-z0-9_-]{43}$/.test(key)) throw new InvalidBundleError("bad series key");
-  const uid = str(se.uid);
-  if (!uid) throw new InvalidBundleError("series without uid");
-  const instances: InstanceEntry[] = [];
-  let offset = 0;
-  for (const inst of se.instance ?? []) {
-    const lenExt = (inst.extension ?? []).find((e: any) => e?.url === EXT_LENGTH);
-    const length = Number(lenExt?.valueDecimal);
-    if (!Number.isSafeInteger(length) || length <= 0) throw new InvalidBundleError("instance without a valid length");
-    const iuid = str(inst.uid);
-    if (!iuid) throw new InvalidBundleError("instance without uid");
-    instances.push({
-      uid: iuid,
-      sopClass: (str(inst.sopClass?.code) ?? "").replace(/^urn:oid:/, ""),
-      number: typeof inst.number === "number" ? inst.number : null,
-      offset,
-      length,
-      firstRecord: Math.floor(offset / RECORD_PLAINTEXT),
-      lastRecord: Math.floor((offset + length - 1) / RECORD_PLAINTEXT),
+  if (!fileId || !key) throw new InvalidBundleError("linked-file extension without id or key");
+  if (!/^[A-Za-z0-9_-]{22}$/.test(fileId)) throw new InvalidBundleError(`bad file id ${fileId}`);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(key)) throw new InvalidBundleError("bad file key");
+  return { fileId, key };
+}
+
+/**
+ * An ImagingStudy's series with their files (PROPOSAL.md §8.1): each series is in its own
+ * `linked-file`'s file, else the study's; offsets run per file through the series and instances in
+ * array order. Null for an ImagingStudy with no linked-file anywhere (ordinary FHIR).
+ */
+function parseStudySeries(r: any): { files: FileEntry[]; series: SeriesEntry[] } | null {
+  const studyFile = linkedFile(r);
+  const own = (r.series ?? []).map(linkedFile);
+  if (!studyFile && !own.some(Boolean)) return null;
+  const files = new Map<string, FileEntry>();
+  const series: SeriesEntry[] = [];
+  (r.series ?? []).forEach((se: any, k: number) => {
+    const uid = str(se?.uid);
+    if (!uid) throw new InvalidBundleError("series without uid");
+    const lf = own[k] ?? studyFile;
+    if (!lf) throw new InvalidBundleError(`series ${uid} has no linked-file`);
+    let file = files.get(lf.fileId);
+    if (!file) files.set(lf.fileId, (file = { fileId: lf.fileId, key: lf.key, plaintextLength: 0, ciphertextLength: 0, recordCount: 0 }));
+    else if (file.key !== lf.key) throw new InvalidBundleError(`file ${lf.fileId} is given two keys`);
+    const start = file.plaintextLength;
+    let offset = start;
+    const instances: InstanceEntry[] = [];
+    for (const inst of se.instance ?? []) {
+      const lenExt = (inst.extension ?? []).find((e: any) => e?.url === EXT_INSTANCE_LENGTH);
+      const length = Number(lenExt?.valueDecimal);
+      if (!Number.isSafeInteger(length) || length <= 0) throw new InvalidBundleError("instance without a valid length");
+      const iuid = str(inst.uid);
+      if (!iuid) throw new InvalidBundleError("instance without uid");
+      instances.push({
+        uid: iuid,
+        sopClass: (str(inst.sopClass?.code) ?? "").replace(/^urn:oid:/, ""),
+        number: typeof inst.number === "number" ? inst.number : null,
+        offset,
+        length,
+        firstRecord: Math.floor(offset / RECORD_PLAINTEXT),
+        lastRecord: Math.floor((offset + length - 1) / RECORD_PLAINTEXT),
+      });
+      offset += length;
+    }
+    if (!instances.length) throw new InvalidBundleError(`series ${uid} lists no instances`);
+    file.plaintextLength = offset;
+    series.push({
+      uid,
+      number: typeof se.number === "number" ? se.number : null,
+      modality: str(se.modality?.code),
+      description: str(se.description),
+      bodySite: str(se.bodySite?.display) ?? str(se.bodySite?.code),
+      id: `${file.fileId}@${start}`,
+      file,
+      offset: start,
+      bytes: offset - start,
+      firstRecord: Math.floor(start / RECORD_PLAINTEXT),
+      lastRecord: Math.floor((offset - 1) / RECORD_PLAINTEXT),
+      instances,
     });
-    offset += length;
+  });
+  for (const f of files.values()) {
+    f.ciphertextLength = ciphertextLength(f.plaintextLength);
+    f.recordCount = recordCount(f.plaintextLength);
   }
-  if (!instances.length) throw new InvalidBundleError(`series ${uid} lists no instances`);
-  return {
-    uid,
-    number: typeof se.number === "number" ? se.number : null,
-    modality: str(se.modality?.code),
-    description: str(se.description),
-    bodySite: str(se.bodySite?.display) ?? str(se.bodySite?.code),
-    fileId,
-    key,
-    plaintextLength: offset,
-    ciphertextLength: ciphertextLength(offset),
-    recordCount: recordCount(offset),
-    instances,
-  };
+  return { files: [...files.values()], series };
 }
 
 /** Parses Bundle JSON (string, bytes or object). Throws InvalidBundleError. */
@@ -251,8 +303,14 @@ export function parseStudyIndex(input: string | Uint8Array | object): StudyIndex
         attachments: (r.presentedForm ?? []).map(attachmentOf),
       });
     } else if (r.resourceType === "ImagingStudy") {
-      const series = (r.series ?? []).map(parseSeries).filter(Boolean) as SeriesEntry[];
-      if (!series.length) continue;
+      const parsed = parseStudySeries(r);
+      if (!parsed?.series.length) continue;
+      const { files, series } = parsed;
+      for (const f of files) {
+        if (studies.some((st) => st.files.some((g) => g.fileId === f.fileId))) {
+          throw new InvalidBundleError(`file ${f.fileId} is linked from two ImagingStudy resources`);
+        }
+      }
       const ident = (r.identifier ?? []).find((i: any) => i?.system === "urn:dicom:uid") ?? r.identifier?.[0];
       const modalities: string[] = [];
       for (const s of series) if (s.modality && !modalities.includes(s.modality)) modalities.push(s.modality);
@@ -264,9 +322,10 @@ export function parseStudyIndex(input: string | Uint8Array | object): StudyIndex
         modalities,
         notes: (r.note ?? []).map((n: any) => str(n?.text)).filter(Boolean) as string[],
         accession: studyAccession(r),
+        files,
         numberOfSeries: series.length,
         numberOfInstances: series.reduce((a, s) => a + s.instances.length, 0),
-        bytes: series.reduce((a, s) => a + s.plaintextLength, 0),
+        bytes: series.reduce((a, s) => a + s.bytes, 0),
         series,
       });
     }

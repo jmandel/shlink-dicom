@@ -23,7 +23,7 @@ pub enum Error {
     UnexpectedCiphertextLength { expected: usize, got: usize },
     #[error("record {record_index} failed AES-GCM authentication")]
     AuthenticationFailed { record_index: u64 },
-    #[error("series key or SHL key must be 32 bytes")]
+    #[error("file key or SHL key must be 32 bytes")]
     InvalidKeyLength,
     #[error("base64url decode error: {0}")]
     Base64(String),

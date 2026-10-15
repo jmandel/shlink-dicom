@@ -1,11 +1,11 @@
-// Encrypt-and-upload, streamed: each series file is read, encrypted and sent in chunks of
+// Encrypt-and-upload, streamed: each study's file is read, encrypted and sent in chunks of
 // CHUNK_RECORDS records, with at most two chunks in memory. The server keeps what it has received,
 // even from an interrupted request (lib/api.ts uploadOffset), so an upload continues where it
 // stopped: after a network failure, and after the page is reloaded (see saveJob).
 import { RECORD_CIPHERTEXT } from "../../core/range";
 import { ApiError, type ShareApi } from "./api";
 import { LinkError } from "../../core/resolver";
-import { CHUNK_RECORDS, ciphertextSize, encryptRecords, seriesKey, type PackedSeries } from "./pack";
+import { CHUNK_RECORDS, ciphertextSize, encryptRecords, fileKey, type PackedFile } from "./pack";
 
 export type Connection =
   | { state: "ok" }
@@ -15,13 +15,13 @@ export type Connection =
   | { state: "offline" };
 
 export interface UploadProgress {
-  /** Ciphertext bytes the server has, over all series. */
+  /** Ciphertext bytes the server has, over all files. */
   sent: number;
   total: number;
-  /** Series complete on the server. */
-  seriesDone: number;
-  /** Series file just finished, for the log. */
-  finished?: PackedSeries;
+  /** Files complete on the server. */
+  filesDone: number;
+  /** File just finished, for the log. */
+  finished?: PackedFile;
 }
 
 /** Failures worth waiting out: no connection, a stall, a proxy or server error, a busy server. */
@@ -80,13 +80,13 @@ let chunkRecords = CHUNK_RECORDS;
 const MIN_CHUNK_RECORDS = 4;
 
 /**
- * Uploads every series, each from where the server has it. Any failure that might pass (offline,
+ * Uploads every file, each from where the server has it. Any failure that might pass (offline,
  * dropped connection, stall, 5xx) is waited out and retried without limit; each retry first asks
  * the server how far it got (HEAD, Upload-Offset).
  */
-export async function uploadSeries(
+export async function uploadFiles(
   api: ShareApi,
-  packed: PackedSeries[],
+  packed: PackedFile[],
   on: (p: UploadProgress) => void,
   onConn: (c: Connection) => void,
   o: { fresh?: boolean; signal?: AbortSignal } = {},
@@ -99,9 +99,9 @@ export async function uploadSeries(
     const st = o.fresh ? null : await persist(() => api.uploadOffset(p.fileId), onConn, signal);
     offsets.set(p.fileId, st ? (st.complete ? ciphertextSize(p) : st.offset) : -1);
   }
-  const sentBefore = (p: PackedSeries) => packed.reduce((a, q) => a + (q === p ? 0 : Math.max(0, offsets.get(q.fileId)!)), 0);
-  let seriesDone = packed.filter((p) => offsets.get(p.fileId) === ciphertextSize(p)).length;
-  on({ sent: [...offsets.values()].reduce((a, n) => a + Math.max(0, n), 0), total, seriesDone });
+  const sentBefore = (p: PackedFile) => packed.reduce((a, q) => a + (q === p ? 0 : Math.max(0, offsets.get(q.fileId)!)), 0);
+  let filesDone = packed.filter((p) => offsets.get(p.fileId) === ciphertextSize(p)).length;
+  on({ sent: [...offsets.values()].reduce((a, n) => a + Math.max(0, n), 0), total, filesDone });
   for (const p of packed) {
     const size = ciphertextSize(p);
     let off = offsets.get(p.fileId)!;
@@ -111,7 +111,7 @@ export async function uploadSeries(
       off = 0;
     }
     const base = sentBefore(p);
-    const key = await seriesKey(p);
+    const key = await fileKey(p);
     // The next chunk is encrypted while the current one uploads.
     let ahead: { rec: number; n: number; ct: Promise<Uint8Array> } | null = null;
     const chunk = (rec: number, n: number) => {
@@ -132,7 +132,7 @@ export async function uploadSeries(
       const from = off;
       try {
         const r = await api.appendUpload(p.fileId, from, body, from + body.length === size, (loaded) => {
-          on({ sent: base + from + loaded, total, seriesDone });
+          on({ sent: base + from + loaded, total, filesDone });
         });
         off = r.offset;
         if (attempt) onConn({ state: "ok" });
@@ -161,8 +161,8 @@ export async function uploadSeries(
       }
     }
     offsets.set(p.fileId, size);
-    seriesDone++;
-    on({ sent: base + size, total, seriesDone, finished: p });
+    filesDone++;
+    on({ sent: base + size, total, filesDone, finished: p });
   }
 }
 

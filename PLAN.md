@@ -2,26 +2,26 @@
 
 ## 1. Core Architectural Contracts
 
-1. **Zero-Knowledge Server Contract (`Share` + `Link` Split with Per-Series Keys & `owner.jwe`):**
-   - Each `.bin` series file is encrypted once under its own random 32-byte key (carried inside the Bundle's `https://example.org/shl-dicom/series-file` extension with `id` and `key` sub-extensions).
-   - The server stores and serves only ciphertext (`{fileId}.bin` series files, the Share's `owner.jwe`, and per-link `bundle.jwe` files). Neither the owner key, any SHL link key, nor any series key is ever sent to the server.
+1. **Zero-Knowledge Server Contract (`Share` + `Link` Split with Per-Study Keys & `owner.jwe`):**
+   - Each study is one `.bin` file, encrypted once under its own random 32-byte key (carried inside the Bundle's `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file` extension on `ImagingStudy`, with `id` and `key` sub-extensions). A series added later may have its own `linked-file` (PROPOSAL.md §8.1, §10.3).
+   - The server stores and serves only ciphertext (`{fileId}.bin` files, the Share's `owner.jwe`, and per-link `bundle.jwe` files). Neither the owner key, any SHL link key, nor any file key is ever sent to the server.
    - **Resource Split:**
-     - **`Share` (`{sid}`):** Owns the pool of encrypted `{fileId}.bin` series files, an encrypted **`owner.jwe`** (the full master Bundle of every series and its 32-byte `key`, encrypted under a 32-byte `ownerKey` held only by the owner), storage quotas, access history, and the `controlToken`.
-     - **Management Credential:** `{ sid, controlToken, ownerKey }` (serializable as a management link/token). With `controlToken` and `ownerKey`, the owner can open the Share from any device, fetch and decrypt `owner.jwe`, and mint new Links (for any subset of series) without re-encrypting or re-uploading `.bin` files.
+     - **`Share` (`{sid}`):** Owns the pool of encrypted `{fileId}.bin` files, an encrypted **`owner.jwe`** (the full master Bundle of every study and its file's 32-byte `key`, encrypted under a 32-byte `ownerKey` held only by the owner), storage quotas, access history, and the `controlToken`.
+     - **Management Credential:** `{ sid, controlToken, ownerKey }` (serializable as a management link/token). With `controlToken` and `ownerKey`, the owner can open the Share from any device, fetch and decrypt `owner.jwe`, and mint new Links (for any subset of studies) without re-encrypting or re-uploading `.bin` files.
      - **`Link` (`{lid}`):** An access policy over a Share (`label`, `passcode`, `exp`, `longLived`, `online`, its own `bundle.jwe` encrypted under that Link's 32-byte SHL key, and an `allowedFiles` allowlist of `{fileId}.bin` names). Each Link has its own URL (`/shl/{lid}/bundle.jwe` in U-mode when created without a passcode, or `/shl/{lid}` in manifest mode when created with a passcode).
-     - **Why this matters:** One Share can issue multiple Links to different recipients (each with its own SHL key, its own subset of series, its own passcode, expiry, revocation, and access log) without re-encrypting or re-uploading `.bin` files. Mode (`U` vs `P`) is fixed at Link creation based on whether a passcode is provided. Changing a passcode means creating a new Link and deleting the old one—and because a deleted Link's `{lid}` is permanently gone (`404`), a revoked link can **never** come back.
+     - **Why this matters:** One Share can issue multiple Links to different recipients (each with its own SHL key, its own subset of studies, its own passcode, expiry, revocation, and access log) without re-encrypting or re-uploading `.bin` files. Mode (`U` vs `P`) is fixed at Link creation based on whether a passcode is provided. Changing a passcode means creating a new Link and deleting the old one—and because a deleted Link's `{lid}` is permanently gone (`404`), a revoked link can **never** come back.
 2. **Public Demo Protection & Quotas:**
    - Pre-seeded demo shares (`mri-brain-2020.tgz` and `wrist-low-res.tgz`, Josh Mandel's own studies shared publicly by choice in `jmandel/my-health-data`) are **read-only** on `/api/demo-shares` and never expose a `controlToken`.
-   - Users can click **"Clone to Sandbox Share"** (`POST /api/shares/{sid}/clone`) or upload their own files to get an isolated, time-limited sandbox share with its own `controlToken` (the client decrypts the public demo Bundle to get the series keys and writes a fresh `owner.jwe` under the user's new `ownerKey`).
+   - Users can click **"Clone to Sandbox Share"** (`POST /api/shares/{sid}/clone`) or upload their own files to get an isolated, time-limited sandbox share with its own `controlToken` (the client decrypts the public demo Bundle to get the file keys and writes a fresh `owner.jwe` under the user's new `ownerKey`).
    - `POST /api/shares` and file `PUT`s enforce the server's limits (bytes and files per share, shares at once; see §5.2), and sandbox shares expire, so the server cannot be abused as an open file host.
-3. **Storage: SQLite for state, series files on disk (`--data-dir`, default `./data`, gitignored; see [`docs/storage.md`](docs/storage.md)):**
+3. **Storage: SQLite for state, encrypted files on disk (`--data-dir`, default `./data`, gitignored; see [`docs/storage.md`](docs/storage.md)):**
    ```
    data/
    ├── catalog.db                        # Routing catalog: shares(sid, expires_at), links(lid -> sid), caps(token -> lid, expires_at)
    ├── samples/                          # The server's sample: one .tgz per study, sample.json, reports.json
    └── shares/
        ├── {sid}.db                      # Per-share SQLite DB: share(control_token_hash, owner_bundle), series_files, uploads, links, link_files, access_log
-       └── {sid}/{fileId}.bin            # Encrypted series files ({fileId}.part while an upload is incomplete)
+       └── {sid}/{fileId}.bin            # Encrypted files, one per study ({fileId}.part while an upload is incomplete)
    ```
 
 ---
@@ -37,7 +37,7 @@ shlink-dicom/
 ├── PROPOSAL.md                         # Protocol specification
 ├── PLAN.md                             # Architecture, API, file layout & test plan
 ├── reference/                          # Standalone ~100-line TS/WebCrypto reference
-│   ├── series-file.ts
+│   ├── linked-file.ts
 │   └── test-vector.ts
 ├── fixtures/
 │   └── golden/                         # Tracked F0 golden share fixtures (bundle.jwe, AAECAwQFBgcICQoLDA0ODw.bin, vector.json)
@@ -46,7 +46,7 @@ shlink-dicom/
 │   ├── samples/                        # The server's sample (one .tgz per study, sample.json, reports.json)
 │   └── shares/
 │       ├── {sid}.db                    # Per-share SQLite DB (share, series_files, uploads, links, link_files, access_log)
-│       └── {sid}/{fileId}.bin          # Encrypted series files
+│       └── {sid}/{fileId}.bin          # Encrypted files
 ├── crates/
 │   ├── shl-dicom-core/                 # Pure Rust library (NO std::fs, NO tokio, NO wasm_bindgen)
 │   │   ├── Cargo.toml
@@ -70,7 +70,7 @@ shlink-dicom/
 │       └── src/
 │           ├── main.rs                 # Clap CLI (`pack`, `inspect`, `serve`)
 │           ├── cli.rs                  # Offline `pack` and client `inspect` command implementations
-│           ├── state.rs                # AppState: SQLite catalog and per-share databases, series files on disk, upload limits, SSE broadcaster
+│           ├── state.rs                # AppState: SQLite catalog and per-share databases, encrypted files on disk, upload limits, SSE broadcaster
 │           ├── seed.rs                 # Downloads sample .tgz files if missing & seeds demo shares on startup
 │           ├── routes_api.rs           # Zero-knowledge upload & Control API (/api/shares/*, /api/demo-shares)
 │           ├── routes_shl.rs           # SHL protocol routes (/shl/{id}/*, /cap/{token}/*) + RFC 9110 HTTP 206 Range engine
@@ -99,15 +99,15 @@ shlink-dicom/
 ### 2.3 File-by-File Responsibilities
 
 #### In `crates/shl-dicom-core/src/`:
-- **`crypto.rs`**: Owns the cryptographic primitives in §9.2 (`record_nonce`, `encrypt_series`, `decrypt_range` using AES-256-GCM with each series' 32-byte key and `uint96_be(i)` nonces). Zero knowledge of DICOM or FHIR.
+- **`crypto.rs`**: Owns the cryptographic primitives in §9.2 (`record_nonce`, `encrypt_file`, `decrypt_range` using AES-256-GCM with each file's 32-byte key and `uint96_be(i)` nonces). Zero knowledge of DICOM or FHIR.
 - **`range.rs`**: Pure arithmetic mapping `[plaintext_start, plaintext_end)` to `(first_record, last_record)` and `[ciphertext_start, ciphertext_end)`.
 - **`jwe.rs`**: Compact JWE encryption and decryption (`alg: "dir"`, `enc: "A256GCM"`, `zip: "DEF"`).
 - **`shl.rs`**: Encodes/decodes `shlink:/` payloads and computes legal `flag` strings (`"U"`, `"LU"`, `"P"`, `"LP"`, `"L"`).
-- **`bundle.rs`**: Builds the R4 `Bundle` JSON from ingested DICOM metadata (declaring `meta.profile: ["https://example.org/shl-dicom/v1"]`, `Bundle.meta.lastUpdated`, the complex `series-file` extension with `id` and `key` sub-extensions on `series`, and the `length` extension on `instance`), subsets an owner Bundle for a Link (`subset_fhir_bundle`), and parses a decrypted `Bundle` back into a strongly-typed `StudyIndex` (computing cumulative byte offsets and covering 64 KiB record ranges for every instance).
+- **`bundle.rs`**: Builds the R4 `Bundle` JSON from ingested DICOM metadata (declaring `meta.profile: [".../StructureDefinition/dicom-imaging-study"]`, `Bundle.meta.lastUpdated`, the complex `linked-file` extension with `id` and `key` sub-extensions on `ImagingStudy` (and on a `series` that has its own file), and the `instance-length` extension on `instance`), subsets an owner Bundle for a Link (`subset_fhir_bundle`), and parses a decrypted `Bundle` back into a strongly-typed `StudyIndex` (resolving each series' file, computing byte offsets per file and covering 64 KiB record ranges for every series and instance).
 - **`dicom_io.rs`**: Parses Part 10 files (or bare datasets) and extracts study/series/instance metadata. It does not decode pixels: the browser decodes with `codecs/shl-dicom-decode` in viewer-kit's worker pool.
 - **`offset_tables.rs`**: Gives encapsulated multi-frame instances with an empty Basic Offset Table and no Extended Offset Table a filled-in table (fragment bytes unchanged), so a viewer can range-read one frame.
 - **`packer.rs`**: Split into two clean steps:
-  1. `IngestSession::pack()` (`A5`): groups ingested DICOM files by `(StudyInstanceUID, SeriesInstanceUID)`, sorts by `(InstanceNumber, SOPInstanceUID)`, draws random 16-byte `fileId`s and random 32-byte series `key`s, encrypts `{fileId}.bin` files, and produces the master owner `Bundle` JSON. With `set_add_offset_tables(true)` it first adds offset tables (`offset_tables.rs`).
+  1. `IngestSession::pack()` (`A5`): groups ingested DICOM files by `(StudyInstanceUID, SeriesInstanceUID)`, sorts series by `(SeriesNumber, SeriesInstanceUID)` and instances by `(InstanceNumber, SOPInstanceUID)`, draws one random 16-byte `fileId` and 32-byte `key` per study, encrypts one `{fileId}.bin` per study, and produces the master owner `Bundle` JSON. With `set_add_offset_tables(true)` it first adds offset tables (`offset_tables.rs`).
   2. `build_link_bundle(owner_bundle, selected_file_ids, shl_key)` (`A5b`): filters the owner `Bundle` to `selected_file_ids` and encrypts a per-link `bundle.jwe` under `shl_key`.
 
 #### In `crates/shl-dicom-wasm/src/`:
@@ -116,7 +116,7 @@ shlink-dicom/
 #### In `crates/shl-dicom-server/src/`:
 - **`state.rs`**: Manages `{data-dir}/catalog.db` and the LRU pool of `{data-dir}/shares/{sid}.db` SQLite databases (see [`docs/storage.md`](docs/storage.md)), startup/periodic orphan & expiry sweeps, and per-share `tokio::sync::broadcast` channels for live SSE telemetry.
 - **`routes_api.rs`**: Implements the Zero-Knowledge Share & Link API (`POST /api/shares`, `PUT /api/shares/{sid}/owner.jwe`, `PUT /api/shares/{sid}/files/{name}`, `POST /api/shares/{sid}/links`, `PATCH /api/shares/{sid}/links/{lid}`, `DELETE /api/shares/{sid}/links/{lid}`, `POST /api/shares/{sid}/links/{lid}/end-sessions`, `GET /api/shares/{sid}/access`, `GET /api/shares/{sid}/events`, `GET /api/demo-shares`).
-- **`routes_shl.rs`**: Implements the receiver-facing SHL routes (`GET /shl/{lid}/bundle.jwe`, `POST /shl/{lid}`, `GET /shl/{lid}/{fileId}.bin`, `GET /cap/{token}/...`) and the HTTP `206 Partial Content` byte-range responder, which streams from the series file on disk.
+- **`routes_shl.rs`**: Implements the receiver-facing SHL routes (`GET /shl/{lid}/bundle.jwe`, `POST /shl/{lid}`, `GET /shl/{lid}/{fileId}.bin`, `GET /cap/{token}/...`) and the HTTP `206 Partial Content` byte-range responder, which streams from the encrypted file on disk.
 
 ---
 
@@ -175,19 +175,19 @@ pub fn decode_shlink_uri(uri: &str) -> Result<ShlPayload>;
   - `ingest_zip(zip_bytes: &[u8])`
 - **Outputs from `IngestSession::pack()` (`A5`) and `build_link_bundle()` (`A5b`):**
   - `PackedStudySet`:
-    - `owner_bundle_json: String` (FHIR R4 `Bundle` with `Bundle.meta.lastUpdated`, `Patient`, and one `ImagingStudy` per study declaring `meta.profile: ["https://example.org/shl-dicom/v1"]` and carrying the `series-file` (`id`, `key`) and `length` extensions)
+    - `owner_bundle_json: String` (FHIR R4 `Bundle` with `Bundle.meta.lastUpdated`, `Patient`, and one `ImagingStudy` per study declaring `meta.profile: [".../StructureDefinition/dicom-imaging-study"]` and carrying the `linked-file` (`id`, `key`) and `instance-length` extensions)
     - `index: StudyIndex`
-    - `series_files: Vec<PackedSeriesFile>` (`{ file_id: String, series_key: [u8; 32], plaintext_len: u64, ciphertext: Vec<u8> }`)
+    - `files: Vec<PackedStudyFile>` (`{ file_id: String, key_b64: String, study_uid: String, plaintext_len: u64, ciphertext: Vec<u8> }`)
   - `build_link_bundle(owner_bundle_json: &str, selected_file_ids: &[String], shl_key: &[u8; 32]) -> Result<LinkBundleOutput>` (`{ shl_key_b64: String, bundle_json: String, bundle_jwe: String, allowed_files: Vec<String> }`)
 - **Parsed Index (`StudyIndex` extracted from decrypted FHIR Bundle):**
-  - Lists every `StudySummary -> SeriesSummary -> InstanceSummary`:
+  - Lists every `StudySummary -> SeriesSummary -> InstanceSummary`, with one `FileSummary { file_id, key, plaintext_length, ciphertext_length, record_count }` per file (`StudySummary.files`, `SeriesSummary.file`; a series also has `offset`, `bytes`, `first_record`, `last_record`):
     ```rust
     pub struct InstanceSummary {
         pub uid: String,
         pub sop_class: String,
         pub number: Option<i32>,
-        pub offset: u64,        // computed sum of prior instance lengths in series
-        pub length: u64,        // from https://example.org/shl-dicom/length
+        pub offset: u64,        // sum of prior instance lengths in the same file (§8.1)
+        pub length: u64,        // from .../StructureDefinition/instance-length
         pub first_record: u64,  // floor(offset / 65520)
         pub last_record: u64,   // floor((offset + length - 1) / 65520)
     }
@@ -275,14 +275,14 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
 | `GET /api/demo-shares` | None | — | `200 OK`: `{ shares: [{ id, title, description, shlinkUri, readOnly: true, share: Share }] }` (never exposes `controlToken`) |
 
 **Uploads and limits:**
-- Series file uploads follow the IETF resumable uploads draft ([draft-ietf-httpbis-resumable-upload-13](https://datatracker.ietf.org/doc/draft-ietf-httpbis-resumable-upload/)): creation with `Upload-Complete`, offset retrieval with `HEAD`, appends with `PATCH` and `application/partial-upload`, the `Upload-Offset`, `Upload-Complete`, `Upload-Length` and `Upload-Limit` fields, and the draft's problem types. Where this server differs:
+- File uploads follow the IETF resumable uploads draft ([draft-ietf-httpbis-resumable-upload-13](https://datatracker.ietf.org/doc/draft-ietf-httpbis-resumable-upload/)): creation with `Upload-Complete`, offset retrieval with `HEAD`, appends with `PATCH` and `application/partial-upload`, the `Upload-Offset`, `Upload-Complete`, `Upload-Length` and `Upload-Limit` fields, and the draft's problem types. Where this server differs:
   - **No `104 (Upload Resumption Supported)` interim responses.** The server's HTTP stack (axum on hyper) can't send them from a handler. Clients learn that uploads are resumable from this API, and get progress from the bytes they send.
   - **The upload resource is the file's own URL,** chosen by the client (`{fileId}.bin`), so creation is a `PUT` to it. The creation response still carries `Location`.
   - **`Upload-Length` is required at creation,** so the share's limit can be checked before any bytes arrive.
   - **Appending to a completed upload** gets `400` (the draft defines no problem type for it).
   - **A `PUT` without `Upload-Complete`** is an ordinary, non-resumable upload of a whole file.
 - The bytes of an interrupted request are kept: a dropped connection, or no byte for 30 s, ends the request where it got to. The client asks `HEAD` where to continue.
-- A series file becomes visible (listed in `files`, allowed in a Link) only once all its bytes have arrived. Until then it is an upload in progress, and its `Upload-Length` counts toward the share's limit.
+- An encrypted file becomes visible (listed in `files`, allowed in a Link) only once all its bytes have arrived. Until then it is an upload in progress, and its `Upload-Length` counts toward the share's limit.
 - One request at a time per file; a second gets `409` (without `Upload-Offset`).
 - Limits are server settings (`shl-dicom-server serve`):
 
@@ -294,12 +294,12 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
   | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` (largest append) |
   | `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 (passcode links' capability URLs) |
 
-- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. Series file bodies stream to disk.
+- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. File bodies stream to disk.
 - The server's own sample is not subject to these limits.
 
 **Rules enforced by the Share & Link API:**
-- **Owner management across sessions (`owner.jwe`):** The owner's client stores `{ sid, controlToken, ownerKey }` (in `localStorage` and exportable as a management link). Fetching and decrypting `GET /api/shares/{sid}/owner.jwe` with `ownerKey` gives the client the full `StudyIndex` (including every `fileId` and 32-byte series `key`) needed to mint new Links or append studies from any device.
-- **Each Link has its own SHL key, `bundle.jwe`, and `allowedFiles` list:** Because each `.bin` series file is encrypted under its own random 32-byte key carried inside the Link's Bundle, a Link only exposes the keys and files listed in its own Bundle and `allowedFiles`.
+- **Owner management across sessions (`owner.jwe`):** The owner's client stores `{ sid, controlToken, ownerKey }` (in `localStorage` and exportable as a management link). Fetching and decrypting `GET /api/shares/{sid}/owner.jwe` with `ownerKey` gives the client the full `StudyIndex` (including every `fileId` and 32-byte file `key`) needed to mint new Links or append studies from any device.
+- **Each Link has its own SHL key, `bundle.jwe`, and `allowedFiles` list:** Because each `.bin` file is encrypted under its own random 32-byte key carried inside the Link's Bundle, a Link only exposes the keys and files listed in its own Bundle and `allowedFiles`.
 - **Mode follows from passcode at Link creation:**
   - Without `passcode`: U-mode (`flag`: `"LU"` if `longLived` else `"U"`, `url`: `{origin}/shl/{lid}/bundle.jwe`).
   - With `passcode`: Manifest mode (`flag`: `"LP"` if `longLived` else `"P"`, `url`: `{origin}/shl/{lid}`).
@@ -360,7 +360,7 @@ Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin`
 |---|---|---|---|
 | **Stage 0** | `F0` | Sample `.tgz` archives cached; Appendix B vector JSON + golden share (`bundle.jwe` + `{fileId}.bin`) generated by TS reference; `StudyIndex` & WASM TypeScript interfaces committed. | Golden share decrypts and verifies with the TS reference; contracts are committed. |
 | **Stage 1** | `A1–A5b` | `crates/shl-dicom-core`: STREAM crypto, range math, JWE, SHL URI codec, DICOM parser, offset tables, FHIR R4 Bundle builder/index parser, packer. | `cargo test -p shl-dicom-core` passes: Appendix B matches byte for byte, edge-case ranges pass, and a synthetic two-study share passes 100% SHA-256 round-trip checks. |
-| **Stage 2** | `B1–B5` | `crates/shl-dicom-server`: `/shl` & `/cap` routes with HTTP `206` Range engine, SQLite state with series files on disk, atomic passcode counter, zero-knowledge upload/control API, demo seeding, and CLI (`pack`, `inspect`, `serve`). | `cargo test -p shl-dicom-server` passes against both the `F0` golden share and shares built by `A5`. |
+| **Stage 2** | `B1–B5` | `crates/shl-dicom-server`: `/shl` & `/cap` routes with HTTP `206` Range engine, SQLite state with encrypted files on disk, atomic passcode counter, zero-knowledge upload/control API, demo seeding, and CLI (`pack`, `inspect`, `serve`). | `cargo test -p shl-dicom-server` passes against both the `F0` golden share and shares built by `A5`. |
 | **Stage 3** | `C2` | `crates/shl-dicom-wasm`: the offset-table binding. | `bun test test/wasm.test.ts` passes. |
 | **Stage 4** | `D1–D5` | `web/`: landing, View, How it works, Share (see `docs/EXPERIENCES.md`). | The scripted Chromium checks in `web/checks/` and `web/how/checks.mjs` pass against the running server. |
 
@@ -379,13 +379,14 @@ Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin`
    - A range starting on an exact record boundary (`start = 65,520`).
    - A range ending in the short final record (`end = P`).
    - A 0-length or inverted range (`start == end` or `start > end`) returning `Err`.
-3. **`test_tamper_and_truncation`**: Flipped ciphertext bit, swapped record 0 and 1, truncated final record, wrong series `key` all return `Err`.
+3. **`test_tamper_and_truncation`**: Flipped ciphertext bit, swapped record 0 and 1, truncated final record, wrong file `key` all return `Err`.
 4. **`test_jwe_roundtrip_and_fresh_iv`**: Encrypts a FHIR Bundle as `dir` + `A256GCM` + `DEF`, verifies compact format has 5 dot-separated parts with empty encrypted key, verifies two encryptions produce distinct 12-byte IVs, and decrypts back to identical JSON.
 5. **`test_pack_and_lossless_roundtrip`**:
-   - Builds two synthetic studies in the test (a 4-slice CT in a `.tgz`, each slice crossing a record boundary, and a loose CR file) and ingests them into one Bundle.
-   - Verifies the `Bundle` has 2 `ImagingStudy` resources declaring `meta.profile: ["https://example.org/shl-dicom/v1"]`.
-   - For every series, decrypts the whole series and each instance's Range read via `decrypt_range`, and asserts a **100% SHA-256 match** with the input files.
-   - Builds a one-series link Bundle with `build_link_bundle` and parses it back.
+   - Builds two synthetic studies in the test (a CT of two series in a `.tgz`, 4 slices that each cross a record boundary and 2 small ones, and a loose CR file) and ingests them into one Bundle.
+   - Verifies the `Bundle` has 2 `ImagingStudy` resources declaring the `dicom-imaging-study` profile, each with `linked-file` on the study and none on its series, and one file per study with the CT's series at consecutive offsets.
+   - For every series, decrypts the series' range and each instance's Range read via `decrypt_range`, and asserts a **100% SHA-256 match** with the input files.
+   - Builds a one-study link Bundle with `build_link_bundle` and parses it back.
+6. **`test_linked_file_default_and_override`** / **`test_linked_file_errors`**: a study-level `linked-file` with a series-level override, offsets per file, subsets that keep or drop each file whole; and the errors (one file id with two keys, a series without a file, one file in two studies).
 
 ### Stage 2 Tests (`cargo test -p shl-dicom-server`)
 1. **`test_zero_knowledge_upload_and_u_mode_range`**:

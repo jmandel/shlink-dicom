@@ -228,7 +228,7 @@ function objectContext(): ObjectContext {
 }
 
 function showObject(se: SeriesEntry, kind: ObjectKind, note?: string) {
-  shownKey = `${se.fileId}/object`;
+  shownKey = `${se.id}/object`;
   objectView ??= new ObjectView($("stage"), objectContext());
   objectView.setContext(objectContext());
   document.body.classList.add("object-mode");
@@ -451,7 +451,7 @@ const isSlideAnnotation = (se: SeriesEntry) => se.instances.some((i) => i.sopCla
  */
 async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
   const st = study();
-  const id = isSlideAnnotation(se) ? `ann:${se.fileId}` : `seg:${se.fileId}`;
+  const id = isSlideAnnotation(se) ? `ann:${se.id}` : `seg:${se.id}`;
   for (let k = 0; k < st.series.length; k++) {
     if (!isSlideSeries(st.series[k])) continue;
     selectSeries(k);
@@ -881,7 +881,7 @@ function contentsList(st: StudyEntry, si: number): HTMLElement {
       selectSeries(k);
     });
     const names = [...new Set(se.instances.map((i) => sopInfo(i.sopClass).name))].join(", ");
-    li.append(b, el("span", "small muted", ` ${names} · ${plural(se.instances.length, ...KIND_LABEL[kind === "slide" || kind === "video" ? "image" : kind])} · ${formatBytes(se.plaintextLength)}`));
+    li.append(b, el("span", "small muted", ` ${names} · ${plural(se.instances.length, ...KIND_LABEL[kind === "slide" || kind === "video" ? "image" : kind])} · ${formatBytes(se.bytes)}`));
     ul.append(li);
   });
   d.append(ul);
@@ -1044,19 +1044,19 @@ function loadStripThumbs() {
 }
 
 function selectSeries(k: number) {
-  if (k === seriesIdx && shownKey.startsWith(series()?.fileId ?? "-")) return;
+  if (k === seriesIdx && shownKey.startsWith(series()?.id ?? "-")) return;
   if (k === seriesIdx && slideView?.active && slideView.ss?.src.series === series()) return;
   seriesAbort.abort();
   seriesAbort = new AbortController();
-  const prevFile = seriesIdx >= 0 ? study()?.series[seriesIdx]?.fileId : undefined;
+  const prevSeries = seriesIdx >= 0 ? study()?.series[seriesIdx]?.id : undefined;
   if (!study()?.series[k]) return;
   seriesIdx = k;
   const se = series();
   updateDownloadButton();
   // Reformats are for image series (set again below when this is one).
   $("view-plane").classList.add("hidden");
-  if (prevFile && prevFile !== se.fileId) {
-    share!.loader.cancelQueued((fid, p) => fid === prevFile && p >= FetchPriority.Prefetch);
+  if (prevSeries && prevSeries !== se.id) {
+    share!.loader.cancelQueued((sid, p) => sid === prevSeries && p >= FetchPriority.Prefetch);
   }
   $("strip")
     .querySelectorAll<HTMLElement>(".series-btn")
@@ -1077,7 +1077,7 @@ function selectSeries(k: number) {
   if (m) {
     leaveSlide();
     leaveObject();
-    shownKey = m === "shown" ? `${se.fileId}/media` : "";
+    shownKey = m === "shown" ? `${se.id}/media` : "";
     sliceIdx = 0;
     sliceCount = se.instances.length;
     setTimeout(loadStripThumbs, 0);
@@ -1154,7 +1154,7 @@ function showSlide(se: SeriesEntry) {
       $("btn-label").textContent = p.label !== null ? "Label" : "Glass slide";
       $("label-title").textContent = p.label !== null && p.overview !== null ? "Slide label and glass slide" : p.label !== null ? "Slide label" : "Glass slide";
       slideView!.show(ss, { share: share!, pool: images!.pool, others: study().series }, t0);
-      shownKey = `${se.fileId}/slide`;
+      shownKey = `${se.id}/slide`;
       if (!metrics.marks["first-slice"]) {
         mark("first-slice");
         setTimeout(loadStripThumbs, 0);
@@ -1223,17 +1223,17 @@ function showSlice(i: number, startPrefetch = false) {
     draw(img, frame);
   } else {
     $("stage-busy").classList.remove("hidden");
-    const want = { file: se.fileId, slice: sliceIdx };
+    const want = { series: se.id, slice: sliceIdx };
     images!
       .get(se, inst, { priority: Priority.Visible })
       .then((im) => {
-        if (series()?.fileId !== want.file) return;
+        if (series()?.id !== want.series) return;
         if (sliceIdx === want.slice) draw(im, sliceTarget(sliceIdx).frame);
         else if (images!.peek(series(), sliceTarget(sliceIdx).inst)) showSlice(sliceIdx);
       })
       .catch((e) => {
         if ((e as any)?.name === "AbortError") return;
-        if (series()?.fileId !== want.file || sliceIdx !== want.slice) return;
+        if (series()?.id !== want.series || sliceIdx !== want.slice) return;
         sliceError(e);
       });
   }
@@ -1295,7 +1295,7 @@ function draw(img: DecodedImage, frame: number) {
   iccInUse = t ? t.description || "embedded profile" : "";
   refreshLayers();
   cineFrame = frame;
-  shownKey = `${se.fileId}/${sliceIdx}`;
+  shownKey = `${se.id}/${sliceIdx}`;
   metrics.slices++;
   if (!metrics.marks["first-slice"]) {
     mark("first-slice");

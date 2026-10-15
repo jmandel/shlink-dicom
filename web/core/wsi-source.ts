@@ -1,4 +1,4 @@
-// SlideSource: a whole-slide series read through byte ranges of its encrypted series file.
+// SlideSource: a whole-slide series read through byte ranges of its encrypted file.
 //
 //   const src = await SlideSource.open(share, series, { onRecords });
 //   src.pyramid.levels[k]                       // finest first
@@ -13,7 +13,7 @@
 // (crates/shl-dicom-core/src/offset_tables.rs).
 import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
-import { planBytes, RECORD_PLAINTEXT } from "./range";
+import { planBytes, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "./range";
 import type { LinkResolver } from "./resolver";
 import type { RecordState } from "./loader";
 import {
@@ -60,7 +60,7 @@ interface Job {
 
 const abortError = () => new DOMException("read aborted", "AbortError");
 
-/** Verified, decrypted records of one series file, fetched on demand through a priority queue. */
+/** Verified, decrypted records of one series' file, fetched on demand through a priority queue. */
 export class SeriesReader {
   readonly stats: ReaderStats = {
     requests: 0,
@@ -94,7 +94,7 @@ export class SeriesReader {
     } = {},
   ) {}
 
-  /** Plaintext bytes [a, b) of the series file. */
+  /** Plaintext bytes [a, b) of the series' file. */
   async read(a: number, b: number, o: ReadOptions = {}): Promise<Uint8Array> {
     if (o.signal?.aborted) throw abortError();
     const r0 = Math.floor(a / RECORD_PLAINTEXT), r1 = Math.floor((b - 1) / RECORD_PLAINTEXT);
@@ -222,9 +222,9 @@ export class SeriesReader {
 
   private async run(job: Job) {
     const s = this.series;
-    const a = job.first * RECORD_PLAINTEXT, b = Math.min(s.plaintextLength, (job.last + 1) * RECORD_PLAINTEXT);
+    const a = job.first * RECORD_PLAINTEXT, b = Math.min(s.file.plaintextLength, (job.last + 1) * RECORD_PLAINTEXT);
     const plan = planBytes(s, a, b);
-    this.o.onRecords?.(s.fileId, plan.firstRecord, plan.lastRecord, "fetching");
+    this.o.onRecords?.(s.file.fileId, plan.firstRecord, plan.lastRecord, "fetching");
     try {
       const t0 = performance.now();
       const ct = await this.resolver.fetchRange(plan);
@@ -239,10 +239,10 @@ export class SeriesReader {
       try {
         pt = await this.decryptor.decrypt(s, plan, ct);
       } catch (e) {
-        this.o.onRecords?.(s.fileId, plan.firstRecord, plan.lastRecord, "failed");
+        this.o.onRecords?.(s.file.fileId, plan.firstRecord, plan.lastRecord, "failed");
         throw e;
       }
-      this.o.onRecords?.(s.fileId, plan.firstRecord, plan.lastRecord, "verified");
+      this.o.onRecords?.(s.file.fileId, plan.firstRecord, plan.lastRecord, "verified");
       for (let r = job.first; r <= job.last; r++) {
         const off = (r - job.first) * RECORD_PLAINTEXT;
         this.remember(r, pt.slice(off, Math.min(pt.byteLength, off + RECORD_PLAINTEXT)));
@@ -347,12 +347,14 @@ export class SlideSource {
     return s;
   }
 
-  /** Total bytes of the slide (sum of instance lengths) and of its series file. */
+  /** Total bytes of the slide (sum of instance lengths). */
   get plaintextBytes() {
-    return this.series.plaintextLength;
+    return this.series.bytes;
   }
+  /** Ciphertext bytes of the records that cover the slide in its file. */
   get ciphertextBytes() {
-    return this.series.ciphertextLength;
+    const { firstRecord, lastRecord, file } = this.series;
+    return Math.min(file.ciphertextLength, (lastRecord + 1) * RECORD_CIPHERTEXT) - firstRecord * RECORD_CIPHERTEXT;
   }
 
   private async loadHeader(i: number) {

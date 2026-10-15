@@ -1,6 +1,6 @@
-# Series-file decryption in the browser: wasm `aes-gcm` vs WebCrypto
+# Decrypting the encrypted files in the browser: wasm `aes-gcm` vs WebCrypto
 
-Question: is decrypting series-file records (PROPOSAL.md §9: 65,536-byte AES-256-GCM records, nonce `uint96_be(i)`) with the Rust `aes-gcm` crate compiled to wasm a bottleneck, and is WebCrypto faster once its per-call cost is counted?
+Question: is decrypting file records (PROPOSAL.md §9: 65,536-byte AES-256-GCM records, nonce `uint96_be(i)`) with the Rust `aes-gcm` crate compiled to wasm a bottleneck, and is WebCrypto faster once its per-call cost is counted?
 
 Answer: yes and yes. In Chromium, WebCrypto decrypts series records 15–20× faster than `aes-gcm` in wasm: about 800 MB/s against about 50 MB/s on one thread. For most transfer syntaxes the wasm decrypt costs as much CPU as decoding, or more. With WebCrypto it costs a small fraction. `record-decrypt.ts`, now `viewer-kit/src/record-decrypt.ts`, is a drop-in module for the WebCrypto path.
 
@@ -63,7 +63,7 @@ Every path was checked in both the worker and the main thread: 12 paths × 17 ch
 
 - reproduces the PROPOSAL Appendix B vector: the plaintext SHA-256 and the three record tags;
 - decrypts a range read of records 1 to the end;
-- decrypts a real series file to its original bytes. `fixtures/wrist.bin` is the three wrist-low-res DICOM Part 10 instances (6.04 MB, 93 records), encrypted with `reference/series-file.ts` by `make-fixtures.ts`;
+- decrypts a real encrypted file to its original bytes. `fixtures/wrist.bin` is the three wrist-low-res DICOM Part 10 instances (6.04 MB, 93 records), encrypted with `reference/linked-file.ts` by `make-fixtures.ts`;
 - rejects a flipped ciphertext bit, a flipped tag bit, swapped records, a record presented at the wrong index, a final record truncated by one byte, and the wrong key.
 
 `record-decrypt.test.ts` (`bun test perf-spikes/decrypt/record-decrypt.test.ts`, 27 tests) covers the module against the same vector and the real file. It also covers:
@@ -90,7 +90,7 @@ A wasm decrypt on one thread processes about 400 Mbit/s. On a fast connection it
 
 ## Decryption or decoding: which is the bottleneck
 
-The comparison must be made on input bytes, because every byte of the series file passes through decryption once, and decoding consumes those same bytes. The figures below are rates for our decoder (`shl_dicom_decode`, wasm-simd) in a Chromium worker, from `codecs/bench/results/2026-10-15-08-57-26-full.json`, the last full run. The large cases are listed for each format.
+The comparison must be made on input bytes, because every byte of the file passes through decryption once, and decoding consumes those same bytes. The figures below are rates for our decoder (`shl_dicom_decode`, wasm-simd) in a Chromium worker, from `codecs/bench/results/2026-10-15-08-57-26-full.json`, the last full run. The large cases are listed for each format.
 
 | Transfer syntax | Decode MP/s | Decoder input MB/s | wasm decrypt (50 MB/s) as a share of decode time | WebCrypto (800 MB/s) |
 |---|---:|---:|---:|---:|
@@ -112,14 +112,14 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
 
 1. **Decrypt with WebCrypto, not `aes-gcm` in wasm.**
    - Use `viewer-kit/src/record-decrypt.ts` (written here; it moved to viewer-kit when the viewer adopted it): `importSeriesKey(raw)` and `decryptRecords(key, ciphertext, firstRecordIndex, opts)`.
-   - The series key then never enters wasm memory. It is imported once per series as a non-extractable `CryptoKey`.
+   - The file key then never enters wasm memory. It is imported once per file as a non-extractable `CryptoKey`.
    - Tuning the Rust path is not worth it. Per-record re-keying, `wasm-opt` and simd128 together move it by about 20%.
    - Keep the Rust `decrypt_range` for native code (server, CLI). There, `aes` uses AES-NI and runs at 1.1 GB/s.
 
 2. **Decrypt in the decoder workers that viewer-kit's `DecoderPool` runs, not on the main thread.**
    - In Chromium, WebCrypto runs on the calling thread and its resolved promises chain without yielding. 50 MB on the main thread is one 60–70 ms task. With today's wasm path it is a 1–1.5 s task.
    - The decoder workers already exist and run in parallel, so decryption scales with them: 2–3 GB/s for 6 workers in this measurement.
-   - A `CryptoKey` is structured-cloneable and stays non-extractable when posted, so each worker receives the series key once.
+   - A `CryptoKey` is structured-cloneable and stays non-extractable when posted, so each worker receives the file key once.
 
 3. **Hand plaintext to the decoder without extra copies.** For one instance, `[a, b)` in series plaintext, with `first = ⌊a / 65,520⌋`:
    1. The fetch layer requests the ciphertext range (§9.3) and transfers the response's `ArrayBuffer` to the decoder worker. No copy.
@@ -164,6 +164,6 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
   It writes `results/<date>.json` and `results/latest.json`. `node run.mjs --quick` runs only the 1 MB and 50 MB sizes and skips the pools.
 - `bench/` holds the page, worker and benchmark code. The same `decrypt(ct, first)` function per path is used for the correctness checks and for timing.
 - `probe-thread.mjs` checks whether `crypto.subtle.decrypt` leaves the calling thread free.
-- `make-fixtures.ts` writes `fixtures/vector.*` (Appendix B) and `fixtures/wrist.*` (a real series file).
+- `make-fixtures.ts` writes `fixtures/vector.*` (Appendix B) and `fixtures/wrist.*` (a real encrypted file).
 
 To reproduce, run `./build.sh && node run.mjs` from this directory, and `bun test perf-spikes/decrypt/record-decrypt.test.ts` from the repository root. Run the benchmark on an idle machine: the numbers here were measured under load from other jobs.

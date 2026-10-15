@@ -4,9 +4,9 @@ use serde_json::Value;
 use crate::{
     bundle::{
         build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput,
-        InstanceBuildInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
+        InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
     },
-    crypto::{b64url_encode, encrypt_series, random_bytes},
+    crypto::{b64url_encode, encrypt_file, random_bytes},
     dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance},
     jwe::encrypt_bundle_jwe,
     offset_tables::{add_offset_table, offset_table_status, OffsetTableStatus},
@@ -15,10 +15,10 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackedSeriesFile {
+/// One study's encrypted file (`{file_id}.bin`): all its series, end to end.
+pub struct PackedStudyFile {
     pub file_id: String,
     pub key_b64: String,
-    pub series_uid: String,
     pub study_uid: String,
     pub plaintext_len: u64,
     #[serde(skip)]
@@ -31,7 +31,7 @@ pub struct PackedStudySet {
     pub offset_tables_added: usize,
     pub owner_bundle_json: String,
     pub index: StudyIndex,
-    pub series_files: Vec<PackedSeriesFile>,
+    pub files: Vec<PackedStudyFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,10 +104,11 @@ impl IngestSession {
         &self.instances
     }
 
-    /// Groups ingested DICOM instances by `(StudyInstanceUID, SeriesInstanceUID)`,
-    /// orders each series by `(InstanceNumber, SOPInstanceUID)`, encrypts each series
-    /// into `{fileId}.bin` with a fresh 16-byte `fileId` and 32-byte `key`, and builds
-    /// the master owner FHIR R4 Bundle.
+    /// Groups ingested DICOM instances by `(StudyInstanceUID, SeriesInstanceUID)`, orders
+    /// each study's series by `(SeriesNumber, SeriesInstanceUID)` and each series by
+    /// `(InstanceNumber, SOPInstanceUID)`, encrypts each study into one `{fileId}.bin` with a
+    /// fresh 16-byte `fileId` and 32-byte `key` (PROPOSAL.md §11.1), and builds the owner's
+    /// FHIR R4 Bundle.
     pub fn pack(self, last_updated: &str) -> Result<PackedStudySet> {
         if self.instances.is_empty() {
             return Err(Error::Dicom("no DICOM instances ingested".into()));
@@ -140,7 +141,7 @@ impl IngestSession {
         }
 
         let mut study_inputs = Vec::new();
-        let mut series_files = Vec::new();
+        let mut files = Vec::new();
         let add_tables = self.add_offset_tables;
         let mut offset_tables_added = 0usize;
 
@@ -150,7 +151,10 @@ impl IngestSession {
             let mut accession: Option<String> = None;
             let mut series_inputs = Vec::new();
 
+            // Each series' instances, kept for the study's plaintext once the series are ordered.
+            let mut series_plain: Vec<(String, Vec<ParsedDicomInstance>)> = Vec::new();
             for (series_uid, mut insts) in series_map {
+                let series_uid_key = series_uid.clone();
                 // Deduplicate by SOPInstanceUID in case the archive had duplicate files
                 insts.sort_by(|a, b| {
                     let num_cmp = a
@@ -179,17 +183,8 @@ impl IngestSession {
                     accession = first.accession_number.clone();
                 }
 
-                let file_id_bytes = random_bytes::<16>()?;
-                let file_id = b64url_encode(&file_id_bytes);
-                let series_key = random_bytes::<32>()?;
-                let key_b64 = b64url_encode(&series_key);
-
-                let total_pt_len: usize = insts.iter().map(|i| i.bytes.len()).sum();
-                let mut series_plaintext = Vec::with_capacity(total_pt_len);
                 let mut inst_inputs = Vec::with_capacity(insts.len());
-
                 for inst in &insts {
-                    series_plaintext.extend_from_slice(&inst.bytes);
                     inst_inputs.push(InstanceBuildInput {
                         uid: inst.sop_instance_uid.clone(),
                         sop_class_uid: inst.sop_class_uid.clone(),
@@ -198,26 +193,15 @@ impl IngestSession {
                     });
                 }
 
-                let ciphertext = encrypt_series(&series_plaintext, &series_key)?;
-
-                series_files.push(PackedSeriesFile {
-                    file_id: file_id.clone(),
-                    key_b64: key_b64.clone(),
-                    series_uid: series_uid.clone(),
-                    study_uid: study_uid.clone(),
-                    plaintext_len: total_pt_len as u64,
-                    ciphertext,
-                });
-
                 series_inputs.push(SeriesBuildInput {
                     uid: series_uid,
                     number: first.series_number,
                     modality: first.modality.clone(),
                     description: first.series_description.clone(),
-                    file_id,
-                    key_b64,
+                    file: None,
                     instances: inst_inputs,
                 });
+                series_plain.push((series_uid_key, insts));
             }
 
             series_inputs.sort_by(|a, b| {
@@ -227,6 +211,28 @@ impl IngestSession {
                     .then_with(|| a.uid.cmp(&b.uid))
             });
 
+            // The study's file: its series in that order, each series' instances end to end.
+            let total_pt_len: usize = series_plain.iter().flat_map(|(_, v)| v.iter()).map(|i| i.bytes.len()).sum();
+            let mut plaintext = Vec::with_capacity(total_pt_len);
+            for se in &series_inputs {
+                let (_, insts) = series_plain.iter().find(|(uid, _)| uid == &se.uid).expect("series");
+                for inst in insts {
+                    plaintext.extend_from_slice(&inst.bytes);
+                }
+            }
+            drop(series_plain);
+            let file_id = b64url_encode(&random_bytes::<16>()?);
+            let key = random_bytes::<32>()?;
+            let key_b64 = b64url_encode(&key);
+            let ciphertext = encrypt_file(&plaintext, &key)?;
+            files.push(PackedStudyFile {
+                file_id: file_id.clone(),
+                key_b64: key_b64.clone(),
+                study_uid: study_uid.clone(),
+                plaintext_len: total_pt_len as u64,
+                ciphertext,
+            });
+
             study_inputs.push(StudyBuildInput {
                 id: format!("study-{}", study_idx + 1),
                 study_instance_uid: study_uid,
@@ -234,6 +240,7 @@ impl IngestSession {
                 started: study_date,
                 accession,
                 note: None,
+                file: LinkedFileInput { file_id, key_b64 },
                 series: series_inputs,
             });
         }
@@ -266,13 +273,13 @@ impl IngestSession {
             offset_tables_added,
             owner_bundle_json,
             index,
-            series_files,
+            files,
         })
     }
 }
 
 /// Builds a link-specific Bundle (`bundle.jwe`) from the owner's full Bundle JSON,
-/// filtering to `selected_file_ids` (or including all series if `selected_file_ids` is empty).
+/// filtering to `selected_file_ids` (or including every file if `selected_file_ids` is empty).
 pub fn build_link_bundle(
     owner_bundle_json: &str,
     selected_file_ids: &[String],
@@ -288,8 +295,8 @@ pub fn build_link_bundle(
 
     let mut allowed_files = Vec::new();
     for st in &parsed_index.studies {
-        for se in &st.series {
-            allowed_files.push(format!("{}.bin", se.file_id));
+        for f in &st.files {
+            allowed_files.push(format!("{}.bin", f.file_id));
         }
     }
 
@@ -325,7 +332,7 @@ mod tests {
 
         let (_, on) = pack_one(true);
         assert_eq!(on.offset_tables_added, 1);
-        let sf = &on.series_files[0];
+        let sf = &on.files[0];
         let inst = &on.index.studies[0].series[0].instances[0];
         assert_eq!(inst.length, src.len() as u64 + 4 * 9);
         assert_eq!(sf.plaintext_len, inst.length);

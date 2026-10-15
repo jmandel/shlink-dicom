@@ -454,7 +454,7 @@ export class MediaController {
 
   /** The probe for instance i, read once. */
   probe(series: SeriesEntry, i = 0): Promise<InstanceProbe> {
-    const key = `${series.fileId}/${i}`;
+    const key = `${series.id}/${i}`;
     let p = this.probes.get(key);
     if (!p) {
       const share = this.o.share();
@@ -501,7 +501,7 @@ export class MediaController {
 
   /** Known to be video (probed). */
   isVideo(series: SeriesEntry): boolean {
-    return !!this.known.get(`${series.fileId}/0`)?.video;
+    return !!this.known.get(`${series.id}/0`)?.video;
   }
 
   /**
@@ -515,7 +515,7 @@ export class MediaController {
       this.leave();
       return false;
     }
-    const key = `${series.fileId}/0`;
+    const key = `${series.id}/0`;
     const p = this.known.get(key);
     if (!p) {
       this.leave();
@@ -553,7 +553,7 @@ export class MediaController {
       this.stopCine();
       return;
     }
-    const key = `${series.fileId}/${inst}`;
+    const key = `${series.id}/${inst}`;
     if (this.cine && this.cineKey === key) return;
     this.stopCine();
     this.cineKey = key;

@@ -27,7 +27,7 @@ pub fn run_pack_cli(
     let packed = session.pack(&now_iso).map_err(|e| e.to_string())?;
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("create {:?}: {e}", out_dir))?;
-    for sf in &packed.series_files {
+    for sf in &packed.files {
         let bin_path = out_dir.join(format!("{}.bin", sf.file_id));
         std::fs::write(&bin_path, &sf.ciphertext)
             .map_err(|e| format!("write {:?}: {e}", bin_path))?;
@@ -179,29 +179,29 @@ pub async fn run_inspect_cli(shlink_uri: &str, passcode: Option<&str>) -> Result
             let r = ciphertext_range(
                 inst.offset,
                 inst.offset + inst.length,
-                first_series.plaintext_length,
+                first_series.file.plaintext_length,
             )
             .map_err(|e| e.to_string())?;
             let base_prefix = base_url
                 .rsplit_once('/')
                 .map(|(p, _)| format!("{p}/"))
                 .unwrap_or_else(|| format!("{base_url}/"));
-            let series_url = format!("{base_prefix}{}.bin", first_series.file_id);
+            let file_url = format!("{base_prefix}{}.bin", first_series.file.file_id);
 
             let resp = client
-                .get(&series_url)
+                .get(&file_url)
                 .header(reqwest::header::RANGE, r.http_range_header())
                 .send()
                 .await
-                .map_err(|e| format!("Range GET {series_url}: {e}"))?;
+                .map_err(|e| format!("Range GET {file_url}: {e}"))?;
             let status = resp.status();
             let ct_slice = resp.bytes().await.map_err(|e| e.to_string())?;
             let dcm = decrypt_range(
                 &ct_slice,
                 inst.offset,
                 inst.offset + inst.length,
-                first_series.plaintext_length,
-                &first_series.key_bytes().map_err(|e| e.to_string())?,
+                first_series.file.plaintext_length,
+                &first_series.file.key_bytes().map_err(|e| e.to_string())?,
             )
             .map_err(|e| e.to_string())?;
             println!(

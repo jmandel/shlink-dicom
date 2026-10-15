@@ -6,7 +6,7 @@
 //   { type: "probe", id, bytes: ArrayBuffer }
 //   { type: "decrypt", id, bytes: ArrayBuffer, encrypted }
 //   { type: "jxl", module } or { type: "jxl", error }   (answer to "need-jxl")
-// With `encrypted` the bytes are series-file ciphertext: verified and decrypted with WebCrypto
+// With `encrypted` the bytes are linked-file ciphertext: verified and decrypted with WebCrypto
 // (record-decrypt.ts) before decoding, so neither the key nor unverified bytes reach wasm.
 // Messages out:
 //   { type: "ready" }
@@ -89,7 +89,7 @@ self.onmessage = async (ev: MessageEvent) => {
   if (m.encrypted) {
     const e = m.encrypted;
     try {
-      bytes = await decryptRecords(e.key, bytes, e.firstRecord, { window: e.window, seriesPlaintextLength: e.seriesPlaintextLength });
+      bytes = await decryptRecords(e.key, bytes, e.firstRecord, { window: e.window, filePlaintextLength: e.filePlaintextLength });
     } catch (err) {
       if (err instanceof RecordAuthenticationError) post({ id: m.id, ok: false, auth: { record: err.recordIndex, reason: err.reason } });
       else post({ id: m.id, ok: false, code: 0, message: `decrypt: ${String((err as Error)?.message ?? err)}`, ms: 0 });

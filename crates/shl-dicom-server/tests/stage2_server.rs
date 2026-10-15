@@ -3,7 +3,7 @@ use axum::http::{header, StatusCode};
 use rusqlite::params;
 use serde_json::{json, Value};
 use shl_dicom_core::{
-    crypto::{b64url_encode, decode_key_32, decrypt_range, encrypt_series, random_bytes},
+    crypto::{b64url_encode, decode_key_32, decrypt_range, encrypt_file, random_bytes},
     jwe::encrypt_bundle_jwe,
     range::ciphertext_range,
 };
@@ -162,8 +162,8 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
 
     let ct_slice = range_resp.bytes().await.unwrap();
     assert_eq!(ct_slice.len(), 150_048 - 65_536);
-    let series_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
-    let inst2 = decrypt_range(&ct_slice, 70_000, 150_000, 150_000, &series_key).unwrap();
+    let file_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
+    let inst2 = decrypt_range(&ct_slice, 70_000, 150_000, 150_000, &file_key).unwrap();
     let expected_inst2: Vec<u8> = (70_000..150_000).map(|k| (k % 251) as u8).collect();
     assert_eq!(inst2, expected_inst2);
 
@@ -405,8 +405,8 @@ async fn test_multiple_links_subset_scoping_and_orphan_sweep() {
 
     let fid1 = b64url_encode(&[10u8; 16]);
     let fid2 = b64url_encode(&[20u8; 16]);
-    let ct1 = encrypt_series(&vec![0x11u8; 10_000], &[0xAAu8; 32]).unwrap();
-    let ct2 = encrypt_series(&vec![0x22u8; 10_000], &[0xBBu8; 32]).unwrap();
+    let ct1 = encrypt_file(&vec![0x11u8; 10_000], &[0xAAu8; 32]).unwrap();
+    let ct2 = encrypt_file(&vec![0x22u8; 10_000], &[0xBBu8; 32]).unwrap();
 
     for (fid, ct) in [(&fid1, &ct1), (&fid2, &ct2)] {
         client
@@ -730,8 +730,8 @@ async fn test_controls_mid_download_resumption_expiry_and_traversal() {
 
     let mut reassembled = Vec::from(part1.as_ref());
     reassembled.extend_from_slice(&part2);
-    let series_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
-    let decrypted_all = decrypt_range(&reassembled, 0, 150_000, 150_000, &series_key).unwrap();
+    let file_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
+    let decrypted_all = decrypt_range(&reassembled, 0, 150_000, 150_000, &file_key).unwrap();
     assert_eq!(decrypted_all.len(), 150_000);
 
     // 4. Take link offline -> 404; bring back online -> 200; set exp in the past -> 404

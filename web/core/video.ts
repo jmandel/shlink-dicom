@@ -1,5 +1,5 @@
 // Video and cine in a shared study: which instances hold video, how they are timed, and their
-// encapsulated stream read through byte ranges of the encrypted series file.
+// encapsulated stream read through byte ranges of its encrypted file.
 //
 //   const probe = await probeInstance(share, series, 0);       // reads the header only (64 KiB+)
 //   probe.video   // { codec: "h264" | "hevc" | "mpeg2", label, view, … } or null

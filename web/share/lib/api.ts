@@ -141,7 +141,7 @@ export class ShareApi {
     return (await (await this.req("GET", `${this.s}/access?${q}`)).json()).events;
   }
 
-  // Series file uploads follow the IETF resumable uploads draft (draft-ietf-httpbis-resumable-upload):
+  // Uploads of the encrypted files follow the IETF resumable uploads draft (draft-ietf-httpbis-resumable-upload):
   // PUT with Upload-Complete creates the upload, HEAD reports Upload-Offset, PATCH appends.
 
   private fileUrl(fileId: string) {

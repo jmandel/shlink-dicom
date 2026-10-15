@@ -32,7 +32,7 @@ export function exportSize(scope: ExportScope): { files: number; bytes: number }
   const list = scopeStudies(scope).flat();
   return {
     files: list.reduce((a, s) => a + s.instances.length, 0),
-    bytes: list.reduce((a, s) => a + s.plaintextLength, 0),
+    bytes: list.reduce((a, s) => a + s.bytes, 0),
   };
 }
 

@@ -77,7 +77,7 @@ export async function encryptJwe(
   return [hdrB64, "", b64urlEncode(iv), b64urlEncode(ct), b64urlEncode(tag)].join(".");
 }
 
-/** 32 random bytes, base64url: a fresh SHL key or series key. */
+/** 32 random bytes, base64url: a fresh SHL key or file key. */
 export function randomKeyB64(): string {
   return b64urlEncode(crypto.getRandomValues(new Uint8Array(32)));
 }

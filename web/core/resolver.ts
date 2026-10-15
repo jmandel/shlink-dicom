@@ -1,5 +1,5 @@
 // Link resolution (SMART Health Links + PROPOSAL.md §10): U mode and manifest mode, passcodes,
-// fresh /cap/ locations when a capability prefix expires, and Range reads of series files.
+// fresh /cap/ locations when a capability prefix expires, and Range reads of the encrypted files.
 import { decryptJwe, JweError } from "./jwe";
 import { hasFlag, parseShlink, type ShlPayload } from "./shlink";
 import type { RangePlan } from "./range";
@@ -51,7 +51,7 @@ export interface RequestEvent {
   bytes: number;
   ms: number;
   /** What the request was for. */
-  purpose: "manifest" | "bundle" | "series";
+  purpose: "manifest" | "bundle" | "file";
 }
 
 export interface ResolverOptions {
@@ -119,17 +119,17 @@ export class LinkResolver {
       throw new LinkError("expired", `This link expired on ${exp.toLocaleDateString()}.`);
     }
     let manifest: any = null;
-    let fileUrl: string;
+    let bundleUrl: string;
     if (this.isDirect) {
       const u = new URL(this.payload.url);
       u.searchParams.set("recipient", this.recipient);
-      fileUrl = u.toString();
+      bundleUrl = u.toString();
       this.baseUrl = this.payload.url;
     } else {
       manifest = await this.postManifest();
-      fileUrl = this.baseUrl!;
+      bundleUrl = this.baseUrl!;
     }
-    const res = await this.timedFetch(fileUrl, { purpose: "bundle" });
+    const res = await this.timedFetch(bundleUrl, { purpose: "bundle" });
     if (!res.ok) throw this.httpError(res.status);
     const jwe = await res.text();
     let bundleBytes: Uint8Array;
@@ -142,7 +142,7 @@ export class LinkResolver {
   }
 
   /** `{fileId}.bin` resolved against the base URL, with `?recipient=`. */
-  seriesUrl(fileId: string): string {
+  fileUrl(fileId: string): string {
     if (!this.baseUrl) throw new Error("open() the link first");
     const u = new URL(`${fileId}.bin`, this.baseUrl);
     u.searchParams.set("recipient", this.recipient);
@@ -157,8 +157,8 @@ export class LinkResolver {
   async fetchRange(plan: RangePlan, signal?: AbortSignal): Promise<Uint8Array> {
     const want = plan.ciphertextEnd - plan.ciphertextStart;
     const attempt = async () =>
-      this.timedFetch(this.seriesUrl(plan.fileId), {
-        purpose: "series",
+      this.timedFetch(this.fileUrl(plan.fileId), {
+        purpose: "file",
         range: plan.rangeHeader,
         signal,
       });
@@ -243,8 +243,8 @@ export class LinkResolver {
         headers,
         body: o.body,
         signal: o.signal,
-        // Series files are immutable (§10), so the HTTP cache may keep them; manifests and Bundles may change.
-        cache: o.purpose === "series" ? "default" : "no-store",
+        // Encrypted files are immutable (§10), so the HTTP cache may keep them; manifests and Bundles may change.
+        cache: o.purpose === "file" ? "default" : "no-store",
       });
     } catch (e) {
       if ((e as any)?.name === "AbortError") throw e;

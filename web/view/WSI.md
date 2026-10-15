@@ -1,6 +1,6 @@
 # Whole-slide images in /view
 
-/view shows whole-slide microscopy (VL Whole Slide Microscopy Image, modality SM) as a deep-zoom pyramid. It fetches only the tiles on screen, each with one byte-range read of the encrypted series file. A 1.2 GB slide viewed at full resolution, with six pans, downloaded 14.6 MB, which is 1.21% of the slide. That figure needs frame offset tables in the files; the packer can add them ([Offset tables](#offset-tables)).
+/view shows whole-slide microscopy (VL Whole Slide Microscopy Image, modality SM) as a deep-zoom pyramid. It fetches only the tiles on screen, each with one byte-range read of the encrypted file. A 1.2 GB slide viewed at full resolution, with six pans, downloaded 14.6 MB, which is 1.21% of the slide. That figure needs frame offset tables in the files; the packer can add them ([Offset tables](#offset-tables)).
 
 ## How it works
 
@@ -112,7 +112,7 @@ The Aperio "ScanScope v1" profile on the CPTAC slides is a lut16 into Lab; the T
 **JPEG XL.** Tiles in the three JPEG XL syntaxes (.110 lossless, .111 JPEG recompression, .112) decode through the same pool, using the decoders' JPEG XL support. Fragment walking recognises JPEG XL codestreams and containers.
 
 **Stats panel** (bottom left; tap it to collapse). It shows:
-- the bytes downloaded against the size of the series file, and the percentage;
+- the bytes downloaded against the size of the slide's records in its encrypted file, and the percentage;
 - tiles decoded and requests made;
 - the current level;
 - time to first tile, measured from the slide's first request to its first decoded tile;
@@ -189,7 +189,7 @@ node web/checks/wsi-checks.mjs --only=features      # or --only=<fixture>, icc, 
 
 `staged/ann-seg` holds links to the DX1, ANN and SEG files of the TCGA study.
 
-The 1.2 GB slide is not on the local server, because the server's API accepts at most 200 MiB per upload body (`DefaultBodyLimit` in `crates/shl-dicom-server/src/lib.rs`) and 500 MiB per share. So a series over 200 MiB cannot be shared through `/share` today. `static-pack.ts` packs the slide as PROPOSAL §9 describes, writing two series files and a Bundle for each. Its offset tables come from the same Rust code as the packer's, through `offset_table_patch_wasm`. `static-host.ts` serves them, the way any static host would (Appendix C).
+The 1.2 GB slide is not on the local server, because the server's API accepts at most 200 MiB per upload body (`DefaultBodyLimit` in `crates/shl-dicom-server/src/lib.rs`) and 500 MiB per share. So a series over 200 MiB cannot be shared through `/share` today. `static-pack.ts` packs the slide as PROPOSAL §9 describes, writing two encrypted files and a Bundle for each. Its offset tables come from the same Rust code as the packer's, through `offset_table_patch_wasm`. `static-host.ts` serves them, the way any static host would (Appendix C).
 
 ## Results
 
@@ -294,7 +294,7 @@ How it works:
   - Segmentations and annotations are placed by spacing and origin. Rotated or flipped slide orientations relative to the slide image are not handled.
   - An annotation instance is read whole (up to 512 MB). Its measurements (for example nucleus area) are not shown.
 - **ICC profiles:** v4 lutAtoB profiles (mAB) are not converted. The table is built on the main thread (27 ms).
-- **Learned offsets.** For files shared without tables, walking results last for the page session. They are not stored across visits, though they could be, by fileId, since series files are immutable.
+- **Learned offsets.** For files shared without tables, walking results last for the page session. They are not stored across visits, though they could be, by file id and offset, since the encrypted files are immutable.
 - **Large uploads.** Series over 200 MiB cannot be uploaded through the local server's API (see above).
 - **Fetch granularity.** The smallest fetch is a 64 KiB record, and tiles here average 3–17 KB. Neighbouring tiles share records, but a scattered view still over-fetches several times its tile bytes. That is the format's record size (PROPOSAL §9.3), not something the viewer can change.
 - **Downloads.** For a slide, "Download originals" offers the study or series ZIP, not "This image". The ZIP of a 1.2 GB series was not tried.

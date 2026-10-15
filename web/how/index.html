@@ -58,7 +58,7 @@
           <p class="plain">Your browser downloads one small locked file, unlocks it with the key, and finds a table of contents for everything shared.</p>
           <div class="d">
             <p>The locked file is a JWE (JSON Web Encryption): a header, a random starting value and the ciphertext, sealed with AES-256-GCM. Unlocked and unzipped, it is a FHIR Bundle, the standard format for health records.</p>
-            <p>The Bundle holds the patient and one ImagingStudy per study. For every image, the ImagingStudy gives its length in bytes, and for each series, which file holds it and that file's own key.</p>
+            <p>The Bundle holds the patient and one ImagingStudy per study. For every image, the ImagingStudy gives its length in bytes. It names one file for the whole study, with that file's own key; a series added later can name a file of its own.</p>
             <p id="d-index" class="nums"></p>
           </div>
         </article>
@@ -66,10 +66,10 @@
         <article class="step" id="pieces" data-step="pieces">
           <p class="step-n">3</p>
           <h2>The pieces</h2>
-          <p class="plain">The images are stored as a file of small locked pieces. Your browser asks for just the pieces that hold this slice.</p>
+          <p class="plain">Each study is stored as one file of small locked pieces. Your browser asks for just the pieces that hold this slice.</p>
           <p class="try">Drag across the pieces to choose others. Every image wholly inside your choice appears.</p>
           <div class="d">
-            <p>Each piece, called a record, holds 65,520 bytes of the original files and a 16-byte seal, so it takes 65,536 bytes on the server. The images sit end to end, so an image at bytes <i>a</i> to <i>b</i> is in pieces ⌊<i>a</i> ÷ 65,520⌋ to ⌊<i>b</i> ÷ 65,520⌋.</p>
+            <p>Each piece, called a record, holds 65,520 bytes of the original files and a 16-byte seal, so it takes 65,536 bytes on the server. The study's images sit end to end, series by series, so an image at bytes <i>a</i> to <i>b</i> is in pieces ⌊<i>a</i> ÷ 65,520⌋ to ⌊<i>b</i> ÷ 65,520⌋.</p>
             <p id="d-pieces" class="nums"></p>
             <div id="d-requests" class="reqs"></div>
           </div>
@@ -81,7 +81,7 @@
           <p class="plain">The server that delivers the pieces can't read them. This is what it gets from your visit.</p>
           <p class="plain2">It also sees your network address and the time, as any web server does.</p>
           <div class="d">
-            <p>Each line is one request. The file names are random and the key never leaves the browser, so names, dates and pixels stay hidden. The sizes, and which pieces were read, can still hint at what kind of study it is.</p>
+            <p>Each line is one request. The file names are random and the key never leaves the browser, so names, dates and pixels stay hidden. The server sees one file per study, not how many series it holds, but the pieces a viewer reads show where those images begin and end, and the sizes can hint at what kind of study it is.</p>
             <p>For each request the server logs the time, the link, the method, the path, the range, the status, the bytes sent and the <code>recipient</code> name the browser gives. Step 7 shows that log for a link you make.</p>
           </div>
         </article>

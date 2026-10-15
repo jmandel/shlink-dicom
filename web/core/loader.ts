@@ -1,4 +1,4 @@
-// InstanceLoader: fetches series-file byte ranges, one instance or a run of instances at a time.
+// InstanceLoader: fetches byte ranges of the linked files, one instance or a run of instances at a time.
 // Requests are deduplicated and run through a priority queue with a fixed number in flight, so the
 // slice on screen is fetched before neighbours and prefetch. Verified ciphertext is not needed
 // again once decoded, but a thumbnail and the full image of one instance both start from it, so
@@ -41,6 +41,8 @@ interface Waiter {
 
 interface Job {
   key: string;
+  /** SeriesEntry.id of the series the plan reads. */
+  seriesId: string;
   plan: RangePlan;
   priority: number;
   seq: number;
@@ -83,14 +85,14 @@ export class InstanceLoader {
    */
   async ciphertext(series: SeriesEntry, i: number, o: LoadOptions = {}): Promise<{ plan: RangePlan; bytes: Uint8Array }> {
     const plan = planInstances(series, i);
-    const key = `${series.fileId}/${i}`;
+    const key = `${series.id}/${i}`;
     const hit = this.cached.get(key);
     if (hit) {
       this.cached.delete(key);
       this.cached.set(key, hit);
       return { plan, bytes: hit.slice() };
     }
-    const bytes = await this.enqueue(key, plan, o, true);
+    const bytes = await this.enqueue(key, series.id, plan, o, true);
     return { plan, bytes: bytes.slice() };
   }
 
@@ -105,8 +107,8 @@ export class InstanceLoader {
    * bytes (views on one buffer). Used by downloads; not cached.
    */
   async run(series: SeriesEntry, plan: RangePlan, o: LoadOptions = {}): Promise<Uint8Array[]> {
-    const key = `${series.fileId}/run/${plan.firstInstance}-${plan.lastInstance}`;
-    const ct = await this.enqueue(key, plan, { priority: o.priority ?? FetchPriority.Background, signal: o.signal }, false);
+    const key = `${series.id}/run/${plan.firstInstance}-${plan.lastInstance}`;
+    const ct = await this.enqueue(key, series.id, plan, { priority: o.priority ?? FetchPriority.Background, signal: o.signal }, false);
     const bytes = await this.decrypt(series, plan, ct);
     const out: Uint8Array[] = [];
     const base = series.instances[plan.firstInstance].offset;
@@ -117,10 +119,13 @@ export class InstanceLoader {
     return out;
   }
 
-  /** Drops queued (not running) requests, e.g. the prefetch of a series the user has left. */
-  cancelQueued(predicate: (fileId: string, priority: number) => boolean) {
+  /**
+   * Drops queued (not running) requests, e.g. the prefetch of a series the user has left.
+   * `predicate` gets the request's SeriesEntry.id and priority.
+   */
+  cancelQueued(predicate: (seriesId: string, priority: number) => boolean) {
     this.queue = this.queue.filter((j) => {
-      if (!predicate(j.plan.fileId, j.priority)) return true;
+      if (!predicate(j.seriesId, j.priority)) return true;
       for (const w of j.waiters) {
         w.signal?.removeEventListener("abort", w.onAbort!);
         w.reject(abortError());
@@ -141,12 +146,12 @@ export class InstanceLoader {
     }
   }
 
-  private enqueue(key: string, plan: RangePlan, o: LoadOptions, cache: boolean): Promise<Uint8Array> {
+  private enqueue(key: string, seriesId: string, plan: RangePlan, o: LoadOptions, cache: boolean): Promise<Uint8Array> {
     if (o.signal?.aborted) return Promise.reject(abortError());
     const priority = o.priority ?? FetchPriority.Visible;
     let job = this.jobs.get(key);
     if (!job) {
-      job = { key, plan, priority, seq: this.seq++, waiters: new Set(), running: false, cache };
+      job = { key, seriesId, plan, priority, seq: this.seq++, waiters: new Set(), running: false, cache };
       this.jobs.set(key, job);
       this.queue.push(job);
     } else if (!job.running && priority < job.priority) {

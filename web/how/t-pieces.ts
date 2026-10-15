@@ -6,11 +6,11 @@ import { decryptParams, planBytes, planInstances, RECORD_CIPHERTEXT, RECORD_PLAI
 import type { DecodedImage } from "../core/images";
 import { drawThumbnail } from "../core/render";
 import type { Scene } from "./how";
-import { $, fileOf, h, mb, n, on, recordLength, S, shortPath, type Req } from "./state";
+import { $, h, mb, n, on, recordLength, S, shortPath, type Req } from "./state";
 
 /** Fetches pieces a..b (inclusive) of the series' file with one Range request. */
 export async function fetchPieces(series: SeriesEntry, a: number, b: number) {
-  const f = fileOf(series);
+  const f = series.file;
   const plan = planBytes(series, a * RECORD_PLAINTEXT, Math.min(f.plaintextLength, (b + 1) * RECORD_PLAINTEXT));
   const ct = await S.share!.resolver.fetchRange(plan);
   return { plan, ct };
@@ -19,7 +19,7 @@ export async function fetchPieces(series: SeriesEntry, a: number, b: number) {
 /** Decrypts and decodes image i, whose pieces are inside ciphertext `ct` starting at piece `a`, in one worker job. */
 export async function decodeFrom(series: SeriesEntry, i: number, ct: Uint8Array, a: number): Promise<DecodedImage> {
   const inst = series.instances[i];
-  const f = fileOf(series);
+  const f = series.file;
   const start = (inst.firstRecord - a) * RECORD_CIPHERTEXT;
   const end = (inst.lastRecord - a) * RECORD_CIPHERTEXT + recordLength(f, inst.lastRecord);
   const encrypted = await decryptParams(series, planInstances(series, i));
@@ -36,7 +36,7 @@ export function reqRow(r: { method: string; url: string; range?: string; status:
 
 export function piecesScene(): Scene {
   const series = S.series!;
-  const f = fileOf(series);
+  const f = series.file;
   const inst = series.instances[S.slice];
   const pad = 6;
   const w0 = Math.max(0, inst.firstRecord - pad);

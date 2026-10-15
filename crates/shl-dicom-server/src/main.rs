@@ -77,7 +77,7 @@ enum Commands {
         /// Most encrypted bytes one share may hold (for example 20G); 0 for no limit
         #[arg(long, env = "SHL_MAX_SHARE_BYTES", default_value = "0", value_parser = parse_size)]
         max_share_bytes: u64,
-        /// Most series files one share may hold; 0 for no limit
+        /// Most encrypted files one share may hold; 0 for no limit
         #[arg(long, env = "SHL_MAX_SHARE_FILES", default_value_t = 0)]
         max_share_files: usize,
         /// Most shares at once, not counting the server's sample; 0 for no limit

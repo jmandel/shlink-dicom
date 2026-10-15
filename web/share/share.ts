@@ -13,9 +13,9 @@ import { drawThumbnail } from "../core/render";
 import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
-import { buildBundle, ciphertextSize, planSeriesFiles, subsetBundle, type PackedSeries } from "./lib/pack";
+import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
-import { clearJob, loadJob, persist, saveJob, uploadSeries, type Connection, type UploadJob } from "./lib/upload";
+import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadJob } from "./lib/upload";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
 import { canPickHandles, clearHandles, filesFrom, loadHandles, pathOf, permitted, pick, quickId, saveHandles, type PickedHandles } from "./lib/handles";
 import { parseStudyIndex } from "../core/bundle";
@@ -23,7 +23,7 @@ import {
   ApiError, ShareApi, manageUrl, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor, type LinkResource,
 } from "./lib/api";
 import { callbackUrl, defaultPortal, finishPortalLaunch, loadFiles, loadLink, loadPortal, startPortalLaunch, type Progress } from "./lib/sources";
-import type { SeriesModel } from "./lib/ingest";
+import type { Instance } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, ICONS, expiryFieldset, expiryFrom, dateOnly, SERVER_MAX_DAYS } from "./lib/ui";
 
 const STEP_NAMES = ["Add imaging", "Review", "Recipient", "Upload", "Send"];
@@ -585,7 +585,7 @@ interface Pending {
   job: UploadJob;
   api: ShareApi;
   owner: any;
-  packed: PackedSeries[];
+  packed: PackedFile[];
 }
 let pending: Pending | null = null;
 
@@ -613,7 +613,7 @@ async function upload() {
         setBar("up-bar-wrap", done, total, $("up-main").textContent!);
       });
     }
-    const packed = planSeriesFiles(studies);
+    const packed = planStudyFiles(studies);
     const owner = buildBundle(col, packed);
     const ownerKey = randomKeyB64();
     const early = (c: Connection) => ($("up-main").textContent = c.state === "ok" ? "" : "Connection lost, retrying…");
@@ -669,7 +669,7 @@ async function runUpload(p: Pending) {
           ? `Connection lost, retrying… ${amount} sent`
           : `Uploaded ${amount}`;
     $("up-main").classList.toggle("warn", conn.state !== "ok");
-    $("up-tech").textContent = `Encrypting ${plural(packed.length, "series", "series")} on this device: ${done} done · ${Math.min(totalRecords, Math.floor(sent / 65536))} of ${totalRecords} records uploaded${conn.state === "retrying" ? ` · next try in ${Math.round(conn.inMs / 1000)} s (${conn.reason})` : ""}`;
+    $("up-tech").textContent = `Encrypting ${plural(packed.length, "file")} on this device: ${done} done · ${Math.min(totalRecords, Math.floor(sent / 65536))} of ${totalRecords} records uploaded${conn.state === "retrying" ? ` · next try in ${Math.round(conn.inMs / 1000)} s (${conn.reason})` : ""}`;
   };
   const onConn = (c: Connection) => {
     conn = c;
@@ -677,19 +677,19 @@ async function runUpload(p: Pending) {
     paint();
   };
   try {
-    await uploadSeries(
+    await uploadFiles(
       api,
       packed,
       (u) => {
         // Bytes sent only go up: a retry that resends some bytes doesn't move the bar back.
-        last = { sent: Math.max(u.total === last.total ? last.sent : 0, u.sent), total: u.total, done: u.seriesDone };
+        last = { sent: Math.max(u.total === last.total ? last.sent : 0, u.sent), total: u.total, done: u.filesDone };
         paint();
-        if (u.finished) $("up-log").prepend(h("li", null, `${seriesName(u.finished.series)} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
+        if (u.finished) $("up-log").prepend(h("li", null, `${plainStudyTitle(u.finished.study.description, studyModalities(u.finished.study))} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
       },
       onConn,
       { fresh: p.fresh },
     );
-    $("up-tech").textContent = `Encrypted ${plural(packed.length, "series", "series")} · ${totalRecords} records uploaded · making the link`;
+    $("up-tech").textContent = `Encrypted ${plural(packed.length, "file")} · ${totalRecords} records uploaded · making the link`;
     const studyIds = owner.entry.filter((e: any) => e.resource.resourceType === "ImagingStudy").map((e: any) => e.resource.id);
     const { bundle, allowedFiles } = subsetBundle(owner, studyIds);
     let link = (await persist(() => api.getShare(), onConn)).links[0];
@@ -733,28 +733,31 @@ async function sameFiles(job: UploadJob, picked: File[]): Promise<File[]> {
   return out;
 }
 
-/** Rebuilds the series plan of a saved job from its owner Bundle and the re-opened source. */
-function planFromOwner(owner: any, c: Collection): PackedSeries[] {
-  const byUid = new Map<string, { inst: any; study: StudyModel; series: SeriesModel }>();
-  for (const st of c.list()) for (const se of st.series) for (const inst of se.instances) byUid.set(inst.h.sopInstanceUid, { inst, study: st, series: se });
+/** Rebuilds the file plan of a saved job from its owner Bundle and the re-opened source. */
+function planFromOwner(owner: any, c: Collection): PackedFile[] {
+  const byUid = new Map<string, { inst: Instance; study: StudyModel }>();
+  for (const st of c.list()) for (const se of st.series) for (const inst of se.instances) byUid.set(inst.h.sopInstanceUid, { inst, study: st });
   const idx = parseStudyIndex(owner);
-  const out: PackedSeries[] = [];
+  const out: PackedFile[] = [];
   for (const st of idx.studies) {
-    for (const se of st.series) {
-      const instances = se.instances.map((i) => {
-        const hit = byUid.get(i.uid);
-        if (!hit) throw new Error("Some of the files are not the ones this upload started with.");
-        if (hit.inst.src.size !== i.length) throw new Error("Some of the files differ from the ones this upload started with.");
-        return hit.inst;
-      });
-      const first = byUid.get(se.instances[0].uid)!;
+    for (const file of st.files) {
+      // The file's instances in file order: its series in Bundle order (§8.1).
+      const instances = st.series
+        .filter((se) => se.file === file)
+        .flatMap((se) => se.instances)
+        .map((i) => {
+          const hit = byUid.get(i.uid);
+          if (!hit) throw new Error("Some of the files are not the ones this upload started with.");
+          if (hit.inst.src.size !== i.length) throw new Error("Some of the files differ from the ones this upload started with.");
+          return hit.inst;
+        });
       out.push({
-        study: first.study,
-        series: { ...first.series, instances },
-        fileId: se.fileId,
-        key: se.key,
-        plaintextLength: se.plaintextLength,
-        records: se.recordCount,
+        study: byUid.get(st.series[0].instances[0].uid)!.study,
+        instances,
+        fileId: file.fileId,
+        key: file.key,
+        plaintextLength: file.plaintextLength,
+        records: file.recordCount,
       });
     }
   }

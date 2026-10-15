@@ -4,7 +4,7 @@ Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each 
 
 ## Contents
 
-- **[`PROPOSAL.md`](PROPOSAL.md)**: the protocol, covering the ImagingStudy index, series files, record encryption, the Range fetch contract and the test vector.
+- **[`PROPOSAL.md`](PROPOSAL.md)**: the protocol, covering the ImagingStudy index, the encrypted study files, record encryption, the Range fetch contract and the test vector.
 - **[`PLAN.md`](PLAN.md)**, **[`docs/`](docs/)**: architecture, server storage ([`docs/storage.md`](docs/storage.md)), the three web experiences ([`docs/EXPERIENCES.md`](docs/EXPERIENCES.md)).
 - **`reference/`**: a short WebCrypto reference receiver and the test vector generator.
 - **`crates/`**:

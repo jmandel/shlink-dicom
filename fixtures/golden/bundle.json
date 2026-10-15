@@ -1,0 +1,186 @@
+{
+  "resourceType": "Bundle",
+  "meta": {
+    "lastUpdated": "2026-09-30T15:00:00Z"
+  },
+  "type": "collection",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:7b1d0f7e-3c9e-4b0a-9a51-0d8a4f0c2e11",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "p1",
+        "name": [
+          {
+            "family": "Okafor",
+            "given": [
+              "Linda"
+            ]
+          }
+        ],
+        "birthDate": "1965-03-02"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:9a4e2c71-5b3d-4e8f-b0a2-6c7d8e9f0a13",
+      "resource": {
+        "resourceType": "ImagingStudy",
+        "id": "ct1",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/dicom-imaging-study"
+          ]
+        },
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file",
+            "extension": [
+              {
+                "url": "id",
+                "valueString": "AAECAwQFBgcICQoLDA0ODw"
+              },
+              {
+                "url": "key",
+                "valueString": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
+              }
+            ]
+          }
+        ],
+        "status": "available",
+        "identifier": [
+          {
+            "system": "urn:dicom:uid",
+            "value": "urn:oid:1.2.840.113619.2.55.3.604688119"
+          }
+        ],
+        "subject": {
+          "reference": "Patient/p1"
+        },
+        "started": "2026-09-30T14:12:00-05:00",
+        "numberOfSeries": 3,
+        "numberOfInstances": 3,
+        "series": [
+          {
+            "uid": "1.2.840.113619.2.55.3.604688119.971",
+            "number": 2,
+            "modality": {
+              "system": "http://dicom.nema.org/resources/ontology/DCM",
+              "code": "CT"
+            },
+            "description": "Abdomen 5mm",
+            "numberOfInstances": 1,
+            "instance": [
+              {
+                "extension": [
+                  {
+                    "url": "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/instance-length",
+                    "valueDecimal": 70000
+                  }
+                ],
+                "uid": "1.2.840.113619.2.55.3.604688119.971.1",
+                "sopClass": {
+                  "system": "urn:ietf:rfc:3986",
+                  "code": "urn:oid:1.2.840.10008.5.1.4.1.1.2"
+                },
+                "number": 1
+              }
+            ]
+          },
+          {
+            "uid": "1.2.840.113619.2.55.3.604688119.997",
+            "number": 997,
+            "modality": {
+              "system": "http://dicom.nema.org/resources/ontology/DCM",
+              "code": "SR"
+            },
+            "description": "Dose report",
+            "numberOfInstances": 1,
+            "instance": [
+              {
+                "extension": [
+                  {
+                    "url": "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/instance-length",
+                    "valueDecimal": 80000
+                  }
+                ],
+                "uid": "1.2.840.113619.2.55.3.604688119.997.1",
+                "sopClass": {
+                  "system": "urn:ietf:rfc:3986",
+                  "code": "urn:oid:1.2.840.10008.5.1.4.1.1.88.67"
+                },
+                "number": 1
+              }
+            ]
+          },
+          {
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file",
+                "extension": [
+                  {
+                    "url": "id",
+                    "valueString": "EBESExQVFhcYGRobHB0eHw"
+                  },
+                  {
+                    "url": "key",
+                    "valueString": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8"
+                  }
+                ]
+              }
+            ],
+            "uid": "1.2.840.113619.2.55.3.604688119.973",
+            "number": 3,
+            "modality": {
+              "system": "http://dicom.nema.org/resources/ontology/DCM",
+              "code": "CT"
+            },
+            "description": "Abdomen 5mm delayed",
+            "numberOfInstances": 1,
+            "instance": [
+              {
+                "extension": [
+                  {
+                    "url": "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/instance-length",
+                    "valueDecimal": 20000
+                  }
+                ],
+                "uid": "1.2.840.113619.2.55.3.604688119.973.1",
+                "sopClass": {
+                  "system": "urn:ietf:rfc:3986",
+                  "code": "urn:oid:1.2.840.10008.5.1.4.1.1.2"
+                },
+                "number": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:c3d4e5f6-0718-4a29-b3c4-d5e6f7a8b9c0",
+      "resource": {
+        "resourceType": "DiagnosticReport",
+        "id": "r1",
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "18748-4",
+              "display": "Diagnostic imaging study"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/p1"
+        },
+        "imagingStudy": [
+          {
+            "reference": "ImagingStudy/ct1"
+          }
+        ],
+        "conclusion": "No acute abnormality."
+      }
+    }
+  ]
+}
