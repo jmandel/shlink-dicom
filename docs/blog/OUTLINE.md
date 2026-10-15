@@ -24,25 +24,15 @@
 - **Markers:**
   - **[FIGURE Fn]**: a figure to produce.
   - **[SCREENSHOT Sn]**: a capture of the live sites, taken when they are finished. The full list is at the end.
-  - **[[MEASURE]] / [[VERIFY]] / [[CHECK]]**: open facts in the draft.
+  - **[[MEASURE]] / [[VERIFY]] / [[CHECK]]**: open facts in the draft. In review drafts, show them as numbered endnotes (superscript links to a list at the end), never inline in the prose.
 
 ---
 
-## 1. Opening: images belong in patients' hands
+## 1. Opening: my brain MRI is on GitHub
 
-- **The everyday reality, first person.** Imaging still reaches patients as a CD, a portal viewer that shows pictures but won't hand over the files, or nothing at all [[CHECK]].
-- **The argument.** Once patients hold their own full-fidelity images, they can do things nobody has to build for them in advance:
-  - send them for a second opinion;
-  - keep a lifetime record across health systems;
-  - show family on a phone;
-  - run new software or AI tools on them;
-  - donate them to research;
-  - and, the subject of this post, share them with a link.
-- **What the law already says.** Patients have a right to electronic copies of their records, imaging included, and these are electronic health information under the Cures Act information blocking rules [[CHECK: HIPAA Right of Access covers images in the requested electronic form when readily producible; Cures Act EHI definition and information blocking scope]]. Keep this to two or three plain sentences with links.
-- **The project in one paragraph.** To show what becomes possible once patients hold their images, I built a way to share a whole study as a SMART Health Link:
-  - every original DICOM file, end-to-end encrypted;
-  - opens in a browser without downloading the whole study first;
-  - from files, a CD, a patient portal, or a link someone gave you.
+- **Open on the fact, not a complaint (Josh's choice).** My own brain MRI, CT and X-rays are public, de-identified, in my GitHub repo, and the link in this post opens them in your browser, streaming only what you look at. Patient ownership is shown, not argued. Avoid the stock "I asked for my images and got a CD" opening.
+- **The argument follows from it.** It's possible because I hold my own images. When patients hold theirs, anyone can build things for them without asking the hospital first: second opinions, a lifetime record, new tools, research, and sharing like this. The legal backdrop (the right of access, information blocking) gets a sentence or two at most [[CHECK]].
+- **Then the project in a paragraph,** and the build story.
 
 **[FIGURE F1] Header image** (*Codex*; done: `docs/blog/images/header.png`, the SMART-logo version Josh chose. Clean, abstract watercolor and ink in the SMART palette; the SMART star sits in the QR code. The spec below is the original idea, kept for reference).
 - **The story, left to right:**
