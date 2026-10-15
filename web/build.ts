@@ -119,7 +119,7 @@ await Bun.write(
     .replaceAll('href="../"', 'href="../../"')
     .replaceAll('href="manage"', 'href="../manage"'),
 );
-// How it works: codec coverage data, the rendered spec and reference code, the benchmark report.
+// How it works: its worker, the receiver file, and the images and C decoders it uses.
 const { bakeHow } = await import("./how/bake.ts");
 await bakeHow(root, out);
 

@@ -1,41 +1,56 @@
-// Shared state for the How it works widgets: the opened sample share, the request log, the
-// current series/instance selection, decrypted instances, and a few DOM helpers.
-import type { OpenShare, RequestEvent, SeriesEntry, SiteConfig, StudyEntry } from "../core/index";
+// Shared state for the tour: the opened sample, the thread (one slice of the brain MRI), the
+// requests this page made, the decoder pool, and small DOM helpers.
+import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, type OpenShare, type RequestEvent, type SeriesEntry, type SiteConfig, type StudyEntry } from "../core/index";
+import type { DecoderPool } from "../core/images";
 
 export interface Req extends RequestEvent {
   id: number;
-  /** performance.now() when the answer arrived. */
-  at: number;
-  /** Wall-clock time. */
   time: Date;
   recipient: string | null;
 }
 
-export interface Selection {
-  study: number;
-  series: number;
-  instance: number;
+/**
+ * The file a series reads from. Today each series has its own file; with study-level files
+ * (docs/STUDY-FILES-AND-S3-PLAN.md) series share one, under `series.file`. Everything the tour
+ * says about "the file" comes through here.
+ */
+export interface FileFacts {
+  fileId: string;
+  plaintextLength: number;
+  ciphertextLength: number;
+  recordCount: number;
+}
+export function fileOf(series: SeriesEntry): FileFacts {
+  const f = (series as any).file ?? series;
+  return { fileId: f.fileId, plaintextLength: f.plaintextLength, ciphertextLength: f.ciphertextLength, recordCount: f.recordCount };
+}
+/** Ciphertext length of record i of a file. */
+export function recordLength(f: FileFacts, i: number): number {
+  return i < f.recordCount - 1 ? RECORD_CIPHERTEXT : f.plaintextLength - i * RECORD_PLAINTEXT + TAG;
 }
 
 type Handler = (...a: any[]) => void;
+export type Ev = "ready" | "request" | "details" | "step";
 
 export const S = {
   cfg: null as SiteConfig | null,
-  /** Bare shlink:/… of the public sample. */
   shlink: "",
-  /** Server share id of the sample (for /api/shares/{sid}/clone). */
   sampleSid: "",
   share: null as OpenShare | null,
+  pool: null as Promise<DecoderPool> | null,
+  /** The compact JWE as fetched (for its header and size). */
+  jwe: "",
+  /** The thread: one slice of the brain MRI. */
+  study: null as StudyEntry | null,
+  series: null as SeriesEntry | null,
+  slice: 0,
   requests: [] as Req[],
-  sel: { study: 0, series: 0, instance: 0 } as Selection,
-  /** Decrypted instances by `${fileId}/${i}` (from step 3), for step 5's pixels. */
-  plain: new Map<string, Uint8Array>(),
-  /** Tamper switch for step 4: flips one bit of the next response for this Range header. */
-  tamper: { range: null as string | null, flipped: null as null | { byte: number; bit: number; before: number; after: number } },
+  details: false,
+  /** Tamper switch: flip one bit of the next response whose Range header matches. */
+  tamper: { range: null as string | null, flipped: null as null | { byte: number; bit: number } },
   handlers: new Map<string, Set<Handler>>(),
 };
 
-export type Ev = "request" | "select" | "ready" | "plain";
 export function on(ev: Ev, fn: Handler) {
   if (!S.handlers.has(ev)) S.handlers.set(ev, new Set());
   S.handlers.get(ev)!.add(fn);
@@ -56,44 +71,13 @@ export function logRequest(e: RequestEvent) {
   try {
     recipient = new URL(e.url).searchParams.get("recipient");
   } catch {}
-  const r: Req = { ...e, id: ++reqId, at: performance.now(), time: new Date(), recipient };
+  const r: Req = { ...e, id: ++reqId, time: new Date(), recipient };
   S.requests.push(r);
   emit("request", r);
 }
 
-/** Keeps every whole instance inside decrypted plaintext [start, start + pt.length) of a series. */
-export function storePlain(series: SeriesEntry, start: number, pt: Uint8Array) {
-  const end = start + pt.length;
-  let added = false;
-  series.instances.forEach((x, i) => {
-    const key = `${series.fileId}/${i}`;
-    if (x.offset >= start && x.offset + x.length <= end && !S.plain.has(key)) {
-      S.plain.set(key, pt.slice(x.offset - start, x.offset - start + x.length));
-      added = true;
-    }
-  });
-  if (added) emit("plain", series.fileId);
-}
-
-export function currentSeries(): { study: StudyEntry; series: SeriesEntry } {
-  const study = S.share!.index.studies[S.sel.study];
-  return { study, series: study.series[S.sel.series] };
-}
-
-export function select(sel: Partial<Selection>, source = "") {
-  Object.assign(S.sel, sel);
-  emit("select", S.sel, source);
-}
-
-/** Finds a series by file id. */
-export function seriesByFile(fileId: string): { study: number; series: number; entry: SeriesEntry } | null {
-  const studies = S.share?.index.studies ?? [];
-  for (let a = 0; a < studies.length; a++) {
-    const b = studies[a].series.findIndex((s) => s.fileId === fileId);
-    if (b >= 0) return { study: a, series: b, entry: studies[a].series[b] };
-  }
-  return null;
-}
+/** Ciphertext bytes this page has received from the host. */
+export const bytesFetched = () => S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0);
 
 // DOM helpers
 export const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -115,43 +99,41 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   return el;
 }
 
-export function facts(dl: HTMLElement, rows: [string, Node | string, string?][]) {
-  dl.replaceChildren();
-  for (const [k, v, cls] of rows) {
-    dl.append(h("dt", { text: k }));
-    const dd = h("dd", { class: cls ?? "" });
-    dd.append(v);
-    dl.append(dd);
-  }
-}
-
 export const n = (x: number) => x.toLocaleString("en-US");
 export const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 export const short = (s: string, a = 6, b = 4) => (s.length > a + b + 1 ? `${s.slice(0, a)}…${s.slice(-b)}` : s);
+export function mb(x: number): string {
+  if (x >= 1e9) return `${(x / 1e9).toFixed(2)} GB`;
+  if (x >= 1e6) return `${(x / 1e6).toFixed(1)} MB`;
+  if (x >= 1e3) return `${Math.round(x / 1e3)} KB`;
+  return `${x} bytes`;
+}
+export const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+export const wait = (ms: number) => new Promise((r) => setTimeout(r, reducedMotion() ? 0 : ms));
 
-/** The path of a URL, with long ids shortened, for compact request rows. */
-function shortPath(url: string): string {
+/** A determinate progress bar: role=progressbar with value, maximum and "a of b" text. */
+export function progressBar(label: string) {
+  const fill = h("i");
+  const el = h("div", { class: "pbar", role: "progressbar", "aria-label": label, "aria-valuemin": "0" }, fill);
+  const text = h("span", { class: "pbar-text small muted" });
+  return {
+    el: h("div", { class: "pbar-wrap" }, el, text),
+    set(now: number, max: number, unit = "") {
+      el.setAttribute("aria-valuenow", String(now));
+      el.setAttribute("aria-valuemax", String(max));
+      const words = `${n(now)}${unit} of ${n(max)}${unit}`;
+      el.setAttribute("aria-valuetext", words);
+      text.textContent = `${label}: ${words}`;
+      fill.style.width = `${(100 * now) / max}%`;
+    },
+  };
+}
+
+/** Request path with long random ids shortened. */
+export function shortPath(url: string): string {
   try {
-    const u = new URL(url);
-    return u.pathname.replace(/[A-Za-z0-9_-]{20,}/g, (m) => short(m, 6, 3));
+    return new URL(url).pathname.replace(/[A-Za-z0-9_-]{20,}/g, (m) => short(m, 6, 3));
   } catch {
     return url;
   }
-}
-
-/** A request row: method, path, status; then range, bytes, time and recipient. */
-export function reqRow(r: { method: string; url: string; range?: string; status: number; bytes: number; ms?: number; recipient?: string | null }, tag: "div" | "button" = "div", fullPath = false) {
-  const path = fullPath ? new URL(r.url).pathname : shortPath(r.url);
-  const details = [r.range ? `Range: ${r.range}` : null, `${n(r.bytes)} bytes`, r.ms !== undefined ? `${Math.round(r.ms)} ms` : null, r.recipient ? `recipient=${r.recipient}` : null]
-    .filter(Boolean)
-    .join(" · ");
-  const ok = r.status >= 200 && r.status < 300;
-  return h(
-    tag as any,
-    { class: "req new", ...(tag === "button" ? { type: "button" } : {}) },
-    h("span", { class: "m", text: r.method }),
-    h("span", { class: "p", text: path }),
-    h("span", { class: `s ${ok ? "ok" : "bad"}`, text: String(r.status) }),
-    h("span", { class: "d", text: details }),
-  );
 }

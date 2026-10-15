@@ -1,264 +1,333 @@
-// Scripted headless-Chromium checks for /how. Needs the server on BASE (default localhost:3333)
-// serving a fresh `bun web/build.ts`.
-//   node web/how/checks.mjs [--only=desktop|phone390]
-// Screenshots go to docs/shots/how/. Exits non-zero if any check fails.
+// Scripted headless-Chromium checks for the /how tour. Needs the server on BASE (default
+// localhost:3333) serving a fresh `bun web/build.ts`.
+//   node web/how/checks.mjs [--only=desktop|phone390] [--quick]
+// Runs: desktop and phone, with the details off and on; then the dark scheme with the details on.
+// Screenshots go to docs/shots/how/ (dark ones to docs/shots/dark/). Exits non-zero on any failure.
 import { launchBrowser, pageErrorCheck } from "../checks/browser.mjs";
+import { darkAudit } from "../checks/dark.mjs";
 import { mkdirSync } from "node:fs";
 
 const BASE = process.env.BASE ?? "http://localhost:3333";
 const SHOTS = new URL("../../docs/shots/how/", import.meta.url).pathname;
+const DARK_SHOTS = new URL("../../docs/shots/dark/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
+mkdirSync(DARK_SHOTS, { recursive: true });
 const only = process.argv.find((a) => a.startsWith("--only="))?.slice(7);
+const quick = process.argv.includes("--quick");
 
 const DEVICES = {
   desktop: { viewport: { width: 1440, height: 900 } },
   phone390: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
 };
+const STEPS = ["link", "index", "pieces", "host", "unlock", "pixels", "compressed", "less", "share"];
 
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
-  console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
+  console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${String(detail).slice(0, 220)}` : ""}`);
 };
-
 const browser = await launchBrowser();
 
-/** Requests that are meant to fail: the sandbox's left-out series and everything after revocation. */
+// Requests meant to fail: everything under a link after it is revoked.
 const expected404 = (url) => /\/(shl|cap)\//.test(url);
 
-async function newPage(context) {
-  const page = await context.newPage();
-  const errors = [];
-  page.on("console", (m) => {
-    if (m.type() !== "error") return;
-    const url = m.location()?.url ?? "";
-    if (/Failed to load resource: the server responded with a status of 404/.test(m.text()) && expected404(url)) return;
-    errors.push(m.text());
-  });
-  page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
-  page.on("response", (r) => {
-    if (r.status() >= 400 && !(r.status() === 404 && expected404(r.url()))) errors.push(`${r.status()} ${r.url().slice(0, 100)}`);
-  });
-  return { page, errors };
+/** Records main-thread tasks over 100 ms (Long Tasks API). */
+function longTaskWatch() {
+  window.__long = [];
+  try {
+    new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) if (e.duration > 100) window.__long.push(`${Math.round(e.duration)} ms during ${window.__how?.current?.() ?? "load"}`);
+    }).observe({ type: "longtask", buffered: true });
+  } catch {}
 }
+
+async function scrollToStep(page, id) {
+  await page.evaluate((id) => {
+    const el = document.getElementById(id);
+    const wide = innerWidth >= 960;
+    const pb = document.querySelector(".panel-wrap").getBoundingClientRect().bottom;
+    const target = wide ? 110 : Math.min(pb, innerHeight * 0.6) + 8;
+    window.scrollTo(0, el.getBoundingClientRect().top + scrollY - target);
+  }, id);
+  await page.waitForFunction((id) => window.__how?.current() === id, id, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(400);
+  return page.evaluate(() => window.__how.current());
+}
+
+const visible = (page, sel) => page.locator(sel).first().isVisible();
+const text = (page, sel) => page.locator(sel).first().textContent();
+const tap = (page, sel, touch) => (touch ? page.locator(sel).first().tap() : page.locator(sel).first().click());
+
+/** Mean brightness of a canvas (0..255); 0 when blank. */
+const canvasLevel = (page, sel) =>
+  page.evaluate((sel) => {
+    const c = document.querySelector(sel);
+    if (!c || !c.width) return 0;
+    let d;
+    try {
+      d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    } catch {
+      const t = document.createElement("canvas");
+      t.width = c.width;
+      t.height = c.height;
+      t.getContext("2d").drawImage(c, 0, 0);
+      d = t.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    }
+    let s = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4 * 61) (s += d[i] + d[i + 1] + d[i + 2]), n++;
+    return s / n / 3;
+  }, sel);
 
 async function layout(page, label, coarse) {
   const r = await page.evaluate((coarse) => {
     const overflow = document.documentElement.scrollWidth - window.innerWidth;
     const small = [];
     if (coarse) {
-      const sel = "button, a.btn, select, input, summary, .toc a, [role=option], .linkish";
-      for (const el of document.querySelectorAll(sel)) {
-        if (el.closest(".hidden") || el.closest("[hidden]")) continue;
+      for (const el of document.querySelectorAll("button, a.btn, select, input, .switch")) {
+        if (el.closest(".hidden") || el.closest(".scene:not(.on)")) continue;
         const s = getComputedStyle(el);
         if (s.display === "none" || s.visibility === "hidden") continue;
         let b = el.getBoundingClientRect();
-        // A checkbox or switch counts by its label, which is the touch target.
-        if (el.matches("input[type=checkbox], input[type=radio]") && el.closest("label")) b = el.closest("label").getBoundingClientRect();
-        if (b.width === 0 || b.height === 0) continue;
-        if (b.height < 43.5 || b.width < 43.5) small.push(`${el.tagName.toLowerCase()}#${el.id || el.className || el.textContent.trim().slice(0, 20)} ${Math.round(b.width)}×${Math.round(b.height)}`);
+        if (el.matches("input[type=checkbox]") && el.closest("label")) b = el.closest("label").getBoundingClientRect();
+        if (!b.width || !b.height) continue;
+        if (b.height < 43.5 || b.width < 43.5) small.push(`${el.tagName.toLowerCase()}#${el.id || el.className} ${Math.round(b.width)}×${Math.round(b.height)}`);
       }
     }
-    return { overflow, small, coarse: matchMedia("(pointer: coarse)").matches };
+    return { overflow, small };
   }, coarse);
   check(`${label}: no horizontal overflow`, r.overflow <= 0, `scrollWidth − innerWidth = ${r.overflow}`);
-  if (coarse) check(`${label}: targets ≥ 44 px (coarse=${r.coarse})`, r.small.length === 0, r.small.slice(0, 12).join(", "));
+  if (coarse) check(`${label}: targets ≥ 44 px`, r.small.length === 0, r.small.slice(0, 8).join(", "));
 }
 
-async function shot(page, sel, name) {
-  await page.locator(sel).scrollIntoViewIfNeeded();
-  await page.waitForTimeout(200);
-  await page.locator(sel).screenshot({ path: `${SHOTS}${name}.png` });
-}
-
-const tap = (page, sel, touch) => (touch ? page.locator(sel).first().tap() : page.locator(sel).first().click());
-
-async function run(dev) {
+async function run(dev, details, dark) {
   const touch = dev !== "desktop";
-  const context = await browser.newContext({ ...DEVICES[dev] });
-  await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
-  const { page, errors } = await newPage(context);
-  const L = (s) => `${dev}: ${s}`;
+  const tag = `${dark ? "dark " : ""}${dev} details ${details ? "on" : "off"}`;
+  const L = (s) => `${tag}: ${s}`;
+  const shot = async (name, full = false) => {
+    const p = dark ? `${DARK_SHOTS}how-${dev}-${name}.png` : `${SHOTS}${dev}-${details ? "d" : "plain"}-${name}.png`;
+    await page.screenshot({ path: p, fullPage: full });
+  };
+  const context = await browser.newContext({ ...DEVICES[dev], colorScheme: dark ? "dark" : "light" });
+  await context.addInitScript(longTaskWatch);
+  await context.addInitScript((d) => {
+    try {
+      localStorage.setItem("how-details", d ? "1" : "0");
+    } catch {}
+  }, details);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("console", (m) => {
+    if (m.type() !== "error") return;
+    if (/status of 404/.test(m.text()) && expected404(m.location()?.url ?? "")) return;
+    errors.push(m.text());
+  });
+  page.on("response", (r) => {
+    if (r.status() >= 400 && !(r.status() === 404 && expected404(r.url()))) errors.push(`${r.status()} ${r.url().slice(0, 100)}`);
+  });
 
   await page.goto(`${BASE}/how`);
-  await page.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok"), null, { timeout: 20000 });
-  check(L("sample opens"), true, await page.textContent("#status"));
-  await page.screenshot({ path: `${SHOTS}${dev}-top.png` });
+  await page.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok") && window.__how?.scenes.size === 9, null, { timeout: 30000 });
+  check(L("sample opens"), true, await text(page, "#status"));
+  check(L(`details switch ${details ? "on" : "off"} and remembered`), (await page.isChecked("#details")) === details && (await page.evaluate(() => document.body.classList.contains("details"))) === details);
+  // The thread, recomputed here from the decrypted Bundle JSON.
+  const truth = await page.evaluate(() => {
+    const { S } = window.__how;
+    const se = S.share.index.bundle.entry.flatMap((e) => e.resource?.series ?? []).find((x) => x.uid === S.series.uid);
+    const lens = se.instance.map((i) => i.extension.find((x) => /length$/.test(x.url)).valueDecimal);
+    const off = lens.slice(0, S.slice).reduce((a, b) => a + b, 0), len = lens[S.slice];
+    const first = Math.floor(off / 65520), last = Math.floor((off + len - 1) / 65520);
+    const total = lens.reduce((a, b) => a + b, 0), C = total + 16 * Math.ceil(total / 65520);
+    return { off, len, first, last, range: `bytes=${first * 65536}-${Math.min(C, (last + 1) * 65536) - 1}`, slice: S.slice, n: lens.length };
+  });
 
-  // 1. The link
-  await tap(page, '#link-json .field-btn[data-k="flag"]', touch);
-  const note = await page.textContent("#link-note");
-  check(L("1 link: tapping a field shows its note"), /flag/.test(note) && /U:/.test(note), note.slice(0, 80));
-  await page.locator("#link .paste summary").click();
-  await page.fill("#link-input", "not a link");
-  await page.click("#link-decode");
-  check(L("1 link: a bad paste is explained"), /doesn't contain/.test(await page.textContent("#link-input-msg")));
-  await page.locator("#link .paste summary").click();
-  await tap(page, '#link-json .field-btn[data-k="key"]', touch);
-  await shot(page, "#link", `${dev}-1-link`);
+  for (const id of STEPS) {
+    const cur = await scrollToStep(page, id);
+    check(L(`step ${id}: its scene is shown`), cur === id && (await page.locator(`.scene[data-scene="${id}"].on`).count()) === 1, `current ${cur}`);
+    const dShown = await page.locator(`#${id} .d`).first().isVisible().catch(() => false);
+    check(L(`step ${id}: details layer ${details ? "shown" : "hidden"}`), dShown === details);
 
-  // 2. The Bundle
-  const hl = await page.locator("#bundle-tree .j-hl").count();
-  check(L("2 bundle: ImagingStudy.series highlighted"), hl >= 1, `${hl} highlighted`);
-  const btn = page.locator("#bundle-tree .j-inst").nth(3);
-  const off = (await btn.textContent()).replace(/\D/g, "");
-  await (touch ? btn.tap() : btn.click());
-  const pick = await page.textContent("#bundle-pick");
-  check(L("2 bundle: an instance shows its byte offset"), pick.replace(/,/g, "").includes(`bytes ${off} to`), pick.slice(0, 120));
-  await shot(page, "#bundle", `${dev}-2-bundle`);
-  await page.locator("#bundle-pick .linkish").click();
-  await page.waitForTimeout(400);
-  check(L("2 bundle: “Show it in the series file” selects that image"), (await page.inputValue("#sf-slider")) === "3");
-
-  // 3. The series file: slider → range → real request → verified
-  const before = await page.locator("#sf-net .req").count();
-  if (touch) {
-    await page.locator("#sf-next").tap();
-    await page.locator("#sf-next").tap();
-  } else {
-    await page.locator("#sf-slider").focus();
-    await page.keyboard.press("ArrowRight");
-    await page.keyboard.press("ArrowRight");
-  }
-  check(L("3 series: slider/± moves to image 6"), (await page.inputValue("#sf-slider")) === "5");
-  await page.waitForFunction(() => /verified/.test(document.querySelector("#sf-facts")?.textContent ?? ""), null, { timeout: 10000 });
-  const facts = await page.textContent("#sf-facts");
-  const range = /Range: (bytes=\d+-\d+)/.exec(facts)?.[1];
-  const net = await page.locator("#sf-net .req").first().textContent();
-  check(L("3 series: the Range request fired and is listed"), !!range && net.includes(range) && net.includes("206") && (await page.locator("#sf-net .req").count()) > before, `${range} · ${net.slice(0, 90)}`);
-  check(L("3 series: decrypted image matches the Bundle"), /SOP Instance UID matches/.test(facts));
-  const selCells = await page.locator("#sf-map .rec.sel").count();
-  const okCells = await page.locator("#sf-map .rec.ok").count();
-  check(L("3 series: record map marks the image's records and verified ones"), selCells >= 1 && okCells >= selCells, `${selCells} selected, ${okCells} verified`);
-  // Tap a record cell: picks the first image starting there.
-  await tap(page, "#sf-map .rec:nth-child(40)", touch);
-  await page.waitForTimeout(300);
-  check(L("3 series: tapping the record map picks an image"), (await page.inputValue("#sf-slider")) !== "5", `now ${await page.inputValue("#sf-slider")}`);
-  await page.waitForFunction(() => /verified/.test(document.querySelector("#sf-facts")?.textContent ?? ""), null, { timeout: 10000 });
-  await shot(page, "#series-file", `${dev}-3-series-file`);
-
-  // 4. Decrypt and verify, then tamper
-  await page.locator("#verify").scrollIntoViewIfNeeded();
-  await tap(page, "#vf-run", touch);
-  await page.waitForSelector("#vf-result .verdict.good", { timeout: 10000 });
-  check(L("4 verify: record verified"), true, (await page.textContent("#vf-result .verdict")).slice(0, 80));
-  await tap(page, "#verify .switch", touch);
-  check(L("4 verify: tamper switch on"), await page.isChecked("#vf-tamper"));
-  await tap(page, "#vf-run", touch);
-  await page.waitForSelector("#vf-result .verdict.bad", { timeout: 10000 });
-  const bad = await page.textContent("#vf-result .verdict.bad");
-  check(L("4 verify: tampered record refused"), /Refused/.test(bad) && /flipped/.test(bad), bad.slice(0, 140));
-  await shot(page, "#verify", `${dev}-4-verify-tampered`);
-  await tap(page, "#verify .switch", touch);
-
-  // 5. What the host sees
-  await page.locator("#host").scrollIntoViewIfNeeded();
-  const rows = await page.locator("#host-log .req").count();
-  check(L("5 host: host pane lists requests"), rows >= 4, `${rows} rows`);
-  // Select the series-file request from step 3 (newest 206 of a .bin with several records).
-  const target = page.locator("#host-log .req", { hasText: ".bin" }).filter({ hasText: "206" }).nth(2);
-  await (touch ? target.tap() : target.click());
-  await page.waitForFunction(() => {
-    const c = document.querySelector("#host-carried canvas");
-    if (!c) return /part of one image/.test(document.querySelector("#host-carried")?.textContent ?? "");
-    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-    for (let i = 0; i < d.length; i += 4 * 97) if (d[i] > 20) return true;
-    return false;
-  }, null, { timeout: 15000 });
-  check(L("5 host: browser pane shows what the request carried"), true, (await page.textContent("#host-carried .cap")).slice(0, 100));
-  await shot(page, "#host", `${dev}-5-host`);
-
-  // 6. Sharing and revocation (mints our own links; never touches the seeded passcode demo)
-  await page.locator("#revoke").scrollIntoViewIfNeeded();
-  await tap(page, "#sb-clone", touch);
-  await page.waitForFunction(() => /Done in/.test(document.querySelector("#sb-clone-msg")?.textContent ?? ""), null, { timeout: 30000 });
-  check(L("6 sandbox: copy made"), true, (await page.textContent("#sb-clone-msg")).slice(0, 100));
-  const passcode = touch ? "4321" : "";
-  if (passcode) await page.fill("#sb-pass", passcode);
-  await tap(page, "#sb-mint", touch);
-  await page.waitForSelector("#sb-link:not(.hidden)", { timeout: 15000 });
-  const href = await page.getAttribute("#sb-open", "href");
-  check(L(`6 sandbox: ${passcode ? "passcode" : "direct"} subset link made`), /\/view#shlink:\//.test(href), href.slice(0, 60));
-
-  const [viewer] = await Promise.all([context.waitForEvent("page"), tap(page, "#sb-open", touch)]);
-  const vErr = [];
-  viewer.on("pageerror", (e) => vErr.push(e.message));
-  if (passcode) {
-    await viewer.waitForSelector("#screen-passcode:not(.hidden)", { timeout: 20000 });
-    await viewer.fill("#input-passcode", passcode);
-    await viewer.click("#btn-passcode");
-  }
-  await viewer.waitForSelector("#screen-overview:not(.hidden)", { timeout: 20000 });
-  const studies = await viewer.locator(".study-open").count();
-  check(L("6 sandbox: subset link opens in a new tab with one study"), studies === 1, `${studies} studies; ${await viewer.textContent("#ov-studies")}`.slice(0, 120));
-  await viewer.screenshot({ path: `${SHOTS}${dev}-6-subset-opened.png` });
-
-  await tap(page, "#sb-probe", touch);
-  await page.waitForFunction(() => /Left-out/.test(document.querySelector("#sb-probe-msg")?.textContent ?? ""), null, { timeout: 15000 });
-  const probe = await page.textContent("#sb-probe-msg");
-  check(L("6 sandbox: included series 206, left-out series 404"), /: 206\./.test(probe) && /: 404,/.test(probe), probe);
-
-  await tap(page, "#sb-revoke", touch);
-  await page.waitForFunction(() => /Revoked/.test(document.querySelector("#sb-revoke-msg")?.textContent ?? ""), null, { timeout: 15000 });
-  const rev = await page.textContent("#sb-revoke-msg");
-  check(L("6 sandbox: after revocation the link and its files answer 404"), /The link: 404/.test(rev) && /used before: 404/.test(rev), rev);
-  await page.waitForFunction(() => [...document.querySelectorAll("#sb-log .req")].some((r) => /bundle\.jwe|manifest|\/shl\/[^/]+$/.test(r.textContent) || /POST/.test(r.textContent)) && document.querySelectorAll("#sb-log .req").length >= 3, null, { timeout: 10000 });
-  check(L("6 sandbox: server access log shown"), true, `${await page.locator("#sb-log .req").count()} log rows`);
-  await shot(page, "#revoke", `${dev}-6-revoked`);
-
-  await viewer.reload();
-  if (passcode) {
-    await viewer.waitForSelector("#screen-passcode:not(.hidden)", { timeout: 20000 });
-    await viewer.fill("#input-passcode", passcode);
-    await viewer.click("#btn-passcode");
-  }
-  await viewer.waitForSelector("#screen-error:not(.hidden)", { timeout: 20000 });
-  check(L("6 sandbox: the opened tab shows the link no longer works"), true, await viewer.textContent("#error-title"));
-  await viewer.screenshot({ path: `${SHOTS}${dev}-6-subset-revoked.png` });
-  check(L("6 sandbox: viewer tab had no page errors"), vErr.length === 0, vErr.join(" | "));
-  await viewer.close();
-
-  // 7. Codecs and performance
-  await page.locator("#codecs").scrollIntoViewIfNeeded();
-  const tsRows = await page.locator("#cx-table tbody tr").count();
-  check(L("7 codecs: coverage by transfer syntax"), tsRows >= 10, `${tsRows} syntaxes; ${await page.textContent("#cx-idc")}`.slice(0, 120));
-  await tap(page, "#bx-run", touch);
-  await page.waitForFunction(() => /Decode/.test(document.querySelector("#bx-facts")?.textContent ?? ""), null, { timeout: 60000 });
-  const bx = await page.textContent("#bx-facts");
-  check(L("7 codecs: live benchmark ran"), /MB\/s/.test(bx) && /images of/.test(bx), bx.replace(/\s+/g, " ").slice(0, 200));
-  await shot(page, "#codecs", `${dev}-7-codecs`);
-
-  // 8. Build it
-  await page.locator("#build").scrollIntoViewIfNeeded();
-  await tap(page, "#rx-run", touch);
-  await page.waitForFunction(() => /returned|threw/.test(document.querySelector("#rx-out")?.textContent ?? ""), null, { timeout: 15000 });
-  const rx = await page.textContent("#rx-out");
-  check(L("8 build: the 50-line receiver runs on the sample"), /"matchesBundle": true/.test(rx) && /"transferSyntax"/.test(rx), rx.replace(/\s+/g, " ").slice(0, 160));
-  await tap(page, "#tv-run", touch);
-  await page.waitForFunction(() => (document.querySelector("#tv-facts")?.textContent ?? "").includes("Tampering"), null, { timeout: 15000 });
-  const tv = await page.textContent("#tv-facts");
-  check(L("8 build: test vector matches appendix B"), !tv.includes("✗") && (tv.match(/✓/g) ?? []).length >= 8, `${(tv.match(/✓/g) ?? []).length} ✓`);
-  await shot(page, "#build", `${dev}-8-build`);
-
-  // Spec and generated pages resolve.
-  for (const p of ["how/spec.html", "how/series-file.html", "how/test-vector.html", "how/corpus.html", "how/bench.html", "how/receiver.mjs", "how/data.json"]) {
-    const r = await page.request.get(`${BASE}/${p}`);
-    if (dev === "desktop") check(`linked page /${p}`, r.ok(), String(r.status()));
+    if (id === "link") {
+      check(L("1 link: QR code and link card"), (await page.locator(".qr svg").count()) >= 1 && /Josh Example/.test(await text(page, ".linkcard")));
+      if (details) check(L("1 link: decoded JSON with url and key"), /"key"/.test(await text(page, '.scene[data-scene="link"] .json')));
+    }
+    if (id === "index") {
+      await page.waitForFunction(() => document.querySelector(".toc-tree .this:not(.hidden-item)"), null, { timeout: 8000 });
+      const t = await text(page, ".toc-tree .this");
+      check(L("2 index: unfolds to this slice"), t.includes(`Slice ${truth.slice + 1} of ${truth.n}`) && t.replace(/,/g, "").includes(String(truth.len)), t);
+      if (details) {
+        const d = (await text(page, "#d-index")).replace(/,/g, "");
+        check(L("2 index: numbers match the Bundle"), d.includes(`starting at byte ${truth.off} `) && d.includes(`slice is ${truth.len} bytes`), d.slice(0, 160));
+      }
+    }
+    if (id === "pieces") {
+      await page.waitForFunction(() => document.querySelectorAll(".thumb canvas").length > 0, null, { timeout: 10000 });
+      await page.waitForTimeout(800);
+      const lvl = await canvasLevel(page, ".thumb.this canvas");
+      const reqOk = await page.evaluate((range) => window.__how.S.requests.some((r) => r.range === range && r.status === 206), truth.range);
+      check(L("3 pieces: the slice's Range request was made and the slice decoded"), reqOk && lvl > 5, `${truth.range}; brightness ${lvl.toFixed(1)}`);
+      const lit = await page.locator(".piece.got").count();
+      check(L("3 pieces: the slice's pieces light up"), lit === truth.last - truth.first + 1, `${lit} lit, expected ${truth.last - truth.first + 1}`);
+      if (details) check(L("3 pieces: Range header shown matches"), (await text(page, ".range-line")).includes(truth.range) && (await text(page, "#d-pieces")).includes(truth.range));
+      // Drag across the strip: a new request, images inside appear, cut ones say which piece they need.
+      const before = await page.evaluate(() => window.__how.S.requests.length);
+      const box = await page.locator(".strip").boundingBox();
+      const cells = await page.locator(".piece").count();
+      const x = (k) => box.x + ((k + 0.5) / cells) * box.width;
+      await page.mouse.move(x(0), box.y + box.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(x(cells - 1), box.y + box.height / 2, { steps: 6 });
+      await page.mouse.up();
+      await page.waitForFunction((n) => window.__how.S.requests.length > n, before, { timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+      const cut = await page.locator(".thumb .cut").count(), imgs = await page.locator(".thumb canvas").count();
+      const after = await page.evaluate(() => window.__how.S.requests.length);
+      check(L("3 pieces: dragging a new choice fetches it and shows whole and cut images"), after > before && imgs >= 1 && cut >= 1, `${after - before} new request(s); ${imgs} images, ${cut} cut`);
+      await shot("3-pieces");
+    }
+    if (id === "host") {
+      const rows = await page.locator(".host-log .req").count();
+      const n = await page.evaluate(() => Math.min(60, window.__how.S.requests.length));
+      check(L("3b host: every request listed as the server receives it"), rows === n && /\.bin/.test(await text(page, ".host-log")), `${rows} rows, ${n} requests`);
+      await shot("3b-host");
+    }
+    if (id === "unlock") {
+      await page.waitForSelector(".verdict.good", { timeout: 15000 });
+      check(L("4 unlock: every piece unlocked and checked"), (await canvasLevel(page, ".band-box canvas")) > 5, await text(page, ".scene.on .verdict"));
+      await tap(page, "#unlock .switch", touch);
+      await page.waitForSelector(".scene.on .verdict.bad", { timeout: 15000 });
+      const bad = await text(page, ".scene.on .verdict");
+      check(L("4 unlock: tamper switch makes a piece refused"), /refused/.test(bad) && /flipped/.test(bad), bad);
+      await shot("4-tampered");
+      await tap(page, "#unlock .switch", touch);
+      await page.waitForSelector(".scene.on .verdict.good", { timeout: 15000 });
+      check(L("4 unlock: switch off, all pieces pass again"), true);
+    }
+    if (id === "pixels") {
+      await page.waitForFunction(() => /Example/.test(document.querySelector(".hdr")?.textContent ?? ""), null, { timeout: 15000 });
+      const hd = await text(page, ".hdr");
+      check(L("5 pixels: header shows the file marker, patient, size and pixel start"), /DICM/.test(hd) && /Example\^Josh/.test(hd) && /512 × 512/.test(hd) && /start at byte/.test(hd), hd.slice(0, 120));
+      await page.waitForTimeout(500);
+      const lvl0 = await canvasLevel(page, '.scene[data-scene="pixels"] .stage canvas');
+      await page.locator("#wl-c").fill("95");
+      await page.waitForTimeout(500);
+      const lvl1 = await canvasLevel(page, '.scene[data-scene="pixels"] .stage canvas');
+      check(L("5 pixels: the slice is drawn and brightness changes it"), lvl0 > 3 && Math.abs(lvl1 - lvl0) > 3, `${lvl0.toFixed(1)} → ${lvl1.toFixed(1)}`);
+      if (details) check(L("5 pixels: transfer syntax and window in the details"), /1\.2\.840\.10008\.1\.2\.1/.test(await text(page, "#d-pixels")));
+      await shot("5-pixels");
+    }
+    if (id === "compressed") {
+      await page.waitForFunction(() => /In the file/.test(document.querySelector('.scene[data-scene="compressed"]')?.textContent ?? ""), null, { timeout: 15000 });
+      await page.waitForTimeout(400);
+      const size = (await page.request.get(`${BASE}/how/compressed.dcm`)).body().then((b) => b.length);
+      const lvl = await canvasLevel(page, '.scene[data-scene="compressed"] .stage canvas');
+      check(L("5b compressed: decoded and drawn"), lvl > 3, `brightness ${lvl.toFixed(1)}`);
+      if (details) {
+        const d = (await text(page, "#d-compressed")).replace(/,/g, "");
+        check(L("5b compressed: file size shown matches the file"), d.includes(`${await size} bytes in the file`), d.slice(0, 120));
+      }
+      await shot("5b-compressed");
+    }
+    if (id === "less") {
+      await page.waitForFunction(() => /of .* shared/.test(document.querySelector('.scene[data-scene="less"] .counter')?.textContent ?? ""), null, { timeout: 15000 });
+      const c0 = await page.evaluate(() => window.__how.S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0));
+      await page.locator('.scene[data-scene="less"] .scrub input').fill("2");
+      await page.waitForFunction((c0) => window.__how.S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0) > c0, c0, { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(600);
+      const c1 = await page.evaluate(() => window.__how.S.requests.reduce((a, r) => a + (r.status < 300 ? r.bytes : 0), 0));
+      check(L("6 less: scrolling to another slice fetches only its pieces"), c1 > c0 && c1 - c0 < 2_000_000, `+${c1 - c0} bytes`);
+      if (!quick) {
+        await tap(page, "#less-slide", touch);
+        await page.waitForFunction(() => /of the slide's/.test(document.querySelector('.scene[data-scene="less"] .counter')?.textContent ?? ""), null, { timeout: 30000 });
+        await page.waitForTimeout(2500);
+        const s0 = await text(page, '.scene[data-scene="less"] .counter');
+        for (let k = 0; k < 3; k++) {
+          await tap(page, '[aria-label="Zoom in"]', touch);
+          await page.waitForTimeout(2000);
+        }
+        const s1 = await text(page, '.scene[data-scene="less"] .counter');
+        check(L("6 less: zooming the slide fetches a little more of it"), s0 !== s1 && /of the slide's/.test(s1), `${s0} → ${s1}`);
+        await shot("6-slide");
+        await tap(page, "#less-mri", touch);
+      }
+    }
+    if (id === "share" && !quick && !dark) {
+      await tap(page, "#sh-make", touch);
+      await page.waitForFunction(() => /A new link/.test(document.querySelector('.scene[data-scene="share"]')?.textContent ?? ""), null, { timeout: 20000 });
+      check(L("7 share: a link to the MRI only is made"), true);
+      await tap(page, "#sh-open", touch);
+      await page.waitForFunction(() => /Opened|did not open/.test(document.querySelector('.scene[data-scene="share"] .big-status')?.textContent ?? ""), null, { timeout: 20000 });
+      const o = await text(page, '.scene[data-scene="share"] .big-status');
+      check(L("7 share: the new link opens with one study and the slice"), /lists 1 study/.test(o), o);
+      await tap(page, "#sh-revoke", touch);
+      await page.waitForFunction(() => /Revoked/.test(document.querySelector('.scene[data-scene="share"]')?.textContent ?? ""), null, { timeout: 15000 });
+      await tap(page, "#sh-open", touch);
+      await page.waitForFunction(() => /404|did not open/.test(document.querySelector('.scene[data-scene="share"] .big-status')?.textContent ?? ""), null, { timeout: 20000 });
+      const r = await text(page, '.scene[data-scene="share"] .big-status');
+      check(L("7 share: after revoking, the next request gets 404"), /404/.test(r), r);
+      if (details) {
+        await page.waitForFunction(() => document.querySelectorAll("#d-share-log .req").length >= 2, null, { timeout: 10000 }).catch(() => {});
+        check(L("7 share: the server's own access log is shown"), (await page.locator("#d-share-log .req").count()) >= 2);
+      }
+      await shot("7-share");
+    }
+    if (dark) await darkAudit(page, L(`step ${id}`), check, `how-${dev}-${id}`);
+    else if (!["pieces", "host", "pixels", "compressed", "share"].includes(id) || id === "link") await shot(`${STEPS.indexOf(id) + 1}-${id}`);
   }
 
-  await layout(page, L("layout"), touch);
-  await page.screenshot({ path: `${SHOTS}${dev}-full.png`, fullPage: true });
-  check(L("no console errors"), errors.length === 0, errors.slice(0, 5).join(" | "));
+  // The ending.
+  await page.locator("#end").scrollIntoViewIfNeeded();
+  const href = await page.getAttribute("#open-viewer", "href");
+  check(L("end: “Open the sample” opens the viewer on the sample link"), /\/view#shlink:\//.test(href ?? ""), href?.slice(0, 50));
+  check(L(`end: build-your-own section ${details ? "shown" : "hidden"}`), (await visible(page, ".end-details")) === details);
+  if (details && !dark && !quick) {
+    await tap(page, "#rx-run", touch);
+    await page.waitForFunction(() => /returned|threw/.test(document.querySelector("#rx-out")?.textContent ?? ""), null, { timeout: 20000 });
+    const rx = await text(page, "#rx-out");
+    check(L("end: the reference receiver runs in a worker on the sample"), /"matchesBundle": true/.test(rx), rx.replace(/\s+/g, " ").slice(0, 160));
+    await tap(page, "#tv-run", touch);
+    await page.waitForFunction(() => /Tampering/.test(document.querySelector("#tv-out")?.textContent ?? ""), null, { timeout: 20000 });
+    const tv = await text(page, "#tv-out");
+    check(L("end: test vector matches appendix B"), !tv.includes("✗") && (tv.match(/✓/g) ?? []).length >= 7, `${(tv.match(/✓/g) ?? []).length} ✓`);
+    await tap(page, "#bx-run", touch);
+    await page.waitForSelector('#bx-progress [role="progressbar"]', { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelectorAll("#bx-out tbody tr").length || /error|failed/i.test(document.querySelector("#bx-out")?.textContent ?? ""), null, { timeout: 120000 });
+    const bx = await text(page, "#bx-out");
+    const pb = await page.evaluate(() => {
+      const b = document.querySelector('#bx-progress [role="progressbar"]');
+      return [b.getAttribute("aria-valuenow"), b.getAttribute("aria-valuemax")];
+    });
+    check(L("end: decoder comparison finishes with real progress, same pixels"), (await page.locator("#bx-out tbody tr").count()) === 3 && !/\bno\b/.test(bx) && pb[0] === pb[1], `${pb.join("/")}: ${bx.replace(/\s+/g, " ").slice(0, 200)}`);
+    await shot("end-details");
+  }
+
+  const long = await page.evaluate(() => window.__long);
+  check(L("no main-thread task over 100 ms"), long.length === 0, long.join(", "));
+  if (!dark) await layout(page, L("layout"), touch);
+  if (!dark && details) await shot("full", true);
+  check(L("no console errors"), errors.length === 0, errors.slice(0, 4).join(" | "));
   await context.close();
 }
 
-for (const dev of Object.keys(DEVICES)) {
-  if (only && only !== dev) continue;
+const runs = [];
+for (const dev of Object.keys(DEVICES)) for (const details of [false, true]) runs.push([dev, details, false]);
+for (const dev of Object.keys(DEVICES)) runs.push([dev, true, true]);
+for (const [dev, details, dark] of runs) {
+  if (only && only !== dev && !(only === "dark" && dark)) continue;
   try {
-    await run(dev);
+    await run(dev, details, dark);
   } catch (e) {
-    check(`${dev}: run completed`, false, e.message.split("\n")[0]);
+    check(`${dark ? "dark " : ""}${dev} details ${details ? "on" : "off"}: run completed`, false, e.message.split("\n")[0]);
   }
+}
+// Reduced motion: the tour still runs, with cuts instead of transitions.
+{
+  const ctx = await browser.newContext({ ...DEVICES.desktop, reducedMotion: "reduce" });
+  const p = await ctx.newPage();
+  await p.goto(`${BASE}/how`);
+  await p.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok"), null, { timeout: 30000 });
+  const t = await p.evaluate(() => getComputedStyle(document.querySelector(".scene")).transitionDuration);
+  check("reduced motion: scenes cut without transitions", /^0s/.test(t), t);
+  await ctx.close();
 }
 pageErrorCheck(browser, check);
 await browser.close();
