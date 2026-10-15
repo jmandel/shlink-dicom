@@ -17,3 +17,5 @@ export * from "./dicom-header";
 export * from "./dicomdir";
 export * from "./export";
 // Browser-only (workers, WebGL): import directly from "./images", "./render" and "./wl".
+export * from "./dicom";
+export * from "./objects";

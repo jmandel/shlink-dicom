@@ -7,10 +7,12 @@ import {
   frameOf,
   renderCpu,
   type DecodedImage,
+  type Frame,
   type Renderer,
   type View,
 } from "../../viewer-kit/src/index";
 import { autoWindow } from "./wl";
+import { floatFrame, floatRange, imageRealWorld, linearWindow } from "./display";
 
 export type { View };
 
@@ -78,10 +80,13 @@ export class Viewport {
     return this.canvas.width / Math.max(1, this.canvas.clientWidth);
   }
 
-  /** Shows frame `k` of an image. `view` merges into the current view (window, zoom…). */
-  show(img: DecodedImage, k = 0, view: Partial<View> = {}) {
+  /**
+   * Shows frame `k` of an image. `view` merges into the current view (window, zoom…). `frame`
+   * replaces the decoded frame with a transformed one (display.ts: Modality LUT, VOI LUT…).
+   */
+  show(img: DecodedImage, k = 0, view: Partial<View> = {}, frame?: Frame) {
     const t0 = performance.now();
-    const f = frameOf(img, k);
+    const f = frame ?? frameOf(img, k);
     this.image = img;
     this.frameIndex = k;
     try {
@@ -124,7 +129,11 @@ export function drawThumbnail(canvas: HTMLCanvasElement, img: DecodedImage, k = 
   if (!ctx) return;
   const w = canvas.width, h = canvas.height;
   const im = ctx.createImageData(w, h);
-  const win = autoWindow(img, k);
-  renderCpu(frameOf(img, k), { ...defaultView(), windowCenter: win.center, windowWidth: win.width, interpolation: "linear" }, w, h, im.data);
+  // Float images: a 16-bit frame of real values, windowed as LINEAR_EXACT (display.ts).
+  const rw = img.float ? imageRealWorld(img) : null;
+  const auto = autoWindow(img, k, rw);
+  const win = img.float ? linearWindow("LINEAR_EXACT", auto.center, auto.width) : auto;
+  const frame = img.float ? floatFrame(frameOf(img, k), rw, floatRange(img, rw)) : frameOf(img, k);
+  renderCpu(frame, { ...defaultView(), windowCenter: win.center, windowWidth: win.width, interpolation: "linear" }, w, h, im.data);
   ctx.putImageData(im, 0, 0);
 }

@@ -4,7 +4,9 @@
 //   node viewer-kit/scripts/build.mjs --no-wasm  # bundles only
 //
 // Output in viewer-kit/dist/:
-//   shl_dicom_decode.wasm   custom sections stripped (what ships)
+//   shl_dicom_decode.wasm      custom sections stripped (what ships); no JPEG XL
+//   shl_dicom_decode_jxl.wasm  the same decoder with JPEG XL, which the pool loads only for
+//                              JPEG XL instances (.110–.112)
 //   decoder-worker.js       the pool's worker script
 //   viewer-kit.js           decoder-pool + gl-renderer + cpu-render, as one ES module
 //   demo.js, harness.js     the demo page and the test/bench page
@@ -30,15 +32,21 @@ export function buildWasm(log = console.error) {
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1",
     RUSTFLAGS: "-C target-feature=+simd128",
   };
-  const t0 = Date.now();
-  execFileSync(`${process.env.HOME}/.cargo/bin/cargo`, ["+stable", "build", "--release", "-p", "shl-dicom-decode-wasm", "--target", "wasm32-unknown-unknown", "--lib"], {
-    cwd: CODECS, env, stdio: ["ignore", "ignore", "inherit"],
-  });
-  const raw = readFileSync(join(targetDir, "wasm32-unknown-unknown", "release", "shl_dicom_decode_wasm.wasm"));
-  const stripped = stripCustomSections(raw);
   mkdirSync(DIST, { recursive: true });
-  writeFileSync(join(DIST, "shl_dicom_decode.wasm"), stripped);
-  log(`wasm: ${(stripped.length / 1024).toFixed(0)} KiB stripped, ${(gzipSync(stripped, { level: 9 }).length / 1024).toFixed(0)} KiB gzip (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+  // Two builds of one crate; separate target directories so each keeps its own feature set.
+  for (const [out, features, dir] of [
+    ["shl_dicom_decode.wasm", [], targetDir],
+    ["shl_dicom_decode_jxl.wasm", ["--features", "jpegxl"], `${targetDir}-jxl`],
+  ]) {
+    const t0 = Date.now();
+    execFileSync(`${process.env.HOME}/.cargo/bin/cargo`, ["+stable", "build", "--release", "-p", "shl-dicom-decode-wasm", ...features, "--target", "wasm32-unknown-unknown", "--lib"], {
+      cwd: CODECS, env: { ...env, CARGO_TARGET_DIR: dir }, stdio: ["ignore", "ignore", "inherit"],
+    });
+    const raw = readFileSync(join(dir, "wasm32-unknown-unknown", "release", "shl_dicom_decode_wasm.wasm"));
+    const stripped = stripCustomSections(raw);
+    writeFileSync(join(DIST, out), stripped);
+    log(`${out}: ${(stripped.length / 1024).toFixed(0)} KiB stripped, ${(gzipSync(stripped, { level: 9 }).length / 1024).toFixed(0)} KiB gzip (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+  }
 }
 
 export function buildBundles(log = console.error) {

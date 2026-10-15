@@ -13,16 +13,15 @@
 2. **Public Demo Protection & Quotas:**
    - Pre-seeded demo shares (`mri-brain-2020.tgz` and `wrist-low-res.tgz`, Josh Mandel's own studies shared publicly by choice in `jmandel/my-health-data`) are **read-only** on `/api/demo-shares` and never expose a `controlToken`.
    - Users can click **"Clone to Sandbox Share"** (`POST /api/shares/{sid}/clone`) or upload their own files to get an isolated, time-limited sandbox share with its own `controlToken` (the client decrypts the public demo Bundle to get the series keys and writes a fresh `owner.jwe` under the user's new `ownerKey`).
-   - `POST /api/shares` and file `PUT`s enforce size and count quotas (e.g., max 150 MB per share, max 256 files per share, max 50 active sandbox shares, automatic expiry cleanup) so the server cannot be abused as an open file host.
-3. **Persistent SQLite Storage (`--data-dir`, default `./data`, gitignored; see [`docs/storage.md`](docs/storage.md)):**
+   - `POST /api/shares` and file `PUT`s enforce the server's limits (bytes and files per share, shares at once; see §5.2), and sandbox shares expire, so the server cannot be abused as an open file host.
+3. **Storage: SQLite for state, series files on disk (`--data-dir`, default `./data`, gitignored; see [`docs/storage.md`](docs/storage.md)):**
    ```
    data/
    ├── catalog.db                        # Routing catalog: shares(sid, expires_at), links(lid -> sid), caps(token -> lid, expires_at)
-   ├── samples/
-   │   ├── mri-brain-2020.tgz
-   │   └── wrist-low-res.tgz
+   ├── samples/                          # The server's sample: one .tgz per study, sample.json, reports.json
    └── shares/
-       └── {sid}.db                      # Per-share SQLite DB: share(control_token_hash, owner_bundle), series_files, series_records(64KiB rows), links, link_files, access_log
+       ├── {sid}.db                      # Per-share SQLite DB: share(control_token_hash, owner_bundle), series_files, uploads, links, link_files, access_log
+       └── {sid}/{fileId}.bin            # Encrypted series files ({fileId}.part while an upload is incomplete)
    ```
 
 ---
@@ -44,11 +43,10 @@ shlink-dicom/
 │   └── golden/                         # Tracked F0 golden share fixtures (bundle.jwe, AAECAwQFBgcICQoLDA0ODw.bin, vector.json)
 ├── data/                               # Default --data-dir (gitignored; see docs/storage.md)
 │   ├── catalog.db                      # Routing SQLite DB (shares, links, caps)
-│   ├── samples/
-│   │   ├── mri-brain-2020.tgz          # Cached Brain MRI archive (~34 MB)
-│   │   └── wrist-low-res.tgz           # Cached Wrist archive (~6 MB)
+│   ├── samples/                        # The server's sample (one .tgz per study, sample.json, reports.json)
 │   └── shares/
-│       └── {sid}.db                    # Per-share SQLite DB (share, series_files, series_records, links, link_files, access_log)
+│       ├── {sid}.db                    # Per-share SQLite DB (share, series_files, uploads, links, link_files, access_log)
+│       └── {sid}/{fileId}.bin          # Encrypted series files
 ├── crates/
 │   ├── shl-dicom-core/                 # Pure Rust library (NO std::fs, NO tokio, NO wasm_bindgen)
 │   │   ├── Cargo.toml
@@ -72,7 +70,7 @@ shlink-dicom/
 │       └── src/
 │           ├── main.rs                 # Clap CLI (`pack`, `inspect`, `serve`)
 │           ├── cli.rs                  # Offline `pack` and client `inspect` command implementations
-│           ├── state.rs                # AppState, disk persistence (`meta.json`), capability token store, SSE broadcaster
+│           ├── state.rs                # AppState: SQLite catalog and per-share databases, series files on disk, upload limits, SSE broadcaster
 │           ├── seed.rs                 # Downloads sample .tgz files if missing & seeds demo shares on startup
 │           ├── routes_api.rs           # Zero-knowledge upload & Control API (/api/shares/*, /api/demo-shares)
 │           ├── routes_shl.rs           # SHL protocol routes (/shl/{id}/*, /cap/{token}/*) + RFC 9110 HTTP 206 Range engine
@@ -118,7 +116,7 @@ shlink-dicom/
 #### In `crates/shl-dicom-server/src/`:
 - **`state.rs`**: Manages `{data-dir}/catalog.db` and the LRU pool of `{data-dir}/shares/{sid}.db` SQLite databases (see [`docs/storage.md`](docs/storage.md)), startup/periodic orphan & expiry sweeps, and per-share `tokio::sync::broadcast` channels for live SSE telemetry.
 - **`routes_api.rs`**: Implements the Zero-Knowledge Share & Link API (`POST /api/shares`, `PUT /api/shares/{sid}/owner.jwe`, `PUT /api/shares/{sid}/files/{name}`, `POST /api/shares/{sid}/links`, `PATCH /api/shares/{sid}/links/{lid}`, `DELETE /api/shares/{sid}/links/{lid}`, `POST /api/shares/{sid}/links/{lid}/end-sessions`, `GET /api/shares/{sid}/access`, `GET /api/shares/{sid}/events`, `GET /api/demo-shares`).
-- **`routes_shl.rs`**: Implements the receiver-facing SHL routes (`GET /shl/{lid}/bundle.jwe`, `POST /shl/{lid}`, `GET /shl/{lid}/{fileId}.bin`, `GET /cap/{token}/...`) and the HTTP `206 Partial Content` byte-range responder querying indexed 64 KiB rows from `series_records`.
+- **`routes_shl.rs`**: Implements the receiver-facing SHL routes (`GET /shl/{lid}/bundle.jwe`, `POST /shl/{lid}`, `GET /shl/{lid}/{fileId}.bin`, `GET /cap/{token}/...`) and the HTTP `206 Partial Content` byte-range responder, which streams from the series file on disk.
 
 ---
 
@@ -224,8 +222,8 @@ type Share = {
   }>;
   quota: {
     bytesUsed: number;
-    bytesMax: number;         // e.g. 150 MB
-    filesMax: number;         // e.g. 256 files
+    bytesMax: number | null;  // the server's --max-share-bytes; null: no limit
+    filesMax: number | null;  // the server's --max-share-files; null: no limit
   };
   links: Link[];
 };
@@ -243,32 +241,52 @@ type Link = {
   allowedFiles: string[];     // Subset of Share's "{fileId}.bin" files accessible through this link
   createdAt: number;
   lastAccessAt: number | null;
-  accessCount: number;
+  accessCount: number;        // requests logged for this link
+  openCount: number;          // Bundle fetches answered 200 or 304: how often the link was opened
+  lastOpenedAt: number | null;
+  bytesServed: number;
 };
 ```
 
 ### 5.2 Zero-Knowledge Share & Link Control Endpoints
 
-All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, Authorization, Range, X-Expected-Size`) so a static web app on GitHub Pages can call an `*.exe.dev` server cross-origin.
+All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, Authorization, Range, If-None-Match, Content-Range, X-Expected-Size`) so a static web app on GitHub Pages can call an `*.exe.dev` server cross-origin.
 
 | Method & Path | Auth | Request Body / Params | Response |
 |---|---|---|---|
-| `POST /api/shares` | None (quota-limited) | `{}` | `201 Created`: `{ share: Share, controlToken: string }` (`controlToken` returned once) |
-| `POST /api/shares/{sid}/clone` | None (quota-limited) | `{}` (clones a demo share's `.bin` files into a sandbox share) | `201 Created`: `{ share: Share, controlToken: string }` |
+| `POST /api/shares` | None (limited by `--max-shares`) | `{ expiresAt?: number }` (Unix seconds; at most 31 days ahead; default 24 hours) | `201 Created`: `{ share: Share, controlToken: string }` (`controlToken` returned once) |
+| `PATCH /api/shares/{sid}` | `Bearer {controlToken}` | `{ expiresAt: number \| null }` (null: the longest allowed, 31 days) | `200 OK`: `Share` |
+| `POST /api/shares/{sid}/clone` | None (limited by `--max-shares`) | `{}` (a new sandbox share with the same `.bin` files, hard-linked on disk) | `201 Created`: `{ share: Share, controlToken: string }` |
 | `GET /api/shares/{sid}` | `Bearer {controlToken}` | — | `200 OK`: `Share` |
 | `DELETE /api/shares/{sid}` | `Bearer {controlToken}` | — | `204 No Content` (removes all files, links, and active `/cap/` prefixes) |
 | `PUT /api/shares/{sid}/owner.jwe` | `Bearer {controlToken}` | Raw compact JWE encrypted under `ownerKey` (`application/jose`) | `200 OK`: `{ ok: true, size: number }` |
 | `GET /api/shares/{sid}/owner.jwe` | `Bearer {controlToken}` | — | `200 OK`: raw `owner.jwe` (`application/jose`) |
-| `PUT /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | Raw encrypted series bytes (`name` MUST match `^[A-Za-z0-9_-]{22}\.bin$`, else `400`; optional `X-Expected-Size` checked against body length) | `200 OK`: `{ name, size, uploadedAt }` |
+| `PUT /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | Encrypted series bytes, streamed to disk. Either the whole file (size from `X-Expected-Size` or `Content-Length`), or one chunk with `Content-Range: bytes a-b/total`, where `a` must equal the bytes already received. `name` MUST match `^[A-Za-z0-9_-]{22}\.bin$`, else `400` | `200 OK`: `{ name, size, received, complete }` (`uploadedAt` too when complete). `409` with `received` when a chunk doesn't start there; `413` over a limit; `400` when the body is longer or shorter than declared (the bytes before the request are kept) |
+| `GET /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | — | `200 OK`: `{ name, size, received, complete }`; `received: 0` and `size: null` when nothing has arrived. A client resumes from `received` |
 | `DELETE /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | — | `204 No Content` (returns `409 Conflict` if any existing Link on the Share still lists `{name}` in `allowedFiles`) |
 | `POST /api/shares/{sid}/links` | `Bearer {controlToken}` | `{ label?: string, passcode?: string, exp?: number, longLived?: boolean, allowedFiles: string[] }` | `201 Created`: `Link` |
 | `PUT /api/shares/{sid}/links/{lid}/bundle.jwe` | `Bearer {controlToken}` | Raw compact JWE encrypted under `{lid}`'s SHL key (`application/jose`) | `200 OK`: `Link` (`hasBundle: true`) |
 | `PATCH /api/shares/{sid}/links/{lid}` | `Bearer {controlToken}` | `{ label?: string\|null, exp?: number\|null, online?: boolean, allowedFiles?: string[] }` (no passcode or mode changes) | `200 OK`: `Link` |
 | `DELETE /api/shares/{sid}/links/{lid}` | `Bearer {controlToken}` | — | `204 No Content` (permanently `404`s `{lid}` and ends all its `/cap/` prefixes) |
 | `POST /api/shares/{sid}/links/{lid}/end-sessions` | `Bearer {controlToken}` | `{}` | `200 OK`: `{ revokedCount: number }` (invalidates open 1-hour `/cap/` prefixes for `{lid}`) |
-| `GET /api/shares/{sid}/access?since=` | `Bearer {controlToken}` | Optional `since` timestamp | `200 OK`: `{ events: AccessEvent[] }` |
+| `GET /api/shares/{sid}/access?since=&lid=&limit=` | `Bearer {controlToken}` | Optional `since` timestamp, `lid` (one link's events) and `limit` (default 500, at most 5000) | `200 OK`: `{ events: AccessEvent[] }`, newest first |
 | `GET /api/shares/{sid}/events` | `Bearer {controlToken}` (via `fetch` stream) | SSE stream | `event: access\ndata: {"ts":...,"lid":"...","method":"GET","path":"...","range":"bytes=65536-131071","status":206,"bytes":65536,"recipient":"..."}\n\n` |
 | `GET /api/demo-shares` | None | — | `200 OK`: `{ shares: [{ id, title, description, shlinkUri, readOnly: true, share: Share }] }` (never exposes `controlToken`) |
+
+**Uploads and limits:**
+- A series file becomes visible (listed in `files`, allowed in a Link) only once all its bytes have arrived. Until then it is an upload in progress, and its declared size counts toward the share's limit.
+- One request at a time per file; a second gets `409`.
+- Limits are server settings (`shl-dicom-server serve`):
+
+  | Flag | Environment | Default |
+  |---|---|---|
+  | `--max-share-bytes` | `SHL_MAX_SHARE_BYTES` | 0 (no limit) |
+  | `--max-share-files` | `SHL_MAX_SHARE_FILES` | 0 (no limit) |
+  | `--max-shares` | `SHL_MAX_SHARES` | 256 (0: no limit) |
+  | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` |
+
+- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. Series file bodies have no cap; they stream to disk.
+- The server's own sample is not subject to these limits.
 
 **Rules enforced by the Share & Link API:**
 - **Owner management across sessions (`owner.jwe`):** The owner's client stores `{ sid, controlToken, ownerKey }` (in `localStorage` and exportable as a management link). Fetching and decrypting `GET /api/shares/{sid}/owner.jwe` with `ownerKey` gives the client the full `StudyIndex` (including every `fileId` and 32-byte series `key`) needed to mint new Links or append studies from any device.
@@ -277,7 +295,7 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
   - Without `passcode`: U-mode (`flag`: `"LU"` if `longLived` else `"U"`, `url`: `{origin}/shl/{lid}/bundle.jwe`).
   - With `passcode`: Manifest mode (`flag`: `"LP"` if `longLived` else `"P"`, `url`: `{origin}/shl/{lid}`).
 - **Changing a passcode:** Create a new Link (`POST /api/shares/{sid}/links` + `PUT .../bundle.jwe` with a fresh SHL key) and delete the old Link (`DELETE /api/shares/{sid}/links/{lid}`). A deleted Link ID is never reused and never revives.
-- **Passcode storage & attempt limit:** Only a salted SHA-256 hash (`sha256(salt || passcode)`) is stored in `meta.json`. Each passcode-protected Link has a lifetime `remainingAttempts` counter (initialized to `5`), decremented atomically under a mutex before validating an attempt. Once `remainingAttempts == 0`, the Link permanently returns `404`.
+- **Passcode storage & attempt limit:** Only a salted SHA-256 hash (`sha256(salt || passcode)`) is stored, in the share's database. Each passcode-protected Link has a lifetime `remainingAttempts` counter (initialized to `5`), decremented atomically before validating an attempt. Once `remainingAttempts == 0`, the Link permanently returns `404`.
 - **Publish order for `L`-flag updates:**
   - **Adding series to a Link:** (1) `PUT` new `{fileId}.bin` files to the Share and update `owner.jwe`, (2) `PATCH` the Link's `allowedFiles` to include the new files, (3) `PUT` the Link's updated `bundle.jwe` (with a fresh 12-byte JWE IV).
   - **Removing series from a Link:** (1) `PUT` the Link's updated `bundle.jwe` (omitting the removed series) first, (2) `PATCH` the Link's `allowedFiles` to narrow the list, (3) `DELETE` obsolete `{oldFileId}.bin` files from the Share (which enforces `409 Conflict` if any Link still lists the file).
@@ -309,7 +327,7 @@ F0  Fixtures & contracts ──────────────────�
 Core (Rust)                Server (Rust)              Web (TS)           │
 A1 crypto+range ─┐         B1 /shl + /cap routes,     D1 shl-resolver,   │
 A2 jwe+shl ──────┤            206 Range engine ◄──────── fetch/Range ◄───┤ (all can start on F0)
-A3 dicom_io parse┤         B2 state: meta.json,       D3 record-map      │
+A3 dicom_io parse┤         B2 state: SQLite,          D3 record-map      │
                  │            caps, passcode counter                     │
 A4 bundle build/parse ◄ A3    │                                          │
 A5 packer ◄ A1 A3 A4       B3 upload/control API ◄ B2                    │
@@ -333,7 +351,7 @@ Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin`
 |---|---|---|---|
 | **Stage 0** | `F0` | Sample `.tgz` archives cached; Appendix B vector JSON + golden share (`bundle.jwe` + `{fileId}.bin`) generated by TS reference; `StudyIndex` & WASM TypeScript interfaces committed. | Golden share decrypts and verifies with the TS reference; contracts are committed. |
 | **Stage 1** | `A1–A5b` | `crates/shl-dicom-core`: STREAM crypto, range math, JWE, SHL URI codec, DICOM parser, offset tables, FHIR R4 Bundle builder/index parser, packer. | `cargo test -p shl-dicom-core` passes: Appendix B matches byte for byte, edge-case ranges pass, and a synthetic two-study share passes 100% SHA-256 round-trip checks. |
-| **Stage 2** | `B1–B5` | `crates/shl-dicom-server`: `/shl` & `/cap` routes with HTTP `206` Range engine, disk state (`meta.json`), atomic passcode counter, zero-knowledge upload/control API, demo seeding, and CLI (`pack`, `inspect`, `serve`). | `cargo test -p shl-dicom-server` passes against both the `F0` golden share and shares built by `A5`. |
+| **Stage 2** | `B1–B5` | `crates/shl-dicom-server`: `/shl` & `/cap` routes with HTTP `206` Range engine, SQLite state with series files on disk, atomic passcode counter, zero-knowledge upload/control API, demo seeding, and CLI (`pack`, `inspect`, `serve`). | `cargo test -p shl-dicom-server` passes against both the `F0` golden share and shares built by `A5`. |
 | **Stage 3** | `C2` | `crates/shl-dicom-wasm`: the offset-table binding. | `bun test test/wasm.test.ts` passes. |
 | **Stage 4** | `D1–D5` | `web/`: landing, View, How it works, Share (see `docs/EXPERIENCES.md`). | The scripted Chromium checks in `web/checks/` and `web/how/checks.mjs` pass against the running server. |
 

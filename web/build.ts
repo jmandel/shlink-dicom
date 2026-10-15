@@ -5,15 +5,19 @@
 //   dist/web/how/index.html        How it works      (/how), plus how/data.json and the pages it links (web/how/bake.ts)
 //   dist/web/share/                Share             (/share, /share/manage, /share/smart-callback)
 //   dist/web/assets/               one bundle per entry point + shared chunks, decoder worker,
-//                                  shl_dicom_decode.wasm, shl_dicom_wasm_bg.wasm (Share: offset tables), CSS
+//                                  shl_dicom_decode.wasm, shl_dicom_decode_jxl.wasm (loaded only for JPEG XL), shl_dicom_wasm_bg.wasm (Share: offset tables), CSS
 //
 // Pages reference assets relatively, so the static parts can be served from any path.
 // Run: bun web/build.ts   (package.json: build:web)
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 
 const root = new URL("..", import.meta.url).pathname;
-const out = `${root}dist/web`;
+// Built into a private folder, then swapped into place, so a server reading dist/web
+// never sees a half-built site (several builds can run at once).
+const site = `${root}dist/web`;
+const out = `${site}.build-${process.pid}`;
+process.on("exit", () => rmSync(out, { recursive: true, force: true }));
 const assets = `${out}/assets`;
 process.chdir(root);
 
@@ -28,6 +32,7 @@ if (!existsSync(offsetWasm)) {
 }
 
 rmSync(out, { recursive: true, force: true });
+mkdirSync(out, { recursive: true });
 mkdirSync(assets, { recursive: true });
 
 const minify = process.env.MINIFY !== "0";
@@ -50,7 +55,7 @@ if (!r.success) {
 
 // Decoder worker: its own file (Workers need a URL).
 const w = await Bun.build({
-  entrypoints: ["viewer-kit/src/decoder-worker.ts"],
+  entrypoints: ["viewer-kit/src/decoder-worker.ts", "web/core/video-mpeg2-worker.ts"],
   outdir: assets,
   target: "browser",
   format: "esm",
@@ -63,7 +68,34 @@ if (!w.success) {
 }
 
 cpSync(decodeWasm, `${assets}/shl_dicom_decode.wasm`);
+cpSync("viewer-kit/dist/shl_dicom_decode_jxl.wasm", `${assets}/shl_dicom_decode_jxl.wasm`);
+// pdf.js, loaded on demand by web/view/pdf-view.ts (reports and encapsulated PDFs).
+mkdirSync(`${assets}/pdfjs`, { recursive: true });
+for (const f of ["pdf.min.mjs", "pdf.worker.min.mjs"]) cpSync(`node_modules/pdfjs-dist/build/${f}`, `${assets}/pdfjs/${f}`);
 cpSync(offsetWasm, `${assets}/shl_dicom_wasm_bg.wasm`);
+// MPEG-2 video decoder (FFmpeg, LGPL-2.1+; codecs/mpeg2-wasm), loaded only for MPEG-2 video, and
+// the exact FFmpeg source it was built from, which the LGPL requires us to offer alongside it.
+for (const f of ["mpeg2dec.js", "mpeg2dec.wasm"]) cpSync(`codecs/mpeg2-wasm/dist/${f}`, `${assets}/${f}`);
+cpSync("codecs/mpeg2-wasm/dist/COPYING.LGPLv2.1", `${assets}/ffmpeg-COPYING.LGPLv2.1.txt`);
+mkdirSync(`${assets}/mpeg2dec-source`, { recursive: true });
+for (const f of ["mpeg2dec.c", "build.sh", "ffmpeg-source.json", "README.md"]) cpSync(`codecs/mpeg2-wasm/${f}`, `${assets}/mpeg2dec-source/${f}`);
+// The source tarball is not committed: fetched from ffmpeg.org when missing, and checked.
+const ffmpeg = JSON.parse(readFileSync("codecs/mpeg2-wasm/ffmpeg-source.json", "utf8")) as { version: string; url: string; sha256: string };
+const ffmpegName = `ffmpeg-${ffmpeg.version}.tar.xz`;
+const ffmpegSource = `codecs/mpeg2-wasm/dist/${ffmpegName}`;
+if (!existsSync(ffmpegSource)) {
+  console.log(`fetching ${ffmpeg.url}`);
+  const r = await fetch(ffmpeg.url);
+  if (!r.ok) throw new Error(`${ffmpeg.url}: HTTP ${r.status}`);
+  await Bun.write(`${ffmpegSource}.part`, await r.arrayBuffer());
+  renameSync(`${ffmpegSource}.part`, ffmpegSource);
+}
+const ffmpegHash = new Bun.CryptoHasher("sha256").update(readFileSync(ffmpegSource)).digest("hex");
+if (ffmpegHash !== ffmpeg.sha256) {
+  rmSync(ffmpegSource);
+  throw new Error(`${ffmpegName}: SHA-256 ${ffmpegHash}, expected ${ffmpeg.sha256}`);
+}
+cpSync(ffmpegSource, `${assets}/${ffmpegName}`);
 cpSync("web/shared/base.css", `${assets}/base.css`);
 cpSync("web/view/view.css", `${assets}/view.css`);
 cpSync("web/landing/landing.css", `${assets}/landing.css`);
@@ -91,5 +123,10 @@ await Bun.write(
 const { bakeHow } = await import("./how/bake.ts");
 await bakeHow(root, out);
 
-const sizes = await $`cd ${out} && find . -type f \( -name '*.js' -o -name '*.wasm' -o -name '*.html' -o -name '*.css' \) -not -name '*.map' -printf '%s\t%p\n' | sort -k2`.text();
+const old = `${site}.old-${process.pid}`;
+if (existsSync(site)) renameSync(site, old);
+renameSync(out, site);
+rmSync(old, { recursive: true, force: true });
+
+const sizes = await $`cd ${site} && find . -type f \( -name '*.js' -o -name '*.wasm' -o -name '*.html' -o -name '*.css' \) -not -name '*.map' -printf '%s\t%p\n' | sort -k2`.text();
 console.log(sizes);

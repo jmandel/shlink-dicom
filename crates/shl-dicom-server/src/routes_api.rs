@@ -19,7 +19,7 @@ use crate::{
     routes_shl::request_origin,
     state::{
         build_link_resource_from_row, hash_passcode, is_valid_id22, now_unix,
-        parse_series_filename, sha256_bytes, write_series_file_to_db, AccessEvent, AppState,
+        parse_series_filename, record_series_file, sha256_bytes, AccessEvent, AppState, ShareFileEntry,
         DEFAULT_PASSCODE_ATTEMPTS, DEFAULT_SANDBOX_TTL_SECS, MAX_SHARE_TTL_SECS,
     },
 };
@@ -160,61 +160,27 @@ pub async fn clone_share(
             .into_response();
     };
 
-    // Copy series_files and series_records from source share to new sandbox share
+    // Copy the series files (hard links where the file system allows) and their rows.
     let copy_res: Result<(), String> = (|| {
-        let src_conn = src_conn_arc.lock().unwrap();
-        let mut dst_conn = dst_conn_arc.lock().unwrap();
-        let _ = dst_conn.execute_batch("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;");
-        let tx = dst_conn.transaction().map_err(|e| e.to_string())?;
-
-        let mut stmt_files = src_conn
-            .prepare("SELECT file_id, size, uploaded_at FROM series_files")
-            .map_err(|e| e.to_string())?;
-        let file_rows = stmt_files
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-
-        for f in file_rows {
-            let (fid, sz, up) = f.map_err(|e| e.to_string())?;
-            tx.execute(
-                "INSERT INTO series_files (file_id, size, uploaded_at) VALUES (?1, ?2, ?3)",
-                params![fid, sz, up],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
-        let mut stmt_recs = src_conn
-            .prepare("SELECT file_id, idx, bytes FROM series_records")
-            .map_err(|e| e.to_string())?;
-        let rec_rows = stmt_recs
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-
-        {
-            let mut insert_rec = tx
-                .prepare("INSERT INTO series_records (file_id, idx, bytes) VALUES (?1, ?2, ?3)")
-                .map_err(|e| e.to_string())?;
-            for rec in rec_rows {
-                let (fid, idx, bytes) = rec.map_err(|e| e.to_string())?;
-                insert_rec
-                    .execute(params![fid, idx, bytes])
-                    .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, i64)> = {
+            let src_conn = src_conn_arc.lock().unwrap();
+            let mut stmt = src_conn.prepare("SELECT file_id, size FROM series_files").map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .collect();
+            rows
+        };
+        std::fs::create_dir_all(state.share_files_dir(&new_sid)).map_err(|e| e.to_string())?;
+        let dst_conn = dst_conn_arc.lock().unwrap();
+        for (fid, size) in rows {
+            let (from, to) = (state.series_path(&source_sid, &fid), state.series_path(&new_sid, &fid));
+            if std::fs::hard_link(&from, &to).is_err() {
+                std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
             }
+            record_series_file(&dst_conn, &fid, size as u64)?;
         }
-
-        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     })();
 
@@ -372,84 +338,376 @@ pub async fn get_owner_bundle(
     }
 }
 
-/// `PUT /api/shares/{sid}/files/{name}`
-pub async fn put_share_file(
+fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
+    (status, Json(json!({ "error": msg.into() }))).into_response()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Series file uploads, following the IETF resumable uploads draft
+// (draft-ietf-httpbis-resumable-upload-13). The upload resource is the file's own URL,
+// /api/shares/{sid}/files/{fileId}.bin:
+//   PUT   with Upload-Complete and Upload-Length   creates the upload (the body may be its start)
+//   HEAD                                           Upload-Offset, Upload-Complete, Upload-Length, Upload-Limit
+//   PATCH application/partial-upload, Upload-Offset, Upload-Complete   appends
+//   DELETE                                         cancels (or deletes the finished file)
+// A PUT without Upload-Complete sends a whole file in one request (not resumable).
+// The bytes of an interrupted request are kept; the client asks where to continue.
+
+const PROBLEM_MISMATCH: &str = "https://iana.org/assignments/http-problem-types#mismatching-upload-offset";
+const PROBLEM_LENGTH: &str = "https://iana.org/assignments/http-problem-types#inconsistent-upload-length";
+
+fn sf_bool(headers: &HeaderMap, name: &str) -> Option<Result<bool, ()>> {
+    let v = headers.get(name)?.to_str().ok()?.trim().to_string();
+    Some(match v.as_str() {
+        "?1" => Ok(true),
+        "?0" => Ok(false),
+        _ => Err(()),
+    })
+}
+
+fn sf_int(headers: &HeaderMap, name: &str) -> Option<Result<u64, ()>> {
+    let v = headers.get(name)?.to_str().ok()?;
+    Some(v.trim().parse::<u64>().map_err(|_| ()))
+}
+
+fn problem(status: StatusCode, kind: &str, title: &str, extra: serde_json::Value) -> Response {
+    let mut body = json!({ "type": kind, "title": title, "error": title });
+    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/problem+json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Where an upload stands: `(offset, length, complete)`; None when there is no such upload.
+fn upload_state(state: &AppState, sid: &str, file_id: &str) -> Option<(u64, Option<u64>, bool)> {
+    let conn_arc = state.open_share_db(sid)?;
+    let conn = conn_arc.lock().unwrap();
+    if let Some(size) = conn
+        .query_row("SELECT size FROM series_files WHERE file_id = ?1", params![file_id], |r| r.get::<_, i64>(0))
+        .optional()
+        .ok()
+        .flatten()
+    {
+        return Some((size as u64, Some(size as u64), true));
+    }
+    let size: i64 = conn
+        .query_row("SELECT size FROM uploads WHERE file_id = ?1", params![file_id], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten()?;
+    let offset = std::fs::metadata(state.part_path(sid, file_id)).map(|m| m.len()).unwrap_or(0);
+    Some((offset, Some(size as u64), false))
+}
+
+fn upload_limit(state: &AppState) -> String {
+    let mut s = format!("max-append-size={}", state.quotas.request_bytes);
+    if let Some(m) = state.quotas.share_bytes {
+        s.push_str(&format!(", max-size={m}"));
+    }
+    s
+}
+
+/// Upload-* headers describing an upload.
+fn with_upload_headers(mut b: axum::http::response::Builder, state: &AppState, offset: u64, length: Option<u64>, complete: bool) -> axum::http::response::Builder {
+    b = b
+        .header("Upload-Offset", offset.to_string())
+        .header("Upload-Complete", if complete { "?1" } else { "?0" })
+        .header("Upload-Limit", upload_limit(state))
+        .header(header::CACHE_CONTROL, "no-store");
+    if let Some(l) = length {
+        b = b.header("Upload-Length", l.to_string());
+    }
+    b
+}
+
+/// `HEAD /api/shares/{sid}/files/{name}`: where the upload stands, so a client can continue it.
+pub async fn head_share_file(
     State(state): State<AppState>,
     Path((sid, name)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
 ) -> Response {
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
     let Some(file_id) = parse_series_filename(&name) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "file name must match ^[A-Za-z0-9_-]{22}\\.bin$" })),
-        )
-            .into_response();
+        return StatusCode::BAD_REQUEST.into_response();
     };
-
-    if body.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "series file body must not be empty" })),
-        )
-            .into_response();
+    match upload_state(&state, &sid, file_id) {
+        Some((offset, length, complete)) => with_upload_headers(Response::builder().status(StatusCode::NO_CONTENT), &state, offset, length, complete)
+            .body(Body::empty())
+            .unwrap(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
+}
 
-    if let Some(exp_hdr) = headers.get("x-expected-size").and_then(|v| v.to_str().ok()) {
-        let Ok(expected_size) = exp_hdr.parse::<usize>() else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "invalid X-Expected-Size header" })),
-            )
-                .into_response();
+struct UploadGuard(AppState, String);
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        self.0.uploading.lock().unwrap().remove(&self.1);
+    }
+}
+
+fn claim(state: &AppState, sid: &str, file_id: &str) -> Option<UploadGuard> {
+    let key = format!("{sid}/{file_id}");
+    state.uploading.lock().unwrap().insert(key.clone()).then(|| UploadGuard(state.clone(), key))
+}
+
+/// How a request's body is appended.
+enum Append {
+    /// Ok: the new offset.
+    Ok(u64),
+    /// The response to send; the file is back where the request started.
+    Fail(Response),
+    /// The connection dropped: the bytes that arrived are kept.
+    Interrupted(u64),
+}
+
+/// Streams `body` onto `{fileId}.part` from `start`, never past `total`.
+async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, total: u64, body: Body) -> Append {
+    use tokio::io::AsyncWriteExt;
+    let part = state.part_path(sid, file_id);
+    let Ok(mut file) = tokio::fs::OpenOptions::new().create(true).write(true).open(&part).await else {
+        return Append::Fail(json_err(StatusCode::INTERNAL_SERVER_ERROR, "could not open the upload file"));
+    };
+    if file.set_len(start).await.is_err() || tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start)).await.is_err() {
+        return Append::Fail(json_err(StatusCode::INTERNAL_SERVER_ERROR, "could not position the upload file"));
+    }
+    let mut got: u64 = 0;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            let _ = file.flush().await;
+            return Append::Interrupted(start + got);
         };
-        if body.len() != expected_size {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("size mismatch: X-Expected-Size={}, got={}", expected_size, body.len())
-                })),
-            )
-                .into_response();
+        if start + got + chunk.len() as u64 > total {
+            let _ = file.set_len(start).await;
+            return Append::Fail(problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({})));
         }
+        if file.write_all(&chunk).await.is_err() {
+            let _ = file.set_len(start).await;
+            return Append::Fail(json_err(StatusCode::INSUFFICIENT_STORAGE, "the server could not store the file"));
+        }
+        got += chunk.len() as u64;
     }
+    let _ = file.flush().await;
+    Append::Ok(start + got)
+}
 
-    let Some(conn_arc) = state.open_share_db(&sid) else {
+/// Renames a finished `.part` and records the file.
+fn publish_file(state: &AppState, sid: &str, file_id: &str, size: u64) -> Result<ShareFileEntry, String> {
+    let part = state.part_path(sid, file_id);
+    if let Ok(f) = std::fs::File::open(&part) {
+        let _ = f.sync_all();
+    }
+    std::fs::rename(&part, state.series_path(sid, file_id)).map_err(|e| e.to_string())?;
+    let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
+    let conn = conn_arc.lock().unwrap();
+    record_series_file(&conn, file_id, size)
+}
+
+fn finished(state: &AppState, status: StatusCode, entry: ShareFileEntry) -> Response {
+    with_upload_headers(Response::builder().status(status), state, entry.size, Some(entry.size), true)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "name": entry.name, "size": entry.size, "uploadedAt": entry.uploaded_at, "complete": true }).to_string(),
+        ))
+        .unwrap()
+}
+
+/// Checks the share's limits for a new upload of `total` bytes and records it.
+fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64) -> Result<(), Response> {
+    let conn_arc = state.open_share_db(sid).ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+    let conn = conn_arc.lock().unwrap();
+    let _ = conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![file_id]);
+    let (files, bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM series_files) + (SELECT COUNT(*) FROM uploads),
+                    (SELECT COALESCE(SUM(size), 0) FROM series_files) + (SELECT COALESCE(SUM(size), 0) FROM uploads)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((0, 0));
+    if state.quotas.share_files.is_some_and(|m| files as usize >= m) {
+        return Err(json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_FILES_EXCEEDED"));
+    }
+    if state.quotas.share_bytes.is_some_and(|m| bytes as u64 + total > m) {
+        return Err(json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED"));
+    }
+    conn.execute("INSERT INTO uploads (file_id, size, started_at) VALUES (?1, ?2, ?3)", params![file_id, total as i64, now_unix()])
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = std::fs::create_dir_all(state.share_files_dir(sid));
+    let _ = std::fs::remove_file(state.part_path(sid, file_id));
+    Ok(())
+}
+
+fn forget_upload(state: &AppState, sid: &str, file_id: &str) {
+    let _ = std::fs::remove_file(state.part_path(sid, file_id));
+    if let Some(c) = state.open_share_db(sid) {
+        let _ = c.lock().unwrap().execute("DELETE FROM uploads WHERE file_id = ?1", params![file_id]);
+    }
+}
+
+/// `PUT /api/shares/{sid}/files/{name}`
+///
+/// With `Upload-Complete` (and `Upload-Length`): creates a resumable upload whose body is the
+/// file's first bytes. Without: the whole file in one request (`Content-Length` or
+/// `X-Expected-Size`), which is not resumable.
+pub async fn put_share_file(
+    State(state): State<AppState>,
+    Path((sid, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if let Err(resp) = require_auth(&state, &sid, &headers) {
+        return resp;
+    }
+    let Some(file_id) = parse_series_filename(&name).map(String::from) else {
+        return json_err(StatusCode::BAD_REQUEST, "file name must match ^[A-Za-z0-9_-]{22}\\.bin$");
+    };
+    let resumable = sf_bool(&headers, "upload-complete");
+    let total = match resumable {
+        Some(_) => match sf_int(&headers, "upload-length") {
+            Some(Ok(n)) => n,
+            Some(Err(_)) => return json_err(StatusCode::BAD_REQUEST, "invalid Upload-Length"),
+            None => return json_err(StatusCode::LENGTH_REQUIRED, "a resumable upload needs Upload-Length"),
+        },
+        None => match sf_int(&headers, "x-expected-size").or_else(|| sf_int(&headers, "content-length")) {
+            Some(Ok(n)) => n,
+            Some(Err(_)) => return json_err(StatusCode::BAD_REQUEST, "invalid X-Expected-Size header"),
+            None => return json_err(StatusCode::LENGTH_REQUIRED, "send Content-Length, X-Expected-Size, or Upload-Complete with Upload-Length"),
+        },
+    };
+    let complete_flag = match resumable {
+        Some(Ok(b)) => b,
+        Some(Err(_)) => return json_err(StatusCode::BAD_REQUEST, "invalid Upload-Complete"),
+        None => true,
+    };
+    if total == 0 {
+        return json_err(StatusCode::BAD_REQUEST, "series file body must not be empty");
+    }
+    let Some(_guard) = claim(&state, &sid, &file_id) else {
+        return json_err(StatusCode::CONFLICT, "another upload of this file is in progress");
+    };
+    if let Some((_, length, true)) = upload_state(&state, &sid, &file_id) {
+        return if length == Some(total) {
+            with_upload_headers(Response::builder().status(StatusCode::OK), &state, total, Some(total), true).body(Body::empty()).unwrap()
+        } else {
+            json_err(StatusCode::CONFLICT, "fileId already exists with different content size")
+        };
+    }
+    if let Err(resp) = start_upload(&state, &sid, &file_id, total) {
+        return resp;
+    }
+    let end = match append_body(&state, &sid, &file_id, 0, total, body).await {
+        Append::Ok(n) => n,
+        Append::Fail(resp) => {
+            if resumable.is_none() {
+                forget_upload(&state, &sid, &file_id);
+            }
+            return resp;
+        }
+        Append::Interrupted(n) => {
+            if resumable.is_none() {
+                forget_upload(&state, &sid, &file_id);
+            }
+            return json_err(StatusCode::BAD_REQUEST, format!("the upload was interrupted after {n} bytes"));
+        }
+    };
+    if complete_flag {
+        if end != total {
+            forget_upload(&state, &sid, &file_id);
+            if resumable.is_none() {
+                return json_err(StatusCode::BAD_REQUEST, format!("size mismatch: expected {total} bytes, got {end}"));
+            }
+            return problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({}));
+        }
+        return match publish_file(&state, &sid, &file_id, total) {
+            Ok(entry) => finished(&state, if resumable.is_some() { StatusCode::CREATED } else { StatusCode::OK }, entry),
+            Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+    }
+    with_upload_headers(Response::builder().status(StatusCode::CREATED), &state, end, Some(total), false)
+        .header(header::LOCATION, format!("/api/shares/{sid}/files/{file_id}.bin"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// `PATCH /api/shares/{sid}/files/{name}` (`application/partial-upload`): appends to an upload.
+pub async fn patch_share_file(
+    State(state): State<AppState>,
+    Path((sid, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if let Err(resp) = require_auth(&state, &sid, &headers) {
+        return resp;
+    }
+    let Some(file_id) = parse_series_filename(&name).map(String::from) else {
+        return json_err(StatusCode::BAD_REQUEST, "invalid file name");
+    };
+    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !ct.starts_with("application/partial-upload") {
+        return json_err(StatusCode::UNSUPPORTED_MEDIA_TYPE, "appends must be application/partial-upload");
+    }
+    let (Some(Ok(offset)), Some(Ok(complete_flag))) = (sf_int(&headers, "upload-offset"), sf_bool(&headers, "upload-complete")) else {
+        return json_err(StatusCode::BAD_REQUEST, "appends need Upload-Offset and Upload-Complete");
+    };
+    let Some(_guard) = claim(&state, &sid, &file_id) else {
+        return json_err(StatusCode::CONFLICT, "another upload of this file is in progress");
+    };
+    let Some((have, length, complete)) = upload_state(&state, &sid, &file_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-
-    let res = {
-        let mut conn = conn_arc.lock().unwrap();
-        write_series_file_to_db(
-            &mut conn,
-            file_id,
-            &body,
-            state.bytes_max,
-            state.files_max,
-        )
-    };
-
-    match res {
-        Ok(entry) => (StatusCode::OK, Json(entry)).into_response(),
-        Err(e) if e == "QUOTA_BYTES_EXCEEDED" || e == "QUOTA_FILES_EXCEEDED" => (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
-        Err(e) if e == "IMMUTABLE_FILE_ID_CONFLICT" => (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "fileId already exists with different content size" })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+    let total = length.unwrap_or(u64::MAX);
+    if complete {
+        return problem(StatusCode::BAD_REQUEST, "about:blank", "the upload is already complete", json!({}));
     }
+    if offset != have {
+        let resp = problem(
+            StatusCode::CONFLICT,
+            PROBLEM_MISMATCH,
+            "offset from request and upload resource do not match",
+            json!({ "expected-offset": have, "provided-offset": offset }),
+        );
+        let (mut parts, b) = resp.into_parts();
+        parts.headers.insert("Upload-Offset", have.to_string().parse().unwrap());
+        parts.headers.insert("Upload-Complete", "?0".parse().unwrap());
+        return Response::from_parts(parts, b);
+    }
+    if let Some(Ok(l)) = sf_int(&headers, "upload-length") {
+        if Some(l) != length {
+            return problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({}));
+        }
+    }
+    if let Some(Ok(cl)) = sf_int(&headers, "content-length") {
+        if cl > state.quotas.request_bytes {
+            return json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", state.quotas.request_bytes));
+        }
+    }
+    let end = match append_body(&state, &sid, &file_id, offset, total, body).await {
+        Append::Ok(n) => n,
+        Append::Fail(resp) => return resp,
+        Append::Interrupted(n) => return json_err(StatusCode::BAD_REQUEST, format!("the request was interrupted at offset {n}")),
+    };
+    if complete_flag {
+        if end != total {
+            if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(state.part_path(&sid, &file_id)).await {
+                let _ = f.set_len(offset).await;
+            }
+            return problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({}));
+        }
+        return match publish_file(&state, &sid, &file_id, total) {
+            Ok(entry) => finished(&state, StatusCode::OK, entry),
+            Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+    }
+    with_upload_headers(Response::builder().status(StatusCode::NO_CONTENT), &state, end, length, false).body(Body::empty()).unwrap()
 }
 
 /// `DELETE /api/shares/{sid}/files/{name}`
@@ -462,38 +720,31 @@ pub async fn delete_share_file(
         return resp;
     }
     let Some(file_id) = parse_series_filename(&name) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "invalid file name" })),
-        )
-            .into_response();
+        return json_err(StatusCode::BAD_REQUEST, "invalid file name");
     };
     let Some(conn_arc) = state.open_share_db(&sid) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-
     let res = {
         let conn = conn_arc.lock().unwrap();
-        conn.execute("DELETE FROM series_files WHERE file_id = ?1", params![file_id])
+        let aborted = conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![file_id]).unwrap_or(0);
+        if aborted > 0 {
+            let _ = std::fs::remove_file(state.part_path(&sid, file_id));
+        }
+        conn.execute("DELETE FROM series_files WHERE file_id = ?1", params![file_id]).map(|n| n + aborted)
     };
-
     match res {
         Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            let _ = std::fs::remove_file(state.series_path(&sid, file_id));
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
         {
-            (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "file is still referenced by one or more links" })),
-            )
-                .into_response()
+            json_err(StatusCode::CONFLICT, "file is still referenced by one or more links")
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 

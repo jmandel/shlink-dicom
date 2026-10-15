@@ -20,6 +20,8 @@ DIR="${DIR:-/opt/shlink-dicom}"
 DATA="${DATA:-/var/lib/shlink-dicom}"
 PORT="${PORT:-8000}"
 ORIGIN="${ORIGIN:-https://shlink-dicom.exe.xyz}"
+MAX_SHARE_BYTES="${MAX_SHARE_BYTES:-20G}"  # per share; the sample is not counted
+MAX_SHARES="${MAX_SHARES:-256}"         # shares at once
 BUN_VERSION="1.4.3"
 WASM_BINDGEN_VERSION="0.2.128"
 export BUN_INSTALL=/opt/bun
@@ -89,6 +91,9 @@ for d in imaging-sandbox/build/dataset/dicom/*/; do
   tar -czf "$DIR/$s.tgz" -C imaging-sandbox/build/dataset/dicom "$s"
   $SUDO mv "$DIR/$s.tgz" "$DATA/samples/$s.tgz"
 done
+# The sandbox's DiagnosticReports (PDF and text inline), added to the sample's Bundle by the seed.
+bun deploy/sample-reports.ts imaging-sandbox/build/dataset "$DIR"
+$SUDO mv "$DIR/reports.json" "$DATA/samples/reports.json"
 $SUDO tee "$DATA/samples/sample.json" >/dev/null <<'EOF2'
 {
   "title": "Sample imaging: Josh Example",
@@ -96,7 +101,7 @@ $SUDO tee "$DATA/samples/sample.json" >/dev/null <<'EOF2'
 }
 EOF2
 # Re-seed when the sample changes (the server keeps an existing seed otherwise).
-sums="$(cd "$DATA/samples" && sha256sum *.tgz sample.json | sha256sum | cut -d' ' -f1)"
+sums="$(cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json | sha256sum | cut -d' ' -f1)"
 if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ]; then
   $SUDO rm -f "$DATA/seeded_demos.json"
   echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
@@ -115,6 +120,9 @@ WorkingDirectory=$DIR
 Environment=PORT=$PORT
 Environment=SHL_DICOM_DATA_DIR=$DATA
 Environment=PUBLIC_ORIGIN=$ORIGIN
+# Upload limits (see shl-dicom-server serve --help). 0 means no limit.
+Environment=SHL_MAX_SHARE_BYTES=$MAX_SHARE_BYTES
+Environment=SHL_MAX_SHARES=$MAX_SHARES
 ExecStart=$DIR/target/release/shl-dicom-server serve
 Restart=on-failure
 RestartSec=2

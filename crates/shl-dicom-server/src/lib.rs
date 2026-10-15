@@ -25,6 +25,7 @@ pub fn build_app_router(state: AppState) -> Router {
             Method::PUT,
             Method::PATCH,
             Method::DELETE,
+            Method::HEAD,
             Method::OPTIONS,
         ])
         .allow_headers([
@@ -33,12 +34,20 @@ pub fn build_app_router(state: AppState) -> Router {
             header::RANGE,
             header::IF_NONE_MATCH,
             HeaderName::from_static("x-expected-size"),
+            HeaderName::from_static("upload-offset"),
+            HeaderName::from_static("upload-complete"),
+            HeaderName::from_static("upload-length"),
         ])
         .expose_headers([
             header::CONTENT_RANGE,
             header::CONTENT_LENGTH,
             header::ACCEPT_RANGES,
             header::ETAG,
+            header::LOCATION,
+            HeaderName::from_static("upload-offset"),
+            HeaderName::from_static("upload-complete"),
+            HeaderName::from_static("upload-length"),
+            HeaderName::from_static("upload-limit"),
         ]);
 
     let serve_dir = ServeDir::new("dist/web")
@@ -63,7 +72,10 @@ pub fn build_app_router(state: AppState) -> Router {
         )
         .route(
             "/api/shares/{sid}/files/{name}",
-            put(routes_api::put_share_file).delete(routes_api::delete_share_file),
+            put(routes_api::put_share_file)
+                .patch(routes_api::patch_share_file)
+                .head(routes_api::head_share_file)
+                .delete(routes_api::delete_share_file),
         )
         .route("/api/shares/{sid}/links", post(routes_api::create_link))
         .route(
@@ -96,7 +108,7 @@ pub fn build_app_router(state: AppState) -> Router {
         .route_service("/share/manage/", page("share/manage"))
         // Static files (assets, config.json); unknown paths get the landing page
         .fallback_service(serve_dir)
-        .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // JSON and JWE bodies; series files stream (routes_api::put_share_file)
         .layer(cors)
         .with_state(state)
 }

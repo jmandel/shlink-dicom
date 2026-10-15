@@ -10,7 +10,7 @@
 //   lockLinks.{desktop,phone}  passcode 2468, one per device, for the too-many-attempts screen
 //   passcodeTestLink           passcode 1234, for wrong-passcode tries
 //   perfLink                   synthetic 512² CT × 100 + 2048² DX (web/checks/synthetic.ts)
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { extractShlink, openShare } from "../core/index";
 import { linksFor, packAndShare } from "./pack-share";
 import { ctSeries, dxImage } from "./synthetic";
@@ -38,6 +38,7 @@ const sample = {
   mriStudy: mri,
   mriSeries: studies[mri].series.map((s) => s.description),
   wristStudy: studies.findIndex((s) => /extremity|wrist/i.test(s.description ?? "")),
+  reports: sampleShare.index.reports.length,
 };
 // The first wrist study only (the sample may hold several).
 const wristResource = bundle.entry.find((e: any) => e.resource?.resourceType === "ImagingStudy" && /extremity|wrist/i.test(e.resource.description ?? ""))?.resource;
@@ -53,6 +54,65 @@ const lockDesktop = await links.mint(bundle, { label: "Lockout test", passcode: 
 const lockPhone = await links.mint(bundle, { label: "Lockout test", passcode: "2468" });
 const passTest = await links.mint(bundle, { label: "Passcode test", passcode: "1234" });
 
+// Reports from the imaging sandbox's clinical record (imaging-sandbox/build/dataset), added to the
+// sample's Bundle as FHIR DiagnosticReports with their PDF and text inline, linked to the images
+// each supported way: by imagingStudy (MRI, wrist), by accession only (CT), by date only (slide),
+// and one that matches no study (a report from an exam that isn't in the share).
+const reportsLink = await (async () => {
+  const ds = new URL("../../imaging-sandbox/build/dataset/", import.meta.url).pathname;
+  let manifest: any;
+  try {
+    manifest = JSON.parse(readFileSync(`${ds}manifest.json`, "utf8"));
+  } catch {
+    return null; // sandbox data not built
+  }
+  const b64 = (p: string) => Buffer.from(readFileSync(`${ds}${p}`)).toString("base64");
+  // Every ImagingStudy entry gets a fullUrl (the sample's may already have one).
+  for (const e of bundle.entry) if (e.resource?.resourceType === "ImagingStudy") e.fullUrl ??= `urn:uuid:${crypto.randomUUID()}`;
+  const entryOf = (uid: string) => bundle.entry.find((e: any) => e.resource?.resourceType === "ImagingStudy" && (e.resource.identifier ?? []).some((i: any) => i.value === `urn:oid:${uid}`));
+  const report = (st: any, how: "fullUrl" | "relative" | "uid" | "accession" | "date" | "none") => {
+    const r = st.report;
+    const dr: any = {
+      resourceType: "DiagnosticReport",
+      id: `rep-${st.id}`,
+      status: "final",
+      code: { coding: [r.code], text: r.title },
+      conclusion: r.conclusion,
+      presentedForm: r.attachments.map((a: any) => ({ contentType: a.contentType, data: b64(a.path), size: a.size, title: r.title })),
+    };
+    if (r.category) dr.category = [{ coding: [r.category], text: r.category.display }];
+    if (how !== "none") dr.effectiveDateTime = st.studyDate;
+    if (how === "uid") dr.imagingStudy = [{ identifier: { system: "urn:dicom:uid", value: `urn:oid:${st.studyInstanceUID}` } }];
+    if (how === "fullUrl") dr.imagingStudy = [{ reference: entryOf(st.studyInstanceUID)?.fullUrl }];
+    if (how === "relative") dr.imagingStudy = [{ reference: `ImagingStudy/${entryOf(st.studyInstanceUID)?.resource.id}` }];
+    if (how !== "date" && how !== "none")
+      dr.identifier = [{ type: { coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0203", code: "ACSN" }] }, value: st.accession }];
+    if (how === "none") {
+      dr.id = "rep-not-shared";
+      dr.effectiveDateTime = "2019-03-02";
+      dr.code = { text: "XR CHEST 2 VIEWS" };
+    }
+    return { fullUrl: `urn:uuid:${crypto.randomUUID()}`, resource: dr };
+  };
+  const by = (id: string) => manifest.studies.find((s: any) => s.id === id);
+  const plan: [string, "fullUrl" | "relative" | "uid" | "accession" | "date" | "none"][] = [
+    ["mri-brain-2020", "uid"],
+    ["xr-hand-wrist-right-2012", "fullUrl"],
+    ["xr-wrist-left-2012", "relative"],
+    ["ct-abdomen-pelvis-2012", "accession"],
+    ["slide-lung-2023", "date"],
+    ["xr-hand-right-2012", "none"],
+  ];
+  const entries = plan.filter(([id]) => by(id)?.report).map(([id, how]) => report(by(id), how));
+  const withReports = { ...bundle, entry: [...bundle.entry.filter((e: any) => e.resource?.resourceType !== "DiagnosticReport"), ...entries] };
+  const mri = by("mri-brain-2020")?.report?.attachments.find((a: any) => a.contentType.startsWith("text/plain"));
+  return {
+    link: (await links.mint(withReports, { label: "Images and reports" })).shlink,
+    // The MRI report's text attachment, for checking that it is shown as is.
+    mriText: mri ? readFileSync(`${ds}${mri.path}`, "utf8") : "",
+  };
+})();
+
 // Synthetic CT and DX, packed and uploaded as the Share page does.
 const ct = ctSeries();
 const perfShare = await packAndShare(base, [...ct.map((b, i) => ({ name: `ct${i}.dcm`, bytes: b })), { name: "dx.dcm", bytes: dxImage() }]);
@@ -67,6 +127,8 @@ const out = {
   expiredLink: expired.shlink,
   lockLinks: { desktop: lockDesktop.shlink, phone: lockPhone.shlink },
   passcodeTestLink: passTest.shlink,
+  reportsLink: reportsLink?.link ?? null,
+  reportsMriText: reportsLink?.mriText ?? "",
   perfLink: perf.shlink,
   // DELETE these after the run.
   shares: [

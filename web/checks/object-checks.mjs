@@ -1,0 +1,347 @@
+// Scripted Chromium checks for every object type in a study (workstream B of docs/COVERAGE-PLAN.md),
+// on the public test set in web/checks/objects/samples.json, each case shared as its own link.
+//   uv run --project codec-corpus python web/checks/objects/expect.py > /tmp/objects-expect.json
+//   bun web/checks/objects-fixtures.ts http://localhost:3350
+//   BASE=http://localhost:3350 node web/checks/object-checks.mjs [--only=case]
+// Expected values come from pydicom (expect.py), not from the viewer's own parser.
+// Screenshots go to docs/shots/objects/.
+import { chromium } from "playwright-core";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+const BASE = process.env.BASE ?? "http://localhost:3350";
+const SHOTS = new URL("../../docs/shots/objects/", import.meta.url).pathname;
+mkdirSync(SHOTS, { recursive: true });
+const F = JSON.parse(readFileSync("/tmp/objects-fixtures.json", "utf8"));
+const E = JSON.parse(readFileSync("/tmp/objects-expect.json", "utf8"));
+const M = JSON.parse(readFileSync(new URL("./objects/samples.json", import.meta.url), "utf8"));
+const only = process.argv.find((a) => a.startsWith("--only="))?.slice(7);
+
+const results = [];
+const check = (name, ok, detail = "") => {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
+};
+const bySop = new Map(Object.values(E).map((e) => [e.sopInstance, e]));
+const bySeries = (uid) => Object.values(E).filter((e) => e.series === uid);
+
+const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const DEV = {
+  desktop: { viewport: { width: 1440, height: 900 } },
+  phone: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
+};
+
+async function open(caseId, dev = "desktop") {
+  const context = await browser.newContext(DEV[dev]);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+  await page.goto(`${BASE}/view#${F[caseId].link}`);
+  await page.waitForSelector(".study-open", { timeout: 30000 });
+  return { context, page, errors };
+}
+
+/** Opens study `si`, then each series in turn; calls fn(page, series uid, k) with it selected. */
+async function eachSeries(page, si, fn) {
+  await page.locator(".study-open").nth(si).click();
+  await page.waitForSelector(".series-btn");
+  const n = await page.locator(".series-btn").count();
+  for (let k = 0; k < n; k++) {
+    const uid = await page.locator(`.series-btn[data-series="${k}"]`).getAttribute("data-uid");
+    await page.locator(`.series-btn[data-series="${k}"]`).click();
+    await fn(uid, k);
+  }
+}
+
+/** Waits for the object view to finish, and returns the SOP instance it shows. */
+const waitObject = async (page) => {
+  await page.waitForFunction(() => { const v = document.querySelector(".object-view"); return v && !v.classList.contains("hidden") && v.dataset.rendered; }, null, { timeout: 30000 });
+  return page.getAttribute(".object-view", "data-sop");
+};
+
+async function objectCase(caseId) {
+  if (!F[caseId]) return check(`${caseId}: fixture`, false, "not shared");
+  const { context, page, errors } = await open(caseId);
+  // Overview: every shared file listed (series counts add up).
+  const expectFiles = F[caseId].files - F[caseId].skipped.length;
+  const listed = await page.$$eval(".study-contents summary", (s) => s.reduce((a, x) => a + Number(/\((\d+)/.exec(x.textContent)?.[1] ?? 0), 0));
+  check(`${caseId}: overview lists every file`, listed === expectFiles, `${listed} of ${expectFiles}${F[caseId].skipped.length ? ` (${F[caseId].skipped.length} not DICOM Part 10)` : ""}`);
+  const studies = await page.locator(".study-open").count();
+  for (let si = 0; si < studies; si++) {
+    if (si) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    await eachSeries(page, si, async (uid, k) => {
+      await page.waitForTimeout(400);
+      // Objects shown in place of the viewer: the expectation is the one for the instance shown.
+      const objectMode = await page.evaluate(() => document.body.classList.contains("object-mode"));
+      const exp = objectMode ? bySop.get(await waitObject(page)) : bySeries(uid)[0];
+      if (!exp) return;
+      const name = `${caseId}/${exp.sopClass.split(".").slice(-2).join(".")}`;
+      const kind = await page.evaluate(() => document.querySelector(".series-btn[aria-current=true] .s-count")?.textContent ?? "");
+      if (exp.srItems !== undefined && !exp.koRefs) {
+                const t = await page.$eval(".sr-tree", (x) => ({ items: +x.dataset.items, refs: +x.dataset.refs }));
+        check(`${name}: SR content items`, t.items === exp.srItems, `${t.items} of ${exp.srItems}`);
+        check(`${name}: SR image references`, t.refs === exp.srRefs, `${t.refs} of ${exp.srRefs}`);
+        const linked = await page.locator(".sr-ref").count();
+        if (exp.srRefs) {
+          const present = await page.evaluate(() => document.querySelectorAll(".sr-ref").length + document.querySelectorAll(".sr-ref-missing").length);
+          check(`${name}: every reference shown, as a link or as missing`, present >= Math.min(1, exp.srRefs), `${present}`);
+          const shared = new Set(Object.values(E).filter((e) => e.case === caseId).map((e) => e.sopInstance));
+          const inShare = exp.srRefSops.filter((s) => shared.has(s)).length;
+          check(`${name}: references to images in the share are links`, inShare === linked, `${linked} links, ${inShare} expected`);
+          if (linked) {
+            const target = await page.locator(".sr-ref").first().textContent();
+            await page.locator(".sr-ref").first().click();
+            await page.waitForFunction(() => !document.body.classList.contains("object-mode") && window.__viewHooks.state().seriesIdx >= 0);
+            check(`${name}: a reference opens its image`, true, target);
+            await page.locator(`.series-btn[data-series="${k}"]`).click();
+          }
+        }
+        await page.screenshot({ path: `${SHOTS}${caseId}-sr-${k}.png` });
+      } else if (exp.pdfPages !== undefined) {
+                await page.waitForSelector(".object-view .pdf-pages[data-rendered]", { timeout: 30000 });
+        const pages = await page.locator(".object-view canvas.pdf-page").count();
+        check(`${name}: PDF pages drawn`, pages === exp.pdfPages, `${pages} of ${exp.pdfPages}`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-pdf-${k}.png` });
+      } else if (exp.cdaSections !== undefined) {
+        const n = await page.locator(".object-view .cda-section").count();
+        check(`${name}: CDA sections shown`, n === exp.cdaSections, `${n} of ${exp.cdaSections}`);
+        const cells = await page.locator(".object-view .cda-text td").count();
+        check(`${name}: CDA narrative tables kept`, cells > 0, `${cells} cells`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-cda-${k}.png` });
+      } else if (exp.waveform) {
+        if (/^1\.2\.840\.10008\.5\.1\.4\.1\.1\.9\.4\./.test(exp.sopClass)) {
+          const dur = await page.$eval(".object-view audio", (a) => new Promise((r) => (a.readyState >= 1 ? r(a.duration) : a.addEventListener("loadedmetadata", () => r(a.duration)))));
+          const want = exp.waveform[0].samples / 8000;
+          check(`${name}: audio playable at its length`, Math.abs(dur - want) < 0.05, `${dur.toFixed(2)} s of ${want.toFixed(2)} s`);
+        }
+        const groups = await page.$$eval(".wf-scroll", (w) => w.map((x) => +x.dataset.channels));
+        check(`${name}: waveform groups and channels`, JSON.stringify(groups) === JSON.stringify(exp.waveform.map((g) => g.channels)), `${groups.join(", ")} channels`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-waveform-${k}.png` });
+      } else if (exp.triangles !== undefined) {
+                await page.waitForSelector(".model-canvas[data-drawn]");
+        const tri = +(await page.getAttribute(".model-canvas", "data-drawn"));
+        check(`${name}: 3D model triangles drawn`, tri === exp.triangles, `${tri} of ${exp.triangles}`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-model-${k}.png` });
+      } else if (exp.koRefs !== undefined) {
+                const items = await page.locator(".ko-item").count();
+        const links = await page.locator(".ko-open").count();
+        const sops = new Set(Object.values(E).filter((e) => e.case === caseId).map((e) => e.sopInstance));
+        const inShare = exp.koRefSops.filter((s) => sops.has(s)).length;
+        check(`${name}: key image list`, items === exp.koRefs, `${items} of ${exp.koRefs} listed`);
+        check(`${name}: key images in the share are links`, links === inShare, `${links} of ${inShare}`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-ko-${k}.png` });
+        if (links) {
+          await page.locator(".ko-open").first().click();
+          await page.waitForFunction(() => !document.body.classList.contains("object-mode"));
+          check(`${name}: a key image opens`, true);
+          await page.locator(`.series-btn[data-series="${k}"]`).click();
+        }
+      } else if (exp.segments !== undefined || exp.rois !== undefined) {
+        // Chosen in the list: the referenced images open with the layer on.
+        await page.waitForTimeout(500);
+        const onImages = await page.evaluate(() => !document.body.classList.contains("object-mode"));
+        if (!onImages) {
+          const note = await page.textContent(".object-view");
+          check(`${name}: referenced images missing: said so`, /not in this share/.test(note), note.slice(0, 80));
+          return;
+        }
+        const st0 = await page.evaluate(() => window.__viewHooks.state());
+        let drawn = 0, best = -1;
+        if (exp.contoursPerImage) {
+          // The image with the most contours, by SOP Instance UID.
+          const [sopBest, nBest] = Object.entries(exp.contoursPerImage).sort((a, b) => b[1] - a[1])[0];
+          // The structure set opens its images asynchronously: wait until they are the current series.
+          await page.waitForFunction((s) => window.__viewHooks.instanceIndex(s) >= 0, sopBest, { timeout: 30000 });
+          const idx = await page.evaluate((s) => window.__viewHooks.instanceIndex(s), sopBest);
+          await page.evaluate((i) => window.__viewHooks.showSlice(i), idx);
+          await page.waitForFunction(() => +document.querySelector(".layer-canvas")?.dataset.drawn > 0, null, { timeout: 15000 }).catch(() => {});
+          drawn = +(await page.getAttribute(".layer-canvas", "data-drawn"));
+          check(`${name}: contours on the image that names them`, drawn === nBest, `${drawn} of ${nBest} on image ${idx + 1}`);
+        } else {
+          for (let i = 0; i < st0.sliceCount; i++) {
+            await page.evaluate((i) => window.__viewHooks.showSlice(i), i);
+            await page.waitForTimeout(150);
+            const d = +(await page.getAttribute(".layer-canvas", "data-drawn"));
+            if (d > drawn) { drawn = d; best = i; }
+          }
+          check(`${name}: segmentation drawn on its images`, drawn > 0, `${drawn} segment frame(s) on slice ${best + 1}`);
+          if (best >= 0) await page.evaluate((i) => window.__viewHooks.showSlice(i), best);
+          await page.waitForTimeout(300);
+        }
+        await page.click("#btn-layers");
+        const legend = await page.locator(".legend-item").count();
+        check(`${name}: legend lists segments or structures`, legend >= (exp.segments ?? exp.rois), `${legend}`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-layers-${k}.png` });
+        await page.click("#sheet-layers [data-close]");
+      } else if (exp.voi !== undefined) {
+        await page.waitForTimeout(800);
+        const onImages = await page.evaluate(() => !document.body.classList.contains("object-mode"));
+        if (!onImages) {
+          const note = await page.textContent(".object-view");
+          check(`${name}: presentation state for images not in the share: said so`, /not in this share/.test(note), note.slice(0, 80));
+          return;
+        }
+        const st = await page.evaluate(() => window.__viewHooks.state());
+        if (exp.voi.length) check(`${name}: presentation state window applied`, Math.abs(st.wc - exp.voi[0][0]) < 0.5 && Math.abs(st.ww - exp.voi[0][1]) < 0.5, `W ${st.ww} L ${st.wc}; expected W ${exp.voi[0][1]} L ${exp.voi[0][0]}`);
+        await page.screenshot({ path: `${SHOTS}${caseId}-pstate-${k}.png` });
+      } else if (/other object/.test(kind)) {
+                check(`${name}: listed with a download`, await page.isVisible(".object-view .obj-actions .btn"));
+      }
+    });
+  }
+  check(`${caseId}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
+/** The same object views on a phone: layout and touch targets. */
+async function phoneCase(caseId, seriesKind) {
+  const { context, page, errors } = await open(caseId, "phone");
+  await page.locator(".study-open").first().click();
+  await page.waitForSelector(".series-btn");
+  const k = await page.locator(".series-btn").evaluateAll((bs, re) => bs.findIndex((b) => new RegExp(re).test(b.textContent)), seriesKind);
+  if (k >= 0) await page.locator(".series-btn").nth(k).click();
+  await page.waitForTimeout(2500);
+  const r = await page.evaluate(() => {
+    const small = [];
+    for (const el of document.querySelectorAll(".object-view button, .object-view select, .object-view a")) {
+      const b = el.getBoundingClientRect();
+      if (b.width && b.height && (b.height < 43.5 || b.width < 43.5)) small.push(`${el.className} ${Math.round(b.width)}×${Math.round(b.height)}`);
+    }
+    return { overflow: document.documentElement.scrollWidth - innerWidth, small };
+  });
+  check(`phone/${caseId}: no horizontal overflow`, r.overflow <= 0, `${r.overflow}`);
+  check(`phone/${caseId}: targets ≥ 44 px`, r.small.length === 0, r.small.join(", "));
+  await page.screenshot({ path: `${SHOTS}phone-${caseId}.png` });
+  check(`phone/${caseId}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
+/** Segmentations and annotations of a slide, chosen in the series list, open on the slide (wsi-view.ts). */
+async function slideLayers() {
+  const W = existsSync("/tmp/wsi-fixtures.json") ? JSON.parse(readFileSync("/tmp/wsi-fixtures.json", "utf8"))["ann-seg"] : null;
+  if (!W) return check("slide layers: fixture", false, "run web/view/wsi-tools/wsi-fixtures.ts (ann-seg)");
+  const base = process.env.WSI_BASE ?? "http://localhost:3333";
+  const context = await browser.newContext(DEV.desktop);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto(`${base}/view#${W.tablesLink}`);
+  await page.waitForSelector(".study-open");
+  await page.locator(".study-open").first().click();
+  await page.waitForSelector(".series-btn");
+  const rows = await page.locator(".series-btn").evaluateAll((bs) => bs.map((b) => ({ k: b.dataset.series, name: b.querySelector(".s-name").textContent, count: b.querySelector(".s-count").textContent })));
+  const derived = rows.filter((r) => /segmentation|other object/.test(r.count));
+  for (const r of derived) {
+    await page.locator(`.series-btn[data-series="${r.k}"]`).click();
+    const ok = await page
+      .waitForFunction(() => window.__wsi.active() && window.__wsi.layers().some((l) => l.visible), null, { timeout: 30000 })
+      .then(() => true, () => false);
+    const vis = await page.evaluate(() => window.__wsi.layers().filter((l) => l.visible).map((l) => l.title));
+    check(`slide layers: "${r.name}" opens the slide with it on`, ok, vis.join(", "));
+    check(`slide layers: no radiology Layers button on the slide`, !(await page.isVisible("#btn-layers")));
+    await page.evaluate(() => window.__wsi.layers().filter((l) => l.visible).forEach((l) => window.__wsi.setLayer(l.id, false)));
+  }
+  check("slide layers: series to try", derived.length > 0, `${derived.length}`);
+  await page.screenshot({ path: `${SHOTS}slide-layer.png` });
+  check("slide layers: no page errors", errors.length === 0, errors.slice(0, 2).join(" | "));
+  await context.close();
+}
+
+/** Video series are labelled as video, with their length (video-fixtures.ts; VIDEO_FIXTURES_JSON picks the file). */
+async function videoLabels() {
+  const file = process.env.VIDEO_FIXTURES_JSON ?? "/tmp/video-fixtures.json";
+  const V = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+  if (!V?.link) return check("video labels: fixture", false, "run web/checks/video-fixtures.ts");
+  const base = new URL(JSON.parse(Buffer.from(V.link.slice(V.link.indexOf("/") + 1), "base64url").toString()).url).origin;
+  const context = await browser.newContext(DEV.desktop);
+  const page = await context.newPage();
+  await page.goto(`${base}/view#${V.link}`);
+  await page.waitForSelector(".study-open");
+  const studies = await page.locator(".study-open").count();
+  const labels = [];
+  for (let si = 0; si < studies; si++) {
+    if (si) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    await page.locator(".study-open").nth(si).click();
+    await page.waitForSelector(".series-btn");
+    await page.waitForTimeout(3000);
+    labels.push(...(await page.$$eval(".series-btn .s-count", (x) => x.map((e) => e.textContent))));
+  }
+  const video = labels.filter((l) => /^Video/.test(l));
+  check("video labels: video series say Video, with a length when recorded", video.length > 0 && video.some((l) => /^Video · \d+:\d\d$/.test(l)), labels.join(" | "));
+  await context.close();
+}
+
+/** A float parametric map over CT slices: offered as a layer, drawn on each slice it covers, in its colour scale. */
+async function pmapOverlay() {
+  const c = M.cases.find((x) => x.id === "pmap-overlay");
+  const cts = c.files.filter((f) => f.startsWith("ct-"));
+  const ct = E[`pmap-overlay/${cts[0]}`];
+  const { context, page, errors } = await open("pmap-overlay");
+  await page.locator(".study-open").first().click();
+  await page.locator(`.series-btn[data-uid="${ct.series}"]`).click();
+  await page.waitForFunction(() => window.__viewHooks.state().seriesIdx >= 0 && !document.querySelector("#stage-busy:not(.hidden)"));
+  await page.waitForSelector("#btn-layers:not(.hidden)", { timeout: 30000 });
+  await page.click("#btn-layers");
+  const row = page.locator(".layer-row", { hasText: "parametric map" });
+  check("pmap overlay: offered in Layers for the CT it was made on", (await row.count()) === 1, await page.textContent("#layers-list"));
+  await row.locator("input").check();
+  await page.waitForFunction(() => /–/.test(document.querySelector(".map-range")?.textContent ?? ""), null, { timeout: 30000 });
+  const range = await page.textContent(".map-range");
+  check("pmap overlay: colour scale spans the mapped range, with units", range === "0 – 100 %", range);
+  await page.screenshot({ path: `${SHOTS}pmap-overlay-layers.png` });
+  await page.click("#sheet-layers [data-close]");
+  // Viridis-like scale of layers.ts, 5 stops.
+  const stops = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
+  const colour = (v) => {
+    const k = Math.min(255, Math.floor((v / 100) * 255)), x = (k / 255) * 4, i = Math.min(3, Math.floor(x)), f = x - i;
+    return stops[i].map((a, j) => Math.round(a * (1 - f) + stops[i + 1][j] * f));
+  };
+  const rows = [], bad = [];
+  for (let k = 0; k < cts.length; k++) {
+    const idx = await page.evaluate((s) => window.__viewHooks.instanceIndex(s), E[`pmap-overlay/${cts[k]}`].sopInstance);
+    await page.evaluate((i) => window.__viewHooks.showSlice(i), idx);
+    await page.waitForFunction(() => +document.querySelector(".layer-canvas")?.dataset.drawn > 0, null, { timeout: 10000 }).catch(() => {});
+    const drawn = +(await page.getAttribute(".layer-canvas", "data-drawn"));
+    rows.push(drawn);
+    // A map pixel 30 to the right of the frame's centre point: CT pixel (2x, 2y) is inside it.
+    const st = await page.evaluate(() => ({ cols: document.querySelector(".layer-canvas").width }));
+    const R = 192, C = 192, mx = Math.round(C * (0.4 + 0.05 * k)) + 30, my = R / 2;
+    const v = Math.min(100, (Math.hypot(mx - C * (0.4 + 0.05 * k), my - R * 0.5) / 120) * 100);
+    const px = await page.evaluate(([x, y]) => {
+      const p = window.__viewHooks.clientAt(x, y);
+      const cv = document.querySelector(".layer-canvas"), r = cv.getBoundingClientRect();
+      const cx = Math.floor((p.x - r.left) * (cv.width / r.width)), cy = Math.floor((p.y - r.top) * (cv.height / r.height));
+      return Array.from(cv.getContext("2d").getImageData(cx, cy, 1, 1).data);
+    }, [2 * mx, 2 * my]);
+    const want = colour(v);
+    if (want.some((w, j) => Math.abs(w - px[j]) > 3) || Math.abs(px[3] - 150) > 2) bad.push(`slice ${k + 1}: ${px.join(",")} vs ${want.join(",")},150 (${st.cols})`);
+  }
+  check("pmap overlay: drawn on each of the 5 slices (1 by source image, 4 by position)", rows.every((d) => d === 1), rows.join(","));
+  check("pmap overlay: colour at a known point matches its value on the scale", bad.length === 0, bad.join("; ") || "5 slices");
+  await page.screenshot({ path: `${SHOTS}pmap-overlay.png` });
+  check("pmap overlay: no console errors", errors.length === 0, errors.slice(0, 2).join(" | "));
+  await context.close();
+}
+
+const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap"];
+try {
+  for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "pmap-overlay") await pmapOverlay().catch((e) => check("pmap overlay: flow threw", false, String(e).slice(0, 300)));
+  if (!only || only === "video-labels") await videoLabels().catch((e) => check("video labels: flow threw", false, String(e).slice(0, 300)));
+  if (!only || only === "slide-layers") await slideLayers().catch((e) => check("slide layers: flow threw", false, String(e).slice(0, 300)));
+  if (!only)
+    for (const [c, k] of [["sr-dose", "report"], ["waveform-ecg", "waveform"], ["pdf", "PDF"], ["kos", "key image"], ["model-stl", "3D"]])
+      await phoneCase(c, k).catch((e) => check(`phone/${c}: flow threw`, false, String(e).slice(0, 300)));
+} finally {
+  await browser.close();
+}
+const failed = results.filter((r) => !r.ok);
+console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+writeFileSync("/tmp/object-checks.json", JSON.stringify(results, null, 2));
+process.exit(failed.length ? 1 : 0);

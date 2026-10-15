@@ -396,6 +396,70 @@ async function flowCt(dev) {
   await context.close();
 }
 
+// FHIR DiagnosticReports beside the images (the sandbox's reports, web/checks/fixtures.ts).
+async function flowReports(dev) {
+  const label = `reports/${dev}`;
+  if (!F.reportsLink) return check(`${label}: sandbox reports fixture`, false, "imaging-sandbox/build/dataset missing");
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(viewUrl(F.reportsLink));
+  await waitOverview(page);
+  // Accessions come from image headers once the overview has decoded one image per study.
+  await page.waitForFunction(() => document.querySelectorAll(".report-from").length >= 5 && [...document.querySelectorAll(".report-from")].some((e) => /accession/.test(e.textContent)), null, { timeout: 20000 }).catch(() => {});
+  const rows = await page.$$eval(".report", (bs) => bs.map((b) => ({ title: b.closest(".study-card").querySelector(".study-title")?.textContent ?? "(no study)", basis: b.dataset.basis, from: b.querySelector(".report-from").textContent })));
+  const row = (re) => rows.find((r) => re.test(r.title)) ?? { basis: "", from: "" };
+  check(`${label}: report linked by its imagingStudy reference (a Bundle fullUrl)`, row(/HAND AND WRIST RT/).basis === "reference", JSON.stringify(row(/HAND AND WRIST RT/)));
+  check(`${label}: report linked by a relative ImagingStudy/<id> reference`, row(/WRIST LEFT/).basis === "reference", JSON.stringify(row(/WRIST LEFT/)));
+  check(`${label}: report linked by Study Instance UID`, row(/BRAIN/).basis === "uid" && row(/BRAIN/).from === "From the clinical record.", JSON.stringify(row(/BRAIN/)));
+  check(`${label}: report linked by accession (from the DICOM header)`, row(/CT ABDOMEN/).basis === "accession" && /accession/.test(row(/CT ABDOMEN/).from), JSON.stringify(row(/CT ABDOMEN/)));
+  check(`${label}: report linked by date is labelled as a guess`, row(/Histopathology/).basis === "date" && /date and type of exam/.test(row(/Histopathology/).from), JSON.stringify(row(/Histopathology/)));
+  check(`${label}: report without images listed on its own`, /without images/.test(await page.textContent(".loose-reports")) && row(/\(no study\)/).basis === "none", JSON.stringify(row(/\(no study\)/)));
+  await page.screenshot({ path: `${SHOTS}${dev}-reports-overview.png`, fullPage: dev !== "desktop" });
+  await layoutChecks(page, `${label} overview`, dev);
+  const brain = await page.locator(".study-open").evaluateAll((bs) => bs.findIndex((b) => /BRAIN/.test(b.textContent)));
+  await page.locator(".study-open").nth(brain).click();
+  await page.waitForFunction(() => window.__view?.marks["first-slice"], null, { timeout: 20000 });
+  if (dev === "desktop") {
+    check(`${label}: report opens beside the images`, await page.isVisible("#report-panel"));
+    const box = await page.locator("#stage").boundingBox(), panel = await page.locator("#report-panel").boundingBox();
+    check(`${label}: images and report side by side`, box.x + box.width <= panel.x + 1, `stage ends ${Math.round(box.x + box.width)}, panel starts ${Math.round(panel.x)}`);
+  } else {
+    check(`${label}: report closed until asked for on a phone`, !(await page.isVisible("#report-panel")));
+    await page.click("#btn-report");
+    check(`${label}: Report button opens it`, await page.isVisible("#report-panel"));
+  }
+  await page.locator("#report-panel .report-tab", { hasText: "PDF" }).click();
+  await page.waitForSelector("#report-panel .pdf-pages[data-rendered]", { timeout: 20000 });
+  const pdfPages = await page.locator("#report-panel canvas.pdf-page").count();
+  check(`${label}: PDF attachment rendered`, pdfPages >= 1, `${pdfPages} page(s)`);
+  await page.screenshot({ path: `${SHOTS}${dev}-reports-pdf.png` });
+  await page.locator("#report-panel .report-tab", { hasText: "Text" }).click();
+  const txt = await page.textContent("#report-panel .report-text");
+  const want = F.reportsMriText.trim();
+  check(`${label}: text attachment shown as is`, txt.trim() === want, `${txt.trim().length} of ${want.length} characters match: ${txt.slice(0, 40)}`);
+  await layoutChecks(page, `${label} panel`, dev);
+  await page.click("#btn-report-close");
+  check(`${label}: report closes`, !(await page.isVisible("#report-panel")));
+  check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
+  await context.close();
+}
+
+// The server's own sample (Josh Example): every report links to its study exactly, never by the
+// date fallback, and no report is left without its images.
+async function flowSampleReports(dev) {
+  const label = `sample-reports/${dev}`;
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  await page.waitForTimeout(1500);
+  const rows = await page.$$eval(".report", (bs) => bs.map((b) => ({ study: b.closest(".study-card").querySelector(".study-open")?.dataset.study ?? null, basis: b.dataset.basis })));
+  const studies = await page.locator(".study-open").count();
+  const exact = rows.filter((r) => r.basis === "reference" || r.basis === "uid");
+  check(`${label}: ${F.sample.reports} reports, each linked exactly`, rows.length === F.sample.reports && exact.length === rows.length, rows.map((r) => r.basis).join(", "));
+  check(`${label}: one report per study, every study has one`, new Set(exact.map((r) => r.study)).size === Math.min(studies, rows.length) && rows.every((r) => r.study !== null), `${new Set(exact.map((r) => r.study)).size} studies of ${studies}`);
+  check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
+  await context.close();
+}
+
 async function flowPages(dev) {
   const label = `pages/${dev}`;
   const { context, page, errors } = await newPage(dev);
@@ -581,6 +645,8 @@ const flows = {
   subset: () => Promise.all(["desktop", "phone360"].map(flowSubset)),
   states: () => Promise.all(["desktop", "phone390"].map(flowStates)),
   ct: () => Promise.all(["desktop", "phone390"].map(flowCt)),
+  reports: () => Promise.all(["desktop", "phone390"].map(flowReports)),
+  "sample-reports": () => Promise.all(["desktop", "phone390"].map(flowSampleReports)),
   pages: () => Promise.all(["desktop", "phone390", "landscape"].map(flowPages)),
 };
 try {

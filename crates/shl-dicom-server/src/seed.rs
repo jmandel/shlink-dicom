@@ -6,11 +6,11 @@ use shl_dicom_core::{
     shl::{compute_shl_flag, encode_shlink_uri, ShlPayload},
 };
 use crate::state::{
-    hash_passcode, now_unix, sha256_bytes, write_series_file_to_db, AppState, DemoShareInfo,
+    hash_passcode, now_unix, sha256_bytes, store_series_file, AppState, DemoShareInfo,
     DEFAULT_PASSCODE_ATTEMPTS,
 };
 
-const SEED_VERSION: u32 = 3;
+const SEED_VERSION: u32 = 4;
 
 /// Title and description of the sample share, from `samples/sample.json` when present.
 #[derive(serde::Deserialize)]
@@ -74,9 +74,10 @@ pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
         ingest.ingest_tar_gz(&bytes).map_err(|e| e.to_string())?;
     }
 
-    let packed = ingest
+    let mut packed = ingest
         .pack("2026-10-14T16:00:00Z")
         .map_err(|e| e.to_string())?;
+    packed.owner_bundle_json = add_sample_reports(&samples_dir, &packed.owner_bundle_json)?;
 
     let meta = sample_meta(state);
     let (sid, _ctrl) = state.create_share(true, None)?;
@@ -84,7 +85,7 @@ pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
 
     let mut all_allowed_files = Vec::new();
     {
-        let mut conn = conn_arc.lock().unwrap();
+        let conn = conn_arc.lock().unwrap();
         let _ = conn.execute_batch("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;");
         let owner_key = random_bytes::<32>().map_err(|e| e.to_string())?;
         let owner_jwe = encrypt_bundle_jwe(packed.owner_bundle_json.as_bytes(), &owner_key)
@@ -95,15 +96,10 @@ pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
 
+        drop(conn);
         for sf in &packed.series_files {
-            write_series_file_to_db(
-                &mut conn,
-                &sf.file_id,
-                &sf.ciphertext,
-                // The server's own sample is not subject to per-share upload quotas.
-                u64::MAX,
-                usize::MAX,
-            )?;
+            // The server's own sample is not subject to upload quotas.
+            store_series_file(state, &sid, &sf.file_id, &sf.ciphertext)?;
             all_allowed_files.push(sf.file_id.clone());
         }
     }
@@ -287,4 +283,49 @@ fn insert_seeded_link(
     }
     state.register_link_in_catalog(sid, lid)?;
     Ok(())
+}
+
+/// Adds the DiagnosticReports in `samples/reports.json` (`[{ studyInstanceUid, report }]`, written by
+/// deploy/sample-reports.ts) to the owner Bundle, each pointed at its ImagingStudy and the Bundle's Patient.
+fn add_sample_reports(samples_dir: &std::path::Path, bundle_json: &str) -> Result<String, String> {
+    let Ok(text) = std::fs::read_to_string(samples_dir.join("reports.json")) else {
+        return Ok(bundle_json.to_string());
+    };
+    let reports: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| format!("reports.json: {e}"))?;
+    let mut bundle: serde_json::Value = serde_json::from_str(bundle_json).map_err(|e| e.to_string())?;
+    let entries = bundle["entry"].as_array().cloned().unwrap_or_default();
+    let patient_url = entries
+        .iter()
+        .find(|e| e["resource"]["resourceType"] == "Patient")
+        .and_then(|e| e["fullUrl"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    // The packed ImagingStudy for a Study Instance UID: its fullUrl.
+    let study_url = |uid: &str| {
+        let want = format!("urn:oid:{uid}");
+        entries.iter().find_map(|e| {
+            let r = &e["resource"];
+            let hit = r["resourceType"] == "ImagingStudy"
+                && r["identifier"].as_array().is_some_and(|ids| ids.iter().any(|i| i["value"] == want.as_str()));
+            hit.then(|| e["fullUrl"].as_str().map(String::from)).flatten()
+        })
+    };
+    let mut added = Vec::new();
+    for (n, item) in reports.iter().enumerate() {
+        let Some(uid) = item["studyInstanceUid"].as_str() else { continue };
+        let Some(url) = study_url(uid) else { continue };
+        let mut r = item["report"].clone();
+        r["id"] = serde_json::json!(format!("report-{}", n + 1));
+        r["subject"] = serde_json::json!({ "reference": patient_url });
+        // Points at the packed ImagingStudy in this Bundle, and names the study by UID.
+        r["imagingStudy"] = serde_json::json!([{
+            "reference": url,
+            "identifier": { "system": "urn:dicom:uid", "value": format!("urn:oid:{uid}") },
+        }]);
+        added.push(serde_json::json!({ "fullUrl": shl_dicom_core::bundle::random_urn_uuid(), "resource": r }));
+    }
+    if let Some(arr) = bundle["entry"].as_array_mut() {
+        arr.extend(added);
+    }
+    serde_json::to_string(&bundle).map_err(|e| e.to_string())
 }

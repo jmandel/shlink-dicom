@@ -106,6 +106,12 @@ Related docs:
 
 ## Decisions pending (ask Josh)
 
+- **PROPOSAL §8, DiagnosticReport** (Share agent's suggestion, not yet written into the spec):
+  - It refers to its ImagingStudy in the same Bundle via imagingStudy.reference (the entry fullUrl), and SHOULD also give identifier urn:dicom:uid.
+  - presentedForm attachments are inline data; url must not point at the source system.
+  - **Open:** large attachments as encrypted files, like series files?
+- **F changes the server storage** (series files on disk under shares/{sid}/). Existing data dirs become unreadable, so deploys need a fresh data dir. There are no users yet.
+
 - (none open)
 
 Resolved 15 Oct:
@@ -121,6 +127,8 @@ Resolved 15 Oct:
   - **D, slides:** adcc54c6231290ab4. Owns web/core/wsi*, web/view/wsi-*.
   - **E, video:** new agent aa651d8c980d68b5e. Owns web/core/video* and a new codecs/ demux crate.
   - **F, scale:** Share agent ac9206ae1a4d9228a. First the share-checks cleanup and a refresh of the local :3333 sample, then F. Owns crates/, web/share/, deploy/.
+  - **D is done** (wsi 144/144, verified). Its commit is held until B/C's view.ts work is stable, then they're committed together.
+  - **Blog:** pi is drafting docs/blog/DRAFT.md from both journals and the outline (watcher b4vsexp24). Codex makes the illustrations; the header is docs/blog/images/header.png.
   - view.ts is shared by B/C, D and E: small hooks only. The coordinator commits per wave with an explicit pathspec.
 
 - **15 Oct, about 11:50:**

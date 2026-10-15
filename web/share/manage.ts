@@ -168,12 +168,8 @@ function refreshStatus() {
 }
 
 function linkStudies(l: LinkResource): StudyEntry[] {
-  const out: StudyEntry[] = [];
-  for (const f of l.allowedFiles) {
-    const st = fileStudy.get(f.replace(/\.bin$/, ""));
-    if (st && !out.includes(st)) out.push(st);
-  }
-  return out;
+  const files = new Set(l.allowedFiles.map((f) => f.replace(/\.bin$/, "")));
+  return index.studies.filter((st) => st.series.some((se) => files.has(se.fileId)));
 }
 
 function linkState(l: LinkResource): { text: string; cls: string } {

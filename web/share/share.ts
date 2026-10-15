@@ -11,14 +11,18 @@ import { PasscodeError, LinkError, LinkResolver } from "../core/resolver";
 import { getDecoderPool } from "../core/images";
 import { drawThumbnail } from "../core/render";
 import {
-  Collection, encodingSummary, plainStudyTitle, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
+  Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
-import { buildBundle, encryptSeries, planSeriesFiles, subsetBundle, type PackedSeries } from "./lib/pack";
-import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, lacksOffsetTable } from "./lib/offset-tables";
+import { buildBundle, ciphertextSize, planSeriesFiles, subsetBundle, type PackedSeries } from "./lib/pack";
+import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
+import { clearJob, loadJob, saveJob, uploadSeries, type UploadJob } from "./lib/upload";
+import { clearStaging, openStager, type Stager } from "./lib/stage";
+import { parseStudyIndex } from "../core/bundle";
 import {
-  ApiError, ShareApi, manageUrl, publishLinkBundle, saveShare, savedShares, shlinkFor, type LinkResource,
+  ApiError, ShareApi, manageUrl, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor, type LinkResource,
 } from "./lib/api";
 import { callbackUrl, defaultPortal, finishPortalLaunch, loadFiles, loadLink, loadPortal, startPortalLaunch, type Progress } from "./lib/sources";
+import type { SeriesModel } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, ICONS, expiryFieldset, expiryFrom, dateOnly, SERVER_MAX_DAYS } from "./lib/ui";
 
 const STEP_NAMES = ["Add imaging", "Review", "Recipient", "Upload", "Send"];
@@ -74,7 +78,7 @@ const CHOICES = [
   { id: "files", icon: ICONS.files, title: "Files or a folder", sub: "DICOM files, a CD, or a ZIP or TGZ archive" },
   { id: "portal", icon: ICONS.portal, title: "Connect to a patient portal", sub: "Sign in to a portal that supports SMART Imaging Access" },
   { id: "link", icon: ICONS.link, title: "Paste a link from my provider", sub: "Pass on some or all of the studies in a SMART Health Link" },
-  { id: "sample", icon: ICONS.sample, title: "Try with sample imaging", sub: "A brain MRI and wrist X-rays, published by their owner" },
+  { id: "sample", icon: ICONS.sample, title: "Try with sample imaging", sub: "A de-identified brain MRI, CT and X-rays, and a pathology slide" },
 ] as const;
 
 function renderChoices() {
@@ -98,12 +102,13 @@ function renderChoices() {
 
 function choose(id: string) {
   sourceKind = id as typeof sourceKind;
-  if (id === "sample") return runLoad("Opening the sample", async (c, on, sig) => {
+  if (id === "sample") return runLoad("Opening the sample", async (c, _st, on) => {
     const samples = await fetchSampleLinks(cfg);
     const pub = samples.find((s) => !s.passcodeHint && s.shlink);
     if (!pub) throw new Error("The sample isn't available from this server right now.");
     const share = await openShare(pub.shlink, { recipient: "Share page (sample)" });
-    await loadLink(share, c, on, sig);
+    sourceInfo = { kind: "sample", link: pub.shlink };
+    await loadLink(share, c, on);
   });
   addPanel(id);
 }
@@ -156,7 +161,8 @@ async function droppedFiles(dt: DataTransfer): Promise<File[]> {
 
 function startFiles(files: File[]) {
   sourceKind = "files";
-  runLoad("Reading your imaging", (c, on, sig) => loadFiles(files, c, on, sig));
+  sourceInfo = { kind: "files", files: files.map((f) => ({ name: (f as any).webkitRelativePath || f.name, size: f.size })) };
+  runLoad("Reading your imaging", (c, st, on, sig) => loadFiles(files, c, st, on, sig));
 }
 
 // Portal
@@ -190,7 +196,8 @@ async function resumePortal() {
   if (!sess) return false;
   history.replaceState(null, "", shareUrl());
   sourceKind = "portal";
-  runLoad("Downloading from the portal", (c, on, sig) => loadPortal(sess, c, on, sig));
+  sourceInfo = { kind: "portal" };
+  runLoad("Downloading from the portal", (c, st, on, sig) => loadPortal(sess, c, st, on, sig));
   return true;
 }
 
@@ -229,7 +236,8 @@ $("link-form").addEventListener("submit", async (e) => {
     const share = await openShare(linkResolver, { passcode, recipient: "Share page (re-share)" });
     btn.disabled = false;
     sourceKind = "link";
-    runLoad("Downloading from the link", (c, on, sig) => loadLink(share, c, on, sig));
+    sourceInfo = { kind: "link", link };
+    runLoad("Opening the link", (c, _st, on) => loadLink(share, c, on));
   } catch (x) {
     btn.disabled = false;
     if (x instanceof PasscodeError) {
@@ -252,7 +260,11 @@ $("link-form").addEventListener("submit", async (e) => {
 });
 
 // Loading (all sources)
-type Loader = (c: Collection, on: (c: Collection, p: Progress) => void, signal: AbortSignal) => Promise<void>;
+type Loader = (c: Collection, stager: Stager, on: (c: Collection, p: Progress) => void, signal: AbortSignal) => Promise<void>;
+/** Where this visit stages decompressed and downloaded files, and the source's description for a resumed upload. */
+let stager: Stager | null = null;
+let sourceInfo: UploadJob["source"] = { kind: "files" };
+let offsetsLacking = false;
 
 function foundLine(c: Collection): string {
   const studies = c.studies.size;
@@ -280,8 +292,13 @@ async function runLoad(title: string, fn: Loader) {
   $("found").textContent = foundLine(col);
   $("doing").textContent = "";
   try {
-    await fn(col, on, ctl.signal);
+    await clearStaging(loadJob()?.source.stage ?? null);
+    stager = await openStager();
+    await fn(col, stager, on, ctl.signal);
     if (ctl.signal.aborted) return;
+    sourceInfo.stage = stager.onDisk ? stager.session : undefined;
+    $("doing").textContent = "Checking for frame offset tables";
+    offsetsLacking = await anyLacksOffsetTable(col.list().flatMap((s) => s.series));
     $("found").textContent = foundLine(col);
     if (!col.studies.size) throw new Error(col.skipped.length ? `No DICOM images were found in ${plural(col.skipped.length, "file")}.` : "No imaging was found.");
     renderReview();
@@ -318,7 +335,7 @@ function renderReview() {
   ].filter(Boolean).join(" · ");
   updateTotal();
   // Multi-frame files without an offset table: offer to add one (on by default).
-  const lacking = studies.some((st) => st.series.some((se) => se.instances.some(lacksOffsetTable)));
+  const lacking = offsetsLacking;
   $("rv-offsets-row").classList.toggle("hidden", !lacking);
   if (lacking && !offsetsTouched) $<HTMLInputElement>("rv-offsets").checked = ADD_OFFSET_TABLES_DEFAULT;
   drawThumbs(studies, ++thumbGen);
@@ -348,9 +365,7 @@ function studyCard(st: StudyModel): HTMLElement {
         h("figure", { class: "thumb", role: "listitem", title: seriesName(se) }, h("canvas", { width: 144, height: 144, "data-uid": se.uid }), h("figcaption", null, seriesName(se))),
       ),
     ),
-    st.reports.length
-      ? h("p", { class: "report-line" }, `Report included: ${st.reports.map((r) => r.code?.text ?? r.code?.coding?.[0]?.display ?? "imaging report").join(", ")}`)
-      : null,
+    reportsBox(st),
     h("p", { class: "tech" }, `${plural(c.series, "series", "series")} · ${plural(c.images, "image")} · ${formatBytes(c.bytes)} · ${encodingSummary(st)}${st.description ? ` · “${st.description}”` : ""}`),
   );
   toggle.addEventListener("change", () => {
@@ -362,12 +377,57 @@ function studyCard(st: StudyModel): HTMLElement {
   return card;
 }
 
+function switchRow(checked: boolean, label: string, onChange: (on: boolean) => void): HTMLLabelElement {
+  const input = h("input", { type: "checkbox", checked, "aria-label": label }) as HTMLInputElement;
+  const text = h("span", { class: "sw-text" }, checked ? "Included" : "Left out");
+  input.addEventListener("change", () => {
+    text.textContent = input.checked ? "Included" : "Left out";
+    onChange(input.checked);
+  });
+  return h("label", { class: "switch-label" }, h("span", { class: "switch" }, input, h("span", { class: "track", "aria-hidden": "true" })), text);
+}
+
+function reportsBox(st: StudyModel): HTMLElement {
+  const box = h("div", { class: "reports" });
+  const render = () => {
+    const file = h("input", { type: "file", class: "hidden", accept: "application/pdf,text/plain,.pdf,.txt" }) as HTMLInputElement;
+    file.addEventListener("change", async () => {
+      const f = file.files?.[0];
+      if (!f) return;
+      st.reports.push({ resource: await reportFromFile(f), include: true, from: "attached" });
+      render();
+    });
+    box.replaceChildren(
+      ...st.reports.map((r) => {
+        const forms = (r.resource.presentedForm ?? []).map((a: any) => `${/pdf/.test(a.contentType) ? "PDF" : "text"} ${formatBytes(a.size ?? Math.floor((a.data?.length ?? 0) * 0.75))}`);
+        const row = h(
+          "div",
+          { class: "report-row" + (r.include ? "" : " excluded") },
+          h("div", { class: "report-name" }, h("span", { class: "report-line" }, `Report: ${reportTitle(r.resource)}`), h("span", { class: "tech" }, [r.from === "attached" ? "attached by you" : `from the ${r.from}`, ...forms].join(" · "))),
+          switchRow(r.include, `Include report ${reportTitle(r.resource)}`, (on) => {
+            r.include = on;
+            row.classList.toggle("excluded", !on);
+          }),
+        );
+        return row;
+      }),
+      h("button", { class: "btn btn-ghost attach", type: "button", onclick: () => file.click() }, "Attach a report (PDF or text)"),
+      file,
+    );
+  };
+  render();
+  return box;
+}
+
 function updateTotal() {
   const inc = col.list().filter((s) => s.include);
   const bytes = inc.reduce((a, s) => a + studyCounts(s).bytes, 0);
   $<HTMLButtonElement>("rv-next").disabled = !inc.length;
   $("rv-total").textContent = inc.length ? `Sharing ${plural(inc.length, "study", "studies")} · ${formatBytes(bytes)}` : "Include at least one study to continue.";
 }
+
+/** Largest instance read whole for a thumbnail. */
+const THUMB_MAX = 64 << 20;
 
 async function drawThumbs(studies: StudyModel[], gen: number) {
   let pool;
@@ -376,25 +436,36 @@ async function drawThumbs(studies: StudyModel[], gen: number) {
   } catch {
     return;
   }
-  const jobs: Promise<void>[] = [];
+  const todo: (() => Promise<void>)[] = [];
   for (const st of studies) {
     for (const se of st.series) {
-      const inst = se.instances[Math.floor(se.instances.length / 2)];
+      // The middle instance, or else the smallest that can be read whole.
+      const mid = se.instances[Math.floor(se.instances.length / 2)];
+      const inst = mid && mid.src.size <= THUMB_MAX ? mid : [...se.instances].sort((a, b) => a.src.size - b.src.size).find((i) => i.src.size <= THUMB_MAX);
       const canvas = document.querySelector<HTMLCanvasElement>(`canvas[data-uid="${CSS.escape(se.uid)}"]`);
-      if (!canvas || !inst) continue;
-      jobs.push(
-        pool
-          .decode(inst.bytes, { copy: true, scale: 2, priority: 2 })
-          .then((img) => {
-            if (gen !== thumbGen) return;
-            drawThumbnail(canvas, img);
-            canvas.classList.add("drawn");
-          })
-          .catch(() => canvas.classList.add("failed")),
-      );
+      if (!canvas) continue;
+      if (!inst) {
+        canvas.classList.add("failed");
+        continue;
+      }
+      todo.push(async () => {
+        if (gen !== thumbGen) return;
+        try {
+          const bytes = await inst.src.read(0, inst.src.size);
+          const img = await pool.decode(bytes, { copy: true, scale: 2, priority: 2 });
+          if (gen !== thumbGen) return;
+          drawThumbnail(canvas, img);
+          canvas.classList.add("drawn");
+        } catch {
+          canvas.classList.add("failed");
+        }
+      });
     }
   }
-  await Promise.all(jobs);
+  // A few at a time, so only a few instances are in memory at once.
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (let job = todo.shift(); job; job = todo.shift()) await job();
+  }));
   if (gen === thumbGen) document.body.dataset.thumbs = "done";
 }
 
@@ -413,93 +484,192 @@ $("who-form").addEventListener("submit", (e) => {
 function setUploadError(msg: string | null) {
   $("up-error").classList.toggle("hidden", !msg);
   $("up-error-text").textContent = msg ?? "";
-  $("up-title").textContent = msg ? "The upload did not finish" : "Encrypting and uploading";
+  $("up-title").textContent = msg ? "The upload stopped" : "Encrypting and uploading";
 }
-$("up-retry").addEventListener("click", () => upload());
+$("up-retry").addEventListener("click", () => {
+  if (pending) runUpload(pending);
+  else upload();
+});
+
+/** An upload under way: what it needs to continue. */
+interface Pending {
+  job: UploadJob;
+  api: ShareApi;
+  owner: any;
+  packed: PackedSeries[];
+}
+let pending: Pending | null = null;
 
 async function upload() {
   show(4);
   setUploadError(null);
   const form = $("who-form");
-  const recipient = $<HTMLInputElement>("in-recipient").value.trim() || null;
-  const passcode = $<HTMLInputElement>("in-pass").value;
-  const allowUpdates = $<HTMLInputElement>("in-updates").checked;
-  const exp = expiryFrom(form, "expiry");
-  const studies = col.list().filter((s) => s.include);
-  if (!$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked) {
-    await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
-      $("up-tech").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
-    });
-  }
-  const packed = planSeriesFiles(studies);
-  const totalCt = packed.reduce((a, p) => a + p.plaintextLength + 16 * p.records, 0);
-  const totalRecords = packed.reduce((a, p) => a + p.records, 0);
-  let encrypted = 0, doneBytes = 0, doneRecords = 0, curBytes = 0;
-  const log = $("up-log");
-  log.replaceChildren();
-  const paint = () => {
-    const up = doneBytes + curBytes;
-    $<HTMLElement>("up-bar").style.width = `${((up / totalCt) * 100).toFixed(1)}%`;
-    $("up-main").textContent = `Uploaded ${formatBytes(up)} of ${formatBytes(totalCt)}`;
-    const recs = Math.min(totalRecords, doneRecords + Math.floor(curBytes / 65536));
-    $("up-tech").textContent = `Encrypting ${plural(packed.length, "series", "series")} on this device: ${encrypted} done · ${recs} of ${totalRecords} records uploaded`;
+  const job: Omit<UploadJob, "sid" | "token" | "ownerKey" | "title" | "startedAt"> = {
+    apiBase: cfg.apiBase,
+    source: sourceInfo,
+    addOffsetTables: !$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked,
+    recipient: $<HTMLInputElement>("in-recipient").value.trim() || null,
+    passcode: $<HTMLInputElement>("in-pass").value,
+    longLived: $<HTMLInputElement>("in-updates").checked,
+    exp: expiryFrom(form, "expiry"),
   };
-  paint();
-  const ownerKey = randomKeyB64();
-  let api: ShareApi | null = null;
+  const studies = col.list().filter((s) => s.include);
+  $("up-log").replaceChildren();
   try {
-    const anon = new ShareApi(cfg.apiBase);
-    const created = await anon.createShare(exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400);
-    api = new ShareApi(cfg.apiBase, { sid: created.share.id, token: created.controlToken });
-    // Encrypt the next series while the current one uploads.
-    const enc = (p: PackedSeries) => encryptSeries(p).then((ct) => {
-      encrypted++;
-      paint();
-      return ct;
-    });
-    let next = packed.length ? enc(packed[0]) : null;
-    for (let i = 0; i < packed.length; i++) {
-      const p = packed[i];
-      const ct = await next!;
-      next = i + 1 < packed.length ? enc(packed[i + 1]) : null;
-      await api.putFile(p.fileId, ct, (loaded) => {
-        curBytes = loaded;
-        paint();
+    if (job.addOffsetTables) {
+      await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
+        $("up-tech").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
       });
-      curBytes = 0;
-      doneBytes += ct.length;
-      doneRecords += p.records;
-      log.prepend(h("li", null, `${seriesName(p.series)} → ${p.fileId.slice(0, 6)}….bin · ${formatBytes(ct.length)} · ${plural(p.records, "record")}`));
-      paint();
     }
-    $("up-tech").textContent = `Encrypted ${plural(packed.length, "series", "series")} · ${totalRecords} records uploaded · creating the link`;
+    const packed = planSeriesFiles(studies);
     const owner = buildBundle(col, packed);
+    const ownerKey = randomKeyB64();
+    const created = await new ShareApi(cfg.apiBase).createShare(job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400);
+    const api = new ShareApi(cfg.apiBase, { sid: created.share.id, token: created.controlToken });
+    // The owner Bundle first: with the manage credential it is all a reload needs to continue.
     await api.putOwner(await encryptJwe(utf8(JSON.stringify(owner)), ownerKey));
-    const studyIds = owner.entry.filter((e: any) => e.resource.resourceType === "ImagingStudy").map((e: any) => e.resource.id);
-    const { bundle, allowedFiles } = subsetBundle(owner, studyIds);
-    let link = await api.createLink({ label: recipient, passcode, exp, longLived: allowUpdates, allowedFiles });
-    link = await publishLinkBundle(api, ownerKey, link.id, bundle);
-    const cred = { sid: created.share.id, token: created.controlToken, ownerKey };
-    const shlink = await shlinkFor(link, ownerKey, cfg.viewerPrefix);
-    const mUrl = manageUrl(manageBase(), cred);
     const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
-    const saved = saveShare({ ...cred, title: `${titles.join(", ")}${recipient ? ` · for ${recipient}` : ""}`, createdAt: Math.floor(Date.now() / 1000), apiBase: cfg.apiBase });
-    result = { shlink, manage: mUrl, link, studies: studies.length };
-    renderDone(saved, !!passcode, recipient);
-    show(5);
+    const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000) };
+    saveJob(full);
+    await runUpload({ job: full, api, owner, packed });
   } catch (x) {
-    console.warn(x);
-    if (api) api.deleteShare().catch(() => {});
-    const e = x as ApiError;
-    setUploadError(
-      e.status === 413
-        ? "The server refused the files: this share is larger than it accepts."
-        : e.status === 429
-          ? "The server has too many shares right now. Try again later."
-          : `${e.message || "Something went wrong."} Nothing was kept on the server.`,
-    );
+    uploadFailed(x);
   }
 }
+
+function uploadFailed(x: unknown) {
+  console.warn(x);
+  const e = x as ApiError;
+  setUploadError(
+    e.status === 413
+      ? `The server refused the files: ${/QUOTA/.test(e.message) ? "this share is larger than it accepts" : e.message}.`
+      : e.status === 429
+        ? "The server has too many shares right now. Try again later."
+        : `${e.message || "Something went wrong."}${pending ? " What reached the server is kept: Try again continues from there." : ""}`,
+  );
+}
+
+/** Uploads what the server doesn't have yet, then makes the link. */
+async function runUpload(p: Pending) {
+  pending = p;
+  show(4);
+  setUploadError(null);
+  const { job, api, owner, packed } = p;
+  const totalRecords = packed.reduce((a, x) => a + x.records, 0);
+  const paint = (sent: number, total: number, done: number) => {
+    $<HTMLElement>("up-bar").style.width = `${((sent / total) * 100).toFixed(1)}%`;
+    $("up-main").textContent = `Uploaded ${formatBytes(sent)} of ${formatBytes(total)}`;
+    $("up-tech").textContent = `Encrypting ${plural(packed.length, "series", "series")} on this device: ${done} done · ${Math.min(totalRecords, Math.floor(sent / 65536))} of ${totalRecords} records uploaded`;
+  };
+  try {
+    await uploadSeries(api, packed, (u) => {
+      paint(u.sent, u.total, u.seriesDone);
+      if (u.finished) $("up-log").prepend(h("li", null, `${seriesName(u.finished.series)} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
+    });
+    $("up-tech").textContent = `Encrypted ${plural(packed.length, "series", "series")} · ${totalRecords} records uploaded · making the link`;
+    const studyIds = owner.entry.filter((e: any) => e.resource.resourceType === "ImagingStudy").map((e: any) => e.resource.id);
+    const { bundle, allowedFiles } = subsetBundle(owner, studyIds);
+    let link = (await api.getShare()).links[0];
+    link ??= await api.createLink({ label: job.recipient, passcode: job.passcode, exp: job.exp, longLived: job.longLived, allowedFiles });
+    link = await publishLinkBundle(api, job.ownerKey, link.id, bundle);
+    const cred = { sid: job.sid, token: job.token, ownerKey: job.ownerKey };
+    const shlink = await shlinkFor(link, job.ownerKey, cfg.viewerPrefix);
+    const saved = saveShare({ ...cred, title: `${job.title}${job.recipient ? ` · for ${job.recipient}` : ""}`, createdAt: job.startedAt, apiBase: cfg.apiBase });
+    clearJob();
+    pending = null;
+    await clearStaging(null);
+    result = { shlink, manage: manageUrl(manageBase(), cred), link, studies: studyIds.length };
+    renderDone(saved, !!job.passcode, job.recipient);
+    show(5);
+  } catch (x) {
+    uploadFailed(x);
+  }
+}
+
+// ------------------------------------------------------------ continuing after a reload
+
+/** Rebuilds the series plan of a saved job from its owner Bundle and the re-opened source. */
+function planFromOwner(owner: any, c: Collection): PackedSeries[] {
+  const byUid = new Map<string, { inst: any; study: StudyModel; series: SeriesModel }>();
+  for (const st of c.list()) for (const se of st.series) for (const inst of se.instances) byUid.set(inst.h.sopInstanceUid, { inst, study: st, series: se });
+  const idx = parseStudyIndex(owner);
+  const out: PackedSeries[] = [];
+  for (const st of idx.studies) {
+    for (const se of st.series) {
+      const instances = se.instances.map((i) => {
+        const hit = byUid.get(i.uid);
+        if (!hit) throw new Error("Some of the files are not the ones this upload started with.");
+        if (hit.inst.src.size !== i.length) throw new Error("Some of the files differ from the ones this upload started with.");
+        return hit.inst;
+      });
+      const first = byUid.get(se.instances[0].uid)!;
+      out.push({
+        study: first.study,
+        series: { ...first.series, instances },
+        fileId: se.fileId,
+        key: se.key,
+        plaintextLength: se.plaintextLength,
+        records: se.recordCount,
+      });
+    }
+  }
+  return out;
+}
+
+async function resumeJob(job: UploadJob, files?: File[]) {
+  const api = new ShareApi(job.apiBase, { sid: job.sid, token: job.token });
+  show(4);
+  setUploadError(null);
+  $("up-tech").textContent = "Continuing the upload";
+  try {
+    const owner = await readOwnerBundle(api, job.ownerKey);
+    const c = new Collection();
+    const st = await openStager(job.source.stage);
+    const on = () => {};
+    if (job.source.kind === "files") await loadFiles(files ?? [], c, st, on);
+    else if (job.source.kind === "portal") {
+      for (const [k, src] of (await st.list()).entries()) await c.add(`staged/${k}`, src);
+      c.finish();
+    } else await loadLink(await openShare(job.source.link!, { recipient: "Share page (re-share)" }), c, on);
+    if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
+    await runUpload({ job, api, owner, packed: planFromOwner(owner, c) });
+  } catch (x) {
+    pending = null;
+    uploadFailed(x);
+  }
+}
+
+function renderResume(job: UploadJob) {
+  $("resume-title").textContent = job.title;
+  const needFiles = job.source.kind === "files";
+  $("resume-text").textContent = needFiles
+    ? `Choose the same ${job.source.files && job.source.files.length > 1 ? "files or folder" : "file"} again to continue. What reached the server is kept.`
+    : "What reached the server is kept. Continue to send the rest.";
+  $("resume-continue").textContent = needFiles ? "Choose the files" : "Continue";
+  $("resume").classList.remove("hidden");
+}
+$("resume-continue").addEventListener("click", () => {
+  const job = loadJob();
+  if (!job) return;
+  if (job.source.kind === "files") $<HTMLInputElement>(job.source.files?.some((f) => f.name.includes("/")) ? "in-resume-folder" : "in-resume").click();
+  else resumeJob(job);
+});
+for (const id of ["in-resume", "in-resume-folder"]) {
+  $<HTMLInputElement>(id).addEventListener("change", (e) => {
+    const input = e.target as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    input.value = "";
+    const job = loadJob();
+    if (job && files.length) resumeJob(job, files);
+  });
+}
+$("resume-discard").addEventListener("click", async () => {
+  const job = loadJob();
+  if (job) await new ShareApi(job.apiBase, { sid: job.sid, token: job.token }).deleteShare().catch(() => {});
+  clearJob();
+  await clearStaging(null);
+  $("resume").classList.add("hidden");
+});
 
 // ---------------------------------------------------------------------------- 5. hand over
 
@@ -546,6 +716,9 @@ $("again").addEventListener("click", () => {
   $<HTMLAnchorElement>("top-manage").href = manageBase();
   renderChoices();
   show(1, "choose");
+  const job = loadJob();
+  if (job && job.apiBase === cfg.apiBase) renderResume(job);
+  else await clearStaging(null);
   await resumePortal();
   getDecoderPool().catch(() => {});
 })();

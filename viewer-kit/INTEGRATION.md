@@ -7,11 +7,12 @@ viewer-kit is the browser's decoding and rendering layer. `web/core` (`images.ts
 
 ## What to ship
 
-Build it with `node viewer-kit/scripts/build.mjs`. That builds the wasm into `viewer-kit/dist/`. `web/build.ts` bundles the worker and the API and copies the wasm into `dist/web/assets/`.
+Build it with `node viewer-kit/scripts/build.mjs`. That builds both wasm modules into `viewer-kit/dist/`. `web/build.ts` bundles the worker and the API and copies the wasm into `dist/web/assets/`; both `.wasm` files must sit side by side there.
 
 | File | What it is |
 |---|---|
-| `shl_dicom_decode.wasm` | 1087 KiB, 347 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm` |
+| `shl_dicom_decode.wasm` | 1209 KiB, 387 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm`, without JPEG XL |
+| `shl_dicom_decode_jxl.wasm` | 2714 KiB, 912 KiB gzip. The same decoder with JPEG XL (jxl-oxide, `--features jpegxl`). Fetched only when a JPEG XL instance arrives; see [JPEG XL](#jpeg-xl) |
 | `decoder-worker.js` | the worker script; must be a separate file |
 | the API | `viewer-kit/src/index.ts`; `web/core` imports it and bun bundles it |
 
@@ -26,13 +27,15 @@ import { DecoderPool, Priority, FrameCache, createRenderer, frameOf, defaultWind
 
 const pool = await DecoderPool.create({ wasm: "shl_dicom_decode.wasm", workerUrl: "decoder-worker.js" });
 // workers: navigator.hardwareConcurrency - 1, capped at 8; override with { workers: n }
+// jxlWasm: the JPEG XL module; default shl_dicom_decode_jxl.wasm next to `wasm` (see "JPEG XL")
 
 const img = await pool.decode(bytes, { priority: Priority.Visible, key, signal });
 const img2 = await pool.decode(ciphertext, { encrypted: { key: cryptoKey, firstRecord, seriesPlaintextLength, window } });
 const plain = await pool.decrypt(ciphertext, { key: cryptoKey, firstRecord, seriesPlaintextLength, window });
 // img: DecodedImage = canonical pixels (CONTRACT.md) + rows, columns, frames, samplesPerPixel,
-//      bitsAllocated, bitsStored, pixelRepresentation, photometric, rescaleSlope/Intercept,
-//      windowCenter/Width (first value, or null), minValue/maxValue, frameOffsets, palette, decodeMs
+//      bitsAllocated, bitsStored, pixelRepresentation, float, photometric, rescaleSlope/Intercept,
+//      windowCenter/Width (first value, or null), minValue/maxValue, realWorldValueMapping,
+//      frameOffsets, palette, decodeMs
 
 const all = await pool.decodeFrames(bytes, { priority, signal, onChunk });  // multi-frame, split over workers
 
@@ -54,7 +57,7 @@ renderer.setView({ windowCenter, windowWidth, zoom, panX, panY, interpolation, i
 | Error | When | What `web/` should do |
 |---|---|---|
 | `InvalidDicomError` | decoder exit 2: the file is malformed | show `e.decoderMessage` with the slice |
-| `UnsupportedDicomError` | exit 3: for example video syntaxes, float pixel data, an image too large for wasm32 | same |
+| `UnsupportedDicomError` | exit 3: for example video syntaxes, JPIP, an image too large for wasm32 | same |
 | `DecoderCrashError` | the wasm trapped | the worker has already restarted itself; report it as a bug |
 | `RecordAuthenticationError` | an `encrypted` input or `decrypt` job: a record failed its AES-GCM check, or its length is wrong for its place | refuse the image; nothing from that record reached the decoder |
 
@@ -78,6 +81,26 @@ const bytes = await pool.decrypt(ciphertext, encrypted);                        
 - **Copies.** The ciphertext is transferred to the worker; each record's plaintext is copied once, into a buffer of exactly the window's size, which goes to the decoder.
 - **`decodeFrames` with `encrypted`** decrypts on one worker first, then shares out the plaintext.
 - `record-decrypt.ts` also runs on the main thread or in Bun (`decryptRecords`), which `web/core`'s `WebCryptoDecryptor` uses where a page wants plaintext itself.
+
+## JPEG XL
+
+JPEG XL (.110–.112) more than doubles the decoder, so it lives in a second module, `shl_dicom_decode_jxl.wasm`, and callers don't change:
+
+- **Lazy.** A worker reads the transfer syntax from the file meta before decoding. For JPEG XL it asks the pool for the second module; the pool fetches and compiles it once, the first time any worker asks, and sends the compiled module to each worker that needs it. Other instances never load it.
+- **Where it comes from.** `PoolOptions.jxlWasm`: a URL or a compiled module. When it is left out and `wasm` is a URL, the pool uses `shl_dicom_decode_jxl.wasm` next to it; when `wasm` is a module, there is none. `jxlWasm: null` turns JPEG XL off.
+- **Without it,** a JPEG XL instance fails with `UnsupportedDicomError`, as does a failed fetch (which is retried on the next JPEG XL instance).
+- **Output.** Colour comes back as RGB. There is no reduced decode: `scale` decodes at full size and box-averages.
+- `test/pool.mjs` checks that the module is not fetched for other syntaxes, and that a JPEG XL instance decodes through it on two workers.
+
+## Float pixel data
+
+Parametric maps and other derived images may carry Float Pixel Data (f32) or Double Float Pixel Data (f64) instead of integers. The decode result says so:
+
+- **`img.float`** is true, `bitsAllocated` is 32 or 64, `pixelRepresentation` is 0 and `bitsStored` equals `bitsAllocated`.
+- **`pixels`** hold the stored values as little-endian f32 or f64; `frameOf` returns a `Float32Array` or `Float64Array` view. Values can be NaN or infinite.
+- **`minValue` / `maxValue`** cover the finite samples only (null if there are none). They are the natural default window when the file has none.
+- **`img.realWorldValueMapping`** is the first Real World Value Mapping item (top level, else the Shared Functional Groups, else Per-Frame item 0): `{ slope, intercept, label, units, unitsMeaning }`, where the real value is stored × slope + intercept in `units` (a UCUM code such as `mm2/s`). It is also set for integer images that carry one. Parametric maps usually store real values already (slope 1, intercept 0).
+- **Rendering:** the renderers take integer samples today. A float frame needs a float texture (WebGL2 `R32F`, or f64 converted to f32) and a window in real values; the CPU path can read the typed array directly.
 
 ## Rendering
 
@@ -120,10 +143,10 @@ Each decode needs its ciphertext fetched first. The pool's queue orders only dec
 - **Geometry.** One reduced pixel covers 2^s × 2^s original pixels. Anything measured in pixels, such as Pixel Spacing, overlays or annotations, must be scaled by 2^s.
 
 **What it costs:**
-- **JPEG baseline and extended** (`.50`, `.51`, the common lossy syntax) decode through the codec's own reduced decode (scaled IDCT). It does much less work: in one Chromium run, a 2048² colour image took 9.9 ms at 1/8 against 42.6 ms at full size.
+- **JPEG baseline and extended** (`.50`, `.51`, the common lossy syntax), and the retired progressive and arithmetic-coded DCT processes, decode through the codec's own reduced decode (scaled IDCT). It does much less work: in one Chromium run, a 2048² colour image took 9.9 ms at 1/8 against 42.6 ms at full size.
 - **JPEG 2000 and HTJ2K** (`.90`, `.91`, `.201`–`.203`) discard the finest wavelet resolution levels, so their code-blocks are never decoded. At 1/8, natively, a 2048² lossless 12-bit JPEG 2000 frame takes about 7 ms instead of 413 ms, and the HTJ2K version about 2 ms instead of 60 ms ([htj2k PERF.md](../codec-corpus/formats/htj2k/PERF.md#reduced-resolution-decode)). This is the case to use for whole-slide pyramids and large radiographs.
   - A frame these codecs cannot reduce falls back to the full decode and box average: too few levels, a non-zero image origin, unusual subsampling, or MIXED HTJ2K.
-- **Every other syntax** (JPEG lossless, JPEG-LS, RLE, native) is decoded at full size, then box-averaged in the worker. That saves transfer and cache memory but not decode time.
+- **Every other syntax** (JPEG lossless and hierarchical, JPEG-LS, JPEG XL, RLE, native, float) is decoded at full size, then box-averaged in the worker. That saves transfer and cache memory but not decode time.
 - **What the values are:** a wavelet reduction is a smoothed low-pass, not a box average, and it matches OpenJPEG's own reduced decode.
 - **Pixels.** At any scale, they match the native `shl_dicom_decode::decode_file_scaled` (`viewer-kit/test/scaled.ts`).
 - **PALETTE COLOR** images keep each block's top-left index, since averaging indices would be meaningless.
@@ -157,13 +180,6 @@ A full-size decode of the slice on screen can follow the thumbnail at `Priority.
 - **PALETTE COLOR images render in colour.** The decoder returns the palette as RGBA in `img.palette`; segmented palettes are not read. 16/32-bit RGB is scaled by Bits Stored.
 - **Only LINEAR is rendered.** `img.voiLutFunction` reports SIGMOID when the file asks for it, but it is not drawn that way. VOI LUT sequences and pixel aspect ratio are not applied.
 
-## Notes for the coordinator
+## Frame ranges
 
-`codecs/shl-dicom-decode-wasm` compiles `shl-dicom-decode/src/parse.rs` and `encaps.rs` into itself with `#[path]`, because they are private modules. This means:
-- the frame split is exactly `decode_file`'s;
-- no shared file was edited;
-- frame-range decoding works by re-wrapping the selected frame codestreams in a minimal Part 10 file and calling `decode_file` on it. All 150 multi-frame encapsulated corpus cases decode byte-identically this way.
-
-A cleaner long-term change would be for `shl-dicom-decode` to export these itself:
-- a `decode_frames(bytes, range)`;
-- the extra attributes: rescale, window and palette.
+`codecs/shl-dicom-decode-wasm` decodes a frame range with `shl_dicom_decode::decode_frames`: only the requested frames of an encapsulated instance are decoded, and native data is copied only for the range where its layout allows. The pixels are byte-identical to the same frames of a whole decode (`viewer-kit/test/verify-oracle.ts`, `codec-corpus/scripts/check_frames.py`). The crate compiles the decoder's `parse.rs` into itself with `#[path]` for the extra attributes (rescale, window, palette, Real World Value Mapping).

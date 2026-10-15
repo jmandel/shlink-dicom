@@ -52,6 +52,8 @@ export interface DecodeOptions {
    * rejects with RecordAuthenticationError and nothing is decoded.
    */
   encrypted?: EncryptedInput;
+  /** Also return the instance's bytes before Pixel Data (`img.header`), for parsing its attributes. */
+  header?: boolean;
   /**
    * Deduplication key (for example `${study}/${series}/${instance}`). A second decode() with the
    * same key while the first is queued or running returns the first promise; a higher priority
@@ -89,6 +91,13 @@ export interface PoolStats {
 export interface PoolOptions {
   /** URL of shl_dicom_decode.wasm, or an already compiled module. */
   wasm: string | URL | WebAssembly.Module;
+  /**
+   * The JPEG XL decoder module (shl_dicom_decode_jxl.wasm), fetched and compiled the first time
+   * a worker meets a JPEG XL instance (.110–.112), then shared by all workers. Default: that file
+   * next to `wasm` when `wasm` is a URL; none when it is a module. `null` turns JPEG XL off (such
+   * instances then fail with UnsupportedDicomError).
+   */
+  jxlWasm?: string | URL | WebAssembly.Module | null;
   /** URL of the bundled decoder-worker.js. */
   workerUrl: string | URL;
   /** Default: navigator.hardwareConcurrency - 1, at least 1, at most 8. */
@@ -108,6 +117,7 @@ interface Job {
   scale: number;
   key?: string;
   encrypted?: EncryptedInput;
+  header?: boolean;
   t0: number;
   resolve(v: any): void;
   reject(e: unknown): void;
@@ -134,12 +144,34 @@ export class DecoderPool {
   private nextId = 1;
   private completed = 0;
   private onStats?: (s: PoolStats) => void;
+  private jxlSource: string | URL | WebAssembly.Module | null = null;
+  private jxlModule: Promise<WebAssembly.Module> | null = null;
 
   private constructor() {}
+
+  /** The JPEG XL module, compiled once on first use. */
+  private loadJxl(): Promise<WebAssembly.Module> {
+    const src = this.jxlSource;
+    if (!src) return Promise.reject(new Error("no JPEG XL decoder module configured (PoolOptions.jxlWasm)"));
+    this.jxlModule ??= src instanceof WebAssembly.Module ? Promise.resolve(src) : WebAssembly.compileStreaming(fetch(src));
+    this.jxlModule.catch(() => (this.jxlModule = null)); // a failed fetch may be retried
+    return this.jxlModule;
+  }
+
+  /** A worker asks for the JPEG XL module: send it, or the reason it is unavailable. */
+  private sendJxl(worker: Worker) {
+    this.loadJxl().then(
+      (module) => worker.postMessage({ type: "jxl", module }),
+      (e) => worker.postMessage({ type: "jxl", error: String((e as Error)?.message ?? e) }),
+    );
+  }
 
   static async create(opts: PoolOptions): Promise<DecoderPool> {
     const pool = new DecoderPool();
     pool.onStats = opts.onStats;
+    pool.jxlSource = opts.jxlWasm !== undefined ? opts.jxlWasm
+      : opts.wasm instanceof WebAssembly.Module ? null
+      : new URL("shl_dicom_decode_jxl.wasm", new URL(opts.wasm, globalThis.location?.href));
     const module = opts.wasm instanceof WebAssembly.Module ? opts.wasm : await WebAssembly.compileStreaming(fetch(opts.wasm));
     const n = opts.workers ?? defaultWorkerCount();
     await Promise.all(
@@ -148,7 +180,7 @@ export class DecoderPool {
         const slot: Slot = { worker, job: null };
         worker.onmessage = (ev) => {
           if (ev.data?.type === "ready") {
-            worker.onmessage = (e) => pool.onResult(slot, e.data);
+            worker.onmessage = (e) => (e.data?.type === "need-jxl" ? pool.sendJxl(worker) : pool.onResult(slot, e.data));
             resolve();
           }
         };
@@ -282,6 +314,7 @@ export class DecoderPool {
       scale: opts.scale ?? 0,
       key: opts.key,
       encrypted: opts.encrypted,
+      header: opts.header,
       t0: performance.now(),
       settled: false,
     } as Job;
@@ -336,7 +369,7 @@ export class DecoderPool {
       slot.job = job;
       const { bytes } = job;
       job.bytes = new ArrayBuffer(0);
-      slot.worker.postMessage({ type: job.kind, id: job.id, bytes, first: job.first, count: job.count, scale: job.scale, encrypted: job.encrypted }, [bytes]);
+      slot.worker.postMessage({ type: job.kind, id: job.id, bytes, first: job.first, count: job.count, scale: job.scale, encrypted: job.encrypted, header: job.header }, [bytes]);
     }
     this.emit();
   }
@@ -349,7 +382,11 @@ export class DecoderPool {
       if (!m.ok) this.settle(job, null, m.auth ? new RecordAuthenticationError(m.auth.record, m.auth.reason) : decodeError(m.code, m.message));
       else if (job.kind === "probe") this.settle(job, m.probe);
       else if (job.kind === "decrypt") this.settle(job, new Uint8Array(m.plaintext));
-      else this.settle(job, toImage(m.info, m.pixels, m.lut, m.ms, performance.now() - job.t0));
+      else {
+        const img = toImage(m.info, m.pixels, m.lut, m.ms, performance.now() - job.t0);
+        if (m.header) img.header = new Uint8Array(m.header);
+        this.settle(job, img);
+      }
     }
     this.pump();
   }

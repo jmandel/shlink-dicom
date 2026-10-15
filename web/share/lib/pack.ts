@@ -1,12 +1,14 @@
 // Packing on the device (PROPOSAL.md §8, §9, §11.1): one random file id and one random 32-byte key
 // per series, the series' Part 10 files laid end to end and encrypted in 65,520-byte records with
 // AES-256-GCM (nonce = record index), and the FHIR Bundle that lists them.
-import { b64urlEncode } from "../../core/b64";
+import { b64urlDecode, b64urlEncode } from "../../core/b64";
+import { ConcatBytes } from "./bytes";
 import { EXT_LENGTH, EXT_SERIES_FILE, PROFILE_URL } from "../../core/bundle";
 import { randomKeyB64 } from "../../core/jwe";
 import { RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
-import { b64urlDecode } from "../../core/b64";
 import type { Collection, SeriesModel, StudyModel } from "./ingest";
+
+const ACSN = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0203", code: "ACSN" }] };
 
 export interface PackedSeries {
   study: StudyModel;
@@ -22,7 +24,7 @@ export function planSeriesFiles(studies: StudyModel[]): PackedSeries[] {
   const out: PackedSeries[] = [];
   for (const study of studies) {
     for (const series of study.series) {
-      const P = series.instances.reduce((a, i) => a + i.bytes.length, 0);
+      const P = series.instances.reduce((a, i) => a + i.src.size, 0);
       out.push({
         study,
         series,
@@ -36,32 +38,42 @@ export function planSeriesFiles(studies: StudyModel[]): PackedSeries[] {
   return out;
 }
 
-/** Encrypts one series file (§9.2). Returns the ciphertext: P + 16·n bytes. */
-export async function encryptSeries(p: PackedSeries, onRecord?: (done: number) => void): Promise<Uint8Array> {
+/** The series file's length: P + 16·n (§9.2). */
+export const ciphertextSize = (p: { plaintextLength: number; records: number }) => p.plaintextLength + TAG * p.records;
+
+/** Records per upload chunk: 8 MiB of ciphertext. */
+export const CHUNK_RECORDS = 128;
+
+/**
+ * Encrypts records [first, last) of a series file (§9.2), reading only their plaintext from the
+ * instances' byte sources. Returns that part of the ciphertext.
+ */
+export async function encryptRecords(p: PackedSeries, key: CryptoKey, first: number, last: number): Promise<Uint8Array> {
   const P = p.plaintextLength;
-  const plain = new Uint8Array(P);
-  let o = 0;
-  for (const inst of p.series.instances) {
-    plain.set(inst.bytes, o);
-    o += inst.bytes.length;
-  }
-  const n = p.records;
-  const out = new Uint8Array(P + TAG * n);
-  const key = await crypto.subtle.importKey("raw", b64urlDecode(p.key), "AES-GCM", false, ["encrypt"]);
-  let done = 0;
-  const BATCH = 32;
-  for (let first = 0; first < n; first += BATCH) {
-    const jobs: Promise<void>[] = [];
-    for (let i = first; i < Math.min(n, first + BATCH); i++) {
-      const chunk = plain.subarray(i * RECORD_PLAINTEXT, Math.min(P, (i + 1) * RECORD_PLAINTEXT));
-      jobs.push(
-        crypto.subtle.encrypt({ name: "AES-GCM", iv: recordNonce(i), tagLength: 128 }, key, chunk).then((ct) => {
-          out.set(new Uint8Array(ct), i * (RECORD_PLAINTEXT + TAG));
-          onRecord?.(++done);
-        }),
-      );
-    }
-    await Promise.all(jobs);
+  const a = first * RECORD_PLAINTEXT, b = Math.min(P, last * RECORD_PLAINTEXT);
+  const plain = await new ConcatBytes(p.series.instances.map((i) => i.src)).read(a, b);
+  const out = new Uint8Array(b - a + TAG * (last - first));
+  await Promise.all(
+    Array.from({ length: last - first }, async (_, k) => {
+      const i = first + k;
+      const chunk = plain.subarray(k * RECORD_PLAINTEXT, Math.min(plain.length, (k + 1) * RECORD_PLAINTEXT));
+      const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: recordNonce(i), tagLength: 128 }, key, chunk);
+      out.set(new Uint8Array(ct), k * (RECORD_PLAINTEXT + TAG));
+    }),
+  );
+  return out;
+}
+
+export function seriesKey(p: PackedSeries): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", b64urlDecode(p.key), "AES-GCM", false, ["encrypt"]);
+}
+
+/** The whole series file in memory, for scripts and small test fixtures. /share streams instead. */
+export async function encryptSeries(p: PackedSeries): Promise<Uint8Array> {
+  const key = await seriesKey(p);
+  const out = new Uint8Array(ciphertextSize(p));
+  for (let r = 0; r < p.records; r += CHUNK_RECORDS) {
+    out.set(await encryptRecords(p, key, r, Math.min(p.records, r + CHUNK_RECORDS)), r * (RECORD_PLAINTEXT + TAG));
   }
   return out;
 }
@@ -70,7 +82,9 @@ const DR_KEEP = ["status", "category", "code", "effectiveDateTime", "effectivePe
 
 /**
  * The owner Bundle: Patient, one ImagingStudy per included study (ids study-1…), and the studies'
- * DiagnosticReports re-pointed at those ImagingStudy ids.
+ * DiagnosticReports. Each report's imagingStudy points at its packed ImagingStudy in this Bundle
+ * (by fullUrl) and names the study by UID; each ImagingStudy carries the Study Instance UID and the
+ * accession number, so a report can be matched either way.
  */
 export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated = new Date().toISOString()): any {
   const patient: any = { resourceType: "Patient", id: "p1" };
@@ -94,7 +108,7 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
       ...(p.series.description ? { description: p.series.description } : {}),
       numberOfInstances: p.series.instances.length,
       instance: p.series.instances.map((inst) => ({
-        extension: [{ url: EXT_LENGTH, valueDecimal: inst.bytes.length }],
+        extension: [{ url: EXT_LENGTH, valueDecimal: inst.src.size }],
         uid: inst.h.sopInstanceUid,
         sopClass: { system: "urn:ietf:rfc:3986", code: `urn:oid:${inst.h.sopClassUid}` },
         ...(inst.number != null ? { number: inst.number } : {}),
@@ -105,7 +119,10 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
       id,
       meta: { profile: [PROFILE_URL] },
       status: "available",
-      identifier: [{ system: "urn:dicom:uid", value: `urn:oid:${st.uid}` }],
+      identifier: [
+        { system: "urn:dicom:uid", value: `urn:oid:${st.uid}` },
+        ...(st.accession ? [{ type: ACSN, value: st.accession }] : []),
+      ],
       subject: { reference: "Patient/p1" },
       ...(st.started ? { started: st.started } : {}),
       numberOfSeries: series.length,
@@ -113,12 +130,13 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
       ...(st.description ? { description: st.description } : {}),
       series,
     };
-    entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: res });
-    for (const r of st.reports) {
+    const studyUrl = "urn:uuid:" + crypto.randomUUID();
+    entry.push({ fullUrl: studyUrl, resource: res });
+    for (const { resource: r } of st.reports.filter((x) => x.include)) {
       const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
       for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
       dr.subject = { reference: "Patient/p1" };
-      dr.imagingStudy = [{ reference: `ImagingStudy/${id}` }];
+      dr.imagingStudy = [{ reference: studyUrl, identifier: { system: "urn:dicom:uid", value: `urn:oid:${st.uid}` } }];
       entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
     }
   });
@@ -142,6 +160,9 @@ function studyFileIds(study: any): string[] {
  */
 export function subsetBundle(owner: any, studyIds: string[]): { bundle: any; allowedFiles: string[] } {
   const keep = new Set(studyIds);
+  const keepUrls = new Set(
+    (owner.entry ?? []).filter((e: any) => e.resource?.resourceType === "ImagingStudy" && keep.has(e.resource.id)).map((e: any) => e.fullUrl),
+  );
   const entry: any[] = [];
   const files: string[] = [];
   for (const e of owner.entry ?? []) {
@@ -151,8 +172,8 @@ export function subsetBundle(owner: any, studyIds: string[]): { bundle: any; all
       files.push(...studyFileIds(r).map((id) => `${id}.bin`));
       entry.push(e);
     } else if (r?.resourceType === "DiagnosticReport") {
-      const refs = (r.imagingStudy ?? []).map((x: any) => String(x.reference ?? "").replace(/^.*ImagingStudy\//, ""));
-      if (refs.some((id: string) => keep.has(id))) entry.push(e);
+      const refs = (r.imagingStudy ?? []).map((x: any) => String(x.reference ?? ""));
+      if (refs.some((ref: string) => keepUrls.has(ref) || keep.has(ref.replace(/^.*ImagingStudy\//, "")))) entry.push(e);
     } else entry.push(e);
   }
   return { bundle: { ...owner, meta: { ...(owner.meta ?? {}), lastUpdated: new Date().toISOString() }, entry }, allowedFiles: files };

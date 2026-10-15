@@ -4,19 +4,34 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shl_dicom_core::{
     crypto::{b64url_encode, random_bytes},
-    range::RECORD_CIPHERTEXT,
     shl::compute_shl_flag,
 };
 use tokio::sync::broadcast;
 
-pub const DEFAULT_BYTES_MAX: u64 = 500 * 1024 * 1024; // 500 MiB per share
-pub const DEFAULT_FILES_MAX: usize = 256;
-pub const DEFAULT_MAX_SANDBOX_SHARES: usize = 64;
+/// Server settings for uploads (see `serve --help`). `None` means no limit.
+#[derive(Debug, Clone)]
+pub struct Quotas {
+    /// Total encrypted bytes one share may hold.
+    pub share_bytes: Option<u64>,
+    /// Series files one share may hold.
+    pub share_files: Option<usize>,
+    /// Shares that may exist at once (not counting the server's own sample).
+    pub shares: Option<usize>,
+    /// Largest body of one upload request (a chunk, or a whole file sent in one request).
+    pub request_bytes: u64,
+}
+
+impl Default for Quotas {
+    fn default() -> Self {
+        Self { share_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024 }
+    }
+}
+
 pub const DEFAULT_SANDBOX_TTL_SECS: i64 = 24 * 3600; // 24 hours
 pub const DEFAULT_CAP_TTL_SECS: i64 = 3600; // 1 hour
 /// Longest lifetime a sharer may ask for with `POST /api/shares` or `PATCH /api/shares/{sid}`.
@@ -71,8 +86,9 @@ pub struct ShareFileEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ShareQuota {
     pub bytes_used: u64,
-    pub bytes_max: u64,
-    pub files_max: usize,
+    /// null: no limit.
+    pub bytes_max: Option<u64>,
+    pub files_max: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,9 +199,9 @@ impl ShareDbPool {
 #[derive(Clone)]
 pub struct AppState {
     pub data_dir: PathBuf,
-    pub bytes_max: u64,
-    pub files_max: usize,
-    pub max_sandbox_shares: usize,
+    pub quotas: Quotas,
+    /// `{sid}/{fileId}` uploads in progress (one request at a time per file).
+    pub uploading: Arc<Mutex<std::collections::HashSet<String>>>,
     catalog: Arc<Mutex<Connection>>,
     pool: Arc<Mutex<ShareDbPool>>,
     events: Arc<Mutex<HashMap<String, broadcast::Sender<AccessEvent>>>>,
@@ -194,20 +210,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self, String> {
-        Self::with_quotas(
-            data_dir,
-            DEFAULT_BYTES_MAX,
-            DEFAULT_FILES_MAX,
-            DEFAULT_MAX_SANDBOX_SHARES,
-        )
+        Self::with_quotas(data_dir, Quotas::default())
     }
 
-    pub fn with_quotas(
-        data_dir: impl AsRef<Path>,
-        bytes_max: u64,
-        files_max: usize,
-        max_sandbox_shares: usize,
-    ) -> Result<Self, String> {
+    pub fn with_quotas(data_dir: impl AsRef<Path>, quotas: Quotas) -> Result<Self, String> {
         let data_dir = data_dir.as_ref().to_path_buf();
         let shares_dir = data_dir.join("shares");
         std::fs::create_dir_all(&shares_dir)
@@ -220,9 +226,8 @@ impl AppState {
 
         let state = Self {
             data_dir,
-            bytes_max,
-            files_max,
-            max_sandbox_shares,
+            quotas,
+            uploading: Arc::new(Mutex::new(std::collections::HashSet::new())),
             catalog: Arc::new(Mutex::new(conn)),
             pool: Arc::new(Mutex::new(ShareDbPool::new())),
             events: Arc::new(Mutex::new(HashMap::new())),
@@ -234,6 +239,20 @@ impl AppState {
 
     pub fn share_db_path(&self, sid: &str) -> PathBuf {
         self.data_dir.join("shares").join(format!("{sid}.db"))
+    }
+
+    /// Series files of a share live on disk next to its database: `shares/{sid}/{fileId}.bin`, with
+    /// `{fileId}.part` while an upload is incomplete.
+    pub fn share_files_dir(&self, sid: &str) -> PathBuf {
+        self.data_dir.join("shares").join(sid)
+    }
+
+    pub fn series_path(&self, sid: &str, file_id: &str) -> PathBuf {
+        self.share_files_dir(sid).join(format!("{file_id}.bin"))
+    }
+
+    pub fn part_path(&self, sid: &str, file_id: &str) -> PathBuf {
+        self.share_files_dir(sid).join(format!("{file_id}.part"))
     }
 
     /// Startup and periodic sweep: removes expired caps, expired sandbox shares,
@@ -278,6 +297,8 @@ impl AppState {
                     if !is_valid_id22(sid) || !self.catalog_has_share(sid) {
                         self.remove_share_files(sid);
                     }
+                } else if entry.path().is_dir() && (!is_valid_id22(name_str) || !self.catalog_has_share(name_str)) {
+                    let _ = std::fs::remove_dir_all(entry.path());
                 }
             }
         }
@@ -428,7 +449,7 @@ impl AppState {
                 )
                 .unwrap_or(0)
             };
-            if active_sandbox >= self.max_sandbox_shares {
+            if self.quotas.shares.is_some_and(|max| active_sandbox >= max) {
                 return Err("QUOTA_SHARES_EXCEEDED".into());
             }
         }
@@ -492,6 +513,7 @@ impl AppState {
         if let Some(conn_arc) = self.pool.lock().unwrap().remove(sid) {
             drop(conn_arc);
         }
+        let _ = std::fs::remove_dir_all(self.share_files_dir(sid));
         let base = self.share_db_path(sid);
         let _ = std::fs::remove_file(&base);
         let _ = std::fs::remove_file(format!("{}-wal", base.display()));
@@ -627,8 +649,8 @@ impl AppState {
             files,
             quota: ShareQuota {
                 bytes_used,
-                bytes_max: self.bytes_max,
-                files_max: self.files_max,
+                bytes_max: self.quotas.share_bytes,
+                files_max: self.quotas.share_files,
             },
             links,
         })
@@ -740,73 +762,30 @@ pub fn build_link_resource_from_row(
     })
 }
 
-pub fn write_series_file_to_db(
-    conn: &mut Connection,
-    file_id: &str,
-    ciphertext: &[u8],
-    bytes_max: u64,
-    files_max: usize,
-) -> Result<ShareFileEntry, String> {
+/// Records a complete series file (already at `series_path`) in the share's database.
+pub fn record_series_file(conn: &Connection, file_id: &str, size: u64) -> Result<ShareFileEntry, String> {
     let uploaded_at = now_unix();
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-    let (existing_count, existing_bytes): (usize, i64) = tx
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM series_files WHERE file_id != ?1",
-            params![file_id],
-            |r| Ok((r.get::<_, i64>(0)? as usize, r.get(1)?)),
-        )
-        .map_err(|e| e.to_string())?;
-
-    if existing_count >= files_max {
-        return Err("QUOTA_FILES_EXCEEDED".into());
-    }
-    if (existing_bytes as u64) + (ciphertext.len() as u64) > bytes_max {
-        return Err("QUOTA_BYTES_EXCEEDED".into());
-    }
-
-    // Immutable rule: if file_id already exists, reject if size differs; otherwise replace/idempotent
-    let existing_size: Option<i64> = tx
-        .query_row(
-            "SELECT size FROM series_files WHERE file_id = ?1",
-            params![file_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if let Some(prev_sz) = existing_size {
-        if prev_sz as usize != ciphertext.len() {
-            return Err("IMMUTABLE_FILE_ID_CONFLICT".into());
-        }
-        tx.execute("DELETE FROM series_records WHERE file_id = ?1", params![file_id])
-            .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM series_files WHERE file_id = ?1", params![file_id])
-            .map_err(|e| e.to_string())?;
-    }
-
-    tx.execute(
-        "INSERT INTO series_files (file_id, size, uploaded_at) VALUES (?1, ?2, ?3)",
-        params![file_id, ciphertext.len() as i64, uploaded_at],
+    conn.execute(
+        "INSERT INTO series_files (file_id, size, uploaded_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(file_id) DO NOTHING",
+        params![file_id, size as i64, uploaded_at],
     )
     .map_err(|e| e.to_string())?;
+    let _ = conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![file_id]);
+    Ok(ShareFileEntry { name: format!("{file_id}.bin"), size, uploaded_at })
+}
 
-    {
-        let mut insert_rec = tx
-            .prepare("INSERT INTO series_records (file_id, idx, bytes) VALUES (?1, ?2, ?3)")
-            .map_err(|e| e.to_string())?;
-        for (idx, chunk) in ciphertext.chunks(RECORD_CIPHERTEXT as usize).enumerate() {
-            insert_rec
-                .execute(params![file_id, idx as i64, chunk])
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(ShareFileEntry {
-        name: format!("{file_id}.bin"),
-        size: ciphertext.len() as u64,
-        uploaded_at,
-    })
+/// Writes a whole series file to disk and records it, with no quota check (the server's own sample,
+/// tests). Uploads go through `PUT /api/shares/{sid}/files/{name}`.
+pub fn store_series_file(state: &AppState, sid: &str, file_id: &str, ciphertext: &[u8]) -> Result<ShareFileEntry, String> {
+    let dir = state.share_files_dir(sid);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let part = state.part_path(sid, file_id);
+    std::fs::write(&part, ciphertext).map_err(|e| e.to_string())?;
+    std::fs::rename(&part, state.series_path(sid, file_id)).map_err(|e| e.to_string())?;
+    let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
+    let conn = conn_arc.lock().unwrap();
+    record_series_file(&conn, file_id, ciphertext.len() as u64)
 }
 
 fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {
@@ -860,12 +839,12 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
            uploaded_at  INTEGER NOT NULL
          );
 
-         CREATE TABLE IF NOT EXISTS series_records (
-           file_id  TEXT    NOT NULL REFERENCES series_files(file_id) ON DELETE CASCADE,
-           idx      INTEGER NOT NULL,
-           bytes    BLOB    NOT NULL,
-           PRIMARY KEY (file_id, idx)
-         ) WITHOUT ROWID;
+         -- Uploads in progress: the declared size of each {fileId}.part on disk.
+         CREATE TABLE IF NOT EXISTS uploads (
+           file_id     TEXT PRIMARY KEY,
+           size        INTEGER NOT NULL,
+           started_at  INTEGER NOT NULL
+         );
 
          CREATE TABLE IF NOT EXISTS links (
            lid                 TEXT PRIMARY KEY,

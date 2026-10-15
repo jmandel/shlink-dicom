@@ -141,11 +141,37 @@ Methods:
 - An image larger than the GPU's maximum texture size switches to the CPU renderer on a fresh canvas.
 - Other members: `scale` (canvas pixels per CSS pixel, for pointer maths), `image`, `kind` and `onDraw(ms)`.
 
-**Thumbnails.** `drawThumbnail(canvas2d, img, frame?)` draws with the CPU renderer, so thumbnails never create WebGL contexts.
+**Thumbnails.** `drawThumbnail(canvas2d, img, frame?)` draws with the CPU renderer, so thumbnails never create WebGL contexts. Float images are drawn as `floatFrame` makes them (below).
 
 **Windows.** `wl.ts` provides:
 - `presetsFor(modality)`: CT gets Auto, Soft tissue, Lung, Bone and Brain; every other modality gets Auto only;
-- `autoWindow(img, frame)`: the file's own Window Center and Width, else the 1st–99th percentile of the frame's values.
+- `autoWindow(img, frame, realWorld?)`: the file's own Window Center and Width, else the 1st–99th percentile of the frame's values. For float images, in real values: the file's window, else the range the Real World Value Mapping covers, else the data range.
+
+### DICOM objects and display: `dicom.ts`, `objects.ts`, `reports.ts`, `sr.ts`, `derived.ts`, `waveform.ts`, `mesh.ts`, `geometry.ts`, `display.ts`, `overlays.ts`, `volume.ts`
+
+**Parsing.** `parseDicom(bytes, { untilPixelData? })` reads a Part 10 file into a `DataSet` tree: explicit and implicit VR little endian, explicit big endian, deflated data sets, sequences of any length, encapsulated fragments, and files without a preamble. Accessors read on demand: `str`, `strs`, `num`, `nums`, `seq`, `raw`, `code`. `T` names the tags this code reads; implicit VR files get VRs from a small dictionary, and an unknown element whose value starts with an item is read as a sequence. `parseDicomSync` is the same without deflate. On the 942 codec-corpus files it agrees with pydicom on element counts and key attributes. `readDicomHeader` (`dicom-header.ts`) is the DICOMDIR/Share subset on top of it.
+
+**Headers of decoded images.** `ImageStore` decodes with `header: true`, so each `DecodedImage` carries the bytes before Pixel Data; `imageHeader(img)` parses them once (`imageHeaderNow` when already parsed).
+
+**What an instance is.** `sopInfo(sopClass)` gives a plain name and a kind (`image`, `slide`, `video`, `sr`, `pdf`, `cda`, `seg`, `rtstruct`, `pmap`, `pr`, `ko`, `waveform`, `model`, `other`); `seriesKind` for a series; `KIND_LABEL` for counts.
+
+**Reports from the clinical record.** `linkReports(index)` links each FHIR DiagnosticReport to a study: by its `imagingStudy` reference (an entry's `fullUrl` or `ImagingStudy/<id>`), by a Study Instance UID it names, by accession number (from the Bundle, or from an image header via `noteAccession`), or by date and exam type (a guess, said so by `linkBasisText`). `ReportEntry.attachments` holds presentedForm data or URLs.
+
+**Object readers.**
+- `readSr(ds)`: the SR content tree (TEXT, CODE, NUM with units, dates, PNAME, UIDREF, IMAGE/COMPOSITE/WAVEFORM references, SCOORD), for text, enhanced, comprehensive, measurement (TID 1500) and dose (TID 10011) reports.
+- `readSegmentation`, `readStructureSet`, `readParametricMap`, `readPresentationState`, `readKeyObjects` (`derived.ts`): segments with colours and per-frame sources and positions; parametric map frames with sources and geometry, Real World Value Mapping, window and Palette Color LUT; ROIs with contours in patient coordinates; GSPS windows, annotations, shutters, displayed area, rotation and flip; key image references.
+- `readWaveforms(ds)` and `toWav(group)`: calibrated channels (sensitivity, baseline, units; mu-law and A-law), and a WAV for audio.
+- `parseStl`, `parseObj`, `parseMtl` (`mesh.ts`): triangle meshes with normals and material colours.
+
+**Geometry.** `geometryOf(ds, frame?)`: position, orientation and pixel spacing, from per-frame and shared functional groups for enhanced images; the spacing's source (`Pixel Spacing`, `Imager Pixel Spacing`, magnification-corrected, ultrasound region, none) for measurements (`spacingSourceText`). `patientToPixel`, `pixelToPatient`.
+
+**Display pipeline.** `displayModel(ds, frame)`: Modality LUT Sequence, VOI LUT Sequence, VOI LUT Function, Presentation LUT Shape and every header window with its explanation. `applyModalityLut`, `applyVoiLut`, `applySigmoid` make frames for the renderer; `linearWindow` turns LINEAR_EXACT into a LINEAR window. `wl.ts` `presetsFor(modality, model)` lists the choices.
+
+**Float pixel data and real-world values.** `realWorldOf(ds, frame)` reads the Real World Value Mapping (per-frame, shared, top level) with its label, UCUM units and the stored range it covers; `imageRealWorld(img)` is the decoder's copy, for before the header is read. `realValue` applies it (else Rescale). The renderers take integer samples, so `floatFrame(frame, realWorld, floatRange(img, realWorld))` spreads the real values over 16-bit stored values whose rescale gives them back, to 1/65534 of the range; NaN becomes black. Float images are windowed in real values with the LINEAR_EXACT formula, so any width above 0 works. `formatValue` and `unitText` print values and units for the cursor readout and legends. ICC profiles: the shared `icc.ts` (`iccToSrgb`).
+
+**Overlays.** `readOverlays(ds)`: 60xx planes from Overlay Data; `overlayBitsFromPixels` fills planes stored in the pixel data's high bits from the raw native pixel data.
+
+**Volumes.** `buildVolume(slices)` stacks parallel, evenly spaced, equally sized slices (or enhanced frames) in patient space; `reformat(volume, plane, index)` cuts sagittal, coronal or axial planes with square pixels, superior up. Float slices are spread over one real-value range shared by the whole volume.
 
 ### Downloads: `export.ts`, `zip.ts`, `dicomdir.ts`, `dicom-header.ts`, `save.ts`
 

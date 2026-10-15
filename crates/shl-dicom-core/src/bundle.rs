@@ -89,6 +89,8 @@ pub struct StudyBuildInput {
     pub study_instance_uid: String,
     pub description: Option<String>,
     pub started: Option<String>,
+    /// Accession Number (0008,0050), written as an ImagingStudy identifier of type ACSN.
+    pub accession: Option<String>,
     pub note: Option<String>,
     pub series: Vec<SeriesBuildInput>,
 }
@@ -148,11 +150,11 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
     }
 
     entries.push(json!({
-        "fullUrl": "urn:uuid:patient-p1",
+        "fullUrl": random_urn_uuid(),
         "resource": patient,
     }));
 
-    for (s_idx, study) in input.studies.iter().enumerate() {
+    for study in input.studies.iter() {
         let total_instances: usize = study.series.iter().map(|se| se.instances.len()).sum();
         let series_json: Vec<Value> = study
             .series
@@ -242,9 +244,15 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
         if let Some(ref note) = study.note {
             study_res["note"] = json!([{ "text": note }]);
         }
+        if let Some(acc) = study.accession.as_deref().filter(|a| !a.trim().is_empty()) {
+            study_res["identifier"].as_array_mut().unwrap().push(json!({
+                "type": { "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "ACSN" }] },
+                "value": acc.trim(),
+            }));
+        }
 
         entries.push(json!({
-            "fullUrl": format!("urn:uuid:imagingstudy-{}", s_idx + 1),
+            "fullUrl": random_urn_uuid(),
             "resource": study_res,
         }));
     }
@@ -610,4 +618,14 @@ fn extract_instance_length(inst_val: &Value) -> Result<u64> {
         }
     }
     Err(Error::InvalidBundle("instance missing valid length extension".into()))
+}
+
+/// A random (version 4) `urn:uuid:` for Bundle.entry.fullUrl.
+pub fn random_urn_uuid() -> String {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).expect("random bytes");
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("urn:uuid:{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }

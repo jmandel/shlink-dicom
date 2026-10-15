@@ -1,0 +1,2 @@
+# The FFmpeg source tarball is fetched by build.sh (checked by SHA-256); not committed.
+dist/ffmpeg-*.tar.xz

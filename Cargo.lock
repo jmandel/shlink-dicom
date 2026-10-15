@@ -1704,6 +1704,7 @@ dependencies = [
  "shl-dicom-core",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tower-http",
 ]

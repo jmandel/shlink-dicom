@@ -2,13 +2,15 @@
 // /tmp/wsi-fixtures.json). For each slide folder, two shares packed as the Share page packs
 // (web/checks/pack-share.ts): one as the files are (`plainLink`), one with offset tables added to
 // instances that lack them (`tablesLink`; see crates/shl-dicom-core/src/offset_tables.rs).
-//   bun web/view/wsi-tools/wsi-fixtures.ts <name>=<folder> [<name>=<folder> …] [--base http://localhost:3333]
+//   bun web/view/wsi-tools/wsi-fixtures.ts <name>=<folder> [<name>=<folder> …] [--base http://localhost:3333] [--tables-only]
+// --tables-only: one share, packed with offset tables (plainLink and tablesLink are the same link).
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { packAndShare } from "../../checks/pack-share";
 
 const args = process.argv.slice(2);
 const bi = args.indexOf("--base");
 const base = bi >= 0 ? args[bi + 1] : "http://localhost:3333";
+const tablesOnly = args.includes("--tables-only");
 const slides = args.filter((a, i) => a.includes("=") && (bi < 0 || i !== bi + 1)).map((a) => a.split("=") as [string, string]);
 
 /** Packs the folder (with or without offset tables), uploads it as a new share, mints one link. */
@@ -26,8 +28,8 @@ async function share(name: string, dir: string, addOffsetTables: boolean) {
 
 const out: Record<string, any> = existsSync("/tmp/wsi-fixtures.json") ? JSON.parse(readFileSync("/tmp/wsi-fixtures.json", "utf8")) : {};
 for (const [name, dir] of slides) {
-  const plain = await share(name, dir, false);
   const tables = await share(name, dir, true);
+  const plain = tablesOnly ? tables : await share(name, dir, false);
   out[name] = {
     dir,
     // DELETE /api/shares/{sid} with the token removes a share.

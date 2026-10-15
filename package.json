@@ -12,6 +12,7 @@
     "playwright-core": "^1.64.1"
   },
   "dependencies": {
+    "pdfjs-dist": "4.10.38",
     "qrcode-generator": "1.4.4"
   }
 }

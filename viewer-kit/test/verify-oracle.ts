@@ -46,11 +46,16 @@ function typed(dtype: string, u8: Uint8Array) {
     case "i2": return new Int16Array(ab);
     case "u4": return new Uint32Array(ab);
     case "i4": return new Int32Array(ab);
+    case "f4": return new Float32Array(ab);
+    case "f8": return new Float64Array(ab);
     default: throw new Error(`dtype ${dtype}`);
   }
 }
 
-const module = new WebAssembly.Module(readFileSync(join(KIT, "dist", "shl_dicom_decode.wasm")));
+const mainModule = new WebAssembly.Module(readFileSync(join(KIT, "dist", "shl_dicom_decode.wasm")));
+// JPEG XL cases use the separate module the pool loads for them.
+const jxlModule = new WebAssembly.Module(readFileSync(join(KIT, "dist", "shl_dicom_decode_jxl.wasm")));
+let module = mainModule;
 let dec = await WasmDecoder.create(module);
 
 type Outcome = "pass" | "fail" | "unsupported" | "crash" | "skipped";
@@ -63,6 +68,10 @@ for (const fmt of formats) {
   // A spread sample when --per-format is given: every k-th case.
   const step = Math.max(1, Math.floor(cases.length / Math.min(perFormat, cases.length)));
   const picked = cases.filter((_, i) => i % step === 0).slice(0, perFormat);
+  if ((fmt === "jpeg-xl") !== (module === jxlModule)) {
+    module = fmt === "jpeg-xl" ? jxlModule : mainModule;
+    dec = await WasmDecoder.create(module);
+  }
   for (const c of picked) {
     if (idx++ % shards !== shard) continue;
     const src = join(FORMATS, fmt, "samples", `${c.id}.dcm`);
@@ -98,7 +107,8 @@ for (const fmt of formats) {
     const a = typed(o.dtype, new Uint8Array(r.pixels)), b = typed(o.dtype, o.data);
     let maxd = 0;
     for (let i = 0; i < a.length; i++) {
-      const d = Math.abs(a[i] - b[i]);
+      // Floats: two NaNs (or equal infinities) are equal, NaN against a number is not.
+      const d = a[i] === b[i] || (Number.isNaN(a[i]) && Number.isNaN(b[i])) ? 0 : Math.abs(a[i] - b[i]) || Infinity;
       if (d > maxd) maxd = d;
     }
     const ok = maxd <= c.max_abs;

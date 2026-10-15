@@ -9,7 +9,6 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
-use shl_dicom_core::range::RECORD_CIPHERTEXT;
 use crate::state::{
     hash_passcode, is_valid_id22, now_unix, parse_series_filename, AccessEvent, AppState,
     DEFAULT_CAP_TTL_SECS,
@@ -431,43 +430,20 @@ async fn serve_series_file(
         None => (0, file_size - 1, StatusCode::OK),
     };
 
-    let first_idx = (start_byte / RECORD_CIPHERTEXT) as i64;
-    let last_idx = (end_byte_inclusive / RECORD_CIPHERTEXT) as i64;
-    let expected_len = (end_byte_inclusive - start_byte + 1) as usize;
-
-    let out_bytes = {
-        let conn = conn_arc.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT idx, bytes FROM series_records
-             WHERE file_id = ?1 AND idx BETWEEN ?2 AND ?3
-             ORDER BY idx",
-        ) {
-            Ok(s) => s,
-            Err(_) => return not_found(),
-        };
-
-        let mut buf = Vec::with_capacity(expected_len);
-        let rows = match stmt.query_map(params![file_id, first_idx, last_idx], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-        }) {
-            Ok(r) => r,
-            Err(_) => return not_found(),
-        };
-
-        for row in rows {
-            let Ok((idx, bytes)) = row else {
-                return not_found();
-            };
-            let rec_start = (idx as u64) * RECORD_CIPHERTEXT;
-            let rec_end = rec_start + (bytes.len() as u64);
-            let slice_start = start_byte.saturating_sub(rec_start) as usize;
-            let slice_end = ((end_byte_inclusive + 1).min(rec_end) - rec_start) as usize;
-            if slice_start < slice_end && slice_end <= bytes.len() {
-                buf.extend_from_slice(&bytes[slice_start..slice_end]);
-            }
-        }
-        buf
+    // Stream the range from the file on disk.
+    let len = end_byte_inclusive - start_byte + 1;
+    let file = match tokio::fs::File::open(state.series_path(sid, file_id)).await {
+        Ok(f) => f,
+        Err(_) => return not_found(),
     };
+    let mut file = file;
+    if tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start_byte)).await.is_err() {
+        return not_found();
+    }
+    let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+        tokio::io::AsyncReadExt::take(file, len),
+        256 * 1024,
+    ));
 
     state.record_access(
         sid,
@@ -478,7 +454,7 @@ async fn serve_series_file(
             path: path_str.to_string(),
             range: range_hdr_str,
             status: status_code.as_u16(),
-            bytes: out_bytes.len() as u64,
+            bytes: len,
             recipient,
         },
     );
@@ -486,7 +462,7 @@ async fn serve_series_file(
     let mut builder = Response::builder()
         .status(status_code)
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, out_bytes.len().to_string())
+        .header(header::CONTENT_LENGTH, len.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
@@ -504,7 +480,7 @@ async fn serve_series_file(
         );
     }
 
-    builder.body(Body::from(out_bytes)).unwrap()
+    builder.body(body).unwrap()
 }
 
 /// Parses a single HTTP `Range: bytes=a-b` header.

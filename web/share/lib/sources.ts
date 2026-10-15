@@ -1,9 +1,13 @@
 // The four ways imaging comes in: files and folders, a patient portal (SMART Imaging Access), a
 // link someone gave you, and the public sample link. Each fills a Collection.
-import { openShare, type OpenShare } from "../../core/share";
-import { planRuns } from "../../core/range";
-import { reportsForStudy } from "../../core/bundle";
+import type { OpenShare } from "../../core/share";
+import { planBytes } from "../../core/range";
+import type { SeriesEntry } from "../../core/bundle";
+import type { DicomHeader } from "../../core/dicom-header";
+import { linkReports } from "../../core/reports";
+import { BlobBytes, SubBytes, type Bytes } from "./bytes";
 import { Collection, expand } from "./ingest";
+import type { Stager } from "./stage";
 import * as S from "./smart";
 
 export interface Progress {
@@ -14,28 +18,26 @@ export interface Progress {
 }
 export type OnProgress = (c: Collection, p: Progress) => void;
 
-/** Reads picked files and folders (and the archives among them) on this device. */
-export async function loadFiles(files: File[], col: Collection, on: OnProgress, signal?: AbortSignal) {
+/**
+ * Collects picked files and folders (and the archives among them). Only headers are read here;
+ * gzip archives and deflated ZIP entries are decompressed into the stager as they are read.
+ */
+export async function loadFiles(files: File[], col: Collection, stager: Stager, on: OnProgress, signal?: AbortSignal) {
   let read = 0;
   for (const f of files) {
     signal?.throwIfAborted();
     const name = (f as any).webkitRelativePath || f.name;
     on(col, { doing: `Reading ${name}`, bytes: read });
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(await f.arrayBuffer());
-    } catch {
-      col.skip(name, "could not be read");
-      continue;
-    }
     try {
       let n = 0;
-      for await (const e of expand(name, bytes)) {
-        col.add(e.name, e.bytes);
+      for await (const e of expand(name, new BlobBytes(f), stager)) {
+        signal?.throwIfAborted();
+        await col.add(e.name, e.src);
         if (++n % 25 === 0) on(col, { doing: `Reading ${name}`, bytes: read });
       }
     } catch (e) {
-      col.skip(name, `archive could not be read (${(e as Error).message})`);
+      if (signal?.aborted) throw e;
+      col.skip(name, `could not be read (${(e as Error).message})`);
     }
     read += f.size;
     on(col, { doing: `Read ${name}`, bytes: read });
@@ -43,44 +45,76 @@ export async function loadFiles(files: File[], col: Collection, on: OnProgress, 
   col.finish();
 }
 
-/** Opens a SMART Health Link and downloads, verifies and decrypts every series in it. */
-export async function loadLink(share: OpenShare, col: Collection, on: OnProgress, signal?: AbortSignal) {
+/** One series of a shared link as a byte source: Range reads, verified and decrypted on demand. */
+class LinkSeriesBytes implements Bytes {
+  constructor(
+    readonly share: OpenShare,
+    readonly se: SeriesEntry,
+  ) {}
+  get size() {
+    return this.se.plaintextLength;
+  }
+  async read(a: number, b: number) {
+    b = Math.min(b, this.size);
+    if (a >= b) return new Uint8Array(0);
+    const plan = planBytes(this.se, a, b);
+    const ct = await this.share.resolver.fetchRange(plan);
+    return this.share.decryptor.decrypt(this.se, plan, ct);
+  }
+}
+
+/**
+ * Opens a SMART Health Link's studies from its Bundle without downloading them. Images are read
+ * when they are shown or packed, as byte ranges of the link's encrypted series files.
+ */
+export async function loadLink(share: OpenShare, col: Collection, on: OnProgress) {
   const idx = share.index;
   if (idx.patient.name) {
     col.patient = { name: idx.patient.name, birthDate: idx.patient.birthDate, identifier: idx.patient.id ? [{ value: idx.patient.id }] : [] };
     col.patientSource = "fhir";
   }
-  const total = idx.studies.reduce((a, s) => a + s.series.length, 0);
-  let done = 0, bytes = 0;
-  const say = () => on(col, { doing: `Downloaded ${done} of ${total} series`, bytes });
-  // The loader runs several Range requests at once; instances are added in any order and sorted at the end.
-  await Promise.all(
-    idx.studies.flatMap((st) =>
-      st.series.map(async (se) => {
-        for (const plan of planRuns(se)) {
-          signal?.throwIfAborted();
-          const insts = await share.loader.run(se, plan, { signal });
-          insts.forEach((b, k) => col.add(`${se.description ?? se.uid}/${plan.firstInstance + k + 1}`, b.slice()));
-          bytes += plan.plaintextEnd - plan.plaintextStart;
-          say();
-        }
-        done++;
-        say();
-      }),
-    ),
-  );
   for (const st of idx.studies) {
+    for (const se of st.series) {
+      const src = new LinkSeriesBytes(share, se);
+      for (const [k, inst] of se.instances.entries()) {
+        const h = blankHeader();
+        Object.assign(h, {
+          sopInstanceUid: inst.uid,
+          sopClassUid: inst.sopClass,
+          studyInstanceUid: st.studyInstanceUid,
+          seriesInstanceUid: se.uid,
+          modality: se.modality ?? "",
+          studyDescription: st.description ?? "",
+          seriesDescription: se.description ?? "",
+          seriesNumber: se.number != null ? String(se.number) : "",
+          instanceNumber: inst.number != null ? String(inst.number) : "",
+          accessionNumber: st.accession ?? "",
+        });
+        col.addWithHeader(`${se.description ?? se.uid}/${k + 1}`, new SubBytes(src, inst.offset, inst.length), h);
+      }
+    }
+    on(col, { doing: "Reading the link's Bundle" });
     const m = col.studies.get(st.studyInstanceUid);
     if (m) {
       if (st.started) m.started = st.started;
       if (st.description) m.description = st.description;
-      const reportIds = new Set(reportsForStudy(idx, st).map((r) => r.id));
+      const reportIds = new Set(linkReports(idx).filter((l) => l.studyId === st.id && l.basis !== "date").map((l) => l.report.id));
       m.reports = (idx.bundle.entry ?? [])
         .map((e: any) => e.resource)
-        .filter((r: any) => r?.resourceType === "DiagnosticReport" && reportIds.has(r.id));
+        .filter((r: any) => r?.resourceType === "DiagnosticReport" && reportIds.has(r.id))
+        .map((resource: any) => ({ resource, include: true, from: "link" as const }));
     }
   }
   col.finish();
+}
+
+function blankHeader(): DicomHeader {
+  return {
+    transferSyntax: "", sopClassUid: "", sopInstanceUid: "", patientName: "", patientId: "", patientBirthDate: "",
+    patientSex: "", studyDate: "", studyTime: "", accessionNumber: "", studyDescription: "", studyInstanceUid: "",
+    studyId: "", referringPhysician: "", seriesInstanceUid: "", modality: "", seriesNumber: "", seriesDescription: "",
+    instanceNumber: "", specificCharacterSet: "",
+  } as DicomHeader;
 }
 
 // -------------------------------------------------------------------------------------- portal
@@ -131,7 +165,7 @@ export async function finishPortalLaunch(search: string): Promise<PortalSession 
 }
 
 /** Searches the patient's imaging and reports, then retrieves every series over WADO-RS. */
-export async function loadPortal(sess: PortalSession, col: Collection, on: OnProgress, signal?: AbortSignal) {
+export async function loadPortal(sess: PortalSession, col: Collection, stager: Stager, on: OnProgress, signal?: AbortSignal) {
   const { d } = sess;
   const tok = sess.token.access_token as string;
   const pid = sess.token.patient as string;
@@ -161,9 +195,13 @@ export async function loadPortal(sess: PortalSession, col: Collection, on: OnPro
       signal?.throwIfAborted();
       on(col, { doing: `Downloading series ${done + 1} of ${total} from the portal`, bytes });
       const url = se ? `${f.wadoBase}/studies/${f.studyUID}/series/${se.uid}` : `${f.wadoBase}/studies/${f.studyUID}`;
-      const parts = await S.wadoRetrieve(url, tok);
-      parts.forEach((b, k) => col.add(`${se?.description ?? f.studyUID}/${k + 1}`, b));
-      bytes += parts.reduce((a, b) => a + b.length, 0);
+      let k = 0;
+      for await (const part of S.wadoRetrieveParts(url, tok, signal)) {
+        const src = await stager.stage(`${se?.description ?? f.studyUID}/${++k}`, part);
+        await col.add(`${se?.description ?? f.studyUID}/${k}`, src);
+        bytes += src.size;
+        on(col, { doing: `Downloading series ${done + 1} of ${total} from the portal`, bytes });
+      }
       done++;
       on(col, { doing: `Downloading series ${done} of ${total} from the portal`, bytes });
     }
@@ -171,14 +209,18 @@ export async function loadPortal(sess: PortalSession, col: Collection, on: OnPro
     if (m) {
       if (f.study.started) m.started = f.study.started;
       if (f.study.description) m.description = f.study.description;
-      const mine = reports.filter((r) =>
-        (r.imagingStudy ?? []).some(
-          (ref: any) =>
-            ref.identifier?.value === `urn:oid:${f.studyUID}` || String(ref.reference ?? "").replace(/^.*ImagingStudy\//, "") === f.study.id,
-        ),
+      const acsn = (f.study.identifier ?? []).find((i: any) => (i.type?.coding ?? []).some((c: any) => c.code === "ACSN"))?.value;
+      if (!m.accession && acsn) m.accession = acsn;
+      // Reports that name this study: by Study Instance UID, by the portal's ImagingStudy, or by accession.
+      const mine = reports.filter(
+        (r) =>
+          (r.imagingStudy ?? []).some(
+            (ref: any) =>
+              ref.identifier?.value === `urn:oid:${f.studyUID}` || String(ref.reference ?? "").replace(/^.*ImagingStudy\//, "") === f.study.id,
+          ) || (!!m.accession && (r.identifier ?? []).some((i: any) => i.value === m.accession)),
       );
       on(col, { doing: "Downloading reports", bytes });
-      m.reports = await Promise.all(mine.map((r) => S.inlineAttachments(r, tok)));
+      m.reports = (await Promise.all(mine.map((r) => S.inlineAttachments(r, tok)))).map((resource) => ({ resource, include: true, from: "portal" as const }));
     }
   }
   col.finish();

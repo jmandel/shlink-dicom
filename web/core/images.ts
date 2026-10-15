@@ -9,6 +9,7 @@ import type { SeriesEntry } from "./bundle";
 import type { InstanceLoader } from "./loader";
 import { decryptParams, RecordAuthenticationError, type RecordDecryptor } from "./decrypt";
 import type { RangePlan } from "./range";
+import { parseHeader, type ParsedDicom } from "./dicom";
 
 export { Priority };
 export type { DecodedImage };
@@ -43,6 +44,25 @@ export interface ImageGetOptions {
    * full-size decode. Reduced images are cached under their own key.
    */
   scale?: number;
+}
+
+const headers = new WeakMap<DecodedImage, Promise<ParsedDicom>>();
+const parsed = new WeakMap<DecodedImage, ParsedDicom>();
+
+/** The decoded image's header attributes (everything before Pixel Data), parsed once. */
+export function imageHeader(img: DecodedImage): Promise<ParsedDicom> | null {
+  if (!img.header) return null;
+  let p = headers.get(img);
+  if (!p) {
+    headers.set(img, (p = parseHeader(img.header)));
+    void p.then((h) => parsed.set(img, h), () => {});
+  }
+  return p;
+}
+
+/** The parsed header if it is ready (imageHeader has been called and has finished), else undefined. */
+export function imageHeaderNow(img: DecodedImage): ParsedDicom | undefined {
+  return parsed.get(img);
 }
 
 /** A RecordDecryptor that verifies and decrypts in the decoder workers (main thread stays free). */
@@ -109,7 +129,7 @@ export class ImageStore {
         return e;
       };
       const decode = (s: number, b: Uint8Array) =>
-        this.pool.decode(b, { priority, key: ImageStore.key(series, i, s), signal: o.signal, scale: s, encrypted });
+        this.pool.decode(b, { priority, key: ImageStore.key(series, i, s), signal: o.signal, scale: s, encrypted, header: true });
       let img: DecodedImage;
       try {
         img = await decode(scale, scale ? bytes.slice() : bytes);

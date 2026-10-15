@@ -74,6 +74,7 @@ export class SeriesReader {
   /** Called after every response (for live counters). */
   onStats: (() => void) | null = null;
   private cache = new Map<number, Uint8Array>();
+  private recent: { bytes: number; ms: number }[] = [];
   private pending = new Map<number, Job>();
   private queue: Job[] = [];
   private running = 0;
@@ -166,6 +167,13 @@ export class SeriesReader {
     return true;
   }
 
+  /** Recent transfer speed (bytes per second) from the last requests, or 0 before any. */
+  throughput(): number {
+    const recent = this.recent;
+    const ms = recent.reduce((a, r) => a + r.ms, 0);
+    return ms > 0 ? (recent.reduce((a, r) => a + r.bytes, 0) * 1000) / ms : 0;
+  }
+
   get queued(): number {
     return this.queue.length;
   }
@@ -220,6 +228,8 @@ export class SeriesReader {
     try {
       const t0 = performance.now();
       const ct = await this.resolver.fetchRange(plan);
+      this.recent.push({ bytes: ct.byteLength, ms: performance.now() - t0 });
+      if (this.recent.length > 8) this.recent.shift();
       if (this.log.length < 5000) this.log.push({ purpose: job.purpose, first: job.first, last: job.last, bytes: ct.byteLength, ms: Math.round(performance.now() - t0), t: Math.round(t0) });
       this.stats.requests++;
       this.stats.bytes += ct.byteLength;
@@ -286,6 +296,10 @@ export interface WalkState {
   frames: number;
   /** Bytes of Pixel Data walked. */
   walkedBytes: number;
+  /** Bytes of Pixel Data in the instance. */
+  pixelBytes: number;
+  /** The furthest frame a tile is waiting for (-1: none). */
+  need: number;
   done: boolean;
 }
 
@@ -297,6 +311,8 @@ interface Walker {
   running: boolean;
   /** locate() calls waiting on this walk. */
   waiting: number;
+  /** Frames those calls wait for (frame → number of callers). */
+  needs: Map<number, number>;
   listeners: Set<() => void>;
   error: unknown;
 }
@@ -372,14 +388,24 @@ export class SlideSource {
   walkState(instance: number): WalkState {
     const h = this.headers[instance]!;
     const wk = this.walkers.get(instance);
-    if (this.tables[instance]) return { instance, known: h.numberOfFrames, frames: h.numberOfFrames, walkedBytes: 0, done: true };
+    const pixelBytes = Math.max(0, this.series.instances[instance].length - Math.max(0, h.firstFragmentOffset));
+    if (this.tables[instance]) return { instance, known: h.numberOfFrames, frames: h.numberOfFrames, walkedBytes: 0, pixelBytes, need: -1, done: true };
     return {
       instance,
       known: wk?.w.knownFrames ?? 0,
       frames: h.numberOfFrames,
       walkedBytes: wk ? wk.w.pos - wk.w.header.firstFragmentOffset : 0,
+      pixelBytes,
+      need: wk && wk.needs.size ? Math.max(...wk.needs.keys()) : -1,
       done: wk?.w.done ?? false,
     };
+  }
+
+  /** Walks under way that a tile is waiting for. */
+  walking(): WalkState[] {
+    const out: WalkState[] = [];
+    for (const [i, wk] of this.walkers) if (wk.waiting > 0 && !wk.w.done) out.push(this.walkState(i));
+    return out;
   }
 
   /** Instance byte range of frame k, locating it first if needed. */
@@ -390,10 +416,11 @@ export class SlideSource {
     if (!h) return null;
     let wk = this.walkers.get(instance);
     if (!wk) {
-      wk = { w: new FragmentWalker(h, this.series.instances[instance].length), running: false, waiting: 0, listeners: new Set(), error: null };
+      wk = { w: new FragmentWalker(h, this.series.instances[instance].length), running: false, waiting: 0, needs: new Map(), listeners: new Set(), error: null };
       this.walkers.set(instance, wk);
     }
     wk.waiting++;
+    wk.needs.set(k, (wk.needs.get(k) ?? 0) + 1);
     try {
       for (;;) {
         const r = wk.w.frameRange(k);
@@ -418,6 +445,9 @@ export class SlideSource {
       }
     } finally {
       wk.waiting--;
+      const left = (wk.needs.get(k) ?? 1) - 1;
+      if (left > 0) wk.needs.set(k, left);
+      else wk.needs.delete(k);
     }
   }
 
@@ -434,17 +464,26 @@ export class SlideSource {
       for (const f of ls) f();
     };
     void (async () => {
-      let chunk = 4 * RECORD_PLAINTEXT;
+      // Chunks sized to about 0.4 s at the measured speed (256 KiB to 4 MiB), so progress moves
+      // several times a second on slow connections and requests stay few on fast ones.
+      let first = true;
+      const size = () => {
+        // The first chunk is small, so progress shows at once; later ones follow the measured speed.
+        if (first) return (first = false), 4 * RECORD_PLAINTEXT;
+        const bps = this.reader.throughput();
+        const want = bps ? bps * 0.4 : 4 * RECORD_PLAINTEXT;
+        return Math.max(4, Math.min(64, Math.round(want / RECORD_PLAINTEXT))) * RECORD_PLAINTEXT;
+      };
       try {
         while (!wk.w.done && wk.waiting > 0) {
           const a = wk.w.pos;
+          const chunk = size();
           const b = Math.min(inst.length, a + chunk);
           if (b <= a) {
             wk.w.done = true;
             break;
           }
           const read = this.reader.read(inst.offset + a, inst.offset + b, { priority: 0, purpose: "walk", signal: this.opts.signal });
-          chunk = Math.min(chunk * 2, 64 * RECORD_PLAINTEXT);
           // Read ahead: the next item header is almost always in the next chunk.
           if (b < inst.length) void this.reader.read(inst.offset + b, inst.offset + Math.min(inst.length, b + chunk), { priority: 0, purpose: "walk", signal: this.opts.signal }).catch(() => {});
           wk.w.feed(await read, a);
@@ -481,14 +520,14 @@ export class SlideSource {
     return this.reader.has(off + r[0], off + r[1]);
   }
 
-  /** A one-frame Part 10 file for tile (tx, ty) of a level, or null when the tile is absent. */
-  async tileFile(level: number, tx: number, ty: number, o: ReadOptions = {}): Promise<Uint8Array<ArrayBuffer> | null> {
-    const L = this.pyramid.levels[level];
-    const f = L.frameOf(tx, ty);
-    if (f < 0) return null;
-    const bytes = await this.frameBytes(L.instance, f, o);
+  /** A one-frame Part 10 file for tile (tx, ty) of a level, plane and path, or null when the tile is absent. */
+  async tileFile(level: number, tx: number, ty: number, plane = 0, path = 0, o: ReadOptions = {}): Promise<Uint8Array<ArrayBuffer> | null> {
+    const ref = this.pyramid.levels[level].frameRef(tx, ty, plane, path);
+    if (!ref) return null;
+    const bytes = await this.frameBytes(ref.instance, ref.frame, o);
     if (!bytes) return null;
-    return singleFrameFile(L.header, bytes);
+    const shift = this.tables[ref.instance]?.bitShift?.(ref.frame) ?? 0;
+    return singleFrameFile(this.headers[ref.instance]!, bytes, shift);
   }
 
   /**

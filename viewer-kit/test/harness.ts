@@ -197,7 +197,7 @@ async function wlBench(opts: { url: string; frames: number; canvas?: [number, nu
 }
 
 /** Pool behaviour: errors, priorities, abort, transfer, dedupe, frame split. */
-async function poolSemantics(opts: { big: string; multiframe: string; unsupported: string; jpeg?: string }) {
+async function poolSemantics(opts: { big: string; multiframe: string; unsupported: string; jpeg?: string; jxl?: string }) {
   const checks: { name: string; ok: boolean; detail: string }[] = [];
   const check = (name: string, ok: boolean, detail = "") => checks.push({ name, ok, detail });
   const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 1 });
@@ -334,6 +334,25 @@ async function poolSemantics(opts: { big: string; multiframe: string; unsupporte
     }
   } finally {
     pool4.destroy();
+  }
+  if (opts.jxl) {
+    // JPEG XL: a pool given the wasm URL fetches shl_dicom_decode_jxl.wasm next to it, and only
+    // when a JPEG XL instance arrives; several workers share the one compiled module.
+    const jxlFetched = () => performance.getEntriesByType("resource").some((e) => e.name.endsWith("shl_dicom_decode_jxl.wasm"));
+    const poolX = await DecoderPool.create({ wasm: WASM, workerUrl: WORKER, workers: 2 });
+    try {
+      await poolX.decode(await fetchBytes(opts.big));
+      check("JPEG XL module not loaded for other syntaxes", !jxlFetched());
+      const bytes = await fetchBytes(opts.jxl);
+      const [a, b] = await Promise.all([poolX.decode(bytes.slice(0)), poolX.decode(bytes.slice(0))]);
+      const same = a.pixels.byteLength === b.pixels.byteLength && new Uint8Array(a.pixels).every((v, i) => v === new Uint8Array(b.pixels)[i]);
+      check("JPEG XL decodes through the lazily loaded module", jxlFetched() && same && a.rows > 0 && a.transferSyntax.startsWith("1.2.840.10008.1.2.4.11"),
+        `${a.columns}x${a.rows} ${a.photometric}, ${a.decodeMs.toFixed(1)} ms`);
+    } catch (e: any) {
+      check("JPEG XL decodes through the lazily loaded module", false, `${e?.name}: ${e?.message}`);
+    } finally {
+      poolX.destroy();
+    }
   }
   return checks;
 }

@@ -190,3 +190,13 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 
 .tech-details summary::before { content: "▸"; margin-right: 8px; transition: transform 0.15s; display: inline-block; }
 .tech-details[open] summary::before { transform: rotate(90deg); }
+
+.reports { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.report-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0; border-top: 1px solid var(--border); }
+.report-row.excluded .report-name { opacity: 0.55; }
+.report-name { display: flex; flex-direction: column; min-width: 0; }
+.report-name .report-line { margin: 0; overflow-wrap: anywhere; }
+.reports .attach { align-self: flex-start; margin-left: -8px; }
+
+.resume { padding: 16px; margin: 16px 0 0; border: 2px solid var(--warn); }
+.resume h2 { margin-bottom: 4px; }

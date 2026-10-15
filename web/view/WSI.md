@@ -21,11 +21,17 @@ When the header runs past what was read, the next read grows by at least 2.5× t
 
 Label, overview and thumbnail images stop after the first record: their attributes are enough, because they are read whole when shown. A filled Basic Offset Table adds 4 bytes per frame to the header read (211 KB for a 52,772-frame level).
 
-**Pyramid.** `buildPyramid` makes one level per Total Pixel Matrix width among the non-LABEL, non-OVERVIEW and non-THUMBNAIL instances, finest first. The first instance of each width is used.
+**Pyramid.** `buildPyramid` makes one level per Total Pixel Matrix width among the non-LABEL, non-OVERVIEW and non-THUMBNAIL instances, finest first. Every instance of a level contributes frames, so a level can be spread over several instances: one per fluorescence channel, one per focal plane, or concatenations.
+
+**Optical paths and focal planes.** The pyramid lists:
+- **Optical paths:** from each instance's Optical Path Sequence, ordered by identifier. Their labels come from Optical Path Description.
+- **Focal planes:** Z offsets in µm when the files give them (per frame, or in the Shared Functional Groups); otherwise plane numbers.
+
+Each level maps (tile, plane, path) to an instance and a frame.
 
 **Tile to frame.**
-- **TILED_FULL:** frame = `ty × tilesAcross + tx`. This is row-major order, with the first focal plane and optical path first.
-- **TILED_SPARSE:** a map built from each frame's Plane Position (Slide) in the Per-frame Functional Groups.
+- **TILED_FULL:** column varies fastest, then row, then focal plane, then optical path (PS3.3 C.8.12.4). So frame = ((path × planes) + plane) × tiles + `ty × tilesAcross + tx` within the instance that holds that path and plane.
+- **TILED_SPARSE:** each frame's Plane Position (Slide) gives its tile. Its Z Offset in Slide Coordinate System gives the plane, and its Optical Path Identification the path. Tiles with no frame are left empty, so background the scanner skipped is not fetched.
 
 **Frame to bytes** (`SlideSource.locate`). The sources are tried in this order:
 1. the Extended Offset Table;
@@ -33,7 +39,15 @@ Label, overview and thumbnail images stop after the first record: their attribut
 3. native frame arithmetic;
 4. walking the fragment item headers from the start of Pixel Data.
 
-Walking (`FragmentWalker`) is sequential. It reads chunks that grow from 256 KiB to 4 MiB, and requests the next chunk while it parses the current one. It keeps what it learns for the page session, and stops when no tile is waiting.
+Walking (`FragmentWalker`) is sequential. It keeps what it learns for the page session, and stops when no tile is waiting.
+- **Chunk size:** the first chunk is 256 KiB. Later chunks are sized to about 0.4 s at the measured speed (256 KiB to 4 MiB), so progress moves several times a second on a slow connection and requests stay few on a fast one.
+- **Read-ahead:** the next chunk is requested while the current one is parsed.
+
+**Progress.** A card near the image says what is happening:
+- **While fragment headers are walked:** "Finding tiles: 42.0 MB of about 379 MB read · 50.3 MB downloaded", with a bar. The estimate scales the bytes read so far by the furthest frame a tile is waiting for, so it settles as the walk goes.
+- **When wanted tiles have been missing for more than 300 ms:** "Loading tiles: 12 of 40 · 3.1 MB downloaded".
+
+The coarsest level and the minimap come first, and pan and zoom are handled on the next frame throughout. A slide with a level that has no offset table carries one line under its title: "This slide has no frame offset table, so the viewer has to read ahead to find tiles. Adding tables when sharing avoids this." 
 
 A fragment starts a new frame when it begins with a codestream start marker: SOI for JPEG and JPEG-LS, SOC or a JP2 signature box for JPEG 2000 and HTJ2K. So frames split over several fragments are handled. Every other syntax is treated as one fragment per frame.
 
@@ -68,6 +82,34 @@ The pool's `decodeFrames` was not used, because for a single frame it adds a pro
 - **Keyboard:** the arrows pan, `+` and `−` zoom, and `0` fits the slide.
 - **Minimap:** tap or drag on it to move there.
 - **Label:** the Label button shows the label and glass-slide images, read when asked for.
+- **Focus:** a Focus control in the toolbar appears when the slide has several focal planes. Page Up and Page Down also move focus. While the new plane loads, the nearest plane's tiles stand in.
+
+**Fluorescence.** A slide whose images are single-sample and has several optical paths is drawn as a composite:
+- **Windows:** each channel's tiles become grey through that channel's window, the 0.5th to 99.8th percentile of its first decoded tile (8- or 16-bit).
+- **Compositing:** each visible channel is drawn on its own layer, tinted with its colour (canvas "multiply"), then added to the picture ("lighter") with its intensity (a brightness filter).
+- **Defaults:** the first four channels are shown. Nuclear stains (DAPI, Hoechst, "nuclei") are blue; other channels get the colour of their Illumination Wave Length when given, else a palette colour.
+- **Controls:** the Channels sheet (Layers, when there are overlays too) has, for each channel, a checkbox, a colour picker and an intensity slider (0–400%). Only visible channels are fetched.
+
+**Colour profiles.** When the optical path carries an ICC profile that is not sRGB, each RGB tile is converted to sRGB before drawing. The transform is `iccToSrgb` in `web/core/icc.ts`, shared with the photo display:
+- **Profile types:** matrix/TRC and lut8/lut16 profiles, into an XYZ or Lab connection space.
+- **Method:** the profile's default (perceptual) intent is sampled once into a 33³ table and applied with trilinear interpolation.
+- **Cost:** about 2 ms per 240² tile, plus 27 ms once to build the table.
+- **Control:** a checkbox in the Layers sheet switches it off.
+
+The Aperio "ScanScope v1" profile on the CPTAC slides is a lut16 into Lab; the TCGA slide here carries sRGB, so nothing is done.
+
+**Annotations and segmentations.** Bulk Simple Annotations (ANN) and slide segmentations (SEG) are found among the study's other series by their Referenced Series Sequence. That costs one small header read per candidate instance. They are listed in the Layers sheet and read only when switched on.
+- **Annotations** (`web/core/wsi-ann.ts`):
+  - Graphic types: points, polylines, polygons, ellipses and rectangles, in 2D (total pixel matrix) or 3D (slide coordinates, placed with the slide's origin, orientation and spacing).
+  - Drawing: a grid index means only annotations on screen are drawn. Annotations under 3 screen pixels are drawn as dots.
+  - Colours: the group's Recommended Display CIELab Value, else a palette colour.
+- **Segmentations:**
+  - Read as tiled pyramids of their own, with segments in the place of optical paths.
+  - Each segment is drawn in its recommended colour: binary masks at fixed opacity, fractional values as opacity.
+  - Placement on the slide uses the two images' pixel spacing and origin.
+  - 1-bit frames that begin mid-byte (PS3.5 packs bits across frames) are re-aligned before decoding.
+
+**JPEG XL.** Tiles in the three JPEG XL syntaxes (.110 lossless, .111 JPEG recompression, .112) decode through the same pool, using the decoders' JPEG XL support. Fragment walking recognises JPEG XL codestreams and containers.
 
 **Stats panel** (bottom left; tap it to collapse). It shows:
 - the bytes downloaded against the size of the series file, and the percentage;
@@ -104,9 +146,25 @@ Attribution: "National Cancer Institute Clinical Proteomic Tumor Analysis Consor
 
 The files are in `/media/barracuda/shlink-dicom-slides/dl/<series_uuid>/`, kept local only.
 
-**Not covered by the test data.**
-- **TILED_SPARSE.** None of the 50,952 CC BY SM series of 100–700 MB in IDC is TILED_SPARSE, so that path is untested on real data.
-- **Several focal planes or optical paths.** Only the first is shown.
+### Feature test data
+
+A census query (`wsi-tools/sm_features.sql`, 7.2 GB) over every SM, ANN and tiled SEG instance in IDC found:
+- **Present under CC BY:** bulk annotations (TCGA, 1,087 series in TCGA-BRCA alone) and tiled segmentations (TCGA).
+- **Fluorescence:** a per-study query (`sm_studies.sql`, 9.2 GB) found fluorescence slides with one channel per instance in the HTAN collections.
+- **Absent under CC BY:** no slide has a Total Pixel Matrix Focal Planes or Number of Optical Paths above 1, none is TILED_SPARSE, and none is JPEG XL. Those were built from real slides with `wsi-tools/build_synthetic.py` (pydicom, imagecodecs, cjxl); each built file says it is synthetic in its Series Description.
+
+| Name | What | Source | License |
+|---|---|---|---|
+| `ann-seg` | TCGA-05-5425 DX1, FFPE H&E: JPEG 2000, 2 levels, 10.6 MB, sRGB ICC profile. With it: Bulk Simple Annotations, 9,856 nucleus polygons (2.1 MB); a nuclei SEG pyramid, binary, 3 levels; and three Stony Brook TIL maps, binary, fractional, and two segments | TCGA-LUAD in IDC: study 2.25.205030765177901157267000321305282297826 (IDC crdc 26f5b0cf-9995-49f4-bdef-389abd895754); slide series 1.3.6.1.4.1.5962.99.1.1068929117.2018545680.1637451501661.2.0 (IDC 5b454b12-b716-471d-abde-f59ec88cf4ef); ANN cdd04f64-c03b-47ef-bcce-528317edeb10, SEG 47b2be3f-c5b7-473f-a444-b48f6e3e9ce1, 5192a672-eff2-400d-848d-d4a18ab4e021, 992b538e-a3f9-4ced-941a-5c1dd732867b, ac7cef6d-69d1-4b32-a5a9-8b12d923e41b | CC BY 4.0 |
+| `fluor-ohsu` | Multiplex immunohistochemistry, 12 channels (one per instance), 5 levels, 8-bit, uncompressed, 126 MB | HTAN-OHSU, series b67a9aee-2f12-4e9d-9e00-7130e5017545, Series Instance UID 1.3.6.1.4.1.5962.99.1.1999891937.339225835.1655562333665.4.0 | CC BY 4.0 |
+| `fluor-16bit` | Imaging mass cytometry, 28 channels, 16-bit, one level, 5 MB | HTAN-WUSTL, series 76cce1d6-61fa-4ced-bb8f-3695eb76758e, Series Instance UID 1.3.6.1.4.1.5962.99.1.1997745066.816859639.1655560186794.4.0 | CC BY 4.0 |
+| `fluor-3path` | Synthetic: three of the OHSU channels in one instance per level (Number of Optical Paths 3) | from `fluor-ohsu` | CC BY 4.0 (changed) |
+| `sparse-z` | Synthetic: DX1 as TILED_SPARSE with three focal planes (Z −2, 0, +2 µm; the outer two blurred by about 1.5 and 3 µm), 223 background tiles left out, frames shuffled, JPEG baseline | from `ann-seg` DX1 | CC BY 4.0 (changed) |
+| `full-z` | Synthetic: the same three planes, TILED_FULL, all planes in one instance per level | from `ann-seg` DX1 | CC BY 4.0 (changed) |
+| `jxl-lossless`, `jxl-lossy` | Synthetic: DX1 re-encoded as JPEG XL lossless (.110) and JPEG XL distance 1 (.112) | from `ann-seg` DX1 | CC BY 4.0 (changed) |
+| `jxl-recompress` | Synthetic: TCGA-05-5425 BS2 (frozen H&E, JPEG baseline, ScanScope v1 ICC profile) with its JPEG tiles losslessly recompressed by cjxl (.111); the 12,000-wide base level left out | TCGA-LUAD, series 62828643-1ae6-4e24-b0e7-16b88a8d548b | CC BY 4.0 (changed) |
+
+TCGA attribution: "The Cancer Genome Atlas (TCGA) Research Network, via the NCI Imaging Data Commons. CC BY 4.0." HTAN attribution: "Human Tumor Atlas Network (HTAN), OHSU and WUSTL centers, via the NCI Imaging Data Commons. CC BY 4.0." The synthetic files are in `/media/barracuda/shlink-dicom-slides/synthetic/`.
 
 ## Running it
 
@@ -120,7 +178,16 @@ bun web/view/wsi-tools/static-host.ts &            # :3335, single-range GET + C
 bun web/view/wsi-tools/static-pack.ts luad-1gb $D/4a6b5ed5-a7e8-450d-9af6-e739b1807bac
 bun web/build.ts && node web/checks/wsi-checks.mjs  # 60 checks; shots and results.json in docs/shots/wsi/
 node web/checks/share-checks.mjs --only=slide       # /share with the slide minus its base level
+# Feature fixtures (one share each, packed with offset tables), then the feature checks:
+cd codec-corpus && uv run python -I ../web/view/wsi-tools/build_synthetic.py /media/barracuda/shlink-dicom-slides/synthetic && cd ..
+S=/media/barracuda/shlink-dicom-slides
+bun web/view/wsi-tools/wsi-fixtures.ts --tables-only ann-seg=$S/staged/ann-seg fluor-ohsu=$S/dl/b67a9aee-2f12-4e9d-9e00-7130e5017545 \
+  fluor-16bit=$S/dl/76cce1d6-61fa-4ced-bb8f-3695eb76758e fluor-3path=$S/synthetic/fluor-3path sparse-z=$S/synthetic/sparse-z \
+  full-z=$S/synthetic/full-z jxl-lossless=$S/synthetic/jxl-lossless jxl-lossy=$S/synthetic/jxl-lossy jxl-recompress=$S/synthetic/jxl-recompress
+node web/checks/wsi-checks.mjs --only=features      # or --only=<fixture>, icc, jxl
 ```
+
+`staged/ann-seg` holds links to the DX1, ANN and SEG files of the TCGA study.
 
 The 1.2 GB slide is not on the local server, because the server's API accepts at most 200 MiB per upload body (`DefaultBodyLimit` in `crates/shl-dicom-server/src/lib.rs`) and 500 MiB per share. So a series over 200 MiB cannot be shared through `/share` today. `static-pack.ts` packs the slide as PROPOSAL §9 describes, writing two series files and a Bundle for each. Its offset tables come from the same Rust code as the packer's, through `offset_table_patch_wasm`. `static-host.ts` serves them, the way any static host would (Appendix C).
 
@@ -149,6 +216,36 @@ These were measured on 15 Oct 2026 in headless Chromium against localhost, with 
 - on the phone: double tap 2×, pinch 4× for a 4× finger spread, a 120 px drag moving 120 CSS px, and a minimap tap;
 - phone layout: no horizontal overflow, and every target at least 44 px;
 - no console errors anywhere.
+
+### Feature results
+
+These come from `wsi-checks.mjs`, which ran 144 of 144 checks on 15 Oct 2026. Every tile below is compared with a reference decode of the same frame (`ref_tiles.py`).
+
+| Feature | Check | Result |
+|---|---|---|
+| Fluorescence, 12 channels | Tiles of 3 channels × 2 levels against pydicom | identical |
+| | Switching a channel off in the sheet; intensity 200% | the picture changes; brighter |
+| | Full resolution at the centre, 4 channels | 30.9 MB of 131.8 MB on desktop, 17.3 MB on the phone (uncompressed 1024² tiles: 1 MB per tile per channel) |
+| Fluorescence, 16-bit and three paths in one instance | Tiles against pydicom | identical |
+| Focal planes, TILED_SPARSE and TILED_FULL | Tiles of all three planes against pydicom; Focus control (keyboard on desktop, tap on phone); Page Up | identical; the picture changes |
+| TILED_SPARSE | A background tile absent from the file | reported absent, left empty |
+| Annotations | 9,856 polygons drawn at fit; outline at the first polygon's first point | drawn |
+| Segmentations | 1-bit tiles of the nuclei pyramid, and both segments of a TIL map whose second frame starts mid-byte, against pydicom | identical |
+| Layers cost | Annotations and the nuclei segmentation, read when switched on | 2.8 MB, after 1.1 MB for the slide |
+| ICC (ScanScope v1, lut16 → Lab) | Corrected tiles against lcms2 (ImageMagick) | max 1, mean ≤ 0.03; switched off: the stored pixels exactly |
+| JPEG XL lossless / lossy / JPEG recompression | Tiles against libjxl (imagecodecs) | identical / max 1 / max 1 (inverse DCT rounding) |
+
+**Slow connection, no offset tables** (`--only=throttled`): brca-jpeg packed without tables, at 20 Mbit/s with 40 ms latency (CDP network emulation), zoomed to full resolution on tissue, sampled for 12 s, on desktop and phone.
+
+| Gate | Result |
+|---|---|
+| Progress shown within 500 ms | 105–110 ms |
+| Its text changes at least every second | longest gap 300–402 ms over 120+ samples |
+| No main-thread task over 100 ms | none in 6 of 7 runs; one desktop run had tasks of 118 and 165 ms (load average 10–14 from other agents) |
+| Pan and zoom answered during the walk | next frame (0–33 ms after the input) |
+| Walked in 12 s | about 30 MB of the roughly 134 MB this view needs |
+
+On the full colour cube, `iccToSrgb` matches lcms2 with a mean difference of 0.15 and a 99th percentile of 3. The largest differences, up to 11, are in saturated out-of-gamut greens (`wsi-tools/icc-check.ts`).
 
 ## Offset tables
 
@@ -189,9 +286,16 @@ How it works:
 
 ## Limits
 
-- **Focal planes and optical paths.** Only the first focal plane and optical path are shown. Z-stacks and multiplexed fluorescence channels are not selectable.
+- **One focal plane at a time.** There is no extended-depth or stacked view.
+- **Fluorescence:**
+  - each channel's window is fixed from its first tile, with no per-channel black or white point control;
+  - channels may be windowed on an inconsistent level if their first decoded tile is unrepresentative.
+- **Overlays:**
+  - Segmentations and annotations are placed by spacing and origin. Rotated or flipped slide orientations relative to the slide image are not handled.
+  - An annotation instance is read whole (up to 512 MB). Its measurements (for example nucleus area) are not shown.
+- **ICC profiles:** v4 lutAtoB profiles (mAB) are not converted. The table is built on the main thread (27 ms).
 - **Learned offsets.** For files shared without tables, walking results last for the page session. They are not stored across visits, though they could be, by fileId, since series files are immutable.
 - **Large uploads.** Series over 200 MiB cannot be uploaded through the local server's API (see above).
 - **Fetch granularity.** The smallest fetch is a 64 KiB record, and tiles here average 3–17 KB. Neighbouring tiles share records, but a scattered view still over-fetches several times its tile bytes. That is the format's record size (PROPOSAL §9.3), not something the viewer can change.
 - **Downloads.** For a slide, "Download originals" offers the study or series ZIP, not "This image". The ZIP of a 1.2 GB series was not tried.
-- **Monochrome slides.** These are shown with a min/max window. There is no window/level control for slides.
+- **Single-channel monochrome slides.** These are shown with a percentile window. There is no window/level control for slides.

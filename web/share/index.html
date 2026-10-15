@@ -31,6 +31,17 @@
       <div id="add-choose">
         <h1 tabindex="-1">Share your imaging</h1>
         <p class="lede">Choose where the imaging comes from. It is read and encrypted on this device before anything is uploaded.</p>
+        <section class="card resume hidden" id="resume">
+          <h2>An upload did not finish</h2>
+          <p class="tech" id="resume-title"></p>
+          <p id="resume-text"></p>
+          <div class="actions">
+            <button class="btn" id="resume-discard">Delete it</button>
+            <button class="btn btn-primary" id="resume-continue">Continue</button>
+          </div>
+          <input type="file" id="in-resume" multiple class="hidden" />
+          <input type="file" id="in-resume-folder" webkitdirectory class="hidden" />
+        </section>
         <div class="choices" id="choices"></div>
         <section class="saved hidden" id="saved">
           <h2>Shares you made in this browser</h2>

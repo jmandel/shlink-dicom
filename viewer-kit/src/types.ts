@@ -16,6 +16,17 @@ export interface ImageInfo {
   bitsStored: number;
   /** 0 unsigned, 1 two's complement. */
   pixelRepresentation: 0 | 1;
+  /**
+   * Float or Double Float Pixel Data: samples are IEEE 754 f32 (bitsAllocated 32) or f64
+   * (bitsAllocated 64), little-endian; pixelRepresentation is 0 and bitsStored equals
+   * bitsAllocated. minValue/maxValue skip NaN and infinities.
+   */
+  float: boolean;
+  /**
+   * First Real World Value Mapping item (top level, else Shared, else Per-Frame item 0), or null:
+   * real value = stored × slope + intercept, in `units` (UCUM code) / `unitsMeaning`.
+   */
+  realWorldValueMapping: RealWorldValueMapping | null;
   /** rows × columns × samples × bytes per sample. */
   frameBytes: number;
   /** Of the returned pixels: "RGB" after a YBR conversion, otherwise as declared. */
@@ -48,6 +59,14 @@ export interface ImageInfo {
   fullColumns?: number;
 }
 
+export interface RealWorldValueMapping {
+  slope: number | null;
+  intercept: number | null;
+  label: string | null;
+  units: string | null;
+  unitsMeaning: string | null;
+}
+
 export interface FrameValues {
   rescaleSlope: number | null;
   rescaleIntercept: number | null;
@@ -74,9 +93,12 @@ export interface DecodedImage extends ImageInfo {
   decodeMs: number;
   /** Time from pool.decode() to the result reaching the main thread (queueing included). */
   totalMs: number;
+  /** The instance's bytes before Pixel Data, when the decode asked for them (`header: true`). */
+  header?: Uint8Array;
 }
 
-export type Samples = Uint8Array | Int8Array | Uint16Array | Int16Array | Uint32Array | Int32Array;
+export type Samples =
+  | Uint8Array | Int8Array | Uint16Array | Int16Array | Uint32Array | Int32Array | Float32Array | Float64Array;
 
 /** One frame ready to render: the input of the renderers. */
 export interface Frame {
@@ -90,7 +112,8 @@ export interface Frame {
   photometric: string;
   rescaleSlope: number;
   rescaleIntercept: number;
-  /** rows × columns × samples values (typed to Bits Allocated and Pixel Representation). */
+  /** rows × columns × samples values (typed to Bits Allocated and Pixel Representation; Float32Array
+   * or Float64Array for float pixel data). */
   data: Samples;
   palette?: PaletteLut | null;
 }
@@ -102,7 +125,11 @@ export function frameOf(img: DecodedImage, k = 0): Frame {
   if (off === undefined) throw new RangeError(`frame ${k} not in this result (${img.frames} frames)`);
   const signed = img.pixelRepresentation === 1;
   let data: Samples;
-  switch (img.bitsAllocated) {
+  if (img.float) {
+    if (img.bitsAllocated === 32) data = new Float32Array(img.pixels, off, n);
+    else if (img.bitsAllocated === 64) data = new Float64Array(img.pixels, off, n);
+    else throw new Error(`float pixel data with Bits Allocated ${img.bitsAllocated}`);
+  } else switch (img.bitsAllocated) {
     case 8: case 1: data = signed ? new Int8Array(img.pixels, off, n) : new Uint8Array(img.pixels, off, n); break;
     case 16: data = signed ? new Int16Array(img.pixels, off, n) : new Uint16Array(img.pixels, off, n); break;
     case 32: data = signed ? new Int32Array(img.pixels, off, n) : new Uint32Array(img.pixels, off, n); break;

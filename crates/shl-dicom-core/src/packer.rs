@@ -147,6 +147,7 @@ impl IngestSession {
         for (study_idx, (study_uid, series_map)) in studies_map.into_iter().enumerate() {
             let mut study_desc = None;
             let mut study_date = None;
+            let mut accession: Option<String> = None;
             let mut series_inputs = Vec::new();
 
             for (series_uid, mut insts) in series_map {
@@ -173,6 +174,9 @@ impl IngestSession {
                 }
                 if study_date.is_none() {
                     study_date = first.study_date.clone();
+                }
+                if accession.is_none() {
+                    accession = first.accession_number.clone();
                 }
 
                 let file_id_bytes = random_bytes::<16>()?;
@@ -228,6 +232,7 @@ impl IngestSession {
                 study_instance_uid: study_uid,
                 description: study_desc,
                 started: study_date,
+                accession,
                 note: None,
                 series: series_inputs,
             });

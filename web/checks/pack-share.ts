@@ -19,6 +19,8 @@ export interface SharedFixture {
   ciphertextBytes: number;
   /** Instances given an offset table. */
   tablesAdded: number;
+  /** Files the Share page's reader left out, with the reason. */
+  skipped: { name: string; reason: string }[];
   mint(bundle: any, o: { label: string; passcode?: string; exp?: number }): Promise<{ lid: string; shlink: string }>;
   revoke(lid: string): Promise<void>;
   remove(): Promise<void>;
@@ -76,7 +78,7 @@ export async function packAndShare(
   o: { addOffsetTables?: boolean } = {},
 ): Promise<SharedFixture> {
   const col = new Collection();
-  for (const f of files) col.add(f.name, f.bytes);
+  for (const f of files) await col.add(f.name, f.bytes);
   col.finish();
   const studies = col.list();
   let tablesAdded = 0;
@@ -104,5 +106,5 @@ export async function packAndShare(
   const bundle = buildBundle(col, packed);
   const ownerJwe = await encryptJwe(new TextEncoder().encode(JSON.stringify(bundle)), randomKeyB64());
   await j(await fetch(`${base}/api/shares/${sid}/owner.jwe`, { method: "PUT", headers: { ...auth, "Content-Type": "application/jose" }, body: ownerJwe }));
-  return { sid, token, bundle, plaintextBytes, ciphertextBytes, tablesAdded, ...linksFor(base, sid, token) };
+  return { sid, token, bundle, plaintextBytes, ciphertextBytes, tablesAdded, skipped: col.skipped, ...linksFor(base, sid, token) };
 }

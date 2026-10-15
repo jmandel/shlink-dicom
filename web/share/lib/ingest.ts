@@ -1,15 +1,25 @@
 // Reading imaging on the device: archives (ZIP, TAR, TGZ), loose DICOM files and folders, and
 // instances handed over by the portal and link sources. Everything ends up as Part 10 files grouped
 // into studies and series (PROPOSAL.md §11.1 steps 1–4).
+//
+// Nothing here holds a whole file: an instance is a byte source (lib/bytes.ts) read on demand, and
+// only its header is read while collecting. Archive members that can't be read in place (deflated
+// ZIP entries, anything inside a gzip stream, portal downloads) are staged to the origin-private
+// file system (lib/stage.ts).
 import { readDicomHeader, type DicomHeader } from "../../core/dicom-header";
 import { formatPersonName, modalityName } from "../../core/format";
+import { BlobBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
+import type { Stager } from "./stage";
 
 export interface Instance {
   name: string;
-  bytes: Uint8Array;
+  src: Bytes;
   h: DicomHeader;
   number: number | null;
 }
+
+/** Bytes a header is read from, growing until the UIDs are found. */
+const HEADER_READS = [64 << 10, 1 << 20, 16 << 20];
 
 export interface SeriesModel {
   uid: string;
@@ -32,10 +42,39 @@ export interface StudyModel {
   description: string | null;
   /** ISO date or dateTime for ImagingStudy.started, from the source (DICOM StudyDate or the portal). */
   started: string | null;
+  /** Accession Number (0008,0050), or the source ImagingStudy's ACSN identifier. */
+  accession: string | null;
   series: SeriesModel[];
   include: boolean;
-  /** FHIR DiagnosticReport resources for this study (portal or link sources), attachments inline. */
-  reports: any[];
+  /** DiagnosticReports for this study (from the portal or link, or attached by the sharer), attachments inline. */
+  reports: ReportItem[];
+}
+
+export interface ReportItem {
+  /** FHIR DiagnosticReport, presentedForm data inline. */
+  resource: any;
+  include: boolean;
+  from: "portal" | "link" | "attached";
+}
+
+/** A DiagnosticReport for a report file the sharer attached (PDF or text). */
+export async function reportFromFile(file: File): Promise<any> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name) || (bytes[0] === 0x25 && bytes[1] === 0x50);
+  const contentType = isPdf ? "application/pdf" : "text/plain; charset=utf-8";
+  const title = file.name.replace(/\.[^.]+$/, "") || "Report";
+  return {
+    resourceType: "DiagnosticReport",
+    status: "final",
+    code: { text: title },
+    presentedForm: [{ contentType, title: file.name, size: bytes.length, data: btoa(bin) }],
+  };
+}
+
+export function reportTitle(r: any): string {
+  return r.code?.text ?? r.code?.coding?.[0]?.display ?? "Imaging report";
 }
 
 export interface Skipped {
@@ -67,20 +106,35 @@ export class Collection {
     return [...this.studies.values()];
   }
 
-  /** Adds one file; DICOMDIR and non-DICOM files are skipped and recorded. */
-  add(name: string, bytes: Uint8Array) {
+  /** Adds one file; DICOMDIR and non-DICOM files are skipped and recorded. Reads only its header. */
+  async add(name: string, data: Bytes | Uint8Array) {
+    const src = data instanceof Uint8Array ? new MemBytes(data) : data;
     const base = name.split(/[\\/]/).pop() ?? name;
     if (base.toUpperCase() === "DICOMDIR") return this.skip(name, "DICOMDIR (an index, not an image)");
-    if (bytes.length < 132 || bytes[128] !== 0x44 || bytes[129] !== 0x49 || bytes[130] !== 0x43 || bytes[131] !== 0x4d) {
+    let head = await src.read(0, Math.min(src.size, HEADER_READS[0]));
+    if (head.length < 132 || head[128] !== 0x44 || head[129] !== 0x49 || head[130] !== 0x43 || head[131] !== 0x4d) {
       if (/^\./.test(base) || /\.(txt|htm|html|inf|exe|ini|pdf|xml|jpg|png|js|css|ico|dll)$/i.test(base)) return this.skip(name, "not a DICOM file");
       return this.skip(name, "not a DICOM Part 10 file");
     }
-    let h: DicomHeader;
-    try {
-      h = readDicomHeader(bytes);
-    } catch {
-      return this.skip(name, "unreadable DICOM header");
+    let h: DicomHeader | null = null;
+    for (const n of HEADER_READS) {
+      if (n > HEADER_READS[0]) {
+        if (src.size <= head.length) break;
+        head = await src.read(0, Math.min(src.size, n));
+      }
+      try {
+        h = readDicomHeader(head);
+      } catch {
+        h = null;
+      }
+      if (h?.sopInstanceUid && h.studyInstanceUid && h.seriesInstanceUid) break;
     }
+    if (!h) return this.skip(name, "unreadable DICOM header");
+    this.addWithHeader(name, src, h);
+  }
+
+  /** Adds an instance whose header is already known (link sources, from the Bundle). */
+  addWithHeader(name: string, src: Bytes, h: DicomHeader) {
     if (h.sopClassUid === DICOMDIR_SOP) return this.skip(name, "DICOMDIR (an index, not an image)");
     if (!h.sopInstanceUid) return this.skip(name, "no SOP Instance UID");
     if (!h.studyInstanceUid || !h.seriesInstanceUid) return this.skip(name, "no Study or Series Instance UID");
@@ -95,6 +149,7 @@ export class Collection {
         uid: h.studyInstanceUid,
         description: h.studyDescription || null,
         started: dicomDate(h.studyDate, h.studyTime),
+        accession: h.accessionNumber || null,
         series: [],
         include: true,
         reports: [],
@@ -114,11 +169,11 @@ export class Collection {
       };
       st.series.push(se);
     }
-    se.instances.push({ name, bytes, h, number: toInt(h.instanceNumber) });
-    se.bytes += bytes.length;
-    se.transferSyntaxes.add(h.transferSyntax);
+    se.instances.push({ name, src, h, number: toInt(h.instanceNumber) });
+    se.bytes += src.size;
+    if (h.transferSyntax) se.transferSyntaxes.add(h.transferSyntax);
     this.instanceCount++;
-    this.bytes += bytes.length;
+    this.bytes += src.size;
     if (this.patientSource === "dicom" && !this.patient.name && h.patientName) {
       this.patient = {
         name: formatPersonName(h.patientName) || null,
@@ -199,6 +254,9 @@ export function studyCounts(study: StudyModel) {
   return { series: study.series.length, images, bytes };
 }
 
+/** Kept in capitals when a description is sentence-cased. */
+const ACRONYMS = /\b(ct|mri?|pet|xr|us|ap|pa|cta|mra|dwi|adc|flair)\b/gi;
+
 const DATE_IN_TEXT = /\b(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})\b/;
 
 /** The study's date for display: its own date, else one written in its description ("BRAIN 7/29/20"). */
@@ -217,7 +275,7 @@ export function plainStudyTitle(description: string | null, modalities: string[]
   const mods = modalities.filter((m) => !["SR", "KO", "PR", "SEG", "OT", "DOC"].includes(m));
   const modText = [...new Set((mods.length ? mods : modalities).map(modalityName))].join(" + ");
   let d = (description ?? "").replace(DATE_IN_TEXT, "").replace(/[_^]+/g, " ").replace(/\s+/g, " ").trim();
-  if (d && d === d.toUpperCase()) d = d.charAt(0) + d.slice(1).toLowerCase();
+  if (d && d === d.toUpperCase()) d = (d.charAt(0) + d.slice(1).toLowerCase()).replace(ACRONYMS, (w) => w.toUpperCase());
   else if (d) d = d.charAt(0).toUpperCase() + d.slice(1).replace(/\b([A-Z])([a-z]+)/g, (_, a, b) => a.toLowerCase() + b);
   if (!d) return modText || "Imaging study";
   if (!modText) return d;
@@ -233,32 +291,92 @@ export function seriesName(se: { description: string | null | undefined; number:
 
 // ------------------------------------------------------------------------------------ archives
 
-const gz = (b: Uint8Array) => b.length > 2 && b[0] === 0x1f && b[1] === 0x8b;
-const zip = (b: Uint8Array) => b.length > 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
-const tar = (b: Uint8Array) =>
+const isGz = (b: Uint8Array) => b.length > 2 && b[0] === 0x1f && b[1] === 0x8b;
+const isZip = (b: Uint8Array) => b.length > 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+const isTar = (b: Uint8Array) =>
   b.length >= 512 && b[257] === 0x75 && b[258] === 0x73 && b[259] === 0x74 && b[260] === 0x61 && b[261] === 0x72;
-
-async function inflate(b: Uint8Array, format: "gzip" | "deflate-raw"): Promise<Uint8Array> {
-  const s = new Blob([b as BlobPart]).stream().pipeThrough(new DecompressionStream(format));
-  return new Uint8Array(await new Response(s).arrayBuffer());
-}
 
 export interface FileEntry {
   name: string;
-  bytes: Uint8Array;
+  src: Bytes;
 }
 
-/** Expands one file: ZIP, TAR and gzip (TGZ) archives yield their members; anything else itself. */
-export async function* expand(name: string, bytes: Uint8Array, depth = 0): AsyncGenerator<FileEntry> {
-  if (depth < 3 && gz(bytes)) {
-    const inner = await inflate(bytes, "gzip");
-    yield* expand(name.replace(/\.(t?gz)$/i, (_, e) => (e.toLowerCase() === "tgz" ? ".tar" : "")), inner, depth + 1);
-  } else if (depth < 3 && zip(bytes)) {
-    for await (const e of zipEntries(bytes)) yield* expand(`${name}/${e.name}`, e.bytes, depth + 1);
-  } else if (depth < 3 && tar(bytes)) {
-    for (const e of tarEntries(bytes)) yield* expand(`${name}/${e.name}`, e.bytes, depth + 1);
+/** A stream of the source's bytes (a Blob's own stream when there is one). */
+function streamOf(src: Bytes): ReadableStream<Uint8Array> {
+  if (src instanceof BlobBytes) return src.blob.stream() as ReadableStream<Uint8Array>;
+  if (src instanceof SubBytes && src.base instanceof BlobBytes) return src.base.blob.slice(src.offset, src.offset + src.size).stream() as ReadableStream<Uint8Array>;
+  let pos = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(c) {
+      if (pos >= src.size) return c.close();
+      const n = Math.min(src.size - pos, 4 << 20);
+      c.enqueue(await src.read(pos, pos + n));
+      pos += n;
+    },
+  });
+}
+
+/**
+ * Expands one file: ZIP and TAR members are read in place where they can be (stored entries, plain
+ * TAR); gzip streams and deflated entries are decompressed into the stager. Anything else is itself.
+ */
+export async function* expand(name: string, src: Bytes, stager: Stager, depth = 0): AsyncGenerator<FileEntry> {
+  const sniff = await src.read(0, Math.min(src.size, 512));
+  if (depth < 3 && isGz(sniff)) {
+    const stream = streamOf(src).pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
+    yield* tarStream(name.replace(/\.(t?gz)$/i, ""), stream, stager);
+  } else if (depth < 3 && isZip(sniff)) {
+    for await (const e of zipEntries(src, stager)) yield* expand(`${name}/${e.name}`, e.src, stager, depth + 1);
+  } else if (depth < 3 && isTar(sniff)) {
+    for await (const e of tarEntries(src)) yield* expand(`${name}/${e.name}`, e.src, stager, depth + 1);
   } else {
-    yield { name, bytes };
+    yield { name, src };
+  }
+}
+
+/** Pull-based reader over a byte stream. */
+class StreamReader {
+  private reader: ReadableStreamDefaultReader<Uint8Array>;
+  private buf = new Uint8Array(0);
+  private done = false;
+  constructor(stream: ReadableStream<Uint8Array>) {
+    this.reader = stream.getReader();
+  }
+  private async fill(n: number) {
+    while (this.buf.length < n && !this.done) {
+      const { value, done } = await this.reader.read();
+      if (done) this.done = true;
+      else if (value?.length) {
+        const b = new Uint8Array(this.buf.length + value.length);
+        b.set(this.buf);
+        b.set(value, this.buf.length);
+        this.buf = b;
+      }
+    }
+  }
+  /** Exactly n bytes, or fewer at the end of the stream. */
+  async take(n: number): Promise<Uint8Array> {
+    await this.fill(n);
+    const out = this.buf.subarray(0, n);
+    this.buf = this.buf.subarray(out.length);
+    return out;
+  }
+  /** The next n bytes as chunks, without holding them all. */
+  async *chunks(n: number): AsyncGenerator<Uint8Array> {
+    while (n > 0) {
+      if (!this.buf.length) await this.fill(1);
+      if (!this.buf.length) return;
+      const out = this.buf.subarray(0, Math.min(n, this.buf.length));
+      this.buf = this.buf.subarray(out.length);
+      n -= out.length;
+      yield out;
+    }
+  }
+  async skip(n: number) {
+    for await (const _ of this.chunks(n));
+  }
+  cancel() {
+    this.reader.cancel().catch(() => {});
   }
 }
 
@@ -268,66 +386,118 @@ function ascii(b: Uint8Array, o: number, n: number): string {
   return s;
 }
 
-export function* tarEntries(b: Uint8Array): Generator<FileEntry> {
-  let off = 0;
-  let longName: string | null = null;
-  let paxPath: string | null = null;
-  while (off + 512 <= b.length) {
-    const h = b.subarray(off, off + 512);
-    if (h.every((x) => x === 0)) break;
-    const name = ascii(h, 0, 100);
-    const sizeField = ascii(h, 124, 12).trim();
-    const size = parseInt(sizeField || "0", 8) || 0;
-    const type = String.fromCharCode(h[156] || 0x30);
-    const prefix = tar(h) ? ascii(h, 345, 155) : "";
-    const data = b.subarray(off + 512, off + 512 + size);
-    off += 512 + Math.ceil(size / 512) * 512;
-    if (type === "L") {
-      longName = ascii(data, 0, data.length);
-      continue;
+interface TarHeader {
+  name: string;
+  size: number;
+  type: string;
+  prefix: string;
+}
+function tarHeader(h: Uint8Array): TarHeader | null {
+  if (h.length < 512 || h.every((x) => x === 0)) return null;
+  const sizeField = ascii(h, 124, 12).trim();
+  return { name: ascii(h, 0, 100), size: parseInt(sizeField || "0", 8) || 0, type: String.fromCharCode(h[156] || 0x30), prefix: isTar(h) ? ascii(h, 345, 155) : "" };
+}
+
+/** TAR members of a stream (the inside of a .tgz), each staged as it is read. */
+async function* tarStream(name: string, stream: ReadableStream<Uint8Array>, stager: Stager): AsyncGenerator<FileEntry> {
+  const r = new StreamReader(stream);
+  const first = await r.take(512);
+  if (!isTar(first)) {
+    // A plain .gz of one file.
+    const rest = async function* () {
+      yield first;
+      for await (const c of r.chunks(Infinity)) yield c;
+    };
+    yield { name, src: await stager.stage(name, rest()) };
+    return;
+  }
+  let block: Uint8Array | null = first;
+  let longName: string | null = null, paxPath: string | null = null;
+  try {
+    for (;;) {
+      const h = block ?? (await r.take(512));
+      block = null;
+      const th = tarHeader(h);
+      if (!th) break;
+      const pad = Math.ceil(th.size / 512) * 512 - th.size;
+      if (th.type === "L" || th.type === "x") {
+        const data = await r.take(th.size);
+        await r.skip(pad);
+        if (th.type === "L") longName = ascii(data, 0, data.length);
+        else paxPath = /\d+ path=([^\n]*)\n/.exec(new TextDecoder().decode(data))?.[1] ?? null;
+        continue;
+      }
+      const full = longName ?? paxPath ?? (th.prefix ? `${th.prefix}/${th.name}` : th.name);
+      longName = paxPath = null;
+      if ((th.type === "0" || th.type === "\0" || th.type === "7") && th.size > 0) {
+        const src = await stager.stage(`${name}/${full}`, r.chunks(th.size));
+        await r.skip(pad);
+        yield { name: `${name}/${full}`, src };
+      } else await r.skip(th.size + pad);
     }
-    if (type === "x") {
-      const m = /\d+ path=([^\n]*)\n/.exec(new TextDecoder().decode(data));
-      if (m) paxPath = m[1];
-      continue;
-    }
-    if (type === "0" || type === "\0" || type === "7") {
-      const full = longName ?? paxPath ?? (prefix ? `${prefix}/${name}` : name);
-      if (size > 0) yield { name: full, bytes: data };
-    }
-    longName = paxPath = null;
+  } finally {
+    r.cancel();
   }
 }
 
-export async function* zipEntries(b: Uint8Array): AsyncGenerator<FileEntry> {
-  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+/** TAR members read in place (an uncompressed .tar). */
+export async function* tarEntries(src: Bytes): AsyncGenerator<FileEntry> {
+  let off = 0;
+  let longName: string | null = null, paxPath: string | null = null;
+  while (off + 512 <= src.size) {
+    const th = tarHeader(await src.read(off, off + 512));
+    if (!th) break;
+    const start = off + 512;
+    off = start + Math.ceil(th.size / 512) * 512;
+    if (th.type === "L" || th.type === "x") {
+      const data = await src.read(start, start + th.size);
+      if (th.type === "L") longName = ascii(data, 0, data.length);
+      else paxPath = /\d+ path=([^\n]*)\n/.exec(new TextDecoder().decode(data))?.[1] ?? null;
+      continue;
+    }
+    const full = longName ?? paxPath ?? (th.prefix ? `${th.prefix}/${th.name}` : th.name);
+    longName = paxPath = null;
+    if ((th.type === "0" || th.type === "\0" || th.type === "7") && th.size > 0) yield { name: full, src: new SubBytes(src, start, th.size) };
+  }
+}
+
+/** ZIP members: stored entries in place, deflated entries inflated into the stager. */
+export async function* zipEntries(src: Bytes, stager: Stager): AsyncGenerator<FileEntry> {
+  const tailStart = Math.max(0, src.size - 22 - 65535);
+  const tail = await src.read(tailStart, src.size);
+  const tv = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
   let eocd = -1;
-  for (let i = b.length - 22; i >= Math.max(0, b.length - 22 - 65535); i--) {
-    if (dv.getUint32(i, true) === 0x06054b50) {
+  for (let i = tail.length - 22; i >= 0; i--) {
+    if (tv.getUint32(i, true) === 0x06054b50) {
       eocd = i;
       break;
     }
   }
   if (eocd < 0) throw new Error("ZIP file without a central directory");
-  let count = dv.getUint16(eocd + 10, true);
-  let cdOff = dv.getUint32(eocd + 16, true);
-  if (cdOff === 0xffffffff || count === 0xffff) {
+  let count = tv.getUint16(eocd + 10, true);
+  let cdSize = tv.getUint32(eocd + 12, true);
+  let cdOff = tv.getUint32(eocd + 16, true);
+  if (cdOff === 0xffffffff || count === 0xffff || cdSize === 0xffffffff) {
     const loc = eocd - 20;
-    if (loc >= 0 && dv.getUint32(loc, true) === 0x07064b50) {
-      const z64 = Number(dv.getBigUint64(loc + 8, true));
-      count = Number(dv.getBigUint64(z64 + 32, true));
-      cdOff = Number(dv.getBigUint64(z64 + 48, true));
+    if (loc >= 0 && tv.getUint32(loc, true) === 0x07064b50) {
+      const z64 = Number(tv.getBigUint64(loc + 8, true));
+      const z = await src.read(z64, z64 + 56);
+      const zv = new DataView(z.buffer, z.byteOffset, z.byteLength);
+      count = Number(zv.getBigUint64(32, true));
+      cdSize = Number(zv.getBigUint64(40, true));
+      cdOff = Number(zv.getBigUint64(48, true));
     }
   }
-  let p = cdOff;
-  for (let i = 0; i < count && dv.getUint32(p, true) === 0x02014b50; i++) {
+  const cd = await src.read(cdOff, cdOff + cdSize);
+  const dv = new DataView(cd.buffer, cd.byteOffset, cd.byteLength);
+  let p = 0;
+  for (let i = 0; i < count && p + 46 <= cd.length && dv.getUint32(p, true) === 0x02014b50; i++) {
     const method = dv.getUint16(p + 10, true);
     let csize = dv.getUint32(p + 20, true);
     let usize = dv.getUint32(p + 24, true);
     const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
     let lho = dv.getUint32(p + 42, true);
-    const name = new TextDecoder().decode(b.subarray(p + 46, p + 46 + nlen));
-    // ZIP64 extra field: sizes and offset that did not fit.
+    const name = new TextDecoder().decode(cd.subarray(p + 46, p + 46 + nlen));
     let x = p + 46 + nlen;
     const xend = x + xlen;
     while (x + 4 <= xend) {
@@ -342,10 +512,22 @@ export async function* zipEntries(b: Uint8Array): AsyncGenerator<FileEntry> {
     }
     p = xend + clen;
     if (name.endsWith("/")) continue;
-    const start = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
-    const raw = b.subarray(start, start + csize);
-    if (method === 0) yield { name, bytes: raw };
-    else if (method === 8) yield { name, bytes: await inflate(raw, "deflate-raw") };
-    else throw new Error(`${name}: ZIP compression method ${method} is not supported`);
+    const lh = await src.read(lho, lho + 30);
+    const lv = new DataView(lh.buffer, lh.byteOffset, lh.byteLength);
+    const start = lho + 30 + lv.getUint16(26, true) + lv.getUint16(28, true);
+    const raw = new SubBytes(src, start, csize);
+    if (method === 0) yield { name, src: raw };
+    else if (method === 8) {
+      const inflated = streamOf(raw).pipeThrough(new DecompressionStream("deflate-raw") as unknown as TransformStream<Uint8Array, Uint8Array>);
+      const it = async function* () {
+        const rd = inflated.getReader();
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) return;
+          yield value;
+        }
+      };
+      yield { name, src: await stager.stage(name, it()) };
+    } else throw new Error(`${name}: ZIP compression method ${method} is not supported`);
   }
 }

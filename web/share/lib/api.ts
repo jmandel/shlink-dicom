@@ -141,32 +141,115 @@ export class ShareApi {
     return (await (await this.req("GET", `${this.s}/access?${q}`)).json()).events;
   }
 
-  /** PUT one series file with upload progress (XMLHttpRequest: fetch has no upload progress). */
-  putFile(fileId: string, bytes: Uint8Array, onProgress: (loaded: number) => void): Promise<void> {
+  // Series file uploads follow the IETF resumable uploads draft (draft-ietf-httpbis-resumable-upload):
+  // PUT with Upload-Complete creates the upload, HEAD reports Upload-Offset, PATCH appends.
+
+  private fileUrl(fileId: string) {
+    return `${this.base}${this.s}/files/${fileId}.bin`;
+  }
+
+  /** Where an upload stands; null when the server has none. Times out after `timeoutMs`. */
+  async uploadOffset(fileId: string, timeoutMs = 20000): Promise<{ offset: number; length: number | null; complete: boolean } | null> {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(this.fileUrl(fileId), { method: "HEAD", headers: { Authorization: `Bearer ${this.cred!.token}` }, cache: "no-store", signal: ctl.signal });
+    } catch {
+      throw new ApiError(0, "The server could not be reached.");
+    } finally {
+      clearTimeout(t);
+    }
+    if (res.status === 404) return null;
+    if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+    const len = res.headers.get("Upload-Length");
+    return { offset: Number(res.headers.get("Upload-Offset") ?? 0), length: len === null ? null : Number(len), complete: res.headers.get("Upload-Complete") === "?1" };
+  }
+
+  /** Creates a resumable upload of `length` bytes (no content yet). */
+  async createUpload(fileId: string, length: number): Promise<void> {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 30000);
+    try {
+      const res = await fetch(this.fileUrl(fileId), {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${this.cred!.token}`, "Upload-Complete": "?0", "Upload-Length": String(length) },
+        body: new Uint8Array(0),
+        signal: ctl.signal,
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          msg = (await res.json()).error ?? msg;
+        } catch {}
+        throw new ApiError(res.status, msg);
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+      throw new ApiError(0, "The server could not be reached.");
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  /**
+   * Appends `bytes` at `offset` (PATCH, application/partial-upload), with upload progress
+   * (XMLHttpRequest: fetch has no upload progress). A request with no progress for `stallMs`
+   * is abandoned and fails as a network error. Returns the server's new offset.
+   */
+  appendUpload(
+    fileId: string,
+    offset: number,
+    bytes: Uint8Array,
+    complete: boolean,
+    onProgress: (loaded: number) => void,
+    stallMs = 20000,
+  ): Promise<{ offset: number; complete: boolean }> {
     const cred = this.cred!;
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
-      x.open("PUT", `${this.base}/api/shares/${cred.sid}/files/${fileId}.bin`);
+      let timer = 0;
+      const arm = () => {
+        clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          x.abort();
+          reject(new ApiError(0, "The connection stalled."));
+        }, stallMs);
+      };
+      x.open("PATCH", this.fileUrl(fileId));
       x.setRequestHeader("Authorization", `Bearer ${cred.token}`);
-      x.setRequestHeader("Content-Type", "application/octet-stream");
-      x.setRequestHeader("X-Expected-Size", String(bytes.length));
-      x.upload.onprogress = (e) => onProgress(e.loaded);
+      x.setRequestHeader("Content-Type", "application/partial-upload");
+      x.setRequestHeader("Upload-Offset", String(offset));
+      x.setRequestHeader("Upload-Complete", complete ? "?1" : "?0");
+      x.upload.onprogress = (e) => {
+        arm();
+        onProgress(e.loaded);
+      };
+      // Once the body is sent, allow the server time to write and answer.
+      x.upload.onload = arm;
       x.onload = () => {
+        clearTimeout(timer);
+        let body: any = {};
+        try {
+          body = JSON.parse(x.responseText);
+        } catch {}
+        const at = x.getResponseHeader("Upload-Offset");
         if (x.status >= 200 && x.status < 300) {
           onProgress(bytes.length);
-          resolve();
+          resolve({ offset: at !== null ? Number(at) : offset + bytes.length, complete: x.getResponseHeader("Upload-Complete") === "?1" });
         } else {
-          let msg = `HTTP ${x.status}`;
-          try {
-            msg = JSON.parse(x.responseText).error ?? msg;
-          } catch {}
-          reject(new ApiError(x.status, msg));
+          const err = new ApiError(x.status, body.error ?? body.title ?? `HTTP ${x.status}`);
+          if (at !== null) (err as ApiError & { offset?: number }).offset = Number(at);
+          reject(err);
         }
       };
-      x.onerror = () => reject(new ApiError(0, "The upload was interrupted."));
-      // A Blob body: the browser streams it from its blob store, and devtools protocol clients
-      // don't get the whole file inlined in their network events.
-      x.send(new Blob([bytes as BlobPart], { type: "application/octet-stream" }));
+      x.onerror = () => {
+        clearTimeout(timer);
+        reject(new ApiError(0, "The connection was lost."));
+      };
+      x.onabort = () => clearTimeout(timer);
+      arm();
+      x.send(bytes as unknown as XMLHttpRequestBodyInit);
     });
   }
 }

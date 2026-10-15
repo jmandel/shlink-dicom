@@ -4,8 +4,21 @@ use shl_dicom_server::{
     build_app_router,
     cli::{run_inspect_cli, run_pack_cli},
     seed::seed_demo_shares,
-    state::AppState,
+    state::{AppState, Quotas},
 };
+
+/// "20G", "64M", "512K" or plain bytes.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num, mul) = match s.chars().last() {
+        Some('K' | 'k') => (&s[..s.len() - 1], 1u64 << 10),
+        Some('M' | 'm') => (&s[..s.len() - 1], 1 << 20),
+        Some('G' | 'g') => (&s[..s.len() - 1], 1 << 30),
+        Some('T' | 't') => (&s[..s.len() - 1], 1 << 40),
+        _ => (s, 1),
+    };
+    num.trim().parse::<u64>().map(|n| n * mul).map_err(|e| format!("{s}: {e}"))
+}
 
 #[derive(Parser)]
 #[command(name = "shl-dicom", about = "SMART Health Links DICOM Packer & Server")]
@@ -54,6 +67,18 @@ enum Commands {
         /// Public origin URL used when pre-seeding demo links
         #[arg(long, env = "PUBLIC_ORIGIN")]
         public_origin: Option<String>,
+        /// Most encrypted bytes one share may hold (for example 20G); 0 for no limit
+        #[arg(long, env = "SHL_MAX_SHARE_BYTES", default_value = "0", value_parser = parse_size)]
+        max_share_bytes: u64,
+        /// Most series files one share may hold; 0 for no limit
+        #[arg(long, env = "SHL_MAX_SHARE_FILES", default_value_t = 0)]
+        max_share_files: usize,
+        /// Most shares at once, not counting the server's sample; 0 for no limit
+        #[arg(long, env = "SHL_MAX_SHARES", default_value_t = 256)]
+        max_shares: usize,
+        /// Largest upload chunk (for example 64M)
+        #[arg(long, env = "SHL_MAX_CHUNK_BYTES", default_value = "64M", value_parser = parse_size)]
+        max_chunk_bytes: u64,
     },
 }
 
@@ -83,8 +108,18 @@ async fn main() {
             port,
             data_dir,
             public_origin,
+            max_share_bytes,
+            max_share_files,
+            max_shares,
+            max_chunk_bytes,
         } => {
-            let state = AppState::new(&data_dir).expect("failed to initialize AppState");
+            let quotas = Quotas {
+                share_bytes: (max_share_bytes > 0).then_some(max_share_bytes),
+                share_files: (max_share_files > 0).then_some(max_share_files),
+                shares: (max_shares > 0).then_some(max_shares),
+                request_bytes: max_chunk_bytes,
+            };
+            let state = AppState::with_quotas(&data_dir, quotas).expect("failed to initialize AppState");
             let origin = public_origin.unwrap_or_else(|| format!("http://localhost:{port}"));
             println!("Seeding demo shares in {:?}...", data_dir);
             if let Err(e) = seed_demo_shares(&state, &origin) {

@@ -42,8 +42,32 @@ export interface SlideHeader {
   opticalPaths: number;
   /** Pixel Spacing (mm, row then column) from the Shared Functional Groups, when present. */
   pixelSpacing: [number, number] | null;
-  /** TILED_SPARSE: per frame, the 1-based (column, row) of its top-left pixel in the total matrix. */
+  /** Per frame (Per-frame Functional Groups), the 1-based (column, row) of its top-left pixel in the total matrix. */
   planePositions: Int32Array | null;
+  /** Per frame: Z Offset in Slide Coordinate System (µm), or null. */
+  frameZ: Float64Array | null;
+  /** Per frame: Optical Path Identifier, or null. */
+  framePath: string[] | null;
+  /** Per frame: Referenced Segment Number (segmentations), or null. */
+  frameSegment: Int32Array | null;
+  /** Shared Functional Groups: the instance's Z offset (µm) and optical path, when given there. */
+  sharedZ: number | null;
+  sharedPath: string | null;
+  /** Optical Path Sequence items, in order. */
+  paths: OpticalPathInfo[];
+  /** Total Pixel Matrix Origin (mm, slide coordinates) and Image Orientation (Slide). */
+  origin: [number, number] | null;
+  orientation: number[] | null;
+  /** Imaged Volume Width (mm), for Pixel Spacing when the Shared Functional Groups lack it. */
+  imagedVolumeWidth: number | null;
+  seriesInstanceUid: string;
+  frameOfReferenceUid: string;
+  /** Series named in the Referenced Series Sequence (annotations and segmentations). */
+  referencedSeries: string[];
+  /** Segmentations: BINARY or FRACTIONAL, the segments, and Maximum Fractional Value. */
+  segmentationType: string;
+  segments: SegmentInfo[];
+  maxFractional: number;
   /** Extended Offset Table and Lengths (relative to the first fragment item after the BOT). */
   extendedOffsets: number[] | null;
   extendedLengths: number[] | null;
@@ -61,6 +85,22 @@ export interface SlideHeader {
   complete: boolean;
   /** When not complete: bytes from the instance start needed to parse further. */
   needBytes: number;
+}
+
+export interface OpticalPathInfo {
+  id: string;
+  description: string;
+  /** Illumination Wave Length (nm), when given. */
+  wavelength: number | null;
+  /** ICC Profile bytes (a copy), when given. */
+  icc: Uint8Array | null;
+}
+
+export interface SegmentInfo {
+  number: number;
+  label: string;
+  /** Recommended Display CIELab Value (DICOM 16-bit scaled), when given. */
+  lab: [number, number, number] | null;
 }
 
 /** The header was cut short: read at least `needBytes` from the instance start and parse again. */
@@ -100,6 +140,29 @@ const TAG = {
   HighBit: T(0x0028, 0x0102),
   PixelRep: T(0x0028, 0x0103),
   PixelMeasuresSeq: T(0x0028, 0x9110),
+  ICCProfile: T(0x0028, 0x2000),
+  ReferencedSeriesSeq: T(0x0008, 0x1115),
+  SeriesInstance: T(0x0020, 0x000e),
+  FrameOfReference: T(0x0020, 0x0052),
+  Wavelength: T(0x0022, 0x0055),
+  XOffset: T(0x0040, 0x072a),
+  YOffset: T(0x0040, 0x073a),
+  ZOffset: T(0x0040, 0x074a),
+  ImagedVolumeWidth: T(0x0048, 0x0001),
+  OriginSeq: T(0x0048, 0x0008),
+  OrientationSlide: T(0x0048, 0x0102),
+  OpticalPathSeq: T(0x0048, 0x0105),
+  OpticalPathId: T(0x0048, 0x0106),
+  OpticalPathDesc: T(0x0048, 0x0107),
+  OpticalPathIdSeq: T(0x0048, 0x0207),
+  SegmentationType: T(0x0062, 0x0001),
+  SegmentSeq: T(0x0062, 0x0002),
+  SegmentNumber: T(0x0062, 0x0004),
+  SegmentLabel: T(0x0062, 0x0005),
+  SegmentIdSeq: T(0x0062, 0x000a),
+  RefSegmentNumber: T(0x0062, 0x000b),
+  SegmentLab: T(0x0062, 0x000d),
+  MaxFractional: T(0x0062, 0x000e),
   TotalCols: T(0x0048, 0x0006),
   TotalRows: T(0x0048, 0x0007),
   PlanePosSlideSeq: T(0x0048, 0x021a),
@@ -122,6 +185,12 @@ const IMPLICIT_VR: Record<number, string> = {
   [TAG.HighBit]: "US", [TAG.PixelRep]: "US", [TAG.PixelMeasuresSeq]: "SQ", [TAG.TotalCols]: "UL", [TAG.TotalRows]: "UL",
   [TAG.PlanePosSlideSeq]: "SQ", [TAG.ColPos]: "SL", [TAG.RowPos]: "SL", [TAG.OpticalPaths]: "UL", [TAG.FocalPlanes]: "UL",
   [TAG.SharedFG]: "SQ", [TAG.PerFrameFG]: "SQ", [TAG.EOT]: "OV", [TAG.EOTLengths]: "OV", [TAG.PixelData]: "OB",
+  [TAG.ICCProfile]: "OB", [TAG.ReferencedSeriesSeq]: "SQ", [TAG.SeriesInstance]: "UI", [TAG.FrameOfReference]: "UI",
+  [TAG.Wavelength]: "FL", [TAG.XOffset]: "DS", [TAG.YOffset]: "DS", [TAG.ZOffset]: "DS", [TAG.ImagedVolumeWidth]: "FL",
+  [TAG.OriginSeq]: "SQ", [TAG.OrientationSlide]: "DS", [TAG.OpticalPathSeq]: "SQ", [TAG.OpticalPathId]: "SH",
+  [TAG.OpticalPathDesc]: "ST", [TAG.OpticalPathIdSeq]: "SQ", [TAG.SegmentationType]: "CS", [TAG.SegmentSeq]: "SQ",
+  [TAG.SegmentNumber]: "US", [TAG.SegmentLabel]: "LO", [TAG.SegmentIdSeq]: "SQ", [TAG.RefSegmentNumber]: "US",
+  [TAG.SegmentLab]: "US", [TAG.MaxFractional]: "US",
 };
 
 interface El {
@@ -147,7 +216,10 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     transferSyntax: "", sopClassUid: "", sopInstanceUid: "", modality: "", imageType: [], flavor: "",
     rows: 0, columns: 0, samplesPerPixel: 1, photometric: "", planarConfiguration: 0, bitsAllocated: 8, bitsStored: 8,
     highBit: 7, pixelRepresentation: 0, numberOfFrames: 1, totalColumns: 0, totalRows: 0, dimensionOrganization: "",
-    focalPlanes: 1, opticalPaths: 1, pixelSpacing: null, planePositions: null, extendedOffsets: null, extendedLengths: null,
+    focalPlanes: 1, opticalPaths: 1, pixelSpacing: null, planePositions: null, frameZ: null, framePath: null, frameSegment: null,
+    sharedZ: null, sharedPath: null, paths: [], origin: null, orientation: null, imagedVolumeWidth: null,
+    seriesInstanceUid: "", frameOfReferenceUid: "", referencedSeries: [], segmentationType: "", segments: [], maxFractional: 0,
+    extendedOffsets: null, extendedLengths: null,
     pixelDataValueOffset: -1, encapsulated: false, pixelDataLength: -1, basicOffsets: null, firstFragmentOffset: -1,
     complete: false, needBytes: 0,
   };
@@ -213,7 +285,7 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
   };
 
   /** Walks the elements of a data set in [a, b), calling fn; nested sequences are skipped unless fn handles them. */
-  const walk = (a: number, b: number, isExplicit: boolean, fn: (el: El) => boolean | void) => {
+  const walk = (a: number, b: number, isExplicit: boolean, fn: (el: El) => number | boolean | void) => {
     let p = a;
     while (p < b) {
       const el = readEl(p, isExplicit);
@@ -242,6 +314,42 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     return out;
   };
 
+  /** A short value's text (needs its bytes). */
+  const val = (e: El) => (e.len === UNDEF ? "" : (need(e.vo + e.len), str(e.vo, e.len)));
+  const firstItemWalk = (e: El, fn: (x: El) => void) => eachItem(e, explicit, (a, b) => walk(a, b, explicit, fn)) as any as number;
+
+  /** The functional group macros this reader uses, from one Shared or Per-frame item. */
+  const functionalGroups = (a: number, b: number) => {
+    const fg = { spacing: null as [number, number] | null, col: 0, row: 0, z: null as number | null, path: null as string | null, segment: null as number | null };
+    walk(a, b, explicit, (e) => {
+      if (e.tag === TAG.PixelMeasuresSeq) {
+        return firstItemWalk(e, (e2) => {
+          if (e2.tag !== TAG.PixelSpacing) return;
+          const v = val(e2).split("\\").map(Number);
+          if (v.length === 2 && v.every((x) => x > 0)) fg.spacing = [v[0], v[1]];
+        });
+      }
+      if (e.tag === TAG.PlanePosSlideSeq) {
+        return firstItemWalk(e, (e2) => {
+          if (e2.tag === TAG.ColPos) (need(e2.vo + e2.len), (fg.col = num(e2)));
+          else if (e2.tag === TAG.RowPos) (need(e2.vo + e2.len), (fg.row = num(e2)));
+          else if (e2.tag === TAG.ZOffset) fg.z = Number(val(e2));
+        });
+      }
+      if (e.tag === TAG.OpticalPathIdSeq) {
+        return firstItemWalk(e, (e2) => {
+          if (e2.tag === TAG.OpticalPathId) fg.path = val(e2);
+        });
+      }
+      if (e.tag === TAG.SegmentIdSeq) {
+        return firstItemWalk(e, (e2) => {
+          if (e2.tag === TAG.RefSegmentNumber) (need(e2.vo + 2), (fg.segment = dv.getUint16(e2.vo, true)));
+        });
+      }
+    });
+    return fg;
+  };
+
   // File meta (always explicit VR LE).
   let pos = 132;
   for (;;) {
@@ -261,40 +369,70 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     const t = el.tag;
     if (t === TAG.PixelData) return;
     if (el.vr === "SQ" || el.len === UNDEF) {
-      if (t === TAG.SharedFG) {
-        return eachItem(el, explicit, (a, b) =>
-          walk(a, b, explicit, (e) => {
-            if (e.tag !== TAG.PixelMeasuresSeq) return;
-            return eachItem(e, explicit, (a2, b2) =>
-              walk(a2, b2, explicit, (e2) => {
-                if (e2.tag === TAG.PixelSpacing) {
-                  need(e2.vo + e2.len);
-                  const v = str(e2.vo, e2.len).split("\\").map(Number);
-                  if (v.length === 2 && v.every((x) => x > 0)) h.pixelSpacing = [v[0], v[1]];
-                }
-              }),
-            ) as any;
-          }),
-        ) as any;
-      }
-      if (t === TAG.PerFrameFG && h.dimensionOrganization !== "TILED_FULL") {
-        const pp: number[] = [];
-        const after = eachItem(el, explicit, (a, b) => {
-          let c = 0, r = 0;
-          walk(a, b, explicit, (e) => {
-            if (e.tag !== TAG.PlanePosSlideSeq) return;
-            return eachItem(e, explicit, (a2, b2) =>
-              walk(a2, b2, explicit, (e2) => {
-                need(e2.vo + e2.len);
-                if (e2.tag === TAG.ColPos) c = num(e2);
-                else if (e2.tag === TAG.RowPos) r = num(e2);
-              }),
-            ) as any;
+      const items = (fn: (a: number, b: number) => void) => eachItem(el, explicit, fn) as any as number;
+      switch (t) {
+        case TAG.SharedFG:
+          return items((a, b) => {
+            const fg = functionalGroups(a, b);
+            if (fg.spacing) h.pixelSpacing = fg.spacing;
+            if (fg.z !== null) h.sharedZ = fg.z;
+            if (fg.path !== null) h.sharedPath = fg.path;
           });
-          pp.push(c, r);
-        });
-        if (pp.some((x) => x !== 0)) h.planePositions = Int32Array.from(pp);
-        return after;
+        case TAG.PerFrameFG: {
+          const pp: number[] = [], zs: number[] = [], ids: string[] = [], segs: number[] = [];
+          let anyZ = false, anyPath = false, anySeg = false;
+          const after = items((a, b) => {
+            const fg = functionalGroups(a, b);
+            pp.push(fg.col, fg.row);
+            zs.push(fg.z ?? 0);
+            ids.push(fg.path ?? "");
+            segs.push(fg.segment ?? 0);
+            anyZ ||= fg.z !== null;
+            anyPath ||= fg.path !== null;
+            anySeg ||= fg.segment !== null;
+          });
+          if (pp.some((x) => x !== 0)) h.planePositions = Int32Array.from(pp);
+          if (anyZ) h.frameZ = Float64Array.from(zs);
+          if (anyPath) h.framePath = ids;
+          if (anySeg) h.frameSegment = Int32Array.from(segs);
+          return after;
+        }
+        case TAG.OpticalPathSeq:
+          return items((a, b) => {
+            const p: OpticalPathInfo = { id: "", description: "", wavelength: null, icc: null };
+            walk(a, b, explicit, (e) => {
+              if (e.tag === TAG.OpticalPathId) p.id = val(e);
+              else if (e.tag === TAG.OpticalPathDesc) p.description = val(e);
+              else if (e.tag === TAG.Wavelength && e.len >= 4) (need(e.vo + 4), (p.wavelength = dv.getFloat32(e.vo, true)));
+              else if (e.tag === TAG.ICCProfile && e.len !== UNDEF) (need(e.vo + e.len), (p.icc = bytes.slice(e.vo, e.vo + e.len)));
+            });
+            h.paths.push(p);
+          });
+        case TAG.OriginSeq:
+          return items((a, b) => {
+            let x = 0, y = 0;
+            walk(a, b, explicit, (e) => {
+              if (e.tag === TAG.XOffset) x = Number(val(e));
+              else if (e.tag === TAG.YOffset) y = Number(val(e));
+            });
+            h.origin = [x, y];
+          });
+        case TAG.SegmentSeq:
+          return items((a, b) => {
+            const g: SegmentInfo = { number: 0, label: "", lab: null };
+            walk(a, b, explicit, (e) => {
+              if (e.tag === TAG.SegmentNumber) (need(e.vo + 2), (g.number = dv.getUint16(e.vo, true)));
+              else if (e.tag === TAG.SegmentLabel) g.label = val(e);
+              else if (e.tag === TAG.SegmentLab && e.len >= 6) (need(e.vo + 6), (g.lab = [0, 2, 4].map((k) => dv.getUint16(e.vo + k, true)) as [number, number, number]));
+            });
+            h.segments.push(g);
+          });
+        case TAG.ReferencedSeriesSeq:
+          return items((a, b) =>
+            walk(a, b, explicit, (e) => {
+              if (e.tag === TAG.SeriesInstance) h.referencedSeries.push(val(e));
+            }),
+          );
       }
       return;
     }
@@ -320,6 +458,12 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
       case TAG.OpticalPaths: h.opticalPaths = num(el) || 1; break;
       case TAG.FocalPlanes: h.focalPlanes = num(el) || 1; break;
       case TAG.EOT: h.extendedOffsets = u64s(el); break;
+      case TAG.SeriesInstance: h.seriesInstanceUid = str(el.vo, el.len); break;
+      case TAG.FrameOfReference: h.frameOfReferenceUid = str(el.vo, el.len); break;
+      case TAG.OrientationSlide: h.orientation = str(el.vo, el.len).split("\\").map(Number); break;
+      case TAG.ImagedVolumeWidth: if (el.len >= 4) h.imagedVolumeWidth = dv.getFloat32(el.vo, true); break;
+      case TAG.SegmentationType: h.segmentationType = str(el.vo, el.len); break;
+      case TAG.MaxFractional: h.maxFractional = num(el); break;
       case TAG.EOTLengths: h.extendedLengths = u64s(el); break;
     }
   };
@@ -358,13 +502,23 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
   h.flavor = h.imageType[2] ?? "";
   if (!h.totalColumns) h.totalColumns = h.columns;
   if (!h.totalRows) h.totalRows = h.rows;
+  if (!h.pixelSpacing && h.imagedVolumeWidth && h.totalColumns) {
+    const sp = h.imagedVolumeWidth / h.totalColumns;
+    h.pixelSpacing = [sp, sp];
+  }
   return h;
 }
 
 // ------------------------------------------------------------------------------------- pyramid
 
+/** One frame of one instance. */
+export interface FrameRef {
+  instance: number;
+  frame: number;
+}
+
 export interface SlideLevel {
-  /** Index of the instance in the series. */
+  /** The level's first instance and its header (tile size and pixel attributes are per level). */
   instance: number;
   header: SlideHeader;
   width: number;
@@ -375,8 +529,17 @@ export interface SlideLevel {
   tilesDown: number;
   /** Base-level pixels per pixel of this level (1 for the base). */
   downsample: number;
-  /** Frame of tile (tx, ty), or -1 when the tile is absent (TILED_SPARSE). */
-  frameOf(tx: number, ty: number): number;
+  /** The frame holding tile (tx, ty) of focal plane `plane` and optical path `path` (indices into the pyramid's lists), or null when absent. */
+  frameRef(tx: number, ty: number, plane?: number, path?: number): FrameRef | null;
+  /** True when this level has any frame for the plane and path. */
+  has(plane: number, path: number): boolean;
+}
+
+/** An optical path (a fluorescence channel, or the one brightfield path), or a segment of a segmentation. */
+export interface SlidePath {
+  id: string;
+  label: string;
+  wavelength: number | null;
 }
 
 export interface Pyramid {
@@ -387,58 +550,151 @@ export interface Pyramid {
   label: number | null;
   overview: number | null;
   thumbnail: number | null;
+  /** Optical paths (or, for a segmentation, segments), in display order. */
+  paths: SlidePath[];
+  /** Focal planes, as Z offsets in µm when the files give them, else as plane numbers; ascending. */
+  planes: number[];
+  /** True when the planes are Z offsets in µm. */
+  planesInMicrons: boolean;
+  /** Single-sample (fluorescence, or segmentation) images. */
+  monochrome: boolean;
+  /** Pixel Spacing (mm) of the base level, origin and orientation, for placing overlays. */
+  spacing: [number, number] | null;
+  origin: [number, number] | null;
+  orientation: number[] | null;
+  frameOfReferenceUid: string;
+  /** The first ICC profile among the optical paths, if any. */
+  icc: Uint8Array | null;
+}
+
+/** What each instance holds: its paths and planes, and how its frames map to them. */
+interface InstanceLayout {
+  i: number;
+  h: SlideHeader;
+  /** Path ids in frame order (TILED_FULL), or every id the frames use (sparse). */
+  pathIds: string[];
+  /** Plane keys in frame order (TILED_FULL), as Z values or local indices. */
+  planeKeys: number[];
 }
 
 /** Builds the pyramid from the instances' headers (null for instances not read or not images). */
 export function buildPyramid(headers: (SlideHeader | null)[]): Pyramid {
-  const vols: { i: number; h: SlideHeader }[] = [];
+  const vols: InstanceLayout[] = [];
   let label: number | null = null, overview: number | null = null, thumbnail: number | null = null;
   headers.forEach((h, i) => {
     if (!h || !h.rows || !h.columns) return;
     if (h.flavor === "LABEL") label ??= i;
     else if (h.flavor === "OVERVIEW") overview ??= i;
     else if (h.flavor === "THUMBNAIL") thumbnail ??= i;
-    else vols.push({ i, h });
+    else vols.push(layoutOf(i, h));
   });
-  // One level per Total Pixel Matrix width; the first instance of each width wins (further
-  // instances of a level, such as other focal planes or concatenations, are not used).
-  vols.sort((a, b) => b.h.totalColumns - a.h.totalColumns || a.i - b.i);
-  const levels: SlideLevel[] = [];
-  for (const { i, h } of vols) {
-    if (levels.length && levels[levels.length - 1].width === h.totalColumns) continue;
-    levels.push(makeLevel(i, h, 1));
+  if (!vols.length) throw new SlideHeaderError("the series has no tiled image");
+  const isSeg = vols.some((v) => v.h.segments.length);
+
+  // Paths: optical paths (or segments) in first-seen order; numeric ids sort numerically.
+  const pathMeta = new Map<string, SlidePath>();
+  for (const v of vols) {
+    if (isSeg) for (const g of v.h.segments) if (!pathMeta.has(String(g.number))) pathMeta.set(String(g.number), { id: String(g.number), label: g.label || `Segment ${g.number}`, wavelength: null });
+    for (const p of v.h.paths) if (!pathMeta.has(p.id)) pathMeta.set(p.id, { id: p.id, label: p.description || (p.id ? `Channel ${p.id}` : ""), wavelength: p.wavelength });
+    for (const id of v.pathIds) if (!pathMeta.has(id)) pathMeta.set(id, { id, label: id ? (isSeg ? `Segment ${id}` : `Channel ${id}`) : "", wavelength: null });
   }
-  if (!levels.length) throw new SlideHeaderError("the series has no tiled image");
+  let paths = [...pathMeta.values()].filter((p) => vols.some((v) => v.pathIds.includes(p.id)));
+  if (paths.every((p) => /^\d+$/.test(p.id))) paths.sort((a, b) => Number(a.id) - Number(b.id));
+  if (!paths.length) paths = [{ id: "", label: "", wavelength: null }];
+  const pathIndex = new Map(paths.map((p, k) => [p.id, k]));
+
+  // Planes: Z values when every instance gives them, else plane numbers.
+  const planesInMicrons = vols.every((v) => v.h.frameZ || v.h.sharedZ !== null);
+  const planes = [...new Set(vols.flatMap((v) => v.planeKeys))].sort((a, b) => a - b);
+  const planeIndex = new Map(planes.map((z, k) => [z, k]));
+
+  // Levels: one per Total Pixel Matrix width; every instance of that width contributes frames.
+  const widths = [...new Set(vols.map((v) => v.h.totalColumns))].sort((a, b) => b - a);
+  const levels = widths.map((w) => makeLevel(vols.filter((v) => v.h.totalColumns === w), pathIndex, planeIndex, paths.length, planes.length));
   const base = levels[0];
   for (const l of levels) l.downsample = base.width / l.width;
-  return { levels, width: base.width, height: base.height, label, overview, thumbnail };
+  const bh = base.header;
+  return {
+    levels, width: base.width, height: base.height, label, overview, thumbnail, paths, planes, planesInMicrons,
+    monochrome: vols.every((v) => v.h.samplesPerPixel === 1),
+    spacing: bh.pixelSpacing, origin: bh.origin, orientation: bh.orientation, frameOfReferenceUid: bh.frameOfReferenceUid,
+    icc: vols.flatMap((v) => v.h.paths).find((p) => p.icc)?.icc ?? null,
+  };
 }
 
-function makeLevel(instance: number, h: SlideHeader, downsample: number): SlideLevel {
+function layoutOf(i: number, h: SlideHeader): InstanceLayout {
+  const sparse = h.dimensionOrganization !== "TILED_FULL" && h.planePositions;
+  if (h.segments.length) {
+    // Segmentations: segments play the part of optical paths.
+    const ids = h.frameSegment ? [...new Set(Array.from(h.frameSegment, String))] : h.segments.map((g) => String(g.number));
+    return { i, h, pathIds: ids, planeKeys: [h.sharedZ ?? 0] };
+  }
+  const pathIds = sparse && h.framePath ? [...new Set(h.framePath)] : h.paths.length ? h.paths.slice(0, Math.max(1, h.opticalPaths)).map((p) => p.id) : [h.sharedPath ?? ""];
+  if (h.sharedPath !== null && pathIds.length === 1) pathIds[0] = h.sharedPath;
+  let planeKeys: number[];
+  if (sparse && h.frameZ) planeKeys = [...new Set(Array.from(h.frameZ))];
+  else if (h.sharedZ !== null) planeKeys = [h.sharedZ];
+  else planeKeys = Array.from({ length: Math.max(1, h.focalPlanes) }, (_, k) => k);
+  return { i, h, pathIds, planeKeys };
+}
+
+function makeLevel(insts: InstanceLayout[], pathIndex: Map<string, number>, planeIndex: Map<number, number>, nPaths: number, nPlanes: number): SlideLevel {
+  const h = insts[0].h;
   const across = Math.ceil(h.totalColumns / h.columns);
   const down = Math.ceil(h.totalRows / h.rows);
-  let frameOf: (tx: number, ty: number) => number;
-  const sparse = h.planePositions && h.dimensionOrganization !== "TILED_FULL";
-  if (sparse) {
-    // TILED_SPARSE: Plane Position (Slide) of each frame; the first frame at a position wins.
-    const map = new Int32Array(across * down).fill(-1);
-    const pp = h.planePositions!;
-    for (let f = 0; f < pp.length / 2; f++) {
-      const tx = Math.floor((pp[2 * f] - 1) / h.columns), ty = Math.floor((pp[2 * f + 1] - 1) / h.rows);
-      if (tx >= 0 && ty >= 0 && tx < across && ty < down && map[ty * across + tx] < 0) map[ty * across + tx] = f;
+  const tiles = across * down;
+  // One map per (plane, path): tile → instance and frame (-1 when absent).
+  const maps = new Map<number, { inst: Int32Array; frame: Int32Array }>();
+  const mapFor = (plane: number, path: number) => {
+    const key = plane * nPaths + path;
+    let m = maps.get(key);
+    if (!m) maps.set(key, (m = { inst: new Int32Array(tiles).fill(-1), frame: new Int32Array(tiles).fill(-1) }));
+    return m;
+  };
+  for (const v of insts) {
+    const hh = v.h;
+    const sparse = hh.dimensionOrganization !== "TILED_FULL" && hh.planePositions;
+    if (sparse) {
+      // TILED_SPARSE: each frame's Plane Position (Slide), Z offset and optical path (or segment).
+      const pp = hh.planePositions!;
+      for (let f = 0; f < pp.length / 2; f++) {
+        const tx = Math.floor((pp[2 * f] - 1) / hh.columns), ty = Math.floor((pp[2 * f + 1] - 1) / hh.rows);
+        if (tx < 0 || ty < 0 || tx >= across || ty >= down) continue;
+        const pathId = hh.frameSegment ? String(hh.frameSegment[f]) : hh.framePath ? hh.framePath[f] : v.pathIds[0];
+        const planeKey = hh.frameZ ? hh.frameZ[f] : v.planeKeys[0];
+        const pi = pathIndex.get(pathId), zi = planeIndex.get(planeKey);
+        if (pi === undefined || zi === undefined) continue;
+        const m = mapFor(zi, pi);
+        if (m.frame[ty * across + tx] < 0) (m.inst[ty * across + tx] = v.i), (m.frame[ty * across + tx] = f);
+      }
+    } else {
+      // TILED_FULL: column fastest, then row, then focal plane, then optical path (or segment).
+      const per = tiles;
+      v.pathIds.forEach((pid, pk) =>
+        v.planeKeys.forEach((zk, zl) => {
+          const pi = pathIndex.get(pid), zi = planeIndex.get(zk);
+          if (pi === undefined || zi === undefined) return;
+          const m = mapFor(zi, pi);
+          const first = (pk * v.planeKeys.length + zl) * per;
+          for (let t = 0; t < tiles && first + t < hh.numberOfFrames; t++) {
+            if (m.frame[t] < 0) (m.inst[t] = v.i), (m.frame[t] = first + t);
+          }
+        }),
+      );
     }
-    frameOf = (tx, ty) => (tx < 0 || ty < 0 || tx >= across || ty >= down ? -1 : map[ty * across + tx]);
-  } else {
-    // TILED_FULL: row-major tiles (first focal plane and optical path come first).
-    frameOf = (tx, ty) => {
-      if (tx < 0 || ty < 0 || tx >= across || ty >= down) return -1;
-      const f = ty * across + tx;
-      return f < h.numberOfFrames ? f : -1;
-    };
   }
+  void nPlanes;
   return {
-    instance, header: h, width: h.totalColumns, height: h.totalRows, tileWidth: h.columns, tileHeight: h.rows,
-    tilesAcross: across, tilesDown: down, downsample, frameOf,
+    instance: insts[0].i, header: h, width: h.totalColumns, height: h.totalRows, tileWidth: h.columns, tileHeight: h.rows,
+    tilesAcross: across, tilesDown: down, downsample: 1,
+    frameRef(tx, ty, plane = 0, path = 0) {
+      if (tx < 0 || ty < 0 || tx >= across || ty >= down) return null;
+      const m = maps.get(plane * nPaths + path);
+      if (!m) return null;
+      const f = m.frame[ty * across + tx];
+      return f < 0 ? null : { instance: m.inst[ty * across + tx], frame: f };
+    },
+    has: (plane, path) => maps.has(plane * nPaths + path),
   };
 }
 
@@ -461,6 +717,10 @@ function frameStartTest(ts: string): ((b0: number, b1: number, b2: number, b3: n
   if (/^1\.2\.840\.10008\.1\.2\.4\.(50|51|57|70|80|81)$/.test(ts)) return (a, b) => a === 0xff && b === 0xd8;
   if (/^1\.2\.840\.10008\.1\.2\.4\.(90|91|92|93|201|202|203)$/.test(ts)) {
     return (a, b, c, d) => (a === 0xff && b === 0x4f) || (a === 0 && b === 0 && c === 0 && d === 0x0c);
+  }
+  // JPEG XL: a bare codestream starts FF 0A; the container with its 12-byte signature box.
+  if (/^1\.2\.840\.10008\.1\.2\.4\.(110|111|112)$/.test(ts)) {
+    return (a, b, c, d) => (a === 0xff && b === 0x0a) || (a === 0 && b === 0 && c === 0 && d === 0x0c);
   }
   return null; // one fragment per frame (RLE, deflate image frames, and others)
 }
@@ -538,12 +798,23 @@ export interface FrameTable {
   source: "extended-offset-table" | "basic-offset-table" | "native" | "walk";
   /** Instance byte range [a, b) of frame k (items included for encapsulated data). */
   range(k: number): [number, number] | null;
+  /** Native 1-bit data: frames are packed back to back, so frame k may start at this bit of its first byte. */
+  bitShift?(k: number): number;
 }
 
 /** A frame table from the header alone (EOT, BOT, or native pixel data), or null if walking is needed. */
 export function frameTableFromHeader(h: SlideHeader, instanceLength: number): FrameTable | null {
   if (!h.complete) return null;
   if (!h.encapsulated) {
+    if (h.bitsAllocated === 1) {
+      const bits = h.rows * h.columns * h.samplesPerPixel;
+      const base = h.pixelDataValueOffset;
+      return {
+        source: "native",
+        range: (k) => (k < h.numberOfFrames ? [base + Math.floor((k * bits) / 8), base + Math.ceil(((k + 1) * bits) / 8)] : null),
+        bitShift: (k) => (k * bits) % 8,
+      };
+    }
     const fb = (h.rows * h.columns * h.samplesPerPixel * h.bitsAllocated) / 8;
     if (!Number.isInteger(fb) || fb <= 0) return null;
     const base = h.pixelDataValueOffset;
@@ -595,7 +866,13 @@ function fragmentsOf(frameBytes: Uint8Array): Uint8Array[] {
  * A minimal Part 10 file holding one frame, for the decoder: the image pixel attributes of the
  * instance with Number of Frames 1, and the frame's fragments (or native bytes).
  */
-export function singleFrameFile(h: SlideHeader, frame: Uint8Array): Uint8Array<ArrayBuffer> {
+export function singleFrameFile(h: SlideHeader, frame: Uint8Array, bitShift = 0): Uint8Array<ArrayBuffer> {
+  if (bitShift) {
+    // Re-align a 1-bit frame that starts mid-byte (pixels are packed from the low bit up).
+    const out = new Uint8Array(Math.ceil((h.rows * h.columns * h.samplesPerPixel) / 8));
+    for (let i = 0; i < out.length; i++) out[i] = ((frame[i] >> bitShift) | ((frame[i + 1] ?? 0) << (8 - bitShift))) & 0xff;
+    frame = out;
+  }
   const parts: Uint8Array[] = [];
   const enc = new TextEncoder();
   const pad = (s: string, ch = " ") => (s.length % 2 ? s + ch : s);

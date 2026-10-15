@@ -1,0 +1,6 @@
+SELECT collection_id, StudyInstanceUID, SeriesInstanceUID, Modality, SOPClassUID, ANY_VALUE(SeriesDescription) descr, COUNT(*) n, SUM(instance_size) sz, ANY_VALUE(license_short_name) lic, ANY_VALUE(TransferSyntaxUID) ts, ANY_VALUE(crdc_series_uuid) suuid, ANY_VALUE(`Rows`) nr, ANY_VALUE(`Columns`) nc, MAX(NumberOfFrames) nf
+FROM `bigquery-public-data.idc_current.dicom_all`
+WHERE collection_id IN ('qin_prostate_repeatability','tcga_gbm','qin_breast_dce_mri','covid_19_ny_sbu','ct_vs_pet_ventilation_imaging','pediatric_ct_seg','cc_radiomics_phantom_3','prostate_anatomical_edge_cases','pancreatic_ct_cbct_seg','soft_tissue_sarcoma','prostate_mri_us_biopsy','cmb_crc','breast_diagnosis','cmmd','midrc_ricord_1c')
+  AND StudyInstanceUID IN (SELECT StudyInstanceUID FROM `bigquery-public-data.idc_current.dicom_all` WHERE SOPClassUID IN ('1.2.840.10008.5.1.4.1.1.88.22','1.2.840.10008.5.1.4.1.1.30','1.2.840.10008.5.1.4.1.1.88.59','1.2.840.10008.5.1.4.1.1.88.67','1.2.840.10008.5.1.4.1.1.67','1.2.840.10008.5.1.4.1.1.481.3','1.2.840.10008.5.1.4.1.1.104.3')
+     OR VOILUTFunction IN ('LINEAR_EXACT','SIGMOID') OR PresentationLUTShape='INVERSE' OR PixelSpacingCalibrationType IS NOT NULL)
+GROUP BY 1,2,3,4,5

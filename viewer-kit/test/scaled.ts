@@ -26,7 +26,10 @@ const opt = (n: string) => (args.indexOf(n) >= 0 ? args[args.indexOf(n) + 1] : u
 const perFormat = Number(opt("--per-format") ?? 4);
 const onlyFormat = opt("--format");
 
-const module = await WebAssembly.compile(readFileSync(join(KIT, "dist", "shl_dicom_decode.wasm")));
+const mainModule = await WebAssembly.compile(readFileSync(join(KIT, "dist", "shl_dicom_decode.wasm")));
+// JPEG XL cases use the separate module the pool loads for them.
+const jxlModule = await WebAssembly.compile(readFileSync(join(KIT, "dist", "shl_dicom_decode_jxl.wasm")));
+let module = mainModule;
 const tmp = mkdtempSync(join(tmpdir(), "vk-scaled-"));
 let checks = 0, failures = 0;
 const fail = (m: string) => { failures++; console.log(`FAIL ${m}`); };
@@ -58,6 +61,7 @@ for (const fmt of readdirSync(FORMATS).sort()) {
   if (onlyFormat && fmt !== onlyFormat) continue;
   const manifest = join(FORMATS, fmt, "cases.json");
   if (!existsSync(manifest)) continue;
+  module = fmt === "jpeg-xl" ? jxlModule : mainModule;
   const cases = (JSON.parse(readFileSync(manifest, "utf8")).cases as any[])
     .filter((c) => c.expect === "decode" && existsSync(join(FORMATS, fmt, "samples", `${c.id}.dcm`)));
   // Spread the picks over the manifest, plus the first multi-frame case.

@@ -226,15 +226,32 @@ pub fn offset_table_patch(bytes: &[u8]) -> Option<OffsetTablePatch> {
     patch_with_limit(bytes, u32::MAX as u64)
 }
 
+/// Where the first fragment item starts (after the empty BOT item), when the instance needs a
+/// table; `None` when it doesn't, or when `prefix` is too short to tell.
+pub fn offset_table_first_fragment(prefix: &[u8]) -> Option<usize> {
+    let h = scan_header(prefix)?;
+    (h.frames >= 2 && !h.has_eot && h.bot_len == 0).then_some(h.bot_pos + 8)
+}
+
+/// One fragment item, for [`offset_table_patch_from_fragments`]: the position of its item header
+/// in the file, its value length, and the first bytes of its value (up to 8).
+pub struct FragmentInfo<'a> {
+    pub pos: u64,
+    pub len: u32,
+    pub head: &'a [u8],
+}
+
+/// The same rewrite as [`offset_table_patch`], from the file's first bytes (at least up to the
+/// first fragment item) and a list of the fragment items, so a caller can walk a large file
+/// without holding it.
+pub fn offset_table_patch_from_fragments(prefix: &[u8], frags: &[FragmentInfo]) -> Option<OffsetTablePatch> {
+    patch_parts(prefix, frags, u32::MAX as u64)
+}
+
 /// `bot_limit`: the largest offset a BOT may hold (u32::MAX; tests lower it to reach the EOT path).
 fn patch_with_limit(bytes: &[u8], bot_limit: u64) -> Option<OffsetTablePatch> {
-    let h = scan_header(bytes)?;
-    if h.frames < 2 || h.has_eot || h.bot_len != 0 {
-        return None;
-    }
-    // Fragments: (item header position, value length).
-    let first_item = h.bot_pos + 8;
-    let mut frags: Vec<(usize, u32)> = Vec::new();
+    let first_item = offset_table_first_fragment(bytes)?;
+    let mut frags: Vec<FragmentInfo> = Vec::new();
     let mut p = first_item;
     loop {
         let tag = tag_at(bytes, p)?;
@@ -249,28 +266,35 @@ fn patch_with_limit(bytes: &[u8], bot_limit: u64) -> Option<OffsetTablePatch> {
         if end > bytes.len() {
             return None;
         }
-        frags.push((p, len));
+        frags.push(FragmentInfo { pos: p as u64, len, head: &bytes[p + 8..p + 8 + (len as usize).min(8)] });
         p = end;
+    }
+    patch_parts(bytes, &frags, bot_limit)
+}
+
+fn patch_parts(prefix: &[u8], frags: &[FragmentInfo], bot_limit: u64) -> Option<OffsetTablePatch> {
+    let h = scan_header(prefix)?;
+    if h.frames < 2 || h.has_eot || h.bot_len != 0 || frags.is_empty() {
+        return None;
+    }
+    let first_item = (h.bot_pos + 8) as u64;
+    if frags[0].pos != first_item {
+        return None;
     }
     // Frame starts, as indices into frags.
     let by_marker: Option<Vec<usize>> = frame_start_test(&h.ts).map(|test| {
-        frags
-            .iter()
-            .enumerate()
-            .filter(|(i, (fp, len))| *i == 0 || test(&bytes[fp + 8..fp + 8 + (*len as usize).min(8)]))
-            .map(|(i, _)| i)
-            .collect()
+        frags.iter().enumerate().filter(|(i, f)| *i == 0 || test(f.head)).map(|(i, _)| i).collect()
     });
     let starts: Vec<usize> = match by_marker {
         Some(s) if s.len() == h.frames => s,
         _ if frags.len() == h.frames => (0..frags.len()).collect(),
         _ => return None,
     };
-    let offsets: Vec<u64> = starts.iter().map(|&i| (frags[i].0 - first_item) as u64).collect();
+    let offsets: Vec<u64> = starts.iter().map(|&i| frags[i].pos - first_item).collect();
     let fits_32 = offsets.last().is_none_or(|&o| o <= bot_limit) && h.frames * 4 <= u32::MAX as usize;
     if fits_32 {
         let mut head = Vec::with_capacity(h.bot_pos + 8 + 4 * h.frames);
-        head.extend_from_slice(&bytes[..h.bot_pos]);
+        head.extend_from_slice(&prefix[..h.bot_pos]);
         head.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
         head.extend_from_slice(&((4 * h.frames) as u32).to_le_bytes());
         for o in &offsets {
@@ -284,8 +308,8 @@ fn patch_with_limit(bytes: &[u8], bot_limit: u64) -> Option<OffsetTablePatch> {
         return None;
     }
     let mut head = Vec::with_capacity(h.pixel_tag_pos + 24 + 16 * h.frames);
-    head.extend_from_slice(&bytes[..h.pixel_tag_pos]);
-    for (tag, values) in [(EOT_TAG, offsets.clone()), (EOT_LENGTHS_TAG, frags.iter().map(|f| f.1 as u64).collect())] {
+    head.extend_from_slice(&prefix[..h.pixel_tag_pos]);
+    for (tag, values) in [(EOT_TAG, offsets.clone()), (EOT_LENGTHS_TAG, frags.iter().map(|f| f.len as u64).collect())] {
         head.extend_from_slice(&((tag >> 16) as u16).to_le_bytes());
         head.extend_from_slice(&((tag & 0xFFFF) as u16).to_le_bytes());
         head.extend_from_slice(b"OV\0\0");

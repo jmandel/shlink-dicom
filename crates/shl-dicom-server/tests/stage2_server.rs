@@ -197,7 +197,11 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
 async fn test_size_quotas_and_409_foreign_key() {
     let dir = temp_data_dir("quotas_409");
     // Set small quota of 200 KB max
-    let state = AppState::with_quotas(&dir, 200_000, 256, 64).unwrap();
+    let state = AppState::with_quotas(
+        &dir,
+        shl_dicom_server::state::Quotas { share_bytes: Some(200_000), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20 },
+    )
+    .unwrap();
     let base = spawn_test_server(state).await;
     let client = reqwest::Client::new();
 
@@ -806,18 +810,7 @@ async fn test_demo_seeding_cloning_expiry_and_parallel_uploads() {
     // 1. Create a read-only share to stand in for a seeded demo share
     let (demo_sid, _unused_ctrl) = state.create_share(true, None).unwrap();
     let fid = b64url_encode(&[77u8; 16]);
-    {
-        let conn_arc = state.open_share_db(&demo_sid).unwrap();
-        let mut conn = conn_arc.lock().unwrap();
-        shl_dicom_server::state::write_series_file_to_db(
-            &mut conn,
-            &fid,
-            &vec![0x55u8; 70_000],
-            state.bytes_max,
-            state.files_max,
-        )
-        .unwrap();
-    }
+    shl_dicom_server::state::store_series_file(&state, &demo_sid, &fid, &vec![0x55u8; 70_000]).unwrap();
 
     // Clone the read-only demo share into a controllable sandbox share
     let clone_resp: Value = client
@@ -879,4 +872,99 @@ async fn test_demo_seeding_cloning_expiry_and_parallel_uploads() {
     assert!(!state.catalog_has_share(&exp_sid));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_chunked_resumable_upload_and_disk_range_reads() {
+    let dir = temp_data_dir("chunked_upload");
+    let state = AppState::new(&dir).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[9u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let head = |c: &reqwest::Client| c.head(&url).bearer_auth(&token).send();
+    let append = |a: usize, b: usize, complete: bool| {
+        client
+            .patch(&url)
+            .bearer_auth(&token)
+            .header("Content-Type", "application/partial-upload")
+            .header("Upload-Offset", a.to_string())
+            .header("Upload-Complete", if complete { "?1" } else { "?0" })
+            .body(data[a..b].to_vec())
+            .send()
+    };
+
+    // No upload yet.
+    assert_eq!(head(&client).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    // Create it with its first bytes.
+    let r = client
+        .put(&url)
+        .bearer_auth(&token)
+        .header("Upload-Complete", "?0")
+        .header("Upload-Length", data.len().to_string())
+        .body(data[..100_000].to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(r.headers()["upload-offset"], "100000");
+    assert_eq!(r.headers()["upload-complete"], "?0");
+
+    // An append at the wrong offset: 409 with where the upload stands.
+    let skip = append(200_000, 300_000, true).await.unwrap();
+    assert_eq!(skip.status(), StatusCode::CONFLICT);
+    assert_eq!(skip.headers()["upload-offset"], "100000");
+    let p: Value = skip.json().await.unwrap();
+    assert_eq!(p["type"], "https://iana.org/assignments/http-problem-types#mismatching-upload-offset");
+    assert_eq!(p["expected-offset"], 100_000);
+
+    // Offset retrieval, then continue.
+    let h = head(&client).await.unwrap();
+    assert_eq!(h.status(), StatusCode::NO_CONTENT);
+    assert_eq!(h.headers()["upload-offset"], "100000");
+    assert_eq!(h.headers()["upload-length"], "300000");
+    assert_eq!(h.headers()["cache-control"], "no-store");
+    assert!(h.headers()["upload-limit"].to_str().unwrap().contains("max-append-size="));
+    let r = append(100_000, 200_000, false).await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(r.headers()["upload-offset"], "200000");
+    // Completing with too few bytes is an inconsistent length.
+    let short = append(200_000, 250_000, true).await.unwrap();
+    assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+    let r = append(200_000, 300_000, true).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["upload-complete"], "?1");
+    assert!(dir.join("shares").join(&sid).join(format!("{fid}.bin")).exists());
+    let h = head(&client).await.unwrap();
+    assert_eq!(h.headers()["upload-complete"], "?1");
+
+    // Read ranges back through a link.
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap();
+    let rr = client
+        .get(format!("{base}/shl/{lid}/{fid}.bin"))
+        .header("Range", "bytes=65530-200009")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rr.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(rr.headers()["content-range"], "bytes 65530-200009/300000");
+    assert_eq!(rr.bytes().await.unwrap().as_ref(), &data[65_530..200_010]);
+    let all = client.get(format!("{base}/shl/{lid}/{fid}.bin")).send().await.unwrap();
+    assert_eq!(all.status(), StatusCode::OK);
+    assert_eq!(all.bytes().await.unwrap().as_ref(), &data[..]);
 }

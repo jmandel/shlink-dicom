@@ -147,49 +147,6 @@ function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
   return -1;
 }
 
-function parseMultipart(body: Uint8Array, contentType: string): { headers: Record<string, string>; bytes: Uint8Array }[] {
-  const m = contentType.match(/boundary=("?)([^";]+)\1/i);
-  if (!m) throw new Error(`no boundary in ${contentType}`);
-  const enc = new TextEncoder();
-  const delim = enc.encode(`--${m[2]}`);
-  const parts: { headers: Record<string, string>; bytes: Uint8Array }[] = [];
-  let pos = indexOf(body, delim, 0);
-  if (pos < 0) throw new Error("multipart: opening boundary not found");
-  while (true) {
-    pos += delim.length;
-    if (body[pos] === 0x2d && body[pos + 1] === 0x2d) break;
-    pos += 2;
-    const headEnd = indexOf(body, enc.encode("\r\n\r\n"), pos);
-    const headers: Record<string, string> = {};
-    for (const line of new TextDecoder().decode(body.subarray(pos, headEnd)).split("\r\n")) {
-      const c = line.indexOf(":");
-      if (c > 0) headers[line.slice(0, c).trim().toLowerCase()] = line.slice(c + 1).trim();
-    }
-    const start = headEnd + 4;
-    let end: number;
-    const cl = headers["content-length"];
-    const e = start + Number(cl);
-    if (cl !== undefined && body[e] === 0x0d && body[e + 1] === 0x0a && indexOf(body.subarray(e + 2, e + 2 + delim.length), delim, 0) === 0) {
-      end = e;
-    } else {
-      end = indexOf(body, enc.encode(`\r\n--${m[2]}`), start);
-      if (end < 0) throw new Error("multipart: closing boundary not found");
-    }
-    parts.push({ headers, bytes: body.subarray(start, end) });
-    pos = end + 2;
-  }
-  return parts;
-}
-
-/** WADO-RS retrieve of a study or series: the Part 10 files, as sent. */
-export async function wadoRetrieve(url: string, token: string): Promise<Uint8Array[]> {
-  const res = await getWithRetry(url, { authorization: `Bearer ${token}`, accept: DICOM_ACCEPT });
-  if (!res.ok) throw new Error(`WADO-RS ${res.status} for ${url}`);
-  const ct = res.headers.get("content-type") ?? "";
-  if (!ct.startsWith("multipart/related")) throw new Error(`WADO-RS answered ${ct}`);
-  return parseMultipart(new Uint8Array(await res.arrayBuffer()), ct).map((p) => p.bytes);
-}
-
 /** Fetches attachment URLs with the token and puts the bytes inline (recipients can't reach the portal). */
 export async function inlineAttachments(report: any, token: string): Promise<any> {
   const forms: any[] = [];
@@ -209,4 +166,92 @@ export async function inlineAttachments(report: any, token: string): Promise<any
     } catch {}
   }
   return { ...report, presentedForm: forms.length ? forms : undefined };
+}
+
+/**
+ * WADO-RS retrieve, streamed: yields each part's bytes as chunks while the response arrives, so a
+ * series is never held whole. Consume each part before asking for the next.
+ */
+export async function* wadoRetrieveParts(url: string, token: string, signal?: AbortSignal): AsyncGenerator<AsyncGenerator<Uint8Array>> {
+  const res = await getWithRetry(url, { authorization: `Bearer ${token}`, accept: DICOM_ACCEPT });
+  if (!res.ok || !res.body) throw new Error(`WADO-RS ${res.status} for ${url}`);
+  const ct = res.headers.get("content-type") ?? "";
+  const m = ct.match(/boundary=("?)([^";]+)\1/i);
+  if (!ct.startsWith("multipart/related") || !m) throw new Error(`WADO-RS answered ${ct}`);
+  const enc = new TextEncoder();
+  const delim = enc.encode(`--${m[2]}`);
+  const closeDelim = enc.encode(`\r\n--${m[2]}`);
+  const reader = res.body.getReader();
+  let buf = new Uint8Array(0);
+  let ended = false;
+  const more = async () => {
+    signal?.throwIfAborted();
+    const { value, done } = await reader.read();
+    if (done) {
+      ended = true;
+      return false;
+    }
+    const b = new Uint8Array(buf.length + value.length);
+    b.set(buf);
+    b.set(value, buf.length);
+    buf = b;
+    return true;
+  };
+  const need = async (n: number) => {
+    while (buf.length < n) if (!(await more())) throw new Error("multipart: response ended early");
+  };
+  const find = async (needle: Uint8Array, from = 0): Promise<number> => {
+    for (;;) {
+      const i = indexOf(buf, needle, from);
+      if (i >= 0) return i;
+      from = Math.max(0, buf.length - needle.length + 1);
+      if (!(await more())) return -1;
+    }
+  };
+  try {
+    let pos = await find(delim);
+    if (pos < 0) throw new Error("multipart: opening boundary not found");
+    buf = buf.subarray(pos);
+    for (;;) {
+      await need(delim.length + 2);
+      if (buf[delim.length] === 0x2d && buf[delim.length + 1] === 0x2d) return; // closing --
+      buf = buf.subarray(delim.length + 2);
+      const headEnd = await find(enc.encode("\r\n\r\n"));
+      if (headEnd < 0) throw new Error("multipart: part headers not terminated");
+      const headers: Record<string, string> = {};
+      for (const line of new TextDecoder().decode(buf.subarray(0, headEnd)).split("\r\n")) {
+        const c = line.indexOf(":");
+        if (c > 0) headers[line.slice(0, c).trim().toLowerCase()] = line.slice(c + 1).trim();
+      }
+      buf = buf.subarray(headEnd + 4);
+      const cl = headers["content-length"] !== undefined ? Number(headers["content-length"]) : NaN;
+      let consumed = false;
+      const body = async function* (): AsyncGenerator<Uint8Array> {
+        if (Number.isFinite(cl)) {
+          let left = cl;
+          while (left > 0) {
+            if (!buf.length && !(await more())) throw new Error("multipart: part ended early");
+            const out = buf.subarray(0, Math.min(left, buf.length));
+            buf = buf.subarray(out.length);
+            left -= out.length;
+            yield out.slice();
+          }
+          await need(2);
+          buf = buf.subarray(2); // CRLF before the next delimiter
+        } else {
+          // No length: find the delimiter (the part is held until then).
+          const end = await find(closeDelim);
+          if (end < 0) throw new Error("multipart: closing boundary not found");
+          yield buf.slice(0, end);
+          buf = buf.subarray(end + 2);
+        }
+        consumed = true;
+      };
+      yield body();
+      if (!consumed) throw new Error("multipart: part not read");
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+    void ended;
+  }
 }
