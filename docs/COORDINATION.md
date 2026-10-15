@@ -129,7 +129,8 @@ Resolved 15 Oct:
 
 - **15 Oct evening: study-file Part 1 started** (agent ad12646f03ce41389).
   - **Now:** the spec, the reference vector, core parsing, web/core and How.
-  - **Waits for my go:** packer.rs, crates/shl-dicom-server, web/share, deploy and the share checks. The go comes once the Share agent (ac9206ae1a4d9228a) reports its items 3–4 done.
+  - **Where:** the whole of Part 1 now happens on branch `study-files` in the worktree ../shlink-dicom-study-files, which keeps main building for the other agents. The agent rebases on main when main is quiet, and the coordinator merges.
+  - **Deviation from the plan:** SeriesEntry gains `id` (fileId@offset), replacing fileId as the series identity in caches and layers.
   - **Then:** Part 2 (BlobStore/S3) goes to the Share agent, and pi (tmux session 1) reviews Part 1 against the plan.
   - **Blog:** outline v2 committed (40bee86); the Codex header is being regenerated.
 
