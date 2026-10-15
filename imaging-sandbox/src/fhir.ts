@@ -16,7 +16,7 @@ const DCM = "http://dicom.nema.org/resources/ontology/DCM";
 const MODALITY: Record<string, string> = {
   CR: "Computed Radiography", CT: "Computed Tomography", DX: "Digital Radiography", MG: "Mammography",
   MR: "Magnetic Resonance", NM: "Nuclear Medicine", OT: "Other", PT: "Positron emission tomography",
-  US: "Ultrasound", XA: "X-Ray Angiography", SR: "SR Document", SC: "Secondary Capture", SM: "Slide Microscopy",
+  US: "Ultrasound", XA: "X-Ray Angiography", SR: "Structured Report Document", SC: "Secondary Capture", SM: "Slide Microscopy",
 };
 
 export interface Urls {
@@ -93,6 +93,10 @@ export function smartConfiguration(cfg: Config, which: "clinical" | "imaging"): 
       "patient/ImagingStudy.rs",
       "patient/Patient.rs",
       "patient/DiagnosticReport.rs",
+      "patient/ServiceRequest.rs",
+      "patient/Encounter.rs",
+      "patient/Practitioner.rs",
+      "patient/Organization.rs",
       "patient/*.rs",
       "patient/ImagingStudy.read",
       "patient/Patient.read",
@@ -136,6 +140,10 @@ export function clinicalCapabilityStatement(cfg: Config): Record<string, unknown
             ],
           },
           { type: "Binary", interaction: [{ code: "read" }] },
+          { type: "ServiceRequest", interaction: [{ code: "read" }, { code: "search-type" }], searchParam: [{ name: "patient", type: "reference" }] },
+          { type: "Encounter", interaction: [{ code: "read" }, { code: "search-type" }], searchParam: [{ name: "patient", type: "reference" }] },
+          { type: "Practitioner", interaction: [{ code: "read" }] },
+          { type: "Organization", interaction: [{ code: "read" }] },
         ],
       },
     ],
@@ -192,11 +200,15 @@ function patientName(p: DemoPatient): string {
 
 // Identifier systems are URLs under the deployment's own base: the
 // sandbox plays the health system that assigns MRNs and accession numbers.
-function accessionIdentifier(cfg: Config, st: Study) {
+// The accession number, as assigned by the fictional facility that
+// performed the study (the same value as the DICOM AccessionNumber).
+export function accessionIdentifier(cfg: Config, st: Study) {
+  const facility = st.facility ?? "imaging";
   return {
     type: { coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0203", code: "ACSN", display: "Accession ID" }] },
-    system: `${cfg.baseUrl}/identifiers/accession`,
+    system: `${cfg.baseUrl}/identifiers/${facility}/accession`,
     value: st.accession,
+    ...(st.facility ? { assigner: { reference: `${urls(cfg).clinical}/Organization/${st.facility}` } } : {}),
   };
 }
 
@@ -227,6 +239,86 @@ function seriesCount(st: Study) {
   return st.series.reduce((a, s) => a + s.instances.length, 0);
 }
 
+// Marks resources written for the sample (reports, orders, visits,
+// clinicians, facilities): v3 ActReason HTEST, "test health data".
+export const SYNTHETIC_TAG = { system: "http://terminology.hl7.org/CodeSystem/v3-ActReason", code: "HTEST", display: "test health data" };
+export const SYNTHETIC_NOTE = "Synthetic report written for this sample; not a clinical interpretation.";
+
+function practitionerName(p: { given: string[]; family: string; suffix?: string }) {
+  return `${p.given.join(" ")} ${p.family}${p.suffix ? `, ${p.suffix}` : ""}`;
+}
+
+export function practitionerResource(cfg: Config, p: Store["clinical"]["practitioners"][number]): Record<string, unknown> {
+  return {
+    resourceType: "Practitioner",
+    id: p.id,
+    meta: { lastUpdated: DATA_LAST_UPDATED, tag: [SYNTHETIC_TAG] },
+    text: { status: "generated", div: `<div xmlns="http://www.w3.org/1999/xhtml">${escXml(practitionerName(p))}, ${escXml(p.role)} (fictional)</div>` },
+    identifier: [{ system: `${cfg.baseUrl}/identifiers/practitioner`, value: p.id }],
+    name: [{ text: practitionerName(p), family: p.family, given: p.given, ...(p.suffix ? { suffix: [p.suffix] } : {}) }],
+  };
+}
+
+export function organizationResource(cfg: Config, o: Store["clinical"]["organizations"][number]): Record<string, unknown> {
+  const [line, cityLine] = [o.address.slice(0, -1), o.address[o.address.length - 1]];
+  const m = cityLine.match(/^(.*), ([A-Z]{2}) (\d{5})$/);
+  return {
+    resourceType: "Organization",
+    id: o.id,
+    meta: { lastUpdated: DATA_LAST_UPDATED, tag: [SYNTHETIC_TAG] },
+    text: { status: "generated", div: `<div xmlns="http://www.w3.org/1999/xhtml">${escXml(o.name)} (fictional)</div>` },
+    identifier: [{ system: `${cfg.baseUrl}/identifiers/organization`, value: o.id }],
+    active: true,
+    name: o.name,
+    telecom: [{ system: "phone", value: o.phone, use: "work" }],
+    address: [{ line, ...(m ? { city: m[1], state: m[2], postalCode: m[3] } : { text: cityLine }), country: "US" }],
+  };
+}
+
+export function encounterResource(cfg: Config, e: Store["clinical"]["encounters"][number], patientId: string): Record<string, unknown> {
+  return {
+    resourceType: "Encounter",
+    id: e.id,
+    meta: { lastUpdated: DATA_LAST_UPDATED, tag: [SYNTHETIC_TAG] },
+    text: { status: "generated", div: `<div xmlns="http://www.w3.org/1999/xhtml">${escXml(e.type)}, ${escXml(e.start)} to ${escXml(e.end)}: ${escXml(e.reason)}</div>` },
+    status: "finished",
+    class: { system: "http://terminology.hl7.org/CodeSystem/v3-ActCode", code: e.class.code, display: e.class.display },
+    type: [{ text: e.type }],
+    subject: { reference: `Patient/${patientId}` },
+    participant: [{ individual: { reference: `Practitioner/${e.practitioner}` } }],
+    period: { start: e.start, end: e.end },
+    reasonCode: [{ text: e.reason }],
+    serviceProvider: { reference: `Organization/${e.organization}` },
+  };
+}
+
+export function serviceRequestResource(cfg: Config, st: Study): Record<string, unknown> | null {
+  const c = st.clinical;
+  if (!c) return null;
+  const u = urls(cfg);
+  return {
+    resourceType: "ServiceRequest",
+    id: `order-${st.id}`,
+    meta: { lastUpdated: DATA_LAST_UPDATED, tag: [SYNTHETIC_TAG] },
+    text: { status: "generated", div: `<div xmlns="http://www.w3.org/1999/xhtml">${escXml(st.report.title)}, ordered ${escXml(c.orderedAt)}: ${escXml(c.reason)}</div>` },
+    identifier: [accessionIdentifier(cfg, st)],
+    status: "completed",
+    intent: "order",
+    category: [st.report.category.code === "RAD"
+      ? { coding: [{ system: "http://snomed.info/sct", code: "363679005", display: "Imaging" }] }
+      : { coding: [{ system: "http://snomed.info/sct", code: "108252007", display: "Laboratory procedure" }] }],
+    priority: c.priority,
+    code: { coding: [st.report.code], text: st.report.title },
+    subject: { reference: `Patient/${st.patientId}` },
+    encounter: { reference: `Encounter/${c.encounter}` },
+    occurrenceDateTime: st.started,
+    authoredOn: c.orderedAt,
+    requester: { reference: `Practitioner/${c.orderedBy}` },
+    reasonCode: [{ text: c.reason }],
+    supportingInfo: [{ reference: `${u.imaging}/ImagingStudy/${st.id}`, display: "Imaging study" }],
+  };
+}
+
 export function binaryUrl(cfg: Config, id: string): string {
   return `${urls(cfg).clinical}/Binary/${id}`;
 }
@@ -237,18 +329,25 @@ export function diagnosticReport(cfg: Config, st: Study): Record<string, unknown
   const r: Record<string, unknown> = {
     resourceType: "DiagnosticReport",
     id: rep.id,
-    meta: { lastUpdated: st.lastUpdated },
+    meta: { lastUpdated: st.lastUpdated, tag: [SYNTHETIC_TAG] },
     text: {
       status: "generated",
-      div: `<div xmlns="http://www.w3.org/1999/xhtml"><p><b>${escXml(rep.title)}</b>, ${escXml(st.started ?? "")}, accession ${escXml(st.accession)}</p><p>${escXml(rep.conclusion)}</p></div>`,
+      div: `<div xmlns="http://www.w3.org/1999/xhtml"><p><b>${escXml(rep.title)}</b>, ${escXml(st.started ?? "")}, accession ${escXml(st.accession)}</p><p>${escXml(rep.conclusion)}</p><p><i>${escXml(SYNTHETIC_NOTE)}</i></p></div>`,
     },
     identifier: [accessionIdentifier(cfg, st)],
+    ...(st.clinical ? { basedOn: [{ reference: `ServiceRequest/order-${st.id}` }] } : {}),
     status: "final",
     category: [{ coding: [rep.category] }],
     code: { coding: [rep.code], text: rep.title },
     subject: { reference: `Patient/${st.patientId}` },
   };
+  if (st.clinical) r.encounter = { reference: `Encounter/${st.clinical.encounter}` };
   if (st.started) r.effectiveDateTime = st.started;
+  if (st.clinical) {
+    r.issued = st.clinical.signed;
+    r.performer = [{ reference: `Practitioner/${st.clinical.readBy}` }];
+    r.resultsInterpreter = [{ reference: `Practitioner/${st.clinical.readBy}` }];
+  }
   Object.assign(r, {
     imagingStudy: [
       {
@@ -299,10 +398,18 @@ export function imagingStudy(cfg: Config, st: Study, endpointRef: string, contai
   Object.assign(r, {
     identifier: [{ system: "urn:dicom:uid", value: `urn:oid:${st.uid}` }, accessionIdentifier(cfg, st)],
     status: "available",
-    modality: st.modalities.map((m) => ({ system: DCM, code: m, display: MODALITY[m] ?? m })),
+    // Study-level modalities are the acquisition modalities; SR (the dose
+    // record) is listed only on its series.
+    modality: st.modalities.filter((m) => m !== "SR").map((m) => ({ system: DCM, code: m, display: MODALITY[m] ?? m })),
     subject: { reference: `${u.clinical}/Patient/${st.patientId}` },
   });
+  if (st.clinical) r.encounter = { reference: `${u.clinical}/Encounter/${st.clinical.encounter}` };
   if (st.started) r.started = st.started;
+  if (st.clinical) {
+    r.basedOn = [{ reference: `${u.clinical}/ServiceRequest/order-${st.id}` }];
+    r.referrer = { reference: `${u.clinical}/Practitioner/${st.clinical.orderedBy}` };
+    r.interpreter = [{ reference: `${u.clinical}/Practitioner/${st.clinical.readBy}` }];
+  }
   Object.assign(r, {
     endpoint: [{ reference: endpointRef }],
     numberOfSeries: st.series.length,
@@ -437,6 +544,37 @@ export function handleClinical(cfg: Config, store: Store, tok: ValidatedToken, r
       reports = reports.filter((r) => v.split(",").includes(r.id as string));
     }
     return fhirJson(searchset(self.toString(), reports.map((r) => ({ fullUrl: `${u.clinical}/DiagnosticReport/${r.id}`, resource: r, search: { mode: "match" } })), reports.length));
+  }
+
+  if (type === "ServiceRequest" || type === "Encounter") {
+    const visible = visibleStudies(store, tok);
+    const all: Record<string, unknown>[] = type === "ServiceRequest"
+      ? visible.map((st) => serviceRequestResource(cfg, st)).filter((x): x is Record<string, unknown> => !!x)
+      : store.clinical.encounters.filter((e) => visible.some((st) => st.clinical?.encounter === e.id)).map((e) => encounterResource(cfg, e, tok.grant.patient));
+    if (id) {
+      const denied = need(tok, type, "r");
+      if (denied) return denied;
+      const r = all.find((x) => x.id === id);
+      return r ? fhirJson(r) : outcome(404, "not-found", `${type}/${id} not found`);
+    }
+    const denied = need(tok, type, "s");
+    if (denied) return denied;
+    const pv = url.searchParams.get("patient") ?? url.searchParams.get("subject");
+    const pid = pv ? patientParam(cfg, pv) : null;
+    if (!pid) return outcome(400, "required", "Search by patient");
+    if (pid !== tok.grant.patient) return outcome(403, "forbidden", "The token's patient context does not match the patient parameter");
+    const u = urls(cfg);
+    return fhirJson(searchset(`${u.clinical}/${type}?patient=${pid}`, all.map((r) => ({ fullUrl: `${u.clinical}/${type}/${r.id}`, resource: r, search: { mode: "match" } })), all.length));
+  }
+
+  if ((type === "Practitioner" || type === "Organization") && id) {
+    const denied = need(tok, type, "r");
+    if (denied) return denied;
+    const r = type === "Practitioner"
+      ? store.clinical.practitioners.find((p) => p.id === id)
+      : store.clinical.organizations.find((o) => o.id === id);
+    if (!r) return outcome(404, "not-found", `${type}/${id} not found`);
+    return fhirJson(type === "Practitioner" ? practitionerResource(cfg, r as any) : organizationResource(cfg, r as any));
   }
 
   if (type === "Binary" && id) {

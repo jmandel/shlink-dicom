@@ -56,7 +56,17 @@ export interface Study {
   lastUpdated: string;
   bytes: number;
   report: Report;
+  clinical?: StudyClinical;
+  facility?: string; // Organization id of the facility that performed the study
   attribution?: string; // image source and license, for studies from public collections
+}
+
+export interface StudyClinical { encounter: string; orderedBy: string; readBy: string; orderedAt: string; signed: string; priority: string; reason: string }
+
+export interface ClinicalContext {
+  organizations: { id: string; name: string; address: string[]; phone: string }[];
+  practitioners: { id: string; given: string[]; family: string; suffix?: string; role: string; organization: string }[];
+  encounters: { id: string; class: { code: string; display: string }; type: string; start: string; end: string; organization: string; location: string; reason: string; practitioner: string }[];
 }
 
 export interface DemoPatient {
@@ -74,6 +84,7 @@ export interface Store {
   studies: Map<string, Study>; // by Study Instance UID
   studiesById: Map<string, Study>;
   binaries: Map<string, { attachment: Attachment; study: Study }>;
+  clinical: ClinicalContext;
 }
 
 // Data in the sandbox changes only when the dataset is rebuilt; this fixed
@@ -108,6 +119,7 @@ export async function loadStore(datasetDir: string, testPatientsFile: string): P
       lastUpdated: DATA_LAST_UPDATED,
       bytes: 0,
       attribution: m.attribution,
+      clinical: m.clinical,
       report: {
         id: `report-${m.id}`,
         category: m.report.category ?? { system: "http://terminology.hl7.org/CodeSystem/v2-0074", code: "RAD", display: "Radiology" },
@@ -155,7 +167,9 @@ export async function loadStore(datasetDir: string, testPatientsFile: string): P
     studies.set(study.uid, study);
     studiesById.set(study.id, study);
   }
-  return { patients, studies, studiesById, binaries };
+  const clinical: ClinicalContext = manifest.clinical ?? { organizations: [], practitioners: [], encounters: [] };
+  for (const st of studies.values()) st.facility = clinical.encounters.find((e) => e.id === st.clinical?.encounter)?.organization;
+  return { patients, studies, studiesById, binaries, clinical };
 }
 
 export function studiesForPatient(store: Store, patientId: string): Study[] {

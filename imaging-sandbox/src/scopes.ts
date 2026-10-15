@@ -26,7 +26,7 @@ export function parseResourceScope(raw: string): ResourceScope | null {
 }
 
 // Resource types this sandbox serves at patient level.
-export const SERVED_RESOURCES = ["Patient", "DiagnosticReport", "ImagingStudy"];
+export const SERVED_RESOURCES = ["Patient", "DiagnosticReport", "ImagingStudy", "ServiceRequest", "Encounter", "Practitioner", "Organization"];
 
 // Narrow a requested scope to what this read-only sandbox can grant.
 // Returns the scope string to grant, or null to drop it.
@@ -64,6 +64,10 @@ export function describeScope(raw: string): string {
     Patient: "your name and identifiers",
     DiagnosticReport: "your imaging reports",
     ImagingStudy: "your imaging studies and their images",
+    ServiceRequest: "your imaging and pathology orders",
+    Encounter: "your visits",
+    Practitioner: "your clinicians' names",
+    Organization: "the names of your care providers",
   };
   const verbs = s.perms.has("s") && s.perms.has("r") ? "Find and read" : s.perms.has("s") ? "Search" : "Read";
   return `${verbs} ${what[s.resource] ?? s.resource}`;

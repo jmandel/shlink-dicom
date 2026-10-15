@@ -47,6 +47,13 @@ for (const mode of ["external", "contained", "capability"]) {
     const reports = await get(`${d.clinicalBase}/DiagnosticReport?patient=${token.patient}`);
     save("Bundle-DiagnosticReport", reports);
     save("CapabilityStatement-clinical", await get(`${d.clinicalBase}/metadata`));
+    for (const t of ["ServiceRequest", "Encounter"]) save(`Bundle-${t}`, await get(`${d.clinicalBase}/${t}?patient=${token.patient}`));
+    const enc = await get(`${d.clinicalBase}/Encounter?patient=${token.patient}`);
+    const prac = new Set<string>(), orgs = new Set<string>();
+    for (const e of enc.entry) { orgs.add(e.resource.serviceProvider.reference); for (const p of e.resource.participant ?? []) prac.add(p.individual.reference); }
+    const reps = await get(`${d.clinicalBase}/DiagnosticReport?patient=${token.patient}`);
+    for (const e of reps.entry) for (const p of e.resource.resultsInterpreter ?? []) prac.add(p.reference);
+    for (const ref of [...prac, ...orgs]) save(ref.replace("/", "-"), await get(`${d.clinicalBase}/${ref}`));
     save("CapabilityStatement-imaging", await get(`${d.imagingBase}/metadata`));
   }
   if (mode === "contained") save("ImagingStudy-contained", bundle.entry[0].resource);

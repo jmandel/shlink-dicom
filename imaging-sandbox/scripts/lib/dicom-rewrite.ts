@@ -266,6 +266,9 @@ export function basicOffsetTableValid(bytes: Uint8Array): boolean {
 // bytes, in order) and the only change is a Basic Offset Table filled
 // where the source had an empty one.
 export function samePixelFrames(before: Uint8Array, after: Uint8Array): boolean {
+  if (Buffer.compare(before, after) === 0) return true;
+  const hasPixels = (b: Uint8Array) => parseDicom(b, { stopAtPixelData: false }).dataset.some((e) => e.tag === 0x7fe00010);
+  if (!hasPixels(before) && !hasPixels(after)) return true;
   if (Buffer.compare(pixelDataElement(before), pixelDataElement(after)) === 0) return true;
   const a = pixelElement(before), b = pixelElement(after);
   if (!a.e.undefinedLength || !b.e.undefinedLength) return false;

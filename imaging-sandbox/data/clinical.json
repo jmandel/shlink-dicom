@@ -1,0 +1,72 @@
+{
+  "_note": "Fictional organizations, clinicians and visits that give the sample record its context. All names, addresses and phone numbers are invented (555-01xx numbers are reserved for fiction). Dates and times match the studies.",
+  "organizations": [
+    {
+      "id": "example-medical-center",
+      "name": "Example Medical Center",
+      "address": ["100 Example Way", "Sample City, CA 94000"],
+      "phone": "(415) 555-0100"
+    },
+    {
+      "id": "example-open-mri",
+      "name": "Example Open MRI",
+      "address": ["200 Sample Street, Suite 3", "Exampleville, WI 53000"],
+      "phone": "(608) 555-0150"
+    }
+  ],
+  "practitioners": [
+    { "id": "casey-example", "given": ["Casey", "M."], "family": "Example", "suffix": "MD", "role": "Emergency Medicine", "organization": "example-medical-center" },
+    { "id": "avery-sample", "given": ["Avery"], "family": "Sample", "suffix": "MD", "role": "Radiology", "organization": "example-medical-center" },
+    { "id": "jordan-sample", "given": ["Jordan"], "family": "Sample", "suffix": "MD", "role": "Orthopaedic Surgery", "organization": "example-medical-center" },
+    { "id": "taylor-example", "given": ["Taylor"], "family": "Example", "suffix": "MD", "role": "Neurology", "organization": "example-open-mri" },
+    { "id": "quinn-sample", "given": ["Quinn"], "family": "Sample", "suffix": "MD", "role": "Radiology", "organization": "example-open-mri" },
+    { "id": "riley-example", "given": ["Riley"], "family": "Example", "suffix": "MD", "role": "Pulmonology", "organization": "example-medical-center" },
+    { "id": "sasha-sample", "given": ["Sasha"], "family": "Sample", "suffix": "MD", "role": "Pathology", "organization": "example-medical-center" }
+  ],
+  "encounters": [
+    {
+      "id": "ed-2012-10-09",
+      "class": { "code": "EMER", "display": "emergency" },
+      "type": "Emergency department visit",
+      "start": "2012-10-09T19:40:00-07:00",
+      "end": "2012-10-10T03:15:00-07:00",
+      "organization": "example-medical-center",
+      "location": "Emergency Department",
+      "reason": "Abdominal pain; hand and wrist pain after a fall",
+      "practitioner": "casey-example"
+    },
+    {
+      "id": "obs-2012-10-10",
+      "class": { "code": "OBSENC", "display": "observation encounter" },
+      "type": "Observation stay",
+      "start": "2012-10-10T03:15:00-07:00",
+      "end": "2012-10-10T19:30:00-07:00",
+      "organization": "example-medical-center",
+      "location": "Observation Unit",
+      "reason": "Abdominal pain; right hand injury",
+      "practitioner": "jordan-sample"
+    },
+    {
+      "id": "mri-2020-07-29",
+      "class": { "code": "AMB", "display": "ambulatory" },
+      "type": "Outpatient imaging visit",
+      "start": "2020-07-29T10:15:00-05:00",
+      "end": "2020-07-29T11:30:00-05:00",
+      "organization": "example-open-mri",
+      "location": "Outpatient Imaging",
+      "reason": "Headaches",
+      "practitioner": "taylor-example"
+    },
+    {
+      "id": "bronch-2023-04-17",
+      "class": { "code": "AMB", "display": "ambulatory" },
+      "type": "Outpatient procedure",
+      "start": "2023-04-17T12:00:00-07:00",
+      "end": "2023-04-17T15:00:00-07:00",
+      "organization": "example-medical-center",
+      "location": "Pulmonary Procedure Suite",
+      "reason": "Lung nodule",
+      "practitioner": "riley-example"
+    }
+  ]
+}

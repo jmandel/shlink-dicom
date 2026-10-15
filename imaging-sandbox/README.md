@@ -47,8 +47,8 @@ On startup the server prints its URLs, the number of studies and instances it lo
 
 | Study | Date | Series | Images | Size |
 |---|---|---|---|---|
-| MRI brain (Hitachi Altaire, 0.7 T) | 29 Jul 2020 | 14 | 263 | 43 MB |
-| CT abdomen and pelvis with oral and IV contrast (GE LightSpeed VCT) | 9 Oct 2012 | 5 | 455 | 242 MB |
+| MRI brain (Hitachi Altaire, 0.7 T) | 29 Jul 2020 | 18 | 267 | 44 MB |
+| CT abdomen and pelvis with oral and IV contrast (GE LightSpeed VCT) | 9 Oct 2012 | 8 | 458 | 246 MB |
 | XR left wrist, 3 views | 10 Oct 2012 | 3 | 3 | 41 MB |
 | XR right hand and wrist, 3 views | 10 Oct 2012 | 3 | 3 | 41 MB |
 | XR right hand, 3 views, portable, through a splint | 10 Oct 2012 | 3 | 3 | 31 MB |
@@ -62,9 +62,10 @@ my-health-data's `imaging/deid.py` made these from the original CD exports, unde
 - **Accession numbers and study IDs:** replaced with `EXMRI2020`, `EXCT2012` and `EXCR2012A`–`C`.
 - **Removed:** other person names, institution and station names, serial numbers, order identifiers, comments and private attributes.
 - **UIDs:** all instance UIDs are replaced.
-- **Dropped series:** the CT dose report screen, a scanned document, and four MRI viewer captures, because their pixels show the patient's name.
+- **Reconstructed series:** the CT dose report screen, the scanned CT order form, and four MRI viewer captures showed the patient's name in their pixels. `imaging/reconstruct.py` redrew each from scratch with the same layout and information, using the sample identity and fictional clinicians and sites. Each is marked "(reconstructed)" in SeriesDescription and explained in ImageComments.
+- **Added:** a synthetic CT radiation dose SR (series 997, "Dose Record (synthetic)"), built from the dose screen's values and the image headers.
 
-Pixel data is unchanged, at full resolution, in the original transfer syntax: Implicit VR Little Endian for the CT and radiographs, Explicit VR Little Endian for the MRI. The sandbox serves these files byte for byte, and its build checks that each one carries the sample patient's name, ID and birth date.
+Pixel data of the original series is unchanged, at full resolution, in the original transfer syntax: Implicit VR Little Endian for the CT and radiographs, Explicit VR Little Endian for the MRI. The sandbox serves these files byte for byte, and its build checks that each one carries the sample patient's name, ID and birth date.
 
 ### The slide's header rewrite
 
@@ -112,19 +113,42 @@ Two instances of the source series are not used. The full-resolution level (1.05
 
 The same text is in the slide's ImagingStudy (`note`), in its sample pathology report, in `build/dataset/manifest.json`, and in `out/index.json`.
 
-### Reports
+### Reports and clinical context
 
-Each study gets one sample report, as a PDF and as plain text with the same content:
+No reports exist for these studies, so each study gets a synthetic one, written in the style of a hospital report. Each comes as a PDF and as plain text with the same words.
+
 - **Kinds:**
-  - radiology reports (category `RAD`) for the MRI (LOINC 24590-2) and the CT (103859-5);
-  - radiology reports for the left wrist (37455-3), the right hand and wrist (103442-0) and the right hand (47371-0);
-  - a pathology report for the slide (category `SP`; LOINC 11529-5 "Surgical pathology study"), with an image-source section carrying the attribution.
-- **Structure:** patient, exam, date, equipment, technique listing the actual series (or, for the slide, the pyramid levels) from the headers, findings and impression.
-- **Marking:** every PDF page carries **SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION.** at the top and bottom, and the text file starts and ends with it.
-- **Content:** the indication, findings and impression are generic and labelled illustrative; the report says no one produced them by reading the images.
-- **PDF format:** written by a small hand-made PDF writer (`scripts/lib/pdf.ts`). It passes `qpdf --check`, and PDF.js extracts the same text as the text file.
+  - radiology reports (category `RAD`): MRI brain (LOINC 24590-2), CT abdomen and pelvis (103859-5), left wrist (37455-3), right hand and wrist (103442-0), and right hand (47371-0);
+  - a surgical pathology report for the slide (category `SP`; LOINC 11529-5).
+- **Layout of the PDFs:**
+  - letterhead of the fictional facility;
+  - patient block: Josh Example, JEXAMPLE01, born 1982-01-01, with exam, date and time, accession, location and ordering clinician;
+  - clinical indication, comparison, and a technique section that lists the series from the headers;
+  - findings by organ system, and the impression;
+  - the signing radiologist or pathologist, with the signature time.
+- **Content:**
+  - Findings were written after looking at the images.
+  - They describe what is visible: for example, the ulnar gutter splint on the portable hand views.
+  - They use routine normal-style language where a reader would expect it. They invent no pathology.
+- **The slide's report** describes the slide, a lung adenocarcinoma from a public research collection. It says plainly that the slide is not tissue from this patient, and carries the attribution.
+- **Marking:** each PDF page has one small footer line, "Synthetic report written for this sample; not a clinical interpretation." The text file ends with the same line. In FHIR, each report carries `meta.tag` v3-ActReason `HTEST` ("test health data") and the line in its narrative.
+- **PDF writer:** a small hand-made writer (`scripts/lib/pdf.ts`, standard Helvetica). Its output passes `qpdf --check`, and PDF.js extracts the same text as the text file.
 
-The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The dataset is 550.3 MB (525 MiB): 397 MB of de-identified studies and 152 MB of slide. `deploy/bootstrap-sandbox.sh` checks the digest of `SHA256SUMS` (`EXPECTED_SUMS`) after building on the VM.
+`data/clinical.json` holds the context, all fictional, with phone numbers in the 555-01xx range. The server serves it as FHIR resources:
+- two Organizations (Example Medical Center, Example Open MRI);
+- seven Practitioners;
+- four Encounters: an ED visit and an observation stay in Oct 2012, an outpatient MRI visit in Jul 2020, and an outpatient procedure in Apr 2023;
+- one ServiceRequest (order) per study.
+
+These are linked:
+- `DiagnosticReport.basedOn` and `ImagingStudy.basedOn` point at the order;
+- `encounter` points at the visit;
+- `resultsInterpreter` and `ImagingStudy.interpreter` point at the reading clinician;
+- `ImagingStudy.referrer` points at the ordering clinician.
+
+Dates and times match the studies.
+
+The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The DICOM files total 555.2 MB. `deploy/bootstrap-sandbox.sh` checks the digest of `SHA256SUMS` (`EXPECTED_SUMS`) after building on the VM.
 
 ### Plain export for other consumers
 
@@ -150,6 +174,8 @@ With the default `BASE_URL` of `http://localhost:3334`:
 | | `/fhir/Patient/{id}`, `/fhir/Patient?_id=` | |
 | | `/fhir/DiagnosticReport?patient=…` | also `category` (e.g. `RAD`), `code`, `_id`; one report per shared study |
 | | `/fhir/DiagnosticReport/{id}` | read |
+| | `/fhir/ServiceRequest?patient=…`, `/fhir/Encounter?patient=…` | orders and visits, with reads by id |
+| | `/fhir/Practitioner/{id}`, `/fhir/Organization/{id}` | fictional clinicians and facilities |
 | | `/fhir/Binary/{id}` | report attachments (`presentedForm.url`): raw bytes, or a FHIR `Binary` with `Accept: application/fhir+json` |
 | Imaging FHIR base | `/imaging/fhir` | |
 | | `/imaging/fhir/.well-known/smart-configuration` | same Authorization Server; `smart-imaging-access` in the top-level `capabilities` |
@@ -200,8 +226,8 @@ A request with an expired or revoked access token is refused with `401` before t
 The authorize endpoint shows a sign-in page with two demo patients and no passwords:
 
 - **Josh Example** (`Patient/josh-example`, male, born 1982-01-01, identifier JEXAMPLE01) owns six studies:
-  - MRI brain, 29 Jul 2020: 14 series, 263 images;
-  - CT abdomen and pelvis with contrast, 9 Oct 2012: 5 series, 455 images;
+  - MRI brain, 29 Jul 2020: 18 series, 267 images (four are reconstructed viewer captures);
+  - CT abdomen and pelvis with contrast, 9 Oct 2012: 8 series, 458 instances (with a reconstructed dose screen and order form, and a synthetic dose SR);
   - XR left wrist; XR right hand and wrist; and XR right hand, all 10 Oct 2012: 3 images each;
   - a whole-slide image of lung tissue, H&E, 17 Apr 2023: 1 series, 5 instances (three pyramid levels, the overview and a thumbnail).
 - **Robin Example** (`Patient/robin-example`) is synthetic and has no imaging.
@@ -220,7 +246,7 @@ The Share flow should run a standard SMART standalone launch:
    - `response_type=code`;
    - `client_id=shlink-dicom-share`;
    - `redirect_uri` set to one of `SHARE_REDIRECT_URIS`;
-   - `scope=launch/patient patient/Patient.rs patient/DiagnosticReport.rs patient/ImagingStudy.rs` (add `offline_access` for a refresh token);
+   - `scope=launch/patient patient/Patient.rs patient/DiagnosticReport.rs patient/ImagingStudy.rs`. Add `patient/ServiceRequest.rs patient/Encounter.rs patient/Practitioner.rs patient/Organization.rs` (or use `patient/*.rs`) for orders, visits and clinicians, and `offline_access` for a refresh token;
    - `aud=<BASE_URL>/fhir`;
    - a random `state`;
    - `code_challenge` and `code_challenge_method=S256`.

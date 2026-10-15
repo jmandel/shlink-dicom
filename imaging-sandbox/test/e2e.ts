@@ -17,6 +17,7 @@ import * as C from "./client.ts";
 import { launchViaForms, type LaunchOptions } from "./launch.ts";
 import { parseDicom, str } from "../src/dicom.ts";
 import { pdfPages } from "./pdf-text.ts";
+import { FOOTER } from "../scripts/lib/report.ts";
 import type { Sandbox } from "../src/server.ts";
 
 const HERE = import.meta.dir;
@@ -226,6 +227,7 @@ async function main() {
   const wrist = studyUIDById.get("xr-wrist-left-2012")!;
   const slide = studyUIDById.get("slide-lung-2023")!;
   const ALL = [...studyUIDById.values()];
+  const brainN = manifest.studies.find((s: any) => s.id === "mri-brain-2020").files.length;
   const N = ALL.length;
   console.log(`ground truth: ${truthBySop.size} instances in ${truthBySeries.size} series from ${DATASET}`);
 
@@ -251,7 +253,7 @@ async function main() {
     const r = await fetch(`${studies[0].wadoBase}/studies/${brain}`, { headers: { authorization: `Bearer ${at}`, accept: C.DICOM_ACCEPT, "accept-encoding": "gzip, br" } });
     const body = new Uint8Array(await r.arrayBuffer());
     const parts = C.parseMultipart(body, r.headers.get("content-type") ?? "");
-    check(`full brain study (${(body.byteLength / 1e6).toFixed(1)} MB multipart): 263 identical parts, no Content-Encoding`, r.status === 200 && !r.headers.get("content-encoding") && parts.length === 263 && parts.every((p) => { const t = truthBySop.get(str(parseDicom(p.bytes).dataset, 0x00080018)!); return !!t && sameBytes(t.bytes, p.bytes); }), { status: r.status, enc: r.headers.get("content-encoding"), n: parts.length });
+    check(`full brain study (${(body.byteLength / 1e6).toFixed(1)} MB multipart): ${brainN} identical parts, no Content-Encoding`, r.status === 200 && !r.headers.get("content-encoding") && parts.length === brainN && parts.every((p) => { const t = truthBySop.get(str(parseDicom(p.bytes).dataset, 0x00080018)!); return !!t && sameBytes(t.bytes, p.bytes); }), { status: r.status, enc: r.headers.get("content-encoding"), n: parts.length });
     const cl = r.headers.get("content-length");
     check("multipart Content-Length matches the body", cl === null || Number(cl) === body.byteLength, cl);
   }
@@ -268,7 +270,7 @@ async function main() {
   const one = await C.wadoGet(`${base}/wado-rs/studies/${wrist}/series/${sopT.seriesUID}/instances/${sopT.sopUID}`, at);
   check("instance-level retrieval returns the identical instance", one.status === 200 && one.parts?.length === 1 && sameBytes(one.parts[0].bytes, sopT.bytes));
   const meta = await C.wadoGet(`${base}/wado-rs/studies/${brain}/metadata`, at, "application/dicom+json");
-  check("study metadata: DICOM JSON for 263 instances", meta.status === 200 && Array.isArray(meta.json) && meta.json.length === 263 && meta.json[0]["0020000D"]?.Value?.[0] === brain);
+  check(`study metadata: DICOM JSON for ${brainN} instances`, meta.status === 200 && Array.isArray(meta.json) && meta.json.length === brainN && meta.json[0]["0020000D"]?.Value?.[0] === brain);
   check("frames (not implemented): 404 after the token check", (await status(`${base}/wado-rs/studies/${wrist}/series/${sopT.seriesUID}/instances/${sopT.sopUID}/frames/1`, at)) === 404);
 
   section("Search parameters");
@@ -336,6 +338,8 @@ async function main() {
   }
 
   section("Imaging reports");
+  // Orders, visits, clinicians and facilities need their own scopes; patient/*.rs covers them.
+  const atAll = (await httpLaunch(base, { scope: "launch/patient patient/*.rs" })).token.access_token as string;
   const rad = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=${encodeURIComponent("http://terminology.hl7.org/CodeSystem/v2-0074|RAD")}`, at);
   check(`category=system|RAD: one report per radiology study (${N - 1})`, rad.total === N - 1);
   check("category=LAB: 0 reports", (await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=LAB`, at)).total === 0);
@@ -351,7 +355,16 @@ async function main() {
     check(`${r.id}: read by id`, (await C.fhirGet(`${base}/fhir/DiagnosticReport/${r.id}`, at)).id === r.id);
     const ref = r.imagingStudy?.[0];
     check(`${r.id}: imagingStudy links its ImagingStudy by reference and Study Instance UID`, ref?.reference === `${d.imagingBase}/ImagingStudy/${studyId}` && ref?.identifier?.value === `urn:oid:${studyUIDById.get(studyId)}`);
-    check(`${r.id}: category ${r.category[0].coding[0].code}, LOINC code, conclusion with the banner`, ["RAD", "SP"].includes(r.category[0].coding[0].code) && r.code.coding[0].system === "http://loinc.org" && r.conclusion.startsWith("SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION."));
+    check(`${r.id}: category ${r.category[0].coding[0].code}, LOINC code, conclusion, synthetic tag`, ["RAD", "SP"].includes(r.category[0].coding[0].code) && r.code.coding[0].system === "http://loinc.org" && !!r.conclusion && r.meta?.tag?.some((t: any) => t.code === "HTEST") && r.text?.div?.includes(FOOTER));
+    const sr = await C.fhirGet(`${base}/fhir/${r.basedOn?.[0]?.reference}`, atAll);
+    const enc = await C.fhirGet(`${base}/fhir/${r.encounter?.reference}`, atAll);
+    const reader = await C.fhirGet(`${base}/fhir/${r.resultsInterpreter?.[0]?.reference}`, atAll);
+    const org = await C.fhirGet(`${base}/fhir/${enc.serviceProvider?.reference}`, atAll);
+    const ist = await C.fhirGet(`${d.imagingBase}/ImagingStudy/${studyId}`, at);
+    check(`${r.id}: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order`,
+      sr.resourceType === "ServiceRequest" && sr.code.coding[0].code === r.code.coding[0].code && sr.identifier[0].value === r.identifier[0].value &&
+      enc.resourceType === "Encounter" && reader.resourceType === "Practitioner" && org.resourceType === "Organization" &&
+      ist.basedOn?.[0]?.reference === `${base}/fhir/ServiceRequest/${sr.id}` && ist.encounter?.reference === `${base}/fhir/Encounter/${enc.id}`);
     const pdfA = r.presentedForm.find((a: any) => a.contentType === "application/pdf");
     const txtA = r.presentedForm.find((a: any) => a.contentType.startsWith("text/plain"));
     const get = async (u: string) => { const res = await fetch(u, { headers: { authorization: `Bearer ${at}` } }); return { status: res.status, type: res.headers.get("content-type"), bytes: new Uint8Array(await res.arrayBuffer()) }; };
@@ -362,14 +375,18 @@ async function main() {
     const pages = await pdfPages(pdf.bytes);
     const text = new TextDecoder().decode(txt.bytes);
     const norm = (x: string) => x.replace(/\s+/g, " ").trim();
-    const BANNER = "SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION.";
-    const pdfBody = pages.flatMap((p) => p.filter((l) => !l.includes(BANNER))).join("\n");
-    const lines = text.split("\n");
-    check(`${r.id}: PDF parses with PDF.js, every page has the banner, and its text matches the text attachment`, pages.length > 0 && pages.every((p) => p[0] === BANNER) && norm(pdfBody) === norm(lines.slice(2, lines.lastIndexOf(BANNER) - 1).join("\n")));
-    check(`${r.id}: text names the sample patient and lists the study's series or instances`, text.includes("EXAMPLE, JOSH") && norm(text).includes("from the DICOM headers:"));
+    const isFooter = (l: string) => l.includes(FOOTER) || /^Page \d+ of \d+$/.test(l.trim());
+    const pdfBody = pages.flatMap((p) => p.filter((l) => !isFooter(l))).join("\n");
+    const txtBody = text.split("\n").filter((l) => l.trim() !== FOOTER).join("\n");
+    check(`${r.id}: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment`, pages.length > 0 && pages.every((p) => p[p.length - 1].includes(FOOTER)) && norm(pdfBody) === norm(txtBody));
+    check(`${r.id}: text names the sample patient, the reading clinician and the facility`, text.includes("EXAMPLE, JOSH") && text.includes("Electronically signed") && text.includes(org.name));
     const bin = await fetch(pdfA.url, { headers: { authorization: `Bearer ${at}`, accept: "application/fhir+json" } }).then((x) => x.json());
     check(`${r.id}: Binary as FHIR JSON when asked`, bin.resourceType === "Binary" && bin.contentType === "application/pdf" && Buffer.from(bin.data, "base64").byteLength === pdfA.size);
   }
+  const orders = await C.fhirGet(`${base}/fhir/ServiceRequest?patient=${PATIENT}`, atAll);
+  const encounters = await C.fhirGet(`${base}/fhir/Encounter?patient=${PATIENT}`, atAll);
+  check("ServiceRequest with a token lacking the scope: 403", (await status(`${base}/fhir/ServiceRequest?patient=${PATIENT}`, at)) === 403);
+  check(`ServiceRequest search: one order per study (${N}); Encounter search: four visits`, orders.total === N && encounters.total === 4, { orders: orders.total, encounters: encounters.total });
   const brainPdfUrl = rad.entry.find((e: any) => e.resource.id === "report-mri-brain-2020").resource.presentedForm[0].url;
   check("report attachment without a token: 401", (await status(brainPdfUrl)) === 401);
 
@@ -404,6 +421,9 @@ async function main() {
   check("WADO-RS wrist study: 200", (await status(`${base}/wado-rs/studies/${wrist}`, wristOnly.token.access_token)) === 200);
   const woReports = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}`, wristOnly.token.access_token);
   check("DiagnosticReport search returns only the wrist report", woReports.total === 1);
+  const woAll = (await httpLaunch(base, { studies: [wrist], scope: "launch/patient patient/*.rs" })).token.access_token;
+  const woOrders = await C.fhirGet(`${base}/fhir/ServiceRequest?patient=${PATIENT}`, woAll);
+  check("ServiceRequest search returns only the wrist order; the brain MRI order is 404", woOrders.total === 1 && (await status(`${base}/fhir/ServiceRequest/order-mri-brain-2020`, woAll)) === 404);
   check("brain report attachment with the wrist-only token: 404", (await status(brainPdfUrl, wristOnly.token.access_token)) === 404);
   const deniedUnshared = await fetch(`${base}/wado-rs/studies/${brain}`, { headers: { authorization: `Bearer ${wristOnly.token.access_token}`, accept: C.DICOM_ACCEPT } });
   const deniedUnknown = await fetch(`${base}/wado-rs/studies/1.2.3.4.5`, { headers: { authorization: `Bearer ${wristOnly.token.access_token}`, accept: C.DICOM_ACCEPT } });
