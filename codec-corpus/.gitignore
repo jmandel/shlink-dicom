@@ -5,7 +5,9 @@ formats/*/samples/
 formats/*/oracle/
 seeds/*.dcm
 seeds/*.npy
-reports/
+reports/*
+# /how bakes its coverage table from this run, so the site builds from git.
+!reports/foundation.json
 prevalence/cache/
 formats/*/frames/
 formats/*/cases.lock
