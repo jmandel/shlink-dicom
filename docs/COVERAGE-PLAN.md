@@ -65,9 +65,9 @@ Status: approved direction (Josh, 15 Oct 2026). It replaces the tier 2 and tier 
 
 ## F. Size limits
 
-- **Packing:** the browser packer streams. It reads, encrypts and uploads one record at a time, and never holds a series in memory.
+- **Packing:** the browser packer streams. It reads, encrypts and uploads one record at a time, and never holds a whole file in memory.
 - **Uploads:** chunked and resumable, and they survive a page reload.
-- **Storage:** large series files live on disk next to the per-share SQLite, while the metadata stays in SQLite. Range reads stream from disk.
+- **Storage:** large encrypted files live on disk next to the per-share SQLite, while the metadata stays in SQLite. Range reads stream from disk.
 - **Limits:** the fixed 200 MiB body and 500 MiB share caps go. Quotas become server settings.
 
 **Gate:** the 1.2 GB lung slide and a multi-GB synthetic CT share through `/share` on a phone and on a desktop. Peak browser memory stays bounded and is reported.

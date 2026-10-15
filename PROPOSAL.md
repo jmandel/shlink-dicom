@@ -66,7 +66,7 @@ SHLs already let a patient share FHIR data with anyone, without prior arrangemen
 
 ## 6. Design principles
 
-- **Reuse the units DICOM and FHIR already have.** DICOM organizes instances into series and series into studies. FHIR `ImagingStudy` already lists series and instances by UID. The study is the unit of storage, and `ImagingStudy` is the index: every series and every instance is one contiguous byte range of the study's file. No new container, segment or chunk concept is visible to the client.
+- **Reuse the units DICOM and FHIR already have.** DICOM organizes instances into series and series into studies. FHIR `ImagingStudy` already lists series and instances by UID. The study is the unit of storage, and `ImagingStudy` is the index: every series and every instance is one contiguous byte range of its file. No new container, segment or chunk concept is visible to the client.
 - **One way to do each thing.** There are no modes or options in the file format: no optional compression, no optional framing. A client has one code path.
 - **Do not touch the DICOM files.** Any compression a source applied lives inside the DICOM files and is described by their own Transfer Syntax UID. The format neither adds compression nor removes it.
 - **The authenticated Bundle carries everything the client must trust.** Lengths, file identifiers and file keys come from the encrypted Bundle, never from the encrypted files. An encrypted file is only ciphertext.
@@ -109,7 +109,7 @@ Standard R4 `ImagingStudy`, with these rules:
 - `identifier` carries the Study Instance UID as `{ system: "urn:dicom:uid", value: "urn:oid:<StudyInstanceUID>" }`.
 - `subject` references the `Patient` in the Bundle.
 - `numberOfSeries` and `numberOfInstances` are populated and count the series and instances **shared in this Bundle**. If the link shares only a subset of a study's series, `ImagingStudy.note` SHOULD state that the shared study is partial.
-- Every shared series appears in `series`, and every shared instance in `series.instance`. Each `series.instance` has `uid` (SOP Instance UID), `sopClass` (`urn:ietf:rfc:3986` / `urn:oid:<SOP Class UID>`) and, if known, `number` (Instance Number).
+- Every shared series appears in `series`, and every shared instance in `series.instance`. Every shared series lists at least one instance. Each `series.instance` has `uid` (SOP Instance UID), `sopClass` (`urn:ietf:rfc:3986` / `urn:oid:<SOP Class UID>`) and, if known, `number` (Instance Number).
 
 Two extensions. Their URLs are under `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/`, the canonical base of the SMART Health Cards and Links implementation guide, where this profile is to be published:
 
@@ -118,7 +118,7 @@ Two extensions. Their URLs are under `http://hl7.org/fhir/uv/smart-health-cards-
 | `…/linked-file` | `ImagingStudy`, `ImagingStudy.series` | complex | An encrypted file and its key. On `ImagingStudy` it names the file of every series in the study; on a `series` it names that series' file instead: |
 | ↳ `id` | `linked-file` | `valueString` | The file id: 16 random bytes, base64url-encoded without padding (22 characters). Names the immutable file (`{id}.bin`). |
 | ↳ `key` | `linked-file` | `valueString` | The file's encryption key: 32 random bytes, base64url-encoded without padding (43 characters). |
-| `…/instance-length` | `ImagingStudy.series.instance` | `valueDecimal` (a non-negative integer) | Length in bytes of this instance's DICOM file. |
+| `…/instance-length` | `ImagingStudy.series.instance` | `valueDecimal` (a positive integer) | Length in bytes of this instance's DICOM file. |
 
 `valueDecimal` is used because R4 `integer` is 32-bit, and a single whole-slide image instance can exceed 2 GB.
 
@@ -126,6 +126,8 @@ Rules for `linked-file`:
 
 - Every shared series has a file: the `linked-file` on the series if it has one, else the one on its `ImagingStudy`. A series with neither is an error.
 - Each file belongs to one `ImagingStudy`. Two `linked-file` extensions in that `ImagingStudy` that give the same `id` give the same `key`.
+- A `linked-file` on `ImagingStudy` MUST be present only if at least one of its series uses it, so a Bundle carries no key for a file none of its series are in.
+- A link that shares only some of a study's series MUST point only at files that hold nothing else (§13).
 - A sharer packing a study writes one file for the whole study and puts `linked-file` on `ImagingStudy` only. A series-level `linked-file` is for a series added to the study later (§10.3).
 
 **Where each instance's bytes are.** Walk `series` in array order and each series' `instance` in array order, keeping a running offset for each file, starting at 0. Each instance occupies [offset, offset + length) of its series' file, and then advances that file's offset by its length. So:
@@ -242,7 +244,7 @@ Because each 65,536-byte record carries its own 16-byte GCM tag and binds its re
 
 - **AES-256-GCM** matches the A256GCM the SHL specification already uses, so the images are not protected more weakly than the Bundle, and needs no other cryptographic primitive.
 - **A random 32-byte key per file** separates the file keys from the SHL key (which is used only for the Bundle JWE) and from each other, so a simple sequential counter nonce (`uint96_be(i)`) is safe. It also lets the same encrypted files be shared across several links, each with its own SHL key, passcode, expiry or subset of studies, by encrypting only a new Bundle.
-- **One file per study** matches how studies are shared: a link shares whole studies, and each study has its own key. A series or an instance is still one byte range of the file, so reading one costs one Range request, as it would with a file per series. The host sees one file per study instead of one per series (§13).
+- **One file per study** matches how studies are usually shared, whole, and each study has its own key. A series or an instance is still one byte range of the file, so reading one costs one Range request, as it would with a file per series. The host sees one file per study instead of one per series (§13).
 - **64 KiB records** keep the overhead to 16 bytes per 64 KiB (0.02%). They also keep the over-fetch on a range read small, and fit comfortably in memory for streaming.
 
 ## 10. Fetch contract

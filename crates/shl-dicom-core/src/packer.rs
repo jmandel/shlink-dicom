@@ -6,7 +6,8 @@ use crate::{
         build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput,
         InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
     },
-    crypto::{b64url_encode, encrypt_file, random_bytes},
+    crypto::{b64url_encode, encrypt_file_stream, random_bytes},
+    range::ciphertext_length,
     dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance},
     jwe::encrypt_bundle_jwe,
     offset_tables::{add_offset_table, offset_table_status, OffsetTableStatus},
@@ -211,20 +212,22 @@ impl IngestSession {
                     .then_with(|| a.uid.cmp(&b.uid))
             });
 
-            // The study's file: its series in that order, each series' instances end to end.
-            let total_pt_len: usize = series_plain.iter().flat_map(|(_, v)| v.iter()).map(|i| i.bytes.len()).sum();
-            let mut plaintext = Vec::with_capacity(total_pt_len);
-            for se in &series_inputs {
-                let (_, insts) = series_plain.iter().find(|(uid, _)| uid == &se.uid).expect("series");
-                for inst in insts {
-                    plaintext.extend_from_slice(&inst.bytes);
-                }
-            }
-            drop(series_plain);
+            // The study's file: its series in that order, each series' instances end to end,
+            // encrypted record by record straight from the instances (no copy of the plaintext).
+            let parts: Vec<&[u8]> = series_inputs
+                .iter()
+                .flat_map(|se| {
+                    let (_, insts) = series_plain.iter().find(|(uid, _)| uid == &se.uid).expect("series");
+                    insts.iter().map(|i| i.bytes.as_slice())
+                })
+                .collect();
+            let total_pt_len: usize = parts.iter().map(|p| p.len()).sum();
             let file_id = b64url_encode(&random_bytes::<16>()?);
             let key = random_bytes::<32>()?;
             let key_b64 = b64url_encode(&key);
-            let ciphertext = encrypt_file(&plaintext, &key)?;
+            let mut ciphertext = Vec::with_capacity(ciphertext_length(total_pt_len as u64) as usize);
+            encrypt_file_stream(SliceChain { parts, at: 0 }, &mut ciphertext, &key)?;
+            drop(series_plain);
             files.push(PackedStudyFile {
                 file_id: file_id.clone(),
                 key_b64: key_b64.clone(),
@@ -275,6 +278,29 @@ impl IngestSession {
             index,
             files,
         })
+    }
+}
+
+/// Byte slices read one after another as one stream.
+struct SliceChain<'a> {
+    parts: Vec<&'a [u8]>,
+    at: usize,
+}
+
+impl std::io::Read for SliceChain<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.at < self.parts.len() {
+            let part = &mut self.parts[self.at];
+            if part.is_empty() {
+                self.at += 1;
+                continue;
+            }
+            let n = part.len().min(buf.len());
+            buf[..n].copy_from_slice(&part[..n]);
+            *part = &part[n..];
+            return Ok(n);
+        }
+        Ok(0)
     }
 }
 

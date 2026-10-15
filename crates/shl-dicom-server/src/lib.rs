@@ -112,7 +112,7 @@ pub fn build_app_router(state: AppState) -> Router {
         .route_service("/share/manage/", page("share/manage"))
         // Static files (assets, config.json); unknown paths get the landing page
         .fallback_service(serve_dir)
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // JSON and JWE bodies; series files stream (routes_api::put_share_file)
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // JSON and JWE bodies; encrypted files stream (routes_api::put_share_file)
         .layer(cors)
         .with_state(state)
 }

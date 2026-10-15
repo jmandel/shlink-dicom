@@ -126,6 +126,8 @@ function linkedFile(el: any): { id: string; key: string } | null {
 export function layout(imagingStudy: any): { files: LinkedFile[]; instances: InstanceLocation[] } {
   const studyFile = linkedFile(imagingStudy);
   const files = new Map<string, LinkedFile>();
+  // A series-level linked-file naming the study's file must give the same key.
+  if (studyFile) files.set(studyFile.id, { ...studyFile, plaintextLength: 0 });
   const instances: InstanceLocation[] = [];
   (imagingStudy.series ?? []).forEach((se: any, s: number) => {
     const lf = linkedFile(se) ?? studyFile;
@@ -133,6 +135,7 @@ export function layout(imagingStudy: any): { files: LinkedFile[]; instances: Ins
     let f = files.get(lf.id);
     if (!f) files.set(lf.id, (f = { id: lf.id, key: lf.key, plaintextLength: 0 }));
     else if (f.key !== lf.key) throw new Error(`file ${lf.id} is given two keys`);
+    if (!se.instance?.length) throw new Error(`series ${s} lists no instances`);
     (se.instance ?? []).forEach((inst: any, i: number) => {
       const length = Number((inst.extension ?? []).find((e: any) => e?.url === EXT_INSTANCE_LENGTH)?.valueDecimal);
       if (!Number.isSafeInteger(length) || length <= 0) throw new Error(`series ${s} instance ${i} has no length`);
@@ -140,5 +143,7 @@ export function layout(imagingStudy: any): { files: LinkedFile[]; instances: Ins
       f.plaintextLength += length;
     });
   });
-  return { files: [...files.values()], instances };
+  // Only files some series uses (a study-level linked-file no series uses names nothing).
+  const used = new Set(instances.map((x) => x.fileId));
+  return { files: [...files.values()].filter((f) => used.has(f.id)), instances };
 }

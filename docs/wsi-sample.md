@@ -24,7 +24,7 @@ The series has seven instances, 1.206 GB in total:
 
 | Instance (IDC instance_uuid prefix) | Image Type | Size | Keep? |
 |---|---|---|---|
-| 6dc953bc | VOLUME, 73,703 × 46,849, 60,368 tiles, 0.49 µm/pixel | 1,052.2 MB | **No.** Over the server's 200 MiB upload body limit, and too large for a sample |
+| 6dc953bc | VOLUME, 73,703 × 46,849, 60,368 tiles, 0.49 µm/pixel | 1,052.2 MB | **No.** Too large for a sample |
 | 8d7a5787 | VOLUME, 18,425 × 11,712, 3,773 tiles, 1.98 µm/pixel | 132.1 MB | Yes: the finest level of the sample |
 | 7ef22e67 | VOLUME, 4,606 × 2,928, 260 tiles | 11.0 MB | Yes |
 | 709a1540 | VOLUME, 2,303 × 1,464, 70 tiles | 3.6 MB | Yes |
@@ -34,9 +34,7 @@ The series has seven instances, 1.206 GB in total:
 
 **Result.** Three pyramid levels, plus the overview and thumbnail, come to **152.3 MB** in one series (150.0 MB without the thumbnail). That is a real multi-level tiled pyramid of 4,103 tiles. At the finest level (about 2 µm per pixel) individual cells are visible.
 
-The series fits the server's limits:
-- one series file of about 152 MB, under the 200 MiB upload body limit;
-- about 200 MB with the 48 MB of sandbox DICOM, under the 500 MiB per share.
+The slide is its own study, so it is one encrypted file of about 152 MB. The server streams file uploads with no body limit; its only size limit is the per-share quota when one is set (`--max-share-bytes`; 20 GB on the public server), and the sample share is not counted against it.
 
 The remaining instances still form a valid pyramid. Each instance carries its own Total Pixel Matrix, and they share the Pyramid UID and Frame of Reference.
 

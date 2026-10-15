@@ -532,3 +532,74 @@ fn test_linked_file_errors() {
     bundle["entry"].as_array_mut().unwrap().push(second);
     assert!(parse_study_index(bundle.to_string().as_bytes()).is_err());
 }
+
+/// Instance lengths are positive and every series lists an instance; an ImagingStudy with a
+/// linked-file and no series shares nothing (PROPOSAL.md §8.1).
+#[test]
+fn test_lengths_empty_series_and_empty_study() {
+    let zero = || {
+        let mut b = build_fhir_bundle(&build_input(None));
+        b["entry"][1]["resource"]["series"][0]["instance"][0]["extension"][0]["valueDecimal"] = 0.into();
+        b
+    };
+    assert!(parse_study_index(zero().to_string().as_bytes()).is_err(), "length 0 accepted");
+
+    let mut b = build_fhir_bundle(&build_input(None));
+    b["entry"][1]["resource"]["series"][1]["instance"] = serde_json::json!([]);
+    assert!(parse_study_index(b.to_string().as_bytes()).is_err(), "series without instances accepted");
+
+    let mut b = build_fhir_bundle(&build_input(None));
+    b["entry"][1]["resource"]["series"] = serde_json::json!([]);
+    assert_eq!(parse_study_index(b.to_string().as_bytes()).unwrap().studies.len(), 0, "empty study listed");
+}
+
+/// A study-level linked-file that every series overrides names no file: it is not in the parsed
+/// files, a subset drops it (no key for a file the link does not serve), and a series-level
+/// linked-file that gives the study's file another key is rejected.
+#[test]
+fn test_unused_study_file_and_key_conflict() {
+    let b_file = LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) };
+    let mut input = build_input(None);
+    for se in input.studies[0].series.iter_mut() {
+        se.file = Some(b_file.clone());
+    }
+    let bundle = build_fhir_bundle(&input);
+    let st = &parse_study_index(bundle.to_string().as_bytes()).unwrap().studies[0];
+    assert_eq!(st.files.iter().map(|f| f.file_id.as_str()).collect::<Vec<_>>(), vec!["BBBBBBBBBBBBBBBBBBBBBB"]);
+    let sub = subset_fhir_bundle(&bundle, std::slice::from_ref(&b_file.file_id), "2026-10-15T01:00:00Z").unwrap();
+    assert!(sub["entry"][1]["resource"].get("extension").is_none(), "unused study-level key left in the link Bundle");
+
+    // Every series names the study's file itself, with another key than the study gives.
+    let mut clash = build_fhir_bundle(&build_input(None));
+    for se in clash["entry"][1]["resource"]["series"].as_array_mut().unwrap() {
+        se["extension"] = serde_json::json!([{
+            "url": EXT_LINKED_FILE,
+            "extension": [{ "url": "id", "valueString": "AAAAAAAAAAAAAAAAAAAAAA" }, { "url": "key", "valueString": format!("{}A", "C".repeat(42)) }]
+        }]);
+    }
+    assert!(parse_study_index(clash.to_string().as_bytes()).is_err(), "study file given two keys accepted");
+}
+
+/// A link Bundle keeps the DiagnosticReports of the studies it keeps, and those that name no study.
+#[test]
+fn test_subset_reports_follow_studies() {
+    let mut input = build_input(None);
+    let mut second = input.studies[0].clone();
+    second.id = "study-2".into();
+    second.study_instance_uid = "2.25.10".into();
+    second.file = LinkedFileInput { file_id: "CCCCCCCCCCCCCCCCCCCCCC".into(), key_b64: format!("{}A", "C".repeat(42)) };
+    for se in second.series.iter_mut() {
+        se.file = None;
+    }
+    input.studies.push(second);
+    let mut bundle = build_fhir_bundle(&input);
+    let url2 = bundle["entry"][2]["fullUrl"].as_str().unwrap().to_string();
+    let entries = bundle["entry"].as_array_mut().unwrap();
+    let report = |id: &str, refs: serde_json::Value| serde_json::json!({ "fullUrl": format!("urn:uuid:{id}"), "resource": { "resourceType": "DiagnosticReport", "id": id, "status": "final", "imagingStudy": refs } });
+    entries.push(report("r1", serde_json::json!([{ "reference": "ImagingStudy/study-1" }])));
+    entries.push(report("r2", serde_json::json!([{ "reference": url2 }])));
+    entries.push(report("r3", serde_json::json!([])));
+    let sub = subset_fhir_bundle(&bundle, &["AAAAAAAAAAAAAAAAAAAAAA".into()], "2026-10-15T01:00:00Z").unwrap();
+    let ids: Vec<&str> = sub["entry"].as_array().unwrap().iter().filter_map(|e| e["resource"]["id"].as_str()).collect();
+    assert_eq!(ids, vec!["p1", "study-1", "r1", "r3"]);
+}

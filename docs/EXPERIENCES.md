@@ -111,8 +111,8 @@ Open question 1 below asks which server to use for the demo.
 Sections, each pairing a short text with a live widget:
 
 1. **The link.** Paste or tap the sample, and see its payload decoded. The widget highlights `url`, `key`, `flag` and `label`, with notes on what each lets the holder do.
-2. **The Bundle.** The decrypted FHIR JSON, collapsible, with `ImagingStudy.series` highlighted. Clicking an instance shows its byte offset in the series file.
-3. **The series file.** An interactive record map: drag a slider across instances, and see the byte range, the records covered, the HTTP `Range` header and the nonce. The real request fires, and the network panel below fills in.
+2. **The Bundle.** The decrypted FHIR JSON, collapsible, with `ImagingStudy.series` highlighted. Clicking an instance shows its byte offset in its study's file.
+3. **The study file.** An interactive record map: drag a slider across instances, and see the byte range, the records covered, the HTTP `Range` header and the nonce. The real request fires, and the network panel below fills in.
 4. **Decrypt and verify.** Shows a 64 KiB record being authenticated, plus the tamper switch: flip a bit in transit and see the record refused.
 5. **What the host sees.** Two panes side by side: the host's log (random file names, byte ranges) and the browser's view (patient, study, pixels).
 6. **Sharing and revocation.** A mini-sandbox: mint a subset link from the sample share, open it, revoke it, and watch the 404s happen. This replaces today's Share tab.

@@ -328,12 +328,22 @@ pub fn subset_fhir_bundle(
         .and_then(Value::as_array)
         .ok_or_else(|| Error::InvalidBundle("owner Bundle missing entry array".into()))?;
 
+    // ImagingStudy entries kept (by fullUrl and id), so DiagnosticReports can follow them.
+    let mut kept_urls: Vec<String> = Vec::new();
+    let mut kept_ids: Vec<String> = Vec::new();
     let mut new_entries = Vec::new();
+    let mut reports = Vec::new();
     for entry in entries {
         let Some(res) = entry.get("resource") else {
             continue;
         };
         let res_type = res.get("resourceType").and_then(Value::as_str).unwrap_or("");
+        if res_type == "DiagnosticReport" {
+            // Decided once the kept studies are known; the slot keeps the Bundle's order.
+            reports.push((new_entries.len(), entry));
+            new_entries.push(Value::Null);
+            continue;
+        }
         if res_type != "ImagingStudy" {
             new_entries.push(entry.clone());
             continue;
@@ -390,10 +400,33 @@ pub fn subset_fhir_bundle(
             }]);
         }
 
+        if let Some(u) = entry.get("fullUrl").and_then(Value::as_str) {
+            kept_urls.push(u.to_string());
+        }
+        if let Some(id) = res.get("id").and_then(Value::as_str) {
+            kept_ids.push(id.to_string());
+        }
         let mut new_entry = entry.clone();
         new_entry["resource"] = new_study;
         new_entries.push(new_entry);
     }
+    // A DiagnosticReport goes with the studies it refers to (by fullUrl or "ImagingStudy/<id>"); one
+    // that refers to none goes with every link (as web/share/lib/pack.ts subsetBundle does).
+    for (slot, entry) in reports {
+        let refs: Vec<&str> = entry["resource"]
+            .get("imagingStudy")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|r| r.get("reference").and_then(Value::as_str)).collect())
+            .unwrap_or_default();
+        let keep = refs.is_empty()
+            || refs.iter().any(|r| {
+                kept_urls.iter().any(|u| u == r) || r.rsplit_once("ImagingStudy/").is_some_and(|(_, id)| kept_ids.iter().any(|k| k == id))
+            });
+        if keep {
+            new_entries[slot] = entry.clone();
+        }
+    }
+    new_entries.retain(|e| !e.is_null());
 
     Ok(json!({
         "resourceType": "Bundle",
@@ -540,9 +573,16 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
     for se_val in series_arr {
         own_files.push(extract_linked_file(se_val)?);
     }
-    // An ImagingStudy without any linked-file is ordinary FHIR, not shared under this profile.
-    if study_file.is_none() && own_files.iter().all(Option::is_none) {
+    // An ImagingStudy without any linked-file is ordinary FHIR, not shared under this profile; one
+    // without series shares nothing.
+    if series_arr.is_empty() || (study_file.is_none() && own_files.iter().all(Option::is_none)) {
         return Ok(None);
+    }
+    // A series-level linked-file that names the study's file must give the same key.
+    if let Some((sid, skey)) = &study_file {
+        if own_files.iter().flatten().any(|(id, key)| id == sid && key != skey) {
+            return Err(Error::InvalidBundle(format!("file {sid} is given two keys")));
+        }
     }
 
     // Walk series and instances in array order with a running offset per file (§8.1).

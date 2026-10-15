@@ -141,9 +141,9 @@ pub struct CiphertextRange {
 pub fn record_nonce(record_index: u64) -> [u8; 12]; // uint96_be(record_index)
 pub fn ciphertext_length(plaintext_len: u64) -> u64;
 pub fn ciphertext_range(start: u64, end: u64, plaintext_len: u64) -> Result<CiphertextRange>;
-pub fn encrypt_series(plaintext: &[u8], series_key: &[u8; 32]) -> Vec<u8>;
-pub fn decrypt_record(record_ct: &[u8], record_index: u64, series_key: &[u8; 32]) -> Result<Vec<u8>>;
-pub fn decrypt_range(ciphertext_slice: &[u8], start: u64, end: u64, plaintext_len: u64, series_key: &[u8; 32]) -> Result<Vec<u8>>;
+pub fn encrypt_file(plaintext: &[u8], file_key: &[u8; 32]) -> Result<Vec<u8>>;
+pub fn encrypt_file_stream<R: Read, W: Write>(reader: R, writer: W, file_key: &[u8; 32]) -> Result<u64>;
+pub fn decrypt_range(ciphertext_slice: &[u8], start: u64, end: u64, plaintext_len: u64, file_key: &[u8; 32]) -> Result<Vec<u8>>;
 ```
 
 ### 3.2 `jwe` & `shl` Modules
@@ -372,7 +372,7 @@ Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin`
 1. Generates and verifies the `F0` golden share (`bundle.jwe` + `AAECAwQFBgcICQoLDA0ODw.bin`) and Appendix B JSON fixture.
 
 ### Stage 1 Tests (`cargo test -p shl-dicom-core`)
-1. **`test_appendix_b_vector`**: Asserts `encrypt_series`, record tags, ciphertext SHA-256, and instance-2 `decrypt_range(70000, 150000)` match Appendix B and `reference/test-vector.ts` byte-for-byte.
+1. **`test_appendix_b_vector`**: Asserts `encrypt_file`, record tags, ciphertext SHA-256, and instance-2 `decrypt_range(70000, 150000)` match Appendix B and `reference/test-vector.ts` byte-for-byte.
 2. **`test_range_and_record_edge_cases`**:
    - Plaintext length that is an exact multiple of `65,520` bytes (e.g., `65,520` and `131,040`).
    - An instance spanning 4+ records (`250,000` bytes).

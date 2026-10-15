@@ -1,6 +1,6 @@
 # shlink-dicom
 
-Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each series is one file of Part 10 instances, encrypted in 64 KiB AES-256-GCM records, so a receiver can range-read single instances or frames from a host that never sees the key.
+Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each study is one file of Part 10 instances (a series added later may have its own file), encrypted in 64 KiB AES-256-GCM records, so a receiver can range-read single instances or frames from a host that never sees the key.
 
 ## Contents
 

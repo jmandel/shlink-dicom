@@ -238,6 +238,30 @@ try {
 }
 check(rejected, "one file id with two keys rejected");
 
+const rejects = (study: any) => {
+  try {
+    layout(study);
+    return false;
+  } catch {
+    return true;
+  }
+};
+const zeroLength = structuredClone(imagingStudy);
+zeroLength.series[0].instance[0].extension[0].valueDecimal = 0;
+check(rejects(zeroLength), "an instance length of 0 rejected");
+const emptySeries = structuredClone(imagingStudy);
+emptySeries.series[1].instance = [];
+check(rejects(emptySeries), "a series without instances rejected");
+const clash = structuredClone(imagingStudy);
+clash.series[0].extension = [linkedFile(fileIdB64, addedKey)];
+check(rejects(clash), "a series-level linked-file giving the study's file another key rejected");
+const allOverride = structuredClone(imagingStudy);
+allOverride.series = [allOverride.series[2]];
+check(
+  layout(allOverride).files.map((f) => f.id).join() === addedFileId,
+  "a study-level linked-file no series uses names no file",
+);
+
 const goldenBundle = {
   resourceType: "Bundle",
   meta: { lastUpdated: "2026-09-30T15:00:00Z" },

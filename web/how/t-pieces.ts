@@ -39,8 +39,9 @@ export function piecesScene(): Scene {
   const f = series.file;
   const inst = series.instances[S.slice];
   const pad = 6;
-  const w0 = Math.max(0, inst.firstRecord - pad);
-  const w1 = Math.min(f.recordCount - 1, inst.lastRecord + pad);
+  // The window stays inside this series' records: the file also holds the study's other series.
+  const w0 = Math.max(series.firstRecord, inst.firstRecord - pad);
+  const w1 = Math.min(series.lastRecord, inst.lastRecord + pad);
   const count = w1 - w0 + 1;
   let sel: [number, number] = [inst.firstRecord, inst.lastRecord];
   const got = new Set<number>();

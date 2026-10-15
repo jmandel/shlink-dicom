@@ -200,6 +200,9 @@ function parseStudySeries(r: any): { files: FileEntry[]; series: SeriesEntry[] }
   const studyFile = linkedFile(r);
   const own = (r.series ?? []).map(linkedFile);
   if (!studyFile && !own.some(Boolean)) return null;
+  if (studyFile && own.some((o: any) => o?.fileId === studyFile.fileId && o.key !== studyFile.key)) {
+    throw new InvalidBundleError(`file ${studyFile.fileId} is given two keys`);
+  }
   const files = new Map<string, FileEntry>();
   const series: SeriesEntry[] = [];
   (r.series ?? []).forEach((se: any, k: number) => {

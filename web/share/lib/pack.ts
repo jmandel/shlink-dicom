@@ -150,15 +150,25 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
   return { resourceType: "Bundle", meta: { lastUpdated }, type: "collection", entry };
 }
 
-/** File ids an ImagingStudy resource links: its own linked-file and any on its series. */
-function studyFileIds(study: any): string[] {
-  const out: string[] = [];
-  for (const el of [study, ...(study.series ?? [])]) {
-    const ext = (el.extension ?? []).find((x: any) => x.url === EXT_LINKED_FILE);
-    const id = ext?.extension?.find((x: any) => x.url === "id")?.valueString;
-    if (id && !out.includes(id)) out.push(id);
+const linkedFileId = (el: any): string | undefined =>
+  (el?.extension ?? []).find((x: any) => x.url === EXT_LINKED_FILE)?.extension?.find((x: any) => x.url === "id")?.valueString;
+
+/**
+ * The file ids an ImagingStudy's series use (each series' own linked-file, else the study's, as
+ * core/bundle.ts resolves them), and the study without a study-level linked-file none of its series
+ * use, so a link carries no key for a file it does not serve (PROPOSAL.md §8.1).
+ */
+function studyFiles(study: any): { ids: string[]; study: any } {
+  const studyId = linkedFileId(study);
+  const ids: string[] = [];
+  for (const se of study.series ?? []) {
+    const id = linkedFileId(se) ?? studyId;
+    if (id && !ids.includes(id)) ids.push(id);
   }
-  return out;
+  if (!studyId || ids.includes(studyId)) return { ids, study };
+  const { extension, ...rest } = study;
+  const others = (extension ?? []).filter((x: any) => x.url !== EXT_LINKED_FILE);
+  return { ids, study: others.length ? { ...rest, extension: others } : rest };
 }
 
 /**
@@ -176,8 +186,9 @@ export function subsetBundle(owner: any, studyIds: string[]): { bundle: any; all
     const r = e.resource;
     if (r?.resourceType === "ImagingStudy") {
       if (!keep.has(r.id)) continue;
-      files.push(...studyFileIds(r).map((id) => `${id}.bin`));
-      entry.push(e);
+      const used = studyFiles(r);
+      files.push(...used.ids.map((id) => `${id}.bin`));
+      entry.push(used.study === r ? e : { ...e, resource: used.study });
     } else if (r?.resourceType === "DiagnosticReport") {
       const refs = (r.imagingStudy ?? []).map((x: any) => String(x.reference ?? ""));
       // A report goes with the studies it names; one that names none goes with every link.

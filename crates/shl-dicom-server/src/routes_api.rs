@@ -160,7 +160,7 @@ pub async fn clone_share(
             .into_response();
     };
 
-    // Copy the series files (hard links where the file system allows) and their rows.
+    // Copy the encrypted files (hard links where the file system allows) and their rows.
     let copy_res: Result<(), String> = (|| {
         let rows: Vec<(String, i64)> = {
             let src_conn = src_conn_arc.lock().unwrap();
@@ -343,7 +343,7 @@ fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Series file uploads, following the IETF resumable uploads draft
+// File uploads, following the IETF resumable uploads draft
 // (draft-ietf-httpbis-resumable-upload-13). The upload resource is the file's own URL,
 // /api/shares/{sid}/files/{fileId}.bin:
 //   PUT   with Upload-Complete and Upload-Length   creates the upload (the body may be its start)
@@ -601,7 +601,7 @@ pub async fn put_share_file(
         None => true,
     };
     if total == 0 {
-        return json_err(StatusCode::BAD_REQUEST, "series file body must not be empty");
+        return json_err(StatusCode::BAD_REQUEST, "file body must not be empty");
     }
     let Some(_guard) = claim(&state, &sid, &file_id) else {
         return json_err(StatusCode::CONFLICT, "another upload of this file is in progress");
