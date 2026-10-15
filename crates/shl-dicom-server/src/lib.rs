@@ -4,6 +4,7 @@ pub mod routes_shl;
 pub mod sample_pack;
 pub mod seed;
 pub mod state;
+pub mod storage;
 
 use axum::{
     extract::DefaultBodyLimit,

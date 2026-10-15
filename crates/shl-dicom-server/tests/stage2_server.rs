@@ -7,7 +7,11 @@ use shl_dicom_core::{
     jwe::encrypt_bundle_jwe,
     range::ciphertext_range,
 };
-use shl_dicom_server::{build_app_router, state::AppState};
+use shl_dicom_server::{
+    build_app_router,
+    state::AppState,
+    storage::{BlobStore, LocalFsStore, ReadDelivery, ReadMode, S3Config, S3Store},
+};
 use tokio::net::TcpListener;
 
 async fn spawn_test_server(state: AppState) -> String {
@@ -18,6 +22,41 @@ async fn spawn_test_server(state: AppState) -> String {
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+/// The store the tests run against: local files, or S3 when SHL_TEST_S3_BUCKET is set (with
+/// SHL_TEST_S3_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and SHL_TEST_S3_READ_MODE =
+/// proxy | redirect). Each test uses its own key prefix.
+fn test_store(dir: &std::path::Path) -> Arc<dyn BlobStore> {
+    let Ok(bucket) = std::env::var("SHL_TEST_S3_BUCKET") else {
+        return Arc::new(LocalFsStore { root: dir.join("blobs") });
+    };
+    Arc::new(
+        S3Store::new(S3Config {
+            endpoint: std::env::var("SHL_TEST_S3_ENDPOINT").ok(),
+            bucket,
+            region: "us-east-1".into(),
+            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap(),
+            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap(),
+            prefix: format!("test-{}/", b64url_encode(&random_bytes::<6>().unwrap())),
+            read_mode: if std::env::var("SHL_TEST_S3_READ_MODE").as_deref() == Ok("redirect") { ReadMode::Redirect } else { ReadMode::Proxy },
+            path_style: true,
+        })
+        .unwrap(),
+    )
+}
+
+fn test_state(dir: &std::path::Path) -> AppState {
+    AppState::with_store(dir, shl_dicom_server::state::Quotas::default(), test_store(dir)).unwrap()
+}
+
+/// Whether the store still has a blob (asks through the store, following a redirect).
+async fn blob_exists(state: &AppState, key: &str) -> bool {
+    match state.store.read_range(key, 0, 0).await {
+        Err(_) => false,
+        Ok(ReadDelivery::Stream(_)) => true,
+        Ok(ReadDelivery::Redirect(url)) => reqwest::Client::new().get(url).header("Range", "bytes=0-0").send().await.is_ok_and(|r| r.status().is_success()),
+    }
 }
 
 fn temp_data_dir(name: &str) -> std::path::PathBuf {
@@ -34,7 +73,7 @@ fn temp_data_dir(name: &str) -> std::path::PathBuf {
 #[tokio::test]
 async fn test_zero_knowledge_upload_and_u_mode_range() {
     let dir = temp_data_dir("u_mode_range");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state).await;
     let client = reqwest::Client::new();
 
@@ -142,6 +181,7 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
         .get(format!("{base}/shl/{lid}/{file_id}.bin?recipient=DrSmith"))
         .header(header::RANGE, r.http_range_header())
         .header(header::ACCEPT_ENCODING, "gzip, br")
+        .header(header::ORIGIN, "https://viewer.example")
         .send()
         .await
         .unwrap();
@@ -150,13 +190,10 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
         range_resp.headers().get(header::CONTENT_RANGE).unwrap(),
         "bytes 65536-150047/150048"
     );
-    assert_eq!(
-        range_resp
-            .headers()
-            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-            .unwrap(),
-        "*"
-    );
+    // Cross-origin readers are allowed: "*" from this server, or the origin echoed by the bucket
+    // a redirect led to.
+    let acao = range_resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap();
+    assert!(acao == "*" || acao == "https://viewer.example", "{acao:?}");
     // Must NEVER carry Content-Encoding even when Accept-Encoding: gzip, br was sent
     assert!(range_resp.headers().get(header::CONTENT_ENCODING).is_none());
 
@@ -197,9 +234,10 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
 async fn test_size_quotas_and_409_foreign_key() {
     let dir = temp_data_dir("quotas_409");
     // Set small quota of 200 KB max
-    let state = AppState::with_quotas(
+    let state = AppState::with_store(
         &dir,
         shl_dicom_server::state::Quotas { share_bytes: Some(200_000), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600 },
+        test_store(&dir),
     )
     .unwrap();
     let base = spawn_test_server(state).await;
@@ -308,7 +346,7 @@ async fn test_size_quotas_and_409_foreign_key() {
 #[tokio::test]
 async fn test_passcode_attempt_limit_and_concurrency() {
     let dir = temp_data_dir("passcode_concurrency");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state).await;
     let client = Arc::new(reqwest::Client::new());
 
@@ -388,7 +426,7 @@ async fn test_passcode_attempt_limit_and_concurrency() {
 #[tokio::test]
 async fn test_multiple_links_subset_scoping_and_orphan_sweep() {
     let dir = temp_data_dir("multi_links_sweep");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
 
@@ -601,7 +639,7 @@ async fn test_multiple_links_subset_scoping_and_orphan_sweep() {
 #[tokio::test]
 async fn test_controls_mid_download_resumption_expiry_and_traversal() {
     let dir = temp_data_dir("controls_resumption_traversal");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
 
@@ -803,14 +841,14 @@ async fn test_controls_mid_download_resumption_expiry_and_traversal() {
 #[tokio::test]
 async fn test_demo_seeding_cloning_expiry_and_parallel_uploads() {
     let dir = temp_data_dir("clone_expiry_parallel");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = Arc::new(reqwest::Client::new());
 
     // 1. Create a read-only share to stand in for a seeded demo share
     let (demo_sid, _unused_ctrl) = state.create_share(true, None).unwrap();
     let fid = b64url_encode(&[77u8; 16]);
-    shl_dicom_server::state::store_series_file(&state, &demo_sid, &fid, &vec![0x55u8; 70_000]).unwrap();
+    shl_dicom_server::state::store_file(&state, &demo_sid, &fid, &vec![0x55u8; 70_000]).await.unwrap();
 
     // Clone the read-only demo share into a controllable sandbox share
     let clone_resp: Value = client
@@ -877,7 +915,7 @@ async fn test_demo_seeding_cloning_expiry_and_parallel_uploads() {
 #[tokio::test]
 async fn test_chunked_resumable_upload_and_disk_range_reads() {
     let dir = temp_data_dir("chunked_upload");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
     let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
@@ -939,7 +977,7 @@ async fn test_chunked_resumable_upload_and_disk_range_reads() {
     let r = append(200_000, 300_000, true).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.headers()["upload-complete"], "?1");
-    assert!(dir.join("shares").join(&sid).join(format!("{fid}.bin")).exists());
+    assert!(blob_exists(&state, &shl_dicom_server::state::storage_key(&sid, &fid)).await);
     let h = head(&client).await.unwrap();
     assert_eq!(h.headers()["upload-complete"], "?1");
 
@@ -972,7 +1010,7 @@ async fn test_chunked_resumable_upload_and_disk_range_reads() {
 #[tokio::test]
 async fn test_sample_redirects() {
     let dir = temp_data_dir("sample_redirect");
-    let state = AppState::new(&dir).unwrap();
+    let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
 
@@ -999,4 +1037,222 @@ async fn test_sample_redirects() {
         let loc = r.headers()[header::LOCATION].to_str().unwrap();
         assert!(loc.ends_with(&format!("/view#{link}")), "{loc}");
     }
+}
+
+/// A cloned share names the same blob; the blob outlives the source share and goes when the
+/// last share naming it is deleted.
+#[tokio::test]
+async fn test_clone_shares_blobs_by_reference() {
+    let dir = temp_data_dir("blob_refs");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let (src, _) = state.create_share(true, None).unwrap();
+    let fid = b64url_encode(&[42u8; 16]);
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+    shl_dicom_server::state::store_file(&state, &src, &fid, &data).await.unwrap();
+    let key = shl_dicom_server::state::storage_key(&src, &fid);
+    let clone: Value = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap().json().await.unwrap();
+    let (sid, token) = (clone["share"]["id"].as_str().unwrap().to_string(), clone["controlToken"].as_str().unwrap().to_string());
+
+    // The source goes; the clone still serves the file.
+    state.delete_share(&src).unwrap();
+    state.empty_trash().await;
+    assert!(blob_exists(&state, &key).await, "blob deleted while a clone still names it");
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap();
+    let r = client.get(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", "bytes=1000-1999").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), &data[1000..2000]);
+
+    // The clone goes too: now the blob is deleted.
+    assert_eq!(client.delete(format!("{base}/api/shares/{sid}")).bearer_auth(&token).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+    state.empty_trash().await;
+    assert!(!blob_exists(&state, &key).await, "blob left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A 20 MiB resumable upload in 3 MiB appends, one of them cut off mid-body: the server keeps
+/// what arrived, the client continues from HEAD's offset, and (on S3) the file goes up as
+/// multipart parts while the upload runs. Range reads across part boundaries come back exact.
+#[tokio::test]
+async fn test_resumable_upload_with_parts_and_an_interrupted_append() {
+    let dir = temp_data_dir("resumable_parts");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[5u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    let total = 20 << 20;
+    let data: Vec<u8> = (0..total as u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+    let r = client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").header("Upload-Length", total.to_string()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    let offset = |c: reqwest::Client| {
+        let (u, t) = (url.clone(), token.clone());
+        async move { c.head(&u).bearer_auth(&t).send().await.unwrap().headers()["upload-offset"].to_str().unwrap().parse::<usize>().unwrap() }
+    };
+    let mut off = 0usize;
+    let mut cut = false;
+    while off < total {
+        let end = (off + (3 << 20)).min(total);
+        let chunk = data[off..end].to_vec();
+        if !cut && off >= 6 << 20 {
+            // An append whose body stops part-way: 1 MiB arrives, then the connection fails.
+            cut = true;
+            let first = chunk[..1 << 20].to_vec();
+            let body = reqwest::Body::wrap_stream(futures_util::stream::iter(vec![
+                Ok::<Vec<u8>, std::io::Error>(first),
+                Err(std::io::Error::other("connection dropped")),
+            ]));
+            let _ = client
+                .patch(&url)
+                .bearer_auth(&token)
+                .header("Content-Type", "application/partial-upload")
+                .header("Upload-Offset", off.to_string())
+                .header("Upload-Complete", "?0")
+                .body(body)
+                .send()
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let now = offset(client.clone()).await;
+            assert!(now >= off && now <= off + (1 << 20), "offset {now} after a cut append from {off}");
+            off = now;
+            continue;
+        }
+        let r = client
+            .patch(&url)
+            .bearer_auth(&token)
+            .header("Content-Type", "application/partial-upload")
+            .header("Upload-Offset", off.to_string())
+            .header("Upload-Complete", if end == total { "?1" } else { "?0" })
+            .body(chunk)
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "append at {off}: {}", r.status());
+        off = end;
+    }
+    assert!(cut);
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap();
+    for (a, b) in [(0usize, 99usize), (8 << 20, (8 << 20) + 99), ((8 << 20) - 50, (8 << 20) + 50), (total - 100, total - 1), (6 << 20, (9 << 20) + 7)] {
+        let r = client.get(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", format!("bytes={a}-{b}")).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT, "range {a}-{b}");
+        assert_eq!(r.bytes().await.unwrap().as_ref(), &data[a..=b], "range {a}-{b}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// In redirect mode a series read is a 307 to a presigned URL (no-store), which serves the range.
+#[tokio::test]
+async fn test_redirect_reads() {
+    if std::env::var("SHL_TEST_S3_READ_MODE").as_deref() != Ok("redirect") {
+        return;
+    }
+    let dir = temp_data_dir("redirect_reads");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[7u8; 16]);
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i % 241) as u8).collect();
+    let r = client.put(format!("{base}/api/shares/{sid}/files/{fid}.bin")).bearer_auth(&token).body(data.clone()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap().to_string();
+    let r = client.get(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", "bytes=100-199").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(r.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(r.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    let to = r.headers()[header::LOCATION].to_str().unwrap().to_string();
+    assert!(to.contains("X-Amz-Signature="), "{to}");
+    let got = reqwest::Client::new().get(&to).header("Range", "bytes=100-199").send().await.unwrap();
+    assert_eq!(got.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(got.bytes().await.unwrap().as_ref(), &data[100..200]);
+    // Revoked: no more redirects.
+    client.delete(format!("{base}/api/shares/{sid}/links/{lid}")).bearer_auth(&token).send().await.unwrap();
+    let r = client.get(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", "bytes=100-199").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deleting an unfinished upload aborts its multipart upload in S3 (parts already sent are gone).
+#[tokio::test]
+async fn test_deleting_an_upload_aborts_its_multipart_upload() {
+    let Ok(bucket_name) = std::env::var("SHL_TEST_S3_BUCKET") else { return };
+    let dir = temp_data_dir("abort_upload");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[9u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").header("Upload-Length", (20u64 << 20).to_string()).send().await.unwrap();
+    let r = client
+        .patch(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/partial-upload")
+        .header("Upload-Offset", "0")
+        .header("Upload-Complete", "?0")
+        .body(vec![1u8; 9 << 20])
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let (upload_id, parts): (String, i64) = {
+        let c = state.open_share_db(&sid).unwrap();
+        let conn = c.lock().unwrap();
+        (
+            conn.query_row("SELECT s3_upload_id FROM uploads WHERE file_id = ?1", rusqlite::params![fid], |r| r.get(0)).unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM upload_parts WHERE file_id = ?1", rusqlite::params![fid], |r| r.get(0)).unwrap(),
+        )
+    };
+    assert_eq!(parts, 1, "9 MiB staged should have gone up as one part");
+    let bucket = rusty_s3::Bucket::new(std::env::var("SHL_TEST_S3_ENDPOINT").unwrap().parse().unwrap(), rusty_s3::UrlStyle::Path, bucket_name, "us-east-1").unwrap();
+    let creds = rusty_s3::Credentials::new(std::env::var("AWS_ACCESS_KEY_ID").unwrap(), std::env::var("AWS_SECRET_ACCESS_KEY").unwrap());
+    let object = state.store.locate(&shl_dicom_server::state::storage_key(&sid, &fid));
+    let object = object.splitn(4, '/').nth(3).unwrap().to_string(); // s3://bucket/<object>
+    use rusty_s3::S3Action;
+    let list = || rusty_s3::actions::ListParts::new(&bucket, Some(&creds), &object, &upload_id).sign(std::time::Duration::from_secs(60));
+    assert_eq!(client.get(list()).send().await.unwrap().status(), StatusCode::OK, "the multipart upload exists");
+    assert_eq!(client.delete(&url).bearer_auth(&token).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+    state.empty_trash().await;
+    let st = client.get(list()).send().await.unwrap().status();
+    assert_eq!(st, StatusCode::NOT_FOUND, "ListParts after the abort");
+    let _ = std::fs::remove_dir_all(&dir);
 }

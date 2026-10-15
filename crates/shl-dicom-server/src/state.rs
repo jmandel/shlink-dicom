@@ -4,7 +4,8 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use crate::storage::{BlobStore, LocalFsStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shl_dicom_core::{
@@ -60,7 +61,7 @@ pub fn is_valid_token43(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-pub fn parse_series_filename(name: &str) -> Option<&str> {
+pub fn parse_file_name(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".bin")?;
     is_valid_id22(stem).then_some(stem)
 }
@@ -204,6 +205,8 @@ pub struct AppState {
     pub quotas: Quotas,
     /// `{sid}/{fileId}` uploads in progress (one request at a time per file).
     pub uploading: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Where finished files live (local disk or S3).
+    pub store: Arc<dyn BlobStore>,
     catalog: Arc<Mutex<Connection>>,
     pool: Arc<Mutex<ShareDbPool>>,
     events: Arc<Mutex<HashMap<String, broadcast::Sender<AccessEvent>>>>,
@@ -215,7 +218,13 @@ impl AppState {
         Self::with_quotas(data_dir, Quotas::default())
     }
 
+    /// Files on local disk, under `{data-dir}/blobs/`.
     pub fn with_quotas(data_dir: impl AsRef<Path>, quotas: Quotas) -> Result<Self, String> {
+        let root = data_dir.as_ref().join("blobs");
+        Self::with_store(data_dir, quotas, Arc::new(LocalFsStore { root }))
+    }
+
+    pub fn with_store(data_dir: impl AsRef<Path>, quotas: Quotas, store: Arc<dyn BlobStore>) -> Result<Self, String> {
         let data_dir = data_dir.as_ref().to_path_buf();
         let shares_dir = data_dir.join("shares");
         std::fs::create_dir_all(&shares_dir)
@@ -230,6 +239,7 @@ impl AppState {
             data_dir,
             quotas,
             uploading: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            store,
             catalog: Arc::new(Mutex::new(conn)),
             pool: Arc::new(Mutex::new(ShareDbPool::new())),
             events: Arc::new(Mutex::new(HashMap::new())),
@@ -243,18 +253,73 @@ impl AppState {
         self.data_dir.join("shares").join(format!("{sid}.db"))
     }
 
-    /// Series files of a share live on disk next to its database: `shares/{sid}/{fileId}.bin`, with
-    /// `{fileId}.part` while an upload is incomplete.
-    pub fn share_files_dir(&self, sid: &str) -> PathBuf {
+    /// A share's uploads in progress are staged on local disk: `shares/{sid}/{fileId}.part`.
+    pub fn staging_dir(&self, sid: &str) -> PathBuf {
         self.data_dir.join("shares").join(sid)
     }
 
-    pub fn series_path(&self, sid: &str, file_id: &str) -> PathBuf {
-        self.share_files_dir(sid).join(format!("{file_id}.bin"))
+    pub fn part_path(&self, sid: &str, file_id: &str) -> PathBuf {
+        self.staging_dir(sid).join(format!("{file_id}.part"))
     }
 
-    pub fn part_path(&self, sid: &str, file_id: &str) -> PathBuf {
-        self.share_files_dir(sid).join(format!("{file_id}.part"))
+    // ---------------------------------------------------------------- blobs and their references
+
+    /// One more file row names this blob.
+    pub fn blob_add(&self, key: &str) {
+        let cat = self.catalog.lock().unwrap();
+        let _ = cat.execute(
+            "INSERT INTO blobs (storage_key, ref_count) VALUES (?1, 1)
+             ON CONFLICT(storage_key) DO UPDATE SET ref_count = ref_count + 1",
+            params![key],
+        );
+    }
+
+    /// One fewer; at zero the blob goes to the trash (deleted by `empty_trash`).
+    pub fn blob_release(&self, key: &str) {
+        let cat = self.catalog.lock().unwrap();
+        let _ = cat.execute("UPDATE blobs SET ref_count = ref_count - 1 WHERE storage_key = ?1", params![key]);
+        let left: Option<i64> = cat
+            .query_row("SELECT ref_count FROM blobs WHERE storage_key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        if left.is_none_or(|n| n <= 0) {
+            let _ = cat.execute("DELETE FROM blobs WHERE storage_key = ?1", params![key]);
+            let _ = cat.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, NULL)", params![key]);
+        }
+    }
+
+    /// An unfinished multipart upload to drop.
+    pub fn trash_upload(&self, key: &str, upload_id: &str) {
+        let cat = self.catalog.lock().unwrap();
+        let _ = cat.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, ?2)", params![key, upload_id]);
+    }
+
+    /// Deletes trashed blobs and aborts trashed uploads in the store.
+    pub async fn empty_trash(&self) {
+        let items: Vec<(i64, String, Option<String>)> = {
+            let cat = self.catalog.lock().unwrap();
+            let mut st = match cat.prepare("SELECT rowid, storage_key, upload_id FROM trash") {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+        };
+        for (rowid, key, upload_id) in items {
+            match upload_id {
+                Some(id) => self.store.abort_upload(&key, &id).await,
+                None => self.store.delete(&key).await,
+            }
+            let _ = self.catalog.lock().unwrap().execute("DELETE FROM trash WHERE rowid = ?1", params![rowid]);
+        }
+    }
+
+    /// Empties the trash in the background, when there is a runtime.
+    pub fn empty_trash_soon(&self) {
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            let me = self.clone();
+            h.spawn(async move { me.empty_trash().await });
+        }
     }
 
     /// Startup and periodic sweep: removes expired caps, expired sandbox shares,
@@ -512,10 +577,37 @@ impl AppState {
     }
 
     fn remove_share_files(&self, sid: &str) {
+        // Its files' blobs lose a reference, and unfinished uploads are dropped. (The catalog row
+        // may be gone already, so the database is opened directly.)
+        let db = self.pool.lock().unwrap().get(sid).or_else(|| {
+            let path = self.share_db_path(sid);
+            path.exists().then(|| Connection::open(&path).ok().map(|c| Arc::new(Mutex::new(c)))).flatten()
+        });
+        if let Some(conn_arc) = db {
+            let (keys, uploads): (Vec<String>, Vec<(String, String)>) = {
+                let conn = conn_arc.lock().unwrap();
+                let keys = conn
+                    .prepare("SELECT storage_key FROM files")
+                    .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+                    .unwrap_or_default();
+                let uploads = conn
+                    .prepare("SELECT file_id, s3_upload_id FROM uploads WHERE s3_upload_id IS NOT NULL")
+                    .and_then(|mut st| st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()))
+                    .unwrap_or_default();
+                (keys, uploads)
+            };
+            for k in keys {
+                self.blob_release(&k);
+            }
+            for (fid, id) in uploads {
+                self.trash_upload(&storage_key(sid, &fid), &id);
+            }
+        }
         if let Some(conn_arc) = self.pool.lock().unwrap().remove(sid) {
             drop(conn_arc);
         }
-        let _ = std::fs::remove_dir_all(self.share_files_dir(sid));
+        let _ = std::fs::remove_dir_all(self.staging_dir(sid));
+        self.empty_trash_soon();
         let base = self.share_db_path(sid);
         let _ = std::fs::remove_file(&base);
         let _ = std::fs::remove_file(format!("{}-wal", base.display()));
@@ -578,7 +670,7 @@ impl AppState {
         let mut bytes_used = 0u64;
         {
             let mut stmt = conn
-                .prepare("SELECT file_id, size, uploaded_at FROM series_files ORDER BY uploaded_at, file_id")
+                .prepare("SELECT file_id, size, uploaded_at FROM files ORDER BY uploaded_at, file_id")
                 .ok()?;
             let rows = stmt
                 .query_map([], |r| {
@@ -764,30 +856,36 @@ pub fn build_link_resource_from_row(
     })
 }
 
-/// Records a complete series file (already at `series_path`) in the share's database.
-pub fn record_series_file(conn: &Connection, file_id: &str, size: u64) -> Result<ShareFileEntry, String> {
+/// A blob's storage key: the share it was uploaded to and the file id.
+pub fn storage_key(sid: &str, file_id: &str) -> String {
+    format!("{sid}/{file_id}.bin")
+}
+
+/// Records a complete file (already in the store under `storage_key`) in the share's database.
+pub fn record_file(conn: &Connection, file_id: &str, storage_key: &str, size: u64) -> Result<ShareFileEntry, String> {
     let uploaded_at = now_unix();
     conn.execute(
-        "INSERT INTO series_files (file_id, size, uploaded_at) VALUES (?1, ?2, ?3)
+        "INSERT INTO files (file_id, storage_key, size, uploaded_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(file_id) DO NOTHING",
-        params![file_id, size as i64, uploaded_at],
+        params![file_id, storage_key, size as i64, uploaded_at],
     )
     .map_err(|e| e.to_string())?;
     let _ = conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![file_id]);
     Ok(ShareFileEntry { name: format!("{file_id}.bin"), size, uploaded_at })
 }
 
-/// Writes a whole series file to disk and records it, with no quota check (the server's own sample,
-/// tests). Uploads go through `PUT /api/shares/{sid}/files/{name}`.
-pub fn store_series_file(state: &AppState, sid: &str, file_id: &str, ciphertext: &[u8]) -> Result<ShareFileEntry, String> {
-    let dir = state.share_files_dir(sid);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+/// Stores a whole file and records it, with no quota check (tests). Uploads go through
+/// `PUT /api/shares/{sid}/files/{name}`; the sample through `seed`.
+pub async fn store_file(state: &AppState, sid: &str, file_id: &str, ciphertext: &[u8]) -> Result<ShareFileEntry, String> {
+    std::fs::create_dir_all(state.staging_dir(sid)).map_err(|e| e.to_string())?;
     let part = state.part_path(sid, file_id);
     std::fs::write(&part, ciphertext).map_err(|e| e.to_string())?;
-    std::fs::rename(&part, state.series_path(sid, file_id)).map_err(|e| e.to_string())?;
+    let key = storage_key(sid, file_id);
+    state.store.put_file(&key, &part).await?;
+    state.blob_add(&key);
     let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
     let conn = conn_arc.lock().unwrap();
-    record_series_file(&conn, file_id, ciphertext.len() as u64)
+    record_file(&conn, file_id, &key, ciphertext.len() as u64)
 }
 
 fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {
@@ -815,7 +913,19 @@ fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {
            lid         TEXT NOT NULL REFERENCES links(lid) ON DELETE CASCADE,
            expires_at  INTEGER NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS caps_expiry ON caps(expires_at);",
+         CREATE INDEX IF NOT EXISTS caps_expiry ON caps(expires_at);
+
+         -- How many file rows (in any share) name each blob; a clone adds references, not bytes.
+         CREATE TABLE IF NOT EXISTS blobs (
+           storage_key  TEXT PRIMARY KEY,
+           ref_count    INTEGER NOT NULL
+         );
+
+         -- Blobs no file names any more, and unfinished multipart uploads, to remove from the store.
+         CREATE TABLE IF NOT EXISTS trash (
+           storage_key  TEXT NOT NULL,
+           upload_id    TEXT
+         );",
     )
 }
 
@@ -835,18 +945,32 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
            owner_updated_at    INTEGER
          );
 
-         CREATE TABLE IF NOT EXISTS series_files (
+         -- Complete encrypted files. The bytes are in the blob store under storage_key, which a
+         -- cloned share shares with its source.
+         CREATE TABLE IF NOT EXISTS files (
            file_id      TEXT PRIMARY KEY,
+           storage_key  TEXT NOT NULL,
            size         INTEGER NOT NULL,
            uploaded_at  INTEGER NOT NULL
          );
 
-         -- Uploads in progress: the declared size of each {fileId}.part on disk.
+         -- Uploads in progress. Upload-Offset = flushed_bytes + the size of shares/{sid}/{file_id}.part.
          CREATE TABLE IF NOT EXISTS uploads (
-           file_id     TEXT PRIMARY KEY,
-           size        INTEGER NOT NULL,
-           started_at  INTEGER NOT NULL
+           file_id        TEXT PRIMARY KEY,
+           size           INTEGER NOT NULL,
+           s3_upload_id   TEXT,
+           flushed_bytes  INTEGER NOT NULL DEFAULT 0,
+           started_at     INTEGER NOT NULL
          );
+
+         -- Parts already sent to S3 for an upload in progress.
+         CREATE TABLE IF NOT EXISTS upload_parts (
+           file_id   TEXT NOT NULL REFERENCES uploads(file_id) ON DELETE CASCADE,
+           part_num  INTEGER NOT NULL,
+           etag      TEXT NOT NULL,
+           size      INTEGER NOT NULL,
+           PRIMARY KEY (file_id, part_num)
+         ) WITHOUT ROWID;
 
          CREATE TABLE IF NOT EXISTS links (
            lid                 TEXT PRIMARY KEY,
@@ -865,7 +989,7 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
 
          CREATE TABLE IF NOT EXISTS link_files (
            lid      TEXT NOT NULL REFERENCES links(lid) ON DELETE CASCADE,
-           file_id  TEXT NOT NULL REFERENCES series_files(file_id),
+           file_id  TEXT NOT NULL REFERENCES files(file_id),
            PRIMARY KEY (lid, file_id)
          ) WITHOUT ROWID;
 

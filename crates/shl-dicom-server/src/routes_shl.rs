@@ -9,8 +9,9 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
+use crate::storage::ReadDelivery;
 use crate::state::{
-    hash_passcode, is_valid_id22, now_unix, parse_series_filename, AccessEvent, AppState,
+    hash_passcode, is_valid_id22, now_unix, parse_file_name, AccessEvent, AppState,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -53,7 +54,7 @@ pub async fn get_shl_file(
     let path_str = format!("/shl/{lid}/{tail}");
     if tail == "bundle.jwe" {
         serve_bundle(&state, &sid, &lid, false, &path_str, query.recipient, &headers).await
-    } else if let Some(file_id) = parse_series_filename(&tail) {
+    } else if let Some(file_id) = parse_file_name(&tail) {
         serve_series_file(
             &state,
             &sid,
@@ -246,7 +247,7 @@ pub async fn get_cap_file(
     let path_str = format!("/cap/{token}/{tail}");
     if tail == "bundle.jwe" {
         serve_bundle(&state, &sid, &lid, true, &path_str, query.recipient, &headers).await
-    } else if let Some(file_id) = parse_series_filename(&tail) {
+    } else if let Some(file_id) = parse_file_name(&tail) {
         serve_series_file(
             &state,
             &sid,
@@ -368,8 +369,8 @@ async fn serve_series_file(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Query link permission and series_files size, then read requested records
-    let file_size: u64 = {
+    // The link must allow the file; then its size and where its bytes are.
+    let (file_size, key): (u64, String) = {
         let conn = conn_arc.lock().unwrap();
         let link_ok: Option<(bool, Option<i64>, bool)> = conn
             .query_row(
@@ -390,18 +391,14 @@ async fn serve_series_file(
             return not_found();
         }
 
-        let sz_opt: Option<i64> = conn
-            .query_row(
-                "SELECT size FROM series_files WHERE file_id = ?1",
-                params![file_id],
-                |r| r.get(0),
-            )
+        let row: Option<(i64, String)> = conn
+            .query_row("SELECT size, storage_key FROM files WHERE file_id = ?1", params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()
             .unwrap_or(None);
-        let Some(sz) = sz_opt else {
+        let Some((sz, key)) = row else {
             return not_found();
         };
-        sz as u64
+        (sz as u64, key)
     };
 
     if file_size == 0 {
@@ -429,20 +426,19 @@ async fn serve_series_file(
         None => (0, file_size - 1, StatusCode::OK),
     };
 
-    // Stream the range from the file on disk.
+    // The store streams the range, or names a presigned URL to send the reader to.
     let len = end_byte_inclusive - start_byte + 1;
-    let file = match tokio::fs::File::open(state.series_path(sid, file_id)).await {
-        Ok(f) => f,
-        Err(_) => return not_found(),
+    let delivery = match state.store.read_range(&key, start_byte, end_byte_inclusive).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("read {key}: {e}");
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::empty())
+                .unwrap();
+        }
     };
-    let mut file = file;
-    if tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start_byte)).await.is_err() {
-        return not_found();
-    }
-    let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
-        tokio::io::AsyncReadExt::take(file, len),
-        256 * 1024,
-    ));
 
     state.record_access(
         sid,
@@ -458,6 +454,20 @@ async fn serve_series_file(
         },
     );
 
+    let body = match delivery {
+        ReadDelivery::Stream(s) => Body::from_stream(s),
+        // Redirect mode: the browser repeats its Range request to the presigned URL. The access
+        // log records the requested bytes.
+        ReadDelivery::Redirect(url) => {
+            return Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header(header::LOCATION, url)
+                .header(header::CACHE_CONTROL, "no-store")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
     let mut builder = Response::builder()
         .status(status_code)
         .header(header::CONTENT_TYPE, "application/octet-stream")

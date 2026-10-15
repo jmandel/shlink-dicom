@@ -14,7 +14,13 @@ use shl_dicom_core::{
     crypto::{b64url_encode, encrypt_file_stream, random_bytes},
     dicom_io::{parse_dicom_header_reader, ParsedDicomInstance},
 };
-use crate::state::{record_series_file, AppState};
+use crate::state::{record_file, storage_key, AppState};
+
+/// Puts a staged file into the blob store from this synchronous packer (the CLI runs it inside
+/// Tokio, so the store call runs on the runtime).
+fn store_sync(state: &AppState, key: &str, path: &Path) -> Result<(), String> {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(state.store.put_file(key, path)))
+}
 
 struct Member {
     path: PathBuf,
@@ -89,7 +95,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
         }
 
         // 3. Encrypt each study from its members into the share's directory.
-        std::fs::create_dir_all(state.share_files_dir(sid)).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(state.staging_dir(sid)).map_err(|e| e.to_string())?;
         let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
         let mut study_inputs = Vec::new();
         let (mut file_ids, mut instances, mut bytes) = (Vec::new(), 0usize, 0u64);
@@ -139,8 +145,11 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             let size = encrypt_file_stream(reader, &mut out, &key).map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
             drop(out);
-            std::fs::rename(&part, state.series_path(sid, &file_id)).map_err(|e| e.to_string())?;
-            record_series_file(&conn_arc.lock().unwrap(), &file_id, size)?;
+            // Into the blob store (local files, or S3 as a multipart upload streamed from disk).
+            let storage = storage_key(sid, &file_id);
+            store_sync(state, &storage, &part)?;
+            state.blob_add(&storage);
+            record_file(&conn_arc.lock().unwrap(), &file_id, &storage, size)?;
             for m in series.iter().flat_map(|(_, m)| m.iter()) {
                 let _ = std::fs::remove_file(&m.path);
             }

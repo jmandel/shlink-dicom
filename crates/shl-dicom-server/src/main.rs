@@ -1,11 +1,78 @@
 use std::path::PathBuf;
-use clap::{Parser, Subcommand};
+use std::sync::Arc;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use shl_dicom_server::{
     build_app_router,
     cli::{run_inspect_cli, run_pack_cli},
     seed::{load_sample, seed_sample},
     state::{AppState, Quotas},
+    storage::{BlobStore, LocalFsStore, ReadMode, S3Config, S3Store},
 };
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ReadModeArg {
+    /// The server reads the range from S3 and streams it
+    Proxy,
+    /// The server answers 307 with a presigned URL valid for 60 s
+    Redirect,
+}
+
+/// Where encrypted files are kept: local disk (default) or a private S3 bucket.
+#[derive(Args)]
+struct StoreArgs {
+    /// S3 bucket; when set, files go to S3 instead of {data-dir}/blobs
+    #[arg(long, env = "SHL_S3_BUCKET")]
+    s3_bucket: Option<String>,
+    /// S3 endpoint URL (unset: the AWS endpoint for the region)
+    #[arg(long, env = "SHL_S3_ENDPOINT")]
+    s3_endpoint: Option<String>,
+    /// S3 region, for request signing
+    #[arg(long, env = "SHL_S3_REGION", default_value = "us-east-1")]
+    s3_region: String,
+    #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+    s3_access_key_id: Option<String>,
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+    s3_secret_access_key: Option<String>,
+    /// Key prefix inside the bucket (for example "shl/")
+    #[arg(long, env = "SHL_S3_PREFIX", default_value = "")]
+    s3_prefix: String,
+    /// How readers get S3 bytes
+    #[arg(long, env = "SHL_S3_READ_MODE", value_enum, default_value = "proxy")]
+    s3_read_mode: ReadModeArg,
+    /// Path-style URLs (http://host/bucket/key), as MinIO and other local services need
+    #[arg(long, env = "SHL_S3_PATH_STYLE", default_value_t = false)]
+    s3_path_style: bool,
+}
+
+impl StoreArgs {
+    fn store(&self, data_dir: &std::path::Path) -> Arc<dyn BlobStore> {
+        let Some(bucket) = self.s3_bucket.clone() else {
+            return Arc::new(LocalFsStore { root: data_dir.join("blobs") });
+        };
+        let (Some(id), Some(secret)) = (self.s3_access_key_id.clone(), self.s3_secret_access_key.clone()) else {
+            eprintln!("--s3-bucket needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
+            std::process::exit(2);
+        };
+        let s = S3Store::new(S3Config {
+            endpoint: self.s3_endpoint.clone(),
+            bucket,
+            region: self.s3_region.clone(),
+            access_key_id: id,
+            secret_access_key: secret,
+            prefix: self.s3_prefix.clone(),
+            read_mode: match self.s3_read_mode {
+                ReadModeArg::Proxy => ReadMode::Proxy,
+                ReadModeArg::Redirect => ReadMode::Redirect,
+            },
+            path_style: self.s3_path_style,
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("S3 settings: {e}");
+            std::process::exit(2);
+        });
+        Arc::new(s)
+    }
+}
 
 /// "20G", "64M", "512K" or plain bytes.
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -62,6 +129,8 @@ enum Commands {
         /// Data directory (catalog.db, shares/, samples/)
         #[arg(long, env = "SHL_DICOM_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
+        #[command(flatten)]
+        store: StoreArgs,
     },
     /// Run the Zero-Knowledge SHL Server and Demo Web App
     Serve {
@@ -89,6 +158,8 @@ enum Commands {
         /// Lifetime of a passcode link's capability URL, in seconds
         #[arg(long, env = "SHL_CAP_TTL_SECS", default_value_t = 3600)]
         cap_ttl_secs: i64,
+        #[command(flatten)]
+        store: StoreArgs,
     },
 }
 
@@ -114,10 +185,13 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Seed { data_dir } => {
+        Commands::Seed { data_dir, store } => {
             let t0 = std::time::Instant::now();
-            let state = AppState::new(&data_dir).expect("failed to initialize AppState");
-            match seed_sample(&state) {
+            let state = AppState::with_store(&data_dir, Quotas::default(), store.store(&data_dir)).expect("failed to initialize AppState");
+            let result = seed_sample(&state);
+            // The earlier sample's files, if any, leave the store now.
+            state.empty_trash().await;
+            match result {
                 Ok(r) => println!(
                     "Sample packed in {:.1} s: share {}, {} files (one per study), {} instances, {:.1} MB",
                     t0.elapsed().as_secs_f64(),
@@ -141,6 +215,7 @@ async fn main() {
             max_shares,
             max_chunk_bytes,
             cap_ttl_secs,
+            store,
         } => {
             let quotas = Quotas {
                 share_bytes: (max_share_bytes > 0).then_some(max_share_bytes),
@@ -149,7 +224,17 @@ async fn main() {
                 request_bytes: max_chunk_bytes,
                 cap_ttl_secs,
             };
-            let state = AppState::with_quotas(&data_dir, quotas).expect("failed to initialize AppState");
+            let store = store.store(&data_dir);
+            println!("Files: {}", store.describe());
+            let state = AppState::with_store(&data_dir, quotas, store).expect("failed to initialize AppState");
+            // Deleted files and dropped uploads leave the store in the background.
+            let gc = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    gc.empty_trash().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            });
             let origin = public_origin.unwrap_or_else(|| format!("http://localhost:{port}"));
             if !load_sample(&state, &origin) {
                 eprintln!("No sample share in {data_dir:?}: run `shl-dicom-server seed --data-dir {}`.", data_dir.display());
