@@ -579,7 +579,8 @@ def main() -> None:
         # Keep the notes and the licence of the seed with the case.
         from common import load_cases, save_cases
         entry = next(c for c in load_cases("jpeg2000") if c["id"] == case["id"])
-        entry["notes"] = case["notes"]
+        entry["notes"] = (case["notes"] + "; no independent decoder: the oracle is the seed or j2k-part2 "
+                          "(OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT")
         entry["tags"] = sorted(set(entry.get("tags", [])) | {"part2"})
         entry["source"]["seed_origin"] = "pydicom test data (pydicom-data, MIT)"
         entry["source"]["script"] = "scripts/sources/j2k_part2.py"

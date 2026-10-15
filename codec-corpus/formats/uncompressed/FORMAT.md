@@ -151,11 +151,11 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
     pydicom refuses all four; the oracle is `gdcm-native` or the repaired copy.
 20. **YBR_PARTIAL_422 and the retired colour models.** No real files are known; 20 cases are generated from RGB seeds (`scripts/sources/retired_photometrics.py`). The standard defines the models but no RGB conversion for HSV and CMYK, and pydicom and GDCM convert none of them, so DCMTK's dcm2img (`dcmtk-color`, the only reader that implements them) is the reference. `retired.rs` has the formulas:
     - HSV: Foley's hexcone algorithm as DCMTK computes it, hue 0..=max covering 0°–360°. Exact against DCMTK.
-    - CMYK: R, G, B = max − C/M/Y − K, at least 0. Exact against DCMTK wherever C + K ≤ max (DCMTK wraps around above that).
+    - CMYK: R, G, B = max − C/M/Y − K, at least 0. Exact against DCMTK wherever C + K ≤ max. Above that DCMTK's unsigned arithmetic wraps around to a bright value; clamping to 0 is a deliberate departure from DCMTK.
     - ARGB: where alpha > 0 the Palette Color Lookup Tables indexed by alpha give the colour, scaled to Bits Stored; elsewhere RGB as stored. Exact against DCMTK when the tables are as deep as the samples; DCMTK does not rescale the RGB planes to a deeper table, which is not meaningful.
     - YBR_PARTIAL_422: expanded like YBR_FULL_422, then the exact inverse of the PS3.3 C.7.6.3.1.2 equations, rounded half up, 8-bit only. DCMTK uses 4-digit coefficients and truncates, so it differs by up to 2; ours is closer to the seed RGB (mean |diff| 0.46 against 0.69 on `pydicom-US1_UNCR`). Ruling: max_abs 2.
 
-    Signed data in these models is unsupported (exit 3).
+    Signed data in these models is unsupported (exit 3). These conversions, the max_abs 2 for YBR_PARTIAL_422, and the repaired-copy and `gdcm-native` oracles of rule 19 were accepted by the coordinator (15 Oct).
 ## STATUS
 
 **Coverage round (decoders agent, 2026-10-15). uncompressed: pass=319 / 319.** New: Float and Double Float Pixel Data, Encapsulated Uncompressed, Deflated Image Frame Compression, the GE private syntax, files without a Part 10 meta, the ACR-NEMA forms of rule 19, YBR_PARTIAL_422 and the retired colour models (rules 16–20). 64 cases added. `--frames A-B` decodes a frame range; `scripts/check_frames.py` checks every multi-frame case's range against its whole decode (222 cases, all identical).

@@ -11,6 +11,10 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-shl-dicom-decode = { path = "../shl-dicom-decode" }
+shl-dicom-decode = { path = "../shl-dicom-decode", default-features = false }
 # parse.rs (included by path from shl-dicom-decode) inflates Deflated Explicit VR LE data sets.
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[features]
+# Builds shl_dicom_decode_jxl.wasm: the same decoder with JPEG XL, loaded only for .110–.112.
+jpegxl = ["shl-dicom-decode/jpegxl"]

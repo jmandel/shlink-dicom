@@ -253,6 +253,8 @@ def register(fmt: str, cid: str, path: Path, seed: str, encoder: str, command: s
     entry["source"] = {"kind": "generated", "seed": seed, "encoder": encoder, "command": command,
                        "script": "scripts/sources/jpeg_retired.py", "license": LICENCE}
     entry["truth"] = "seed" if truth_ok else "references"
+    if "-hier" in cid and fmt == "jpeg-lossless":
+        entry["notes"] = ("lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)")
     entry["sha256"] = sha256_file(path)
     entry["size"] = path.stat().st_size
     cases[cid] = entry

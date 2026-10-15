@@ -18,5 +18,11 @@ shl-codec-jpeg = { path = "../shl-codec-jpeg" }
 shl-codec-jpeg-ls = { path = "../shl-codec-jpeg-ls" }
 shl-codec-jpeg2000 = { path = "../shl-codec-jpeg2000" }
 shl-codec-htj2k = { path = "../shl-codec-htj2k" }
-shl-codec-jpegxl = { path = "../shl-codec-jpegxl" }
+shl-codec-jpegxl = { path = "../shl-codec-jpegxl", optional = true }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[features]
+# JPEG XL (.110–.112). On by default; the browser's main wasm leaves it out and loads a second
+# module built with it only for JPEG XL instances (viewer-kit/INTEGRATION.md).
+default = ["jpegxl"]
+jpegxl = ["dep:shl-codec-jpegxl"]

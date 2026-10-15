@@ -2287,7 +2287,7 @@
     },
     {
       "id": "gen-pydicom-CT_small-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -2320,7 +2320,7 @@
     },
     {
       "id": "gen-pydicom-CT_small-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -2353,7 +2353,7 @@
     },
     {
       "id": "gen-pydicom-CT_small-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -2386,7 +2386,7 @@
     },
     {
       "id": "gen-pydicom-CT_small-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -2966,7 +2966,7 @@
     },
     {
       "id": "gen-synth-rgb8-60x40-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -2999,7 +2999,7 @@
     },
     {
       "id": "gen-synth-rgb8-60x40-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -3032,7 +3032,7 @@
     },
     {
       "id": "gen-synth-rgb8-60x40-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -3065,7 +3065,7 @@
     },
     {
       "id": "gen-synth-rgb8-60x40-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -3645,7 +3645,7 @@
     },
     {
       "id": "gen-synth-s16-64x64-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -3678,7 +3678,7 @@
     },
     {
       "id": "gen-synth-s16-64x64-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -3711,7 +3711,7 @@
     },
     {
       "id": "gen-synth-s16-64x64-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -3744,7 +3744,7 @@
     },
     {
       "id": "gen-synth-s16-64x64-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4100,7 +4100,7 @@
     },
     {
       "id": "gen-synth-u12-65x31-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4133,7 +4133,7 @@
     },
     {
       "id": "gen-synth-u12-65x31-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4166,7 +4166,7 @@
     },
     {
       "id": "gen-synth-u12-65x31-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4199,7 +4199,7 @@
     },
     {
       "id": "gen-synth-u12-65x31-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4753,7 +4753,7 @@
     },
     {
       "id": "gen-synth-u16-128x96-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4786,7 +4786,7 @@
     },
     {
       "id": "gen-synth-u16-128x96-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4819,7 +4819,7 @@
     },
     {
       "id": "gen-synth-u16-128x96-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -4852,7 +4852,7 @@
     },
     {
       "id": "gen-synth-u16-128x96-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5208,7 +5208,7 @@
     },
     {
       "id": "gen-synth-u16-3frame-32x32-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5241,7 +5241,7 @@
     },
     {
       "id": "gen-synth-u16-3frame-32x32-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5274,7 +5274,7 @@
     },
     {
       "id": "gen-synth-u16-3frame-32x32-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5307,7 +5307,7 @@
     },
     {
       "id": "gen-synth-u16-3frame-32x32-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5887,7 +5887,7 @@
     },
     {
       "id": "gen-synth-u8-64x48-t81py-hier-arith-p4",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5920,7 +5920,7 @@
     },
     {
       "id": "gen-synth-u8-64x48-t81py-hier-arith-p5-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5953,7 +5953,7 @@
     },
     {
       "id": "gen-synth-u8-64x48-t81py-hier-p1",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],
@@ -5986,7 +5986,7 @@
     },
     {
       "id": "gen-synth-u8-64x48-t81py-hier-p7-rst",
-      "notes": "",
+      "notes": "lossless hierarchical: we upsample as T.81 J.1.1.2 says (truncate after each direction) and return the seed; Richter's libjpeg truncates the four-sample mean once, so where it decodes the file it reads 1 higher on about a quarter of the doubly interpolated samples and the case is marked disputed (jpeg-dct FORMAT.md)",
       "tags": [
         "retired-jpeg"
       ],

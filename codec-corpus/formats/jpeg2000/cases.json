@@ -1095,7 +1095,7 @@
     },
     {
       "id": "gen-part2-CT_small-rev-offset",
-      "notes": "signed monochrome; offset array only",
+      "notes": "signed monochrome; offset array only; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1127,7 +1127,7 @@
     },
     {
       "id": "gen-part2-SC_rgb-irr-dependency",
-      "notes": "irreversible array-based dependency, float coefficients",
+      "notes": "irreversible array-based dependency, float coefficients; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1159,7 +1159,7 @@
     },
     {
       "id": "gen-part2-SC_rgb-two-stages",
-      "notes": "two stages; permuted component collections; an offset-only collection; MCC series; 16/32-bit and float arrays",
+      "notes": "two stages; permuted component collections; an offset-only collection; MCC series; 16/32-bit and float arrays; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1191,7 +1191,7 @@
     },
     {
       "id": "gen-part2-SC_rgb_16bit-rev-dependency",
-      "notes": "reversible array-based dependency, 16-bit RGB",
+      "notes": "reversible array-based dependency, 16-bit RGB; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1223,7 +1223,7 @@
     },
     {
       "id": "gen-part2-US1_UNCR-irr-decorrelation",
-      "notes": "irreversible array-based decorrelation (YCbCr) with offsets",
+      "notes": "irreversible array-based decorrelation (YCbCr) with offsets; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1257,7 +1257,7 @@
     },
     {
       "id": "gen-part2-US1_UNCR-irr-decorrelation-cr20",
-      "notes": "irreversible array-based decorrelation (YCbCr) with offsets",
+      "notes": "irreversible array-based decorrelation (YCbCr) with offsets; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1291,7 +1291,7 @@
     },
     {
       "id": "gen-part2-US1_UNCR-rev-decorrelation",
-      "notes": "reversible array-based decorrelation; MCT series of two segments; integer offsets",
+      "notes": "reversible array-based decorrelation; MCT series of two segments; integer offsets; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1323,7 +1323,7 @@
     },
     {
       "id": "gen-part2-emri_small-volume",
-      "notes": "volumetric: 10 frames as the components of one codestream",
+      "notes": "volumetric: 10 frames as the components of one codestream; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],
@@ -1355,7 +1355,7 @@
     },
     {
       "id": "gen-part2-emri_small-volume-2-codestreams",
-      "notes": "volumetric: 10 frames in two codestreams of 5 components",
+      "notes": "volumetric: 10 frames in two codestreams of 5 components; no independent decoder: the oracle is the seed or j2k-part2 (OpenJPEG on the components plus numpy Annex J), since no available decoder reads Part 2 MCT",
       "tags": [
         "part2"
       ],

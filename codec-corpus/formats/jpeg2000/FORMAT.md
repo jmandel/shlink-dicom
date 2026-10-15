@@ -198,6 +198,8 @@ DICOM allows only the Annex J multiple component transformations under these syn
 - OpenJPEG codes the transformed components as plain signed components (`j2k_part2/opj_mc_enc.c`);
 - the script adds the Part 2 marker segments to the main header.
 
+**No independent decoder.** No available decoder reads Part 2 multi-component transforms (OpenJPEG 2.5.4 and Grok refuse them; Kakadu's licence rules it out), so these cases are not independently verified, and each says so in its notes. Ruling (coordinator, 15 Oct): the composite oracle below is accepted, with max_abs 2 on the irreversible decorrelation cases.
+
 The reversible (.92) cases take the seed as ground truth. The reference `j2k-part2` in `ref_decode.py` strips the Part 2 marker segments, decodes the components with OpenJPEG, and applies Annex J in numpy, separately from the Rust code. It reproduces every reversible seed exactly. For the irreversible cases it is the oracle.
 
 | Case | Covers |
