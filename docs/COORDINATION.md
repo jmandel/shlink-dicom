@@ -98,6 +98,12 @@ Related docs:
   - The viewer keeps its BOT/EOT/fragment-walk lookup.
 - **Public sample:** the bootstrap packs every sandbox study (MRI, wrist, slide; 202 MB). The seed reads `samples/*.tgz` and `samples/sample.json` (9479156).
 
+- **Reports (Josh, 15 Oct):**
+  - DICOM usually comes from imaging systems without reports. Reports come from the clinical side as FHIR DiagnosticReports. The viewer shows them side by side with the images, and doesn't assume they came from the same place.
+  - Shares and the public sample carry them in the Bundle.
+  - Encapsulated PDF in DICOM is the secondary case: only one or two in the demo sample.
+- **De-identification (Josh, 15 Oct):** never drop PHI-bearing content. Rebuild it as a synthetic equivalent with fake names (dose screens, scanned documents, viewer captures).
+
 ## Decisions pending (ask Josh)
 
 - (none open)
