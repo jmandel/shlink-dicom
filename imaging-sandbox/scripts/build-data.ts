@@ -40,7 +40,8 @@ const log = (...a: unknown[]) => { if (!quiet) console.log(...a); };
 
 interface StudyConfig {
   id: string;
-  archive: string;
+  archive?: string; // a .tgz source holding the study's .dcm files
+  files?: string[]; // or individual .dcm sources (by source archive name)
   accession: string;
   studyDate: string;
   studyTime: string;
@@ -96,7 +97,9 @@ const write = (rel: string, bytes: Uint8Array | string) => {
 const manifestStudies: unknown[] = [];
 const exportFiles: { from: string; to: string }[] = [];
 for (const st of cfg.studies) {
-  const entries = readTgz(await source(st.archive)).filter((e) => e.path.toLowerCase().endsWith(".dcm"));
+  const entries = st.archive
+    ? readTgz(await source(st.archive)).filter((e) => e.path.toLowerCase().endsWith(".dcm"))
+    : await Promise.all((st.files ?? []).map(async (name) => ({ path: name, bytes: await source(name) })));
   entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const set = new Map<number, HeaderSet>([
     [0x00080020, { vr: "DA", value: compact(st.studyDate) }],

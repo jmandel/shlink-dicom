@@ -155,9 +155,13 @@
       },
       "sha256": "5b8c2675765c368c86b13488d2c9e61d7e7a277a80c5be73898fe33d2a959f1b",
       "size": 1160692,
-      "expect": "error",
-      "max_abs": null,
-      "confidence": "no reference decodes this file"
+      "expect": "decode",
+      "max_abs": 0,
+      "confidence": "lossless consensus; families agreeing: []; WEAK (fewer than two independent families)",
+      "oracle_case": "repair-gdcm-FUJI-ffff-ba16-bs16",
+      "ruling": "Bits Allocated/Stored 0xFFFF inferred as 16 from the SIZ precision (matches opj_decompress)",
+      "oracle_sha256": "b4b7c4ff787d76f8a4d0d3706dbf7a02e6791249be4dd5dcc3dbc10aaabb9f02",
+      "disputed": false
     },
     {
       "id": "ext-gdcm-HardcopyColor_YBR_RCT_J2K_PC1",
@@ -6060,6 +6064,35 @@
       "expect": "decode",
       "max_abs": 0,
       "oracle_sha256": "a729f6fe1e75762988fd4a8749a18b580bbb16fb5365abf5a21dfecb0244b517",
+      "confidence": "lossless consensus; families agreeing: ['openjpeg']; WEAK (fewer than two independent families)",
+      "disputed": false
+    },
+    {
+      "id": "repair-gdcm-FUJI-ffff-ba16-bs16",
+      "notes": "",
+      "tags": [
+        "repair"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.90",
+      "rows": 2010,
+      "columns": 1670,
+      "frames": 1,
+      "samples_per_pixel": 1,
+      "bits_allocated": 16,
+      "bits_stored": 16,
+      "pixel_representation": 0,
+      "photometric": "MONOCHROME1",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "repair",
+        "of": "ext-gdcm-FUJI-ffff-MONO1-J2K",
+        "how": "Bits Allocated/Stored 0xFFFF -> 16"
+      },
+      "sha256": "eb6f77d03e291084f9216dee2ef91dedcb41c0de829c9f737331ceb07d6e3ff9",
+      "size": 1160660,
+      "expect": "decode",
+      "max_abs": 0,
+      "oracle_sha256": "b4b7c4ff787d76f8a4d0d3706dbf7a02e6791249be4dd5dcc3dbc10aaabb9f02",
       "confidence": "lossless consensus; families agreeing: ['openjpeg']; WEAK (fewer than two independent families)",
       "disputed": false
     }

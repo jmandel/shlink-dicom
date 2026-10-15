@@ -59,17 +59,13 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
    - Native Pixel Data must hold `frames × frame bytes` (bit-packed data: `ceil(total pixels / 8)`). If it is shorter, the file is refused. This is why `pydicom-MR_truncated` exits 2.
    - Trailing padding and excess bytes are ignored. pydicom's `allow_excess_frames` can return *more* frames than Number of Frames when the excess holds whole frames. We return exactly Number of Frames, as the oracle's reshape does.
 2. **Number of Frames.** Missing, empty or 0 means 1, as in pydicom. A negative or non-numeric value is invalid.
-3. **Required attributes, as pydicom requires them:**
-   - Rows, Columns, Bits Allocated, Bits Stored, Pixel Representation and Photometric Interpretation;
-   - Planar Configuration when Samples per Pixel is 3.
-
-   If any is missing, the file is invalid (exit 2). One exception: a missing **Samples per Pixel means 1**, as GDCM assumes (`ext-gdcm-gdcm-CR-DCMTK-16-NonSamplePerPix`, a MONOCHROME2 CR). pydicom refuses that file, so its case should become expect=decode. The following are also invalid:
-   - Bits Allocated that is 0, more than 64, or not 1 or a multiple of 8;
-   - Bits Stored of 0 or more than Bits Allocated;
+3. **Missing or impossible Image Pixel attributes are inferred where the evidence settles them, and refused otherwise.** pydicom refuses every such file. The decoder fills in a value only from evidence in the file itself. Each value it fills in is reported in `Canonical::inferred` and printed by the CLI as `note: inferred NAME = VALUE: reason` on stderr; the exit code is still 0. Rule 15 has the full list. These are refused (exit 2):
    - Samples per Pixel other than 1 or 3;
-   - Pixel Representation or Planar Configuration other than 0 or 1.
+   - Pixel Representation other than 0 or 1;
+   - Planar Configuration other than 0 or 1 on native 3-sample data;
+   - on native data, Bits Allocated present but not 1, 8, 16 or 32, for example 12. That may be packed 12-bit data, and the length alone cannot tell.
 
-   Bits Allocated 24, 40, 48 or 64 is unsupported (exit 3): the contract has no sample type for them.
+   Bits Allocated 24, 40, 48 or 64 is unsupported (exit 3), because the contract has no sample type for them.
 4. **Explicit VR Big Endian:**
    - 16- and 32-bit samples are byte-swapped.
    - 8-bit samples in an **OW** element are swapped pairwise first. pydicom's `be_swap_ow` handles the same layout, which some big endian writers produce.
@@ -112,11 +108,49 @@ No case in this format is disputed. These are the rulings on edge cases, and whe
 
     Float and Double Float Pixel Data without integer Pixel Data are refused with "float pixel data not supported", before any check for Bits Stored.
 
+15. **Inference rules.** Each fills in one attribute and records why. Evidence comes from the codestream header (JPEG and JPEG-LS SOF, JPEG 2000 SIZ), from the Pixel Data length, or from the pixels themselves.
+
+    **Implemented:**
+
+    | Attribute | When | Value used | Evidence |
+    |---|---|---|---|
+    | Planar Configuration | missing, on native 3-sample data (not YBR_FULL_422 and not 1-bit) | whichever layout is clearly smoother: mean absolute difference between horizontally and vertically adjacent samples of a channel, summed. The smoother reading must win by at least 1.25×. Refused if the margin is smaller, or the image is under 16×16 pixels or under 4 pixels in either direction; decoded either way if both readings give the same pixels | Long-tail IDC sweep: 8 RGB files without the attribute, all refused by pydicom, GDCM and dcmtk. The 2 Philips IntelliSpace Portal files read as a clean CT montage only when planar (interleaved, they tile 3×3). The 6 GE LOGIQ E9 US files read cleanly only when interleaved. The score picks the right layout for all 8, by margins of 1.77× to 8.4×. Stripped copies of 14 existing RGB cases came out right for 13; the 14th, a 3×3 image, is why the minimum size exists. Cases: `idc-lt-model-intellispace-p-310c4091` (planar), `idc-lt-planar-3-absent-4eca9830` (interleaved), `strip-pc-*` (7 decode, 1 refused as too small). |
+    | Planar Configuration | missing or invalid, on encapsulated data | 0 | No codec reads it: RLE is by segment, and JPEG and JPEG 2000 carry their own layout (PS3.5 §8.2). |
+    | Samples per Pixel | missing | the codestream's component count; else 3 for RGB/YBR_*, 1 for MONOCHROME*/PALETTE COLOR; else 1 (GDCM) | `ext-gdcm-gdcm-CR-DCMTK-16-NonSamplePerPix` |
+    | Photometric Interpretation | missing | MONOCHROME2 for 1 sample, RGB for 3 | Colour data without the attribute is returned unconverted. |
+    | Photometric Interpretation | not a defined term, 1 sample | MONOCHROME2 | `ext-gdcm-MR16BitsAllocated_8BitsStored` ("MONOCHROME") |
+    | Bits Allocated | encapsulated, missing or not 1/8/16/32 | 8, 16 or 32 to hold the codestream precision | `ext-gdcm-FUJI-ffff-MONO1-J2K` (0xFFFF, SIZ 16-bit): equals `opj_decompress`. `ext-gdcm-DCMTK_JPEGExt_12Bits` (12, SOF 12-bit): equals `dcmdjpeg`. `ext-gdcm-JPEGLosslessSeNonZero` (12, SOF 12-bit): equals GDCM on a copy with Bits Allocated 16 (dcmtk and pylibjpeg refuse its SOS). |
+    | Bits Allocated | native, missing | 8, 16 or 32 when the Pixel Data length is exactly (or with 1 pad byte) Rows × Columns × Samples × Frames × 1, 2 or 4 bytes | consistency check on the length |
+    | Bits Stored | missing, 0, or above Bits Allocated | the codestream precision if it fits, else Bits Allocated (no masking) | FUJI file (0xFFFF). Keeping every bit loses nothing. |
+    | Pixel Representation | missing | the JPEG 2000 SIZ sign bit; else 0, as GDCM and dcmtk assume | |
+    | Rows, Columns | missing or 0, encapsulated | from SOF or SIZ | A present value is never overridden: a disagreement stays the codec's refusal (`ext-gdcm-JPEGNote_bogus`). |
+    | Rows or Columns | native, one of them missing | the only value that makes the Pixel Data length fit exactly (or with 1 pad byte) | consistency check on the length |
+    | Pixel Data (encapsulated) | after at least one fragment: fewer than 8 stray bytes, a non-item tag where the delimiter belongs, or a last fragment that claims at most 2 bytes more than remain | the fragments read so far | CENSUS.md, tolerance list: "odd-length last fragment, fragment length off by one, garbage terminator". A larger overrun is a truncated file and is still refused. |
+
+    **Left as refusals, and why:**
+    - **Native Pixel Data shorter than the image.** Missing samples cannot be inferred, and padding them would invent pixels. Examples: `pydicom-MR_truncated`, the Orthanc `oob-monochrome` files.
+    - **Excess native data that would hold extra whole frames when Number of Frames is absent.** pydicom returns the extra frames, but no file in the 6,000-file sweep or the corpus does this. Ignoring the excess, as now, is the conservative reading.
+    - **Planar Configuration when neither reading is clearly smoother**, or the image is too small to judge.
+    - **Native Bits Allocated 12** (see rule 3).
+    - **Rows and Columns both missing on native data.** Many sizes fit any given length.
+    - **Float and Double Float Pixel Data** (exit 3). The contract has no float sample type.
+
 ## STATUS
 
-**Foundation agent, 2026-10-14 (IDC and quirk-set round). uncompressed: pass=237 / 240.** The 3 failures are expectation changes for the coordinator; the decoder's output is believed right for all three:
+**Inference round (foundation agent, 2026-10-15). uncompressed: pass=255 / 255.** It added 12 cases:
+- 8 `strip-pc-*`: 7 decode and 1 is refused as too small;
+- 2 real IDC files without Planar Configuration;
+- 2 repaired copies, which are their oracles.
 
-| Case | Today | Should be |
+They were registered from a one-off script through `discover.register`, `save_cases` and `oracle_case`. Across all formats every case passes except 3, which are deliberate improvements needing expectation changes (rule 15): `ext-gdcm-DCMTK_JPEGExt_12Bits` (jpeg-dct), `ext-gdcm-JPEGLosslessSeNonZero` (jpeg-lossless) and `ext-gdcm-FUJI-ffff-MONO1-J2K` (jpeg2000). Each is expect=error today and now decodes to exactly what dcmtk, GDCM or OpenJPEG gives on the file or on a copy with Bits Allocated fixed. Suggested oracles, as `repairs.py` `patch_attr` calls:
+- `BitsAllocated=16` for the two JPEG files;
+- `BitsAllocated=16, BitsStored=16` for the FUJI file.
+
+No other case changed result. Tests: 30 unit tests, and 36 end-to-end tests including one per inference rule and the refusals. A 300,000-iteration mutation fuzz run found no panics.
+
+**Earlier round: IDC and quirk-set fixes (2026-10-14).** The coordinator has since applied the expectation changes in this table through `repairs.py`:
+
+| Case | Then | Should be |
 |---|---|---|
 | `ext-fodicom-GH1376` | expect=error; we decode | Re-register under jpeg-lossless with a dcmtk oracle (ruling 13). |
 | `ext-gdcm-gdcm-CR-DCMTK-16-NonSamplePerPix` | expect=error; we decode with Samples per Pixel 1 | expect=decode; GDCM's output is the oracle (ruling 3). |

@@ -318,13 +318,13 @@
       },
       "sha256": "733b4901d663ae4c36a3f9a0f7cf2934912a350d7a0bb384e198360436bee9e1",
       "size": 3626,
-      "expect": "error",
-      "max_abs": null,
-      "oracle_sha256": "42efc4186115fffadb62c78fdcb3cfcab09051b94702c5bc9b1bd6904d122e00",
-      "confidence": "ruling: Bits Allocated 12 is not a legal value for encapsulated data; only dcmtk decodes it",
+      "expect": "decode",
+      "max_abs": 1,
+      "oracle_sha256": "904e2ffcaf02aabca216c0195ae08ddb145d4c65229a26c6fc3d674f872b0e6f",
+      "confidence": "lossy; 1 reference(s); families agreeing exactly: []",
       "disputed": false,
-      "expect_override": "error",
-      "ruling": "Bits Allocated 12 is not a legal value for encapsulated data; only dcmtk decodes it"
+      "ruling": "Bits Allocated 12 is impossible for encapsulated data; inferred 16 from the 12-bit SOF (matches dcmdjpeg)",
+      "oracle_case": "repair-gdcm-DCMTK_JPEGExt_12Bits-ba16"
     },
     {
       "id": "ext-gdcm-JDDICOM_Sample2",
@@ -5149,6 +5149,35 @@
       "max_abs": 3,
       "oracle_sha256": "4e5a7293e30281ca9943a4ca6d7de9744feceed3ae3cfdd4c02c31889d7d6ebc",
       "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']",
+      "disputed": false
+    },
+    {
+      "id": "repair-gdcm-DCMTK_JPEGExt_12Bits-ba16",
+      "notes": "",
+      "tags": [
+        "repair"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.51",
+      "rows": 64,
+      "columns": 160,
+      "frames": 1,
+      "samples_per_pixel": 1,
+      "bits_allocated": 16,
+      "bits_stored": 12,
+      "pixel_representation": 0,
+      "photometric": "MONOCHROME2",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "repair",
+        "of": "ext-gdcm-DCMTK_JPEGExt_12Bits",
+        "how": "Bits Allocated 12 -> 16"
+      },
+      "sha256": "1e83ba25707605b64663bcf12521242dee8a7d471330e9780922e5787e2b50fa",
+      "size": 3626,
+      "expect": "decode",
+      "max_abs": 1,
+      "oracle_sha256": "904e2ffcaf02aabca216c0195ae08ddb145d4c65229a26c6fc3d674f872b0e6f",
+      "confidence": "lossy; 2 reference(s); families agreeing exactly: ['libjpeg-richter']",
       "disputed": false
     }
   ]

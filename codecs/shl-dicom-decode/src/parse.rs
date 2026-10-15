@@ -481,7 +481,7 @@ fn read_encapsulated<'a>(c: &mut Cursor<'a>, s: Syntax) -> Result<PixelValue<'a>
                     c.take(len)?
                 };
                 if first {
-                    if len % 4 != 0 {
+                    if !len.is_multiple_of(4) {
                         return Err(invalid(format!("Basic Offset Table length {len} is not a multiple of 4")));
                     }
                     basic_offsets = data;

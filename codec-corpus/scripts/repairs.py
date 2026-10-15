@@ -107,6 +107,12 @@ def ybr_lossless() -> None:
 
 
 def main() -> None:
+    patch_attr("jpeg-dct", "ext-gdcm-DCMTK_JPEGExt_12Bits", "repair-gdcm-DCMTK_JPEGExt_12Bits-ba16",
+               "Bits Allocated 12 -> 16", "Bits Allocated 12 is impossible for encapsulated data; inferred 16 from the 12-bit SOF (matches dcmdjpeg)", BitsAllocated=16)
+    patch_attr("jpeg-lossless", "ext-gdcm-JPEGLosslessSeNonZero", "repair-gdcm-JPEGLosslessSeNonZero-ba16",
+               "Bits Allocated 12 -> 16", "Bits Allocated 12 inferred as 16 from the 12-bit SOF (matches GDCM on the repaired copy)", BitsAllocated=16)
+    patch_attr("jpeg2000", "ext-gdcm-FUJI-ffff-MONO1-J2K", "repair-gdcm-FUJI-ffff-ba16-bs16",
+               "Bits Allocated/Stored 0xFFFF -> 16", "Bits Allocated/Stored 0xFFFF inferred as 16 from the SIZ precision (matches opj_decompress)", BitsAllocated=16, BitsStored=16)
     cornell()
     ybr_lossless()
     gh1376()

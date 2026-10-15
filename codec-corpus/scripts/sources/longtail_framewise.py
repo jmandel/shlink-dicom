@@ -193,8 +193,12 @@ def verify(inst: dict, a) -> dict:
     t0 = time.monotonic()
     try:
         src = work / "in.dcm"
-        with urllib.request.urlopen(inst["url"], timeout=600) as r, open(src, "wb") as f:
-            shutil.copyfileobj(r, f, 1 << 20)
+        kept = WORK / "keep" / f"{inst['instance_uuid']}.dcm"
+        if kept.exists():
+            shutil.copyfile(kept, src)
+        else:
+            with urllib.request.urlopen(inst["url"], timeout=600) as r, open(src, "wb") as f:
+                shutil.copyfileobj(r, f, 1 << 20)
         hdr = pydicom.dcmread(src, stop_before_pixels=True, force=True)
         n = int(hdr.NumberOfFrames)
         ts = str(hdr.file_meta.TransferSyntaxUID)
@@ -309,6 +313,7 @@ def main() -> int:
     ap.add_argument("--chunk", type=int, default=16)
     ap.add_argument("--sample", type=int, default=30)
     ap.add_argument("--only")
+    ap.add_argument("--uuids", type=Path, help="verify these instances (one uuid per line) instead of the skipped-size ones")
     ap.add_argument("--split", nargs=3)
     ap.add_argument("--subset", nargs=3)
     ap.add_argument("--ref", nargs=4)
@@ -340,7 +345,10 @@ def main() -> int:
     done = set()
     if a.out.exists():
         done = {json.loads(l)["instance_uuid"] for l in a.out.read_text().splitlines()}
-    todo = [r for r in recs.values() if r["outcome"] == "skipped-decoded-size" and r["instance_uuid"] not in done
+    want = set(a.uuids.read_text().split()) if a.uuids else None
+    todo = [r for r in recs.values()
+            if (r["instance_uuid"] in want if want else r["outcome"] == "skipped-decoded-size")
+            and r["instance_uuid"] not in done
             and (not a.only or a.only in r["instance_uuid"])]
     print(f"{len(todo)} instances to verify frame-wise", flush=True)
     for inst in todo:

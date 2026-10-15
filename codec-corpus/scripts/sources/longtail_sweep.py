@@ -179,7 +179,10 @@ def process(inst: dict, a, disk: Budget, mem: Budget) -> dict:
         src = work / "in.dcm"
         t0 = time.monotonic()
         err = None
-        for attempt in range(3):
+        kept = a.work / "keep" / f"{inst['instance_uuid']}.dcm"
+        if a.from_keep and kept.exists():
+            shutil.copyfile(kept, src)
+        for attempt in range(0 if (a.from_keep and kept.exists()) else 3):
             try:
                 with urllib.request.urlopen(inst["url"], timeout=300) as r, open(src, "wb") as f:
                     shutil.copyfileobj(r, f, 1 << 20)
@@ -222,7 +225,14 @@ def process(inst: dict, a, disk: Budget, mem: Budget) -> dict:
             nbytes = pb["NumberOfFrames"] * pb["Rows"] * pb["Columns"] * (pb.get("SamplesPerPixel") or 1) * dtype.itemsize
         rec["canonical_bytes"] = nbytes
         ref_outs = {}
-        for ref in applicable(ts):
+        ref_list = applicable(ts)
+        if a.ybr422_j2k_raw and ts in ("1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.91") \
+                and pb.get("PhotometricInterpretation") == "YBR_FULL_422":
+            # Known reference issue: OpenJPEG already converts sYCC to RGB for subsampled
+            # 3-component codestreams and pydicom converts again; decide with the unconverted output.
+            ref_list = ["pydicom:pylibjpeg-raw", "openjpeg-cli"]
+            rec["refs_rule"] = "j2k-ybr422-raw"
+        for ref in ref_list:
             out = work / f"ref-{ref.replace(':', '_')}.raw"
             r = run([PY, str(SCRIPTS / "ref_decode.py"), "--ref", ref, str(src), str(out)], tmo_ref)
             r["ok"] = r["exit"] == 0 and out.exists() and (nbytes is None or out.stat().st_size == nbytes)
@@ -308,6 +318,9 @@ def main() -> int:
     ap.add_argument("--max-decoded-gb", type=float, default=2)
     ap.add_argument("--keep-max-mb", type=float, default=500)
     ap.add_argument("--uuids", type=Path, help="file with instance_uuids to (re)run, one per line")
+    ap.add_argument("--from-keep", action="store_true", help="use WORK/keep/<uuid>.dcm when present")
+    ap.add_argument("--ybr422-j2k-raw", action="store_true",
+                    help="JPEG 2000 YBR_FULL_422: references pylibjpeg-raw and openjpeg-cli only")
     a = ap.parse_args()
     if a.probe:
         print(json.dumps(probe(a.probe)))

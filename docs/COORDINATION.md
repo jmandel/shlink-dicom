@@ -22,8 +22,8 @@ Related docs:
 
 | Area | Agent id | Owns | Current task | When it reports |
 |---|---|---|---|---|
-| How it works (`/how`) | a0bd674282e6512f4 | `web/how/`; may add new files to `web/core/` | Live widgets on the sample link; 50-line receiver | Verify the screenshots in `docs/shots/how/` and the widgets; then commit |
-| Share (`/share`) | ac9206ae1a4d9228a | `web/share/`; may make additive changes to `crates/shl-dicom-server` | Files/CD/ZIP, SMART portal through the sandbox, re-share, manage page | Verify the flows and `docs/shots/share/`; review the server changes; commit |
+| ~~How it works~~ DONE, committed | a0bd674282e6512f4 | `web/how/`; may add new files to `web/core/` | Live widgets on the sample link; 50-line receiver | Verify the screenshots in `docs/shots/how/` and the widgets; then commit |
+| ~~Share~~ DONE, committed | ac9206ae1a4d9228a | `web/share/`; may make additive changes to `crates/shl-dicom-server` | Files/CD/ZIP, SMART portal through the sandbox, re-share, manage page | Verify the flows and `docs/shots/share/`; review the server changes; commit |
 | Imaging sandbox | ab83241fb7aa4e1f8 | `imaging-sandbox/` | Fictional patient rewritten into the DICOM (pixels untouched); scripted `build-data.ts` reproducible from git; DiagnosticReports with PDF and text, marked "SAMPLE REPORT"; Josh's rulings (aud array, grant-bound capabilities, `.s`/`.r`, **406 when transfer-syntax is omitted**, token_type and scope); deploy **private** to smart-imaging-sandbox.exe.xyz | Verify; commit the scripts and config (no DICOM); ask Josh before set-public |
 | JPEG 2000/HTJ2K speed, round 2 | aeb346615b443d8de | `codecs/shl-codec-jpeg2000/` (including the vendored hayro), `codecs/shl-codec-htj2k/` (including the vendored oxideav), `formats/{jpeg2000,htj2k}/` | Wavelet (5/3, 9/7) and HT block decoder speed; targets about 3× OpenJPH and about 1.2× OpenJPEG; exactness kept | Then tell the reduced-res agent to go ahead with JPEG 2000/HTJ2K scaled decode |
 | Foundation (CLI), inference round | aac32c9d770084d05 | `codecs/shl-dicom-decode/`, `formats/uncompressed/` | Infer missing Planar Configuration (smoothness) and other safe inferences, each with a warning | Verify check.py and the ruling write-ups; commit |
@@ -61,7 +61,7 @@ Related docs:
 - **Local servers:** the shlink-dicom server is on localhost:3333; the sandbox runs on localhost:3334 with `cd imaging-sandbox && bun src/server.ts`.
 - **GitHub issues opened on argonautproject/smart-imaging (Josh approved):** #2 (the token response example lacks token_type and scope) and #3 (transfer-syntax guidance: apps send `*`; servers may answer 406). Watch them for replies.
 - **Tools installed:** binaryen (`~/.local/bin/wasm-opt`, version 133), wasm-tools, rustfilt, and the rustup stable toolchain with wasm32. The system cargo has no wasm32 target, so use `~/.cargo/bin/cargo +stable`.
-- **Commits:** 68e6b9a is the last checkpoint. Everything since then is uncommitted: View, viewer-kit's scale option, sandbox, JPEG-LS speed and so on.
+- **Commits:** ed67c94 is the last checkpoint (three experiences, sandbox, scaled decode, JPEG-LS speed). docs/shots/ is gitignored, because check scripts regenerate it. Earlier checkpoint: 68e6b9a.
 
 ## Decisions made (Josh)
 
@@ -94,13 +94,16 @@ Resolved 15 Oct:
    - review the server changes;
    - commit a checkpoint;
    - update PROCESS-NOTES.
-2. **View follow-ups** (resume the Core+View agent, a3832d83abfd092fc):
+2. **View follow-ups.** Hold until the whole-slide agent (adcc54c6231290ab4), which now owns web/view, finishes; then resume the Core+View agent, a3832d83abfd092fc:
+   - update the stale view-checks (/how and /share are no longer placeholders; the 'locked' check reuses an exhausted passcode fixture, so mint a fresh one each run);
+   - landing sample note: change it after the sample switches to the sandbox's fictional patient. The 'coming soon' labels are already removed (coordinator, 15 Oct).
    - decrypt inside the decoder workers, using `perf-spikes/decrypt/record-decrypt.ts` and the non-extractable key posted to each worker;
    - scaled thumbnails through `pool.decode(bytes, { scale })`;
    - remove `/legacy` once How and Share replace it;
    - fix `test/e2e.test.ts`, which expects the old page;
    - update the root README;
    - re-measure on a real GPU after Josh reboots.
+2b. **Coordinator:** document the Share agent's link-key convention in PROPOSAL.md/PLAN.md (link key = HKDF(owner key, link id), so the manage link can rebuild any link; the server never holds link keys), and the server's new fields (openCount/lastOpenedAt/bytesServed, access ?lid=&limit=, share expiresAt capped at 31 days).
 3. **When JPEG 2000/HTJ2K speed reports:**
    - verify and commit;
    - give the reduced-res agent (a21f481eac15d1f73) the go-ahead for JPEG 2000/HTJ2K scaled decode;

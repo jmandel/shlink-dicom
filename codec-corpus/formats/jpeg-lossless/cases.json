@@ -801,9 +801,13 @@
       },
       "sha256": "ebc4c79229f80a282e181cd05eda436287c89cdec9e66a765e06b278164aa6b7",
       "size": 180828,
-      "expect": "error",
-      "max_abs": null,
-      "confidence": "no reference decodes this file"
+      "expect": "decode",
+      "max_abs": 0,
+      "confidence": "lossless consensus; families agreeing: []; WEAK (fewer than two independent families)",
+      "oracle_case": "repair-gdcm-JPEGLosslessSeNonZero-ba16",
+      "ruling": "Bits Allocated 12 inferred as 16 from the 12-bit SOF (matches GDCM on the repaired copy)",
+      "oracle_sha256": "e2a9b9cdf629d794df6a40a6988fcd5a5ca4baa6f2c18e7c5d7a75f804b72b42",
+      "disputed": false
     },
     {
       "id": "ext-gdcm-JPEGLosslessYBR_FULL_422",
@@ -7018,6 +7022,35 @@
       "max_abs": 0,
       "oracle_sha256": "ef7120ddfc77c166ecdc5ffb99715deff8be9f3e7c0409021c0e06b962d2a61a",
       "confidence": "lossless consensus; families agreeing: ['ijg', 'libjpeg-richter']",
+      "disputed": false
+    },
+    {
+      "id": "repair-gdcm-JPEGLosslessSeNonZero-ba16",
+      "notes": "",
+      "tags": [
+        "repair"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.70",
+      "rows": 512,
+      "columns": 512,
+      "frames": 1,
+      "samples_per_pixel": 1,
+      "bits_allocated": 16,
+      "bits_stored": 12,
+      "pixel_representation": 0,
+      "photometric": "MONOCHROME2",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "repair",
+        "of": "ext-gdcm-JPEGLosslessSeNonZero",
+        "how": "Bits Allocated 12 -> 16"
+      },
+      "sha256": "16b96fbd28d405d633d518bd3358d711f6cbe891218d37d3a4760d429341c663",
+      "size": 180828,
+      "expect": "decode",
+      "max_abs": 0,
+      "oracle_sha256": "e2a9b9cdf629d794df6a40a6988fcd5a5ca4baa6f2c18e7c5d7a75f804b72b42",
+      "confidence": "lossless consensus; families agreeing: ['ijg']; WEAK (fewer than two independent families)",
       "disputed": false
     }
   ]

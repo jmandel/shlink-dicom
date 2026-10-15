@@ -272,15 +272,19 @@ fn truncated_file_is_invalid() {
 
 #[test]
 fn missing_attributes_are_invalid() {
+    // Only Rows: neither the size nor the sample width can be told from 2 bytes.
     let mut ds = Ds::new(Enc::ExplicitLe);
     ds.us(0x0028, 0x0010, 1);
     ds.elem(0x7FE0, 0x0010, b"OB", &[0, 0]);
     assert!(matches!(decode_file(&part10(EXPLICIT_LE, &ds.out, true)), Err(Error::Invalid(_))));
-    // RGB without Planar Configuration: pydicom refuses it.
+    // RGB without Planar Configuration: pydicom refuses it. One pixel reads the same either
+    // way, so it decodes, with the inference reported.
     let mut ds = Ds::new(Enc::ExplicitLe);
     ds.image(3, "RGB", None, None, 1, 1, 8, 8, 0);
     ds.elem(0x7FE0, 0x0010, b"OB", &[1, 2, 3, 0]);
-    assert!(matches!(decode_file(&part10(EXPLICIT_LE, &ds.out, true)), Err(Error::Invalid(_))));
+    let out = decode_file(&part10(EXPLICIT_LE, &ds.out, true)).unwrap();
+    assert_eq!(out.data, [1, 2, 3]);
+    assert_eq!(out.inferred.len(), 1);
 }
 
 #[test]

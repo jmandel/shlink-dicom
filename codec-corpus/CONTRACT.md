@@ -70,7 +70,7 @@ An offset table that fails these checks is ignored, and the next method is used,
 
 Fewer frames than Number of Frames is exit 2. Each codestream is the fragments joined; any trailing pad byte is still there.
 
-**2. Call.** `decode_frame(codestream, &info)` is called once per frame, in order. `FrameInfo` holds the data set's values unchanged: Photometric Interpretation as declared, Planar Configuration as declared (0 when Samples per Pixel is 1), and the transfer syntax UID. `Unsupported` becomes exit 3 and `Invalid` becomes exit 2; the first frame error stops the decode.
+**2. Call.** `decode_frame(codestream, &info)` is called once per frame, in order. `FrameInfo` holds the data set's values: Photometric Interpretation as declared, Planar Configuration as declared (0 when Samples per Pixel is 1, or when it is missing on encapsulated data), and the transfer syntax UID. The exception is an attribute the CLI had to infer (step 6); `FrameInfo` then carries the inferred value. `Unsupported` becomes exit 3 and `Invalid` becomes exit 2; the first frame error stops the decode.
 
 **3. Output size.** `DecodedFrame.data` must be exactly `info.frame_bytes()` long (rows × columns × samples × bytes per sample). Anything else is exit 2. Bits Allocated 1 means one byte per sample.
 
@@ -91,6 +91,25 @@ Fewer frames than Number of Frames is exit 2. Each codestream is the fragments j
 - JPEG 2000: pydicom corrects only a mismatch between the codestream's signedness and Pixel Representation, and only for MONOCHROME images.
 
 Because the CLI masks afterwards (to Bits Stored, or for JPEG 2000 to the larger of Bits Stored and the SIZ precision), these differences matter only when the codestream precision differs from Bits Stored. A codec agent who finds such a case records it in their FORMAT.md.
+
+**6. Inferred attributes.** When an Image Pixel attribute is missing or impossible, pydicom refuses the file. The CLI instead fills it in from evidence in the file, if that evidence settles it, and refuses otherwise. Each value it fills in is listed in `Canonical::inferred` (attribute, value, reason) and printed by the binary on stderr as `note: inferred NAME = VALUE: reason`; the exit code stays 0. The rules (full table and evidence in `formats/uncompressed/FORMAT.md`, rule 15):
+- **From the first frame's codestream header** (JPEG/JPEG-LS SOF, JPEG 2000 SIZ), for encapsulated data:
+  - Rows and Columns when missing or 0;
+  - Bits Allocated when missing or not 1/8/16/32: the container for the precision;
+  - Bits Stored when missing, 0, or above Bits Allocated;
+  - Samples per Pixel when missing;
+  - Pixel Representation when missing, from the JPEG 2000 sign bit.
+
+  A value that is present and valid is never overridden. A mismatch with the codestream remains the codec's to refuse.
+- **From the Pixel Data length**, for native data: Bits Allocated, or one of Rows and Columns, when exactly one value makes the length fit.
+- **Planar Configuration missing on native 3-sample data:** the layout whose reading is clearly smoother (at least 1.25× lower mean neighbour difference). Refused when neither is, or when the image is under 16×16 pixels. On encapsulated data a missing value is 0, since no codec uses it.
+- **Defaults:**
+  - Samples per Pixel from the photometric, else 1;
+  - Photometric Interpretation from Samples per Pixel (MONOCHROME2 or RGB), and MONOCHROME2 for an undefined term on 1-sample data;
+  - Pixel Representation 0.
+- **A damaged end of encapsulated Pixel Data**, after at least one fragment, ends the pixel data instead of refusing the file: a few stray bytes, a non-item tag, or a last fragment overrunning the data by at most 2 bytes.
+
+A codec needs nothing new for this: it sees the inferred values in `FrameInfo` as if the data set had declared them.
 
 **Testing a codec without the CLI's dispatch.** `shl_dicom_decode::decode_file_with(bytes, |ts| ...)` takes a codec table instead of `codec_for`, so a candidate crate can be tried without editing `shl-dicom-decode`.
 

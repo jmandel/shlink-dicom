@@ -344,3 +344,28 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
     - one float-pixel-data file (highdicom).
 
     No new codec bug so far.
+
+## 12. Wave 2 lands; slides; size limits; repo hygiene (15 Oct, late afternoon)
+
+- **The sweep checkpoint at 66% prompted Josh to ask about the size limit.** "I'm concerned about the size limit. Can you explain this to me?" The coordinator traced it to the harness's own memory cap (`--max-decoded-gb 2`). It had skipped 12 whole-slide images that decode to 2.4–11.8 GB, so those files had gone unchecked. Fix: frame-by-frame verification with bounded memory, about 30 sampled tiles per slide against references, plus a hash pass over every frame.
+- **Josh then raised the ambition.** "I definitely want to be able to support these kinds of slide images and our viewers should do something with them … zoom and navigate to prove that our streaming model works … include … a scaled down version … in our sample data." Two tracks:
+  - a whole-slide viewer agent: the pyramid read from headers fetched by range; tile→frame→byte mapping; a deep-zoom view that fetches only visible tiles; live "bytes fetched against slide size" stats as the proof of streaming. It also prototypes an optional Bundle extension with per-instance frame offsets (PROPOSAL open question 4), held for Josh to decide;
+  - the sandbox agent queued to add a scaled-down but real CC BY IDC slide to the fictional patient's data.
+- **"Is webassembly really limited to 4 GB?"**
+  - **Answer:** yes, for wasm32 (32-bit addresses). Memory64 (WebAssembly 3.0) lifts it: Chrome and Firefox shipped it around early 2025, Safari lagged, Rust has only a tier-3 target, and bounds checks cost performance.
+  - **Design consequence:** we never need more than 4 GB in one instance, because decoding works per frame or tile, each worker has its own instance, and downloads stream without decoding.
+- **Wave 2 verified by the coordinator, not just reported.**
+  - **Reruns:** How it works passed 68/68 and Share 123/123. View had 11 failures, all stale checks (placeholders that no longer exist; a passcode fixture exhausted by an earlier run).
+  - **Highlights:**
+    - the explainer's record map, with live 206 requests and "9 records verified … SOP Instance UID matches the Bundle";
+    - a 49-line receiver that runs in the page, Node and Bun;
+    - Share's portal flow (SMART launch against the sandbox, "Morgan Rivera", reports carried as PDF and text);
+    - a manage page with a plain activity log and a technical request log behind a disclosure.
+  - **Decisions the Share agent made to document in the proposal:**
+    - link keys derived as HKDF(owner key, link id), so the manage link can rebuild any link while the server never holds link keys;
+    - share expiry made settable, up to 31 days. The demo server had been deleting every share after 24 hours, which would have made "1 month" untrue.
+- **Repo hygiene lesson.** The checkpoint commit jumped from 5.8 MB to 38 MB because the check scripts' screenshots (about 30 MB) were swept in by `git add -A`. The commit had not been pushed, so the coordinator amended it, gitignored `docs/shots/` (regenerable) and expired the reflog. The repo went back to 2.7 MB (ed67c94). Rule going forward: dry-run `git add` and check sizes before each checkpoint.
+- **Other decisions recorded in COORDINATION.md:**
+  - both exe.dev VMs are public (the proxy on port 8000);
+  - the public sample will use the sandbox's fictional patient;
+  - "detect what we can": an inference round in the decoder (missing Planar Configuration by smoothness, plus other safe inferences, each reported as a warning).
