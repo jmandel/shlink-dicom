@@ -2,7 +2,7 @@
 // Every path has the same shape: decrypt(ciphertext, firstRecordIndex) -> Promise<Uint8Array>,
 // verifying every tag and returning contiguous plaintext. The same function is used for the
 // correctness checks and for timing.
-import { decryptRecords, importSeriesKey } from "./record-decrypt.js";
+import { decryptRecords, importFileKey } from "./record-decrypt.js";
 
 export const RP = 65520, TAG = 16, RC = 65536;
 const MB = 1e6;
@@ -84,7 +84,7 @@ export function wcInFlight(key, K) {
 }
 
 export async function importKey(raw) {
-  return importSeriesKey(raw);
+  return importFileKey(raw);
 }
 
 // ---------- data ----------

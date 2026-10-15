@@ -111,7 +111,7 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
 ## Recommendation for the viewer
 
 1. **Decrypt with WebCrypto, not `aes-gcm` in wasm.**
-   - Use `viewer-kit/src/record-decrypt.ts` (written here; it moved to viewer-kit when the viewer adopted it): `importSeriesKey(raw)` and `decryptRecords(key, ciphertext, firstRecordIndex, opts)`.
+   - Use `viewer-kit/src/record-decrypt.ts` (written here; it moved to viewer-kit when the viewer adopted it): `importFileKey(raw)` and `decryptRecords(key, ciphertext, firstRecordIndex, opts)`.
    - The file key then never enters wasm memory. It is imported once per file as a non-extractable `CryptoKey`.
    - Tuning the Rust path is not worth it. Per-record re-keying, `wasm-opt` and simd128 together move it by about 20%.
    - Keep the Rust `decrypt_range` for native code (server, CLI). There, `aes` uses AES-NI and runs at 1.1 GB/s.
@@ -123,7 +123,7 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
 
 3. **Hand plaintext to the decoder without extra copies.** For one instance, `[a, b)` in series plaintext, with `first = ⌊a / 65,520⌋`:
    1. The fetch layer requests the ciphertext range (§9.3) and transfers the response's `ArrayBuffer` to the decoder worker. No copy.
-   2. The worker calls `decryptRecords(key, ct, first, { window: { start: a − 65,520·first, length: b − a }, seriesPlaintextLength })`. Each record's plaintext is copied once, straight to its place in a buffer of exactly the instance's size. Bytes of the partial records at either end outside the instance are verified but not kept.
+   2. The worker calls `decryptRecords(key, ct, first, { window: { start: a − 65,520·first, length: b − a }, filePlaintextLength })`. Each record's plaintext is copied once, straight to its place in a buffer of exactly the instance's size. Bytes of the partial records at either end outside the instance are verified but not kept.
    3. The worker passes that buffer to `WasmDecoder.decode`, which copies it into wasm memory once, as it does today.
 
    That makes three copies in all, two of them inside WebCrypto. Today's `ingest_ciphertext_range` already makes three before any instance is assembled:
@@ -136,7 +136,7 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
 4. **Change `WasmShlSession` to match.**
    - `ingest_ciphertext_range` stops decrypting.
    - Either the bounded record cache moves to JS, holding verified plaintext keyed by `(fileId, record)` or by instance, or the session gains an ingest call for plaintext that JS has already verified.
-   - The length checks that `ingest_ciphertext_range` does now move to `decryptRecords` via `seriesPlaintextLength`:
+   - The length checks that `ingest_ciphertext_range` does now move to `decryptRecords` via `filePlaintextLength`:
      - non-final records must be 65,536 bytes;
      - the final record must be its remainder plus 16;
      - no record may lie past the end.

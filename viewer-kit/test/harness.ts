@@ -1,7 +1,7 @@
 // Browser-side harness for test/gl-vs-cpu.mjs and bench/*.mjs (driven by playwright-core).
 // Loaded by test/harness.html; exposes window.vk.
 import { DecoderPool, Priority } from "../src/decoder-pool";
-import { importSeriesKey, recordNonce, RECORD_PLAINTEXT } from "../src/record-decrypt";
+import { importFileKey, recordNonce, RECORD_PLAINTEXT } from "../src/record-decrypt";
 import { GlRenderer } from "../src/gl-renderer";
 import { renderCpu, defaultView, type View } from "../src/cpu-render";
 import { frameOf, defaultWindow, type DecodedImage, type Frame } from "../src/types";
@@ -316,8 +316,8 @@ async function poolSemantics(opts: { big: string; multiframe: string; unsupporte
     const first = Math.floor(pre / RECORD_PLAINTEXT), last = Math.floor((pre + one.length - 1) / RECORD_PLAINTEXT);
     const ct = new Uint8Array(recs.slice(first, last + 1).reduce((a, r) => a + r.length, 0));
     recs.slice(first, last + 1).reduce((o, r) => (ct.set(r, o), o + r.length), 0);
-    const key = await importSeriesKey(raw);
-    const encrypted = { key, firstRecord: first, seriesPlaintextLength: P, window: { start: pre - first * RECORD_PLAINTEXT, length: one.length } };
+    const key = await importFileKey(raw);
+    const encrypted = { key, firstRecord: first, filePlaintextLength: P, window: { start: pre - first * RECORD_PLAINTEXT, length: one.length } };
     const viaEnc = await pool4.decode(ct.slice(), { encrypted });
     const viaPlain = await pool4.decode(one.slice());
     const e1 = new Uint8Array(viaEnc.pixels), e2 = new Uint8Array(viaPlain.pixels);
