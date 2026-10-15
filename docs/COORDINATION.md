@@ -109,6 +109,14 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct, about 12:10: coverage plan round 1 launched** (docs/COVERAGE-PLAN.md).
+  - **A, decoders:** new agent a4b3a594727c938f4. Owns codecs/, codec-corpus/, viewer-kit/INTEGRATION.md.
+  - **B+C, objects and display:** Core+View agent a3832d83abfd092fc. Owns web/view (non-WSI) and web/core (non-wsi, non-video).
+  - **D, slides:** adcc54c6231290ab4. Owns web/core/wsi*, web/view/wsi-*.
+  - **E, video:** new agent aa651d8c980d68b5e. Owns web/core/video* and a new codecs/ demux crate.
+  - **F, scale:** Share agent ac9206ae1a4d9228a. First the share-checks cleanup and a refresh of the local :3333 sample, then F. Owns crates/, web/share/, deploy/.
+  - view.ts is shared by B/C, D and E: small hooks only. The coordinator commits per wave with an explicit pathspec.
+
 - **15 Oct, about 11:50:**
   - **Josh Example data is live.** It is in my-health-data 911ee41 (5 studies, one tgz per series). The sandbox and the shlink-dicom sample were rebuilt from it plus the CC BY slide (f2eac46), and both VMs were redeployed from GitHub.
   - **Public checks:** sandbox e2e 130/130, How 68/68, View 142/142 (828b439).
