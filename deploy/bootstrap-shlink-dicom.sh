@@ -83,10 +83,24 @@ echo "== public sample (sandbox dataset, fictional patient)"
 (cd imaging-sandbox && bun scripts/build-data.ts --quiet)
 id shlink >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin shlink
 $SUDO mkdir -p "$DATA/samples"
-for s in mri-brain-2020 wrist-low-res; do
+$SUDO rm -f "$DATA"/samples/*.tgz
+for d in imaging-sandbox/build/dataset/dicom/*/; do
+  s="$(basename "$d")"
   tar -czf "$DIR/$s.tgz" -C imaging-sandbox/build/dataset/dicom "$s"
   $SUDO mv "$DIR/$s.tgz" "$DATA/samples/$s.tgz"
 done
+$SUDO tee "$DATA/samples/sample.json" >/dev/null <<'EOF2'
+{
+  "title": "Sample imaging: Morgan Rivera",
+  "description": "Brain MRI, wrist X-ray and a lung pathology slide for Morgan Rivera, a fictional patient. Slide image: CPTAC-LUAD from the NCI Imaging Data Commons, CC BY 4.0, changed (see the study note)."
+}
+EOF2
+# Re-seed when the sample changes (the server keeps an existing seed otherwise).
+sums="$(cd "$DATA/samples" && sha256sum *.tgz sample.json | sha256sum | cut -d' ' -f1)"
+if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ]; then
+  $SUDO rm -f "$DATA/seeded_demos.json"
+  echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
+fi
 $SUDO chown -R shlink:shlink "$DATA"
 
 $SUDO tee /etc/systemd/system/shlink-dicom.service >/dev/null <<EOF
