@@ -26,7 +26,8 @@ export interface UploadProgress {
 
 /** Failures worth waiting out: no connection, a stall, a proxy or server error, a busy server. */
 export function isTransient(e: unknown): boolean {
-  if (e instanceof ApiError) return e.status === 0 || e.status === 408 || e.status === 425 || e.status === 429 || e.status >= 500;
+  // 409 without an offset: another request for the same file is still finishing on the server.
+  if (e instanceof ApiError) return e.status === 0 || e.status === 408 || e.status === 409 || e.status === 425 || e.status === 429 || e.status >= 500;
   if (e instanceof LinkError) return e.reason === "network" || e.reason === "server";
   const name = (e as Error)?.name;
   return name === "TimeoutError" || name === "AbortError" || e instanceof TypeError;
@@ -88,12 +89,14 @@ export async function uploadSeries(
   packed: PackedSeries[],
   on: (p: UploadProgress) => void,
   onConn: (c: Connection) => void,
-  signal?: AbortSignal,
+  o: { fresh?: boolean; signal?: AbortSignal } = {},
 ) {
+  const signal = o.signal;
   const total = packed.reduce((a, p) => a + ciphertextSize(p), 0);
   const offsets = new Map<string, number>();
   for (const p of packed) {
-    const st = await persist(() => api.uploadOffset(p.fileId), onConn, signal);
+    // A new share has no uploads yet; otherwise ask the server what it has.
+    const st = o.fresh ? null : await persist(() => api.uploadOffset(p.fileId), onConn, signal);
     offsets.set(p.fileId, st ? (st.complete ? ciphertextSize(p) : st.offset) : -1);
   }
   const sentBefore = (p: PackedSeries) => packed.reduce((a, q) => a + (q === p ? 0 : Math.max(0, offsets.get(q.fileId)!)), 0);

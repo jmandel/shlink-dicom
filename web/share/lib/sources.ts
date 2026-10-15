@@ -58,7 +58,8 @@ class LinkSeriesBytes implements Bytes {
     b = Math.min(b, this.size);
     if (a >= b) return new Uint8Array(0);
     const plan = planBytes(this.se, a, b);
-    const ct = await this.share.resolver.fetchRange(plan);
+    // A read that stalls fails after a minute; the upload waits it out and asks again.
+    const ct = await this.share.resolver.fetchRange(plan, AbortSignal.timeout(60000));
     return this.share.decryptor.decrypt(this.se, plan, ct);
   }
 }

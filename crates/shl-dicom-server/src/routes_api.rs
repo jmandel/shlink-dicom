@@ -353,6 +353,9 @@ fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
 // A PUT without Upload-Complete sends a whole file in one request (not resumable).
 // The bytes of an interrupted request are kept; the client asks where to continue.
 
+/// How long an upload request may go without receiving a byte.
+const BODY_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
 const PROBLEM_MISMATCH: &str = "https://iana.org/assignments/http-problem-types#mismatching-upload-offset";
 const PROBLEM_LENGTH: &str = "https://iana.org/assignments/http-problem-types#inconsistent-upload-length";
 
@@ -480,8 +483,17 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
     }
     let mut got: u64 = 0;
     let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else {
+    loop {
+        // A body that stops arriving for BODY_IDLE ends the request; what came is kept.
+        let next = match tokio::time::timeout(BODY_IDLE, stream.next()).await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(_) => {
+                let _ = file.flush().await;
+                return Append::Interrupted(start + got);
+            }
+        };
+        let Ok(chunk) = next else {
             let _ = file.flush().await;
             return Append::Interrupted(start + got);
         };

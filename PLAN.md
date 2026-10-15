@@ -250,7 +250,7 @@ type Link = {
 
 ### 5.2 Zero-Knowledge Share & Link Control Endpoints
 
-All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, Authorization, Range, If-None-Match, Content-Range, X-Expected-Size`) so a static web app on GitHub Pages can call an `*.exe.dev` server cross-origin.
+All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`, `Access-Control-Allow-Methods` also includes `HEAD`; `Access-Control-Allow-Headers: Content-Type, Authorization, Range, If-None-Match, X-Expected-Size, Upload-Offset, Upload-Complete, Upload-Length`; and `Access-Control-Expose-Headers` includes `Location, Upload-Offset, Upload-Complete, Upload-Length, Upload-Limit`) so a static web app on GitHub Pages can call an `*.exe.dev` server cross-origin.
 
 | Method & Path | Auth | Request Body / Params | Response |
 |---|---|---|---|
@@ -261,9 +261,10 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
 | `DELETE /api/shares/{sid}` | `Bearer {controlToken}` | — | `204 No Content` (removes all files, links, and active `/cap/` prefixes) |
 | `PUT /api/shares/{sid}/owner.jwe` | `Bearer {controlToken}` | Raw compact JWE encrypted under `ownerKey` (`application/jose`) | `200 OK`: `{ ok: true, size: number }` |
 | `GET /api/shares/{sid}/owner.jwe` | `Bearer {controlToken}` | — | `200 OK`: raw `owner.jwe` (`application/jose`) |
-| `PUT /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | Encrypted series bytes, streamed to disk. Either the whole file (size from `X-Expected-Size` or `Content-Length`), or one chunk with `Content-Range: bytes a-b/total`, where `a` must equal the bytes already received. `name` MUST match `^[A-Za-z0-9_-]{22}\.bin$`, else `400` | `200 OK`: `{ name, size, received, complete }` (`uploadedAt` too when complete). `409` with `received` when a chunk doesn't start there; `413` over a limit; `400` when the body is longer or shorter than declared (the bytes before the request are kept) |
-| `GET /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | — | `200 OK`: `{ name, size, received, complete }`; `received: 0` and `size: null` when nothing has arrived. A client resumes from `received` |
-| `DELETE /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | — | `204 No Content` (returns `409 Conflict` if any existing Link on the Share still lists `{name}` in `allowedFiles`) |
+| `PUT /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | With `Upload-Complete: ?0` and `Upload-Length: N`: creates a resumable upload; the body (possibly empty) is its first bytes. Without `Upload-Complete`: the whole file in one request (size from `X-Expected-Size` or `Content-Length`), not resumable. `name` MUST match `^[A-Za-z0-9_-]{22}\.bin$`, else `400` | `201 Created` with `Location`, `Upload-Offset`, `Upload-Complete`, `Upload-Limit`; a whole file gets `200 OK`: `{ name, size, uploadedAt, complete: true }`. `413` over a limit |
+| `HEAD /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | — | `204 No Content` with `Upload-Offset`, `Upload-Complete`, `Upload-Length`, `Upload-Limit` and `Cache-Control: no-store`; `404` when there is no such upload |
+| `PATCH /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | `Content-Type: application/partial-upload`, `Upload-Offset`, `Upload-Complete`; the bytes to append | `204 No Content` with the new `Upload-Offset` (`Upload-Complete: ?0`); the last append gets `200 OK` with `Upload-Complete: ?1`. `409` with the right `Upload-Offset` and a `mismatching-upload-offset` problem when the offset is wrong; `400` with an `inconsistent-upload-length` problem when the bytes don't fit `Upload-Length` |
+| `DELETE /api/shares/{sid}/files/{name}` | `Bearer {controlToken}` | — | `204 No Content`: cancels an upload, or deletes the file (`409 Conflict` if any existing Link on the Share still lists `{name}` in `allowedFiles`) |
 | `POST /api/shares/{sid}/links` | `Bearer {controlToken}` | `{ label?: string, passcode?: string, exp?: number, longLived?: boolean, allowedFiles: string[] }` | `201 Created`: `Link` |
 | `PUT /api/shares/{sid}/links/{lid}/bundle.jwe` | `Bearer {controlToken}` | Raw compact JWE encrypted under `{lid}`'s SHL key (`application/jose`) | `200 OK`: `Link` (`hasBundle: true`) |
 | `PATCH /api/shares/{sid}/links/{lid}` | `Bearer {controlToken}` | `{ label?: string\|null, exp?: number\|null, online?: boolean, allowedFiles?: string[] }` (no passcode or mode changes) | `200 OK`: `Link` |
@@ -274,8 +275,15 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
 | `GET /api/demo-shares` | None | — | `200 OK`: `{ shares: [{ id, title, description, shlinkUri, readOnly: true, share: Share }] }` (never exposes `controlToken`) |
 
 **Uploads and limits:**
-- A series file becomes visible (listed in `files`, allowed in a Link) only once all its bytes have arrived. Until then it is an upload in progress, and its declared size counts toward the share's limit.
-- One request at a time per file; a second gets `409`.
+- Series file uploads follow the IETF resumable uploads draft ([draft-ietf-httpbis-resumable-upload-13](https://datatracker.ietf.org/doc/draft-ietf-httpbis-resumable-upload/)): creation with `Upload-Complete`, offset retrieval with `HEAD`, appends with `PATCH` and `application/partial-upload`, the `Upload-Offset`, `Upload-Complete`, `Upload-Length` and `Upload-Limit` fields, and the draft's problem types. Where this server differs:
+  - **No `104 (Upload Resumption Supported)` interim responses.** The server's HTTP stack (axum on hyper) can't send them from a handler. Clients learn that uploads are resumable from this API, and get progress from the bytes they send.
+  - **The upload resource is the file's own URL,** chosen by the client (`{fileId}.bin`), so creation is a `PUT` to it. The creation response still carries `Location`.
+  - **`Upload-Length` is required at creation,** so the share's limit can be checked before any bytes arrive.
+  - **Appending to a completed upload** gets `400` (the draft defines no problem type for it).
+  - **A `PUT` without `Upload-Complete`** is an ordinary, non-resumable upload of a whole file.
+- The bytes of an interrupted request are kept: a dropped connection, or no byte for 30 s, ends the request where it got to. The client asks `HEAD` where to continue.
+- A series file becomes visible (listed in `files`, allowed in a Link) only once all its bytes have arrived. Until then it is an upload in progress, and its `Upload-Length` counts toward the share's limit.
+- One request at a time per file; a second gets `409` (without `Upload-Offset`).
 - Limits are server settings (`shl-dicom-server serve`):
 
   | Flag | Environment | Default |
@@ -283,9 +291,10 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
   | `--max-share-bytes` | `SHL_MAX_SHARE_BYTES` | 0 (no limit) |
   | `--max-share-files` | `SHL_MAX_SHARE_FILES` | 0 (no limit) |
   | `--max-shares` | `SHL_MAX_SHARES` | 256 (0: no limit) |
-  | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` |
+  | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` (largest append) |
+  | `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 (passcode links' capability URLs) |
 
-- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. Series file bodies have no cap; they stream to disk.
+- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. Series file bodies stream to disk.
 - The server's own sample is not subject to these limits.
 
 **Rules enforced by the Share & Link API:**

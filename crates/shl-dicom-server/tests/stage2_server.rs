@@ -199,7 +199,7 @@ async fn test_size_quotas_and_409_foreign_key() {
     // Set small quota of 200 KB max
     let state = AppState::with_quotas(
         &dir,
-        shl_dicom_server::state::Quotas { share_bytes: Some(200_000), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20 },
+        shl_dicom_server::state::Quotas { share_bytes: Some(200_000), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600 },
     )
     .unwrap();
     let base = spawn_test_server(state).await;

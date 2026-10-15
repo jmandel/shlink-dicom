@@ -36,8 +36,9 @@ for (const a of archives.flatMap(walk)) {
 
 // --ref-link=<shlink>: compare with the instances of another link (a re-share against its source).
 const refLink = args.find((a) => a.startsWith("--ref-link="))?.slice(11);
+const refPass = args.find((a) => a.startsWith("--ref-passcode="))?.slice(15);
 if (refLink) {
-  const ref = await openShare(refLink, { recipient: "share-verify" });
+  const ref = await openShare(refLink, { passcode: refPass, recipient: "share-verify" });
   const want = new Set<string>();
   {
     const tmp = await openShare(link, { passcode: pass, recipient: "share-verify" });

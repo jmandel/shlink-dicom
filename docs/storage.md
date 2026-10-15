@@ -162,13 +162,15 @@ Taking an attempt before checking means concurrent wrong guesses can never excee
 
 ## Write flows
 
-**Uploading a series file (`PUT /api/shares/{sid}/files/{fileId}.bin`).** The client sends the whole file in one request, or chunks with `Content-Range: bytes a-b/total` (PLAN.md §5.2).
+**Uploading a series file.** The upload follows the IETF resumable uploads draft (PLAN.md §5.2): `PUT` with `Upload-Complete` creates it, `HEAD` reports `Upload-Offset`, `PATCH` appends. A `PUT` without `Upload-Complete` sends the whole file in one request.
 1. Authenticate: the SHA-256 of the bearer token must match `share.control_token_hash`.
-2. Allow one request at a time per file.
-3. A new upload: check the share's limits against the declared total, insert an `uploads` row, and start `{fileId}.part`. A whole-file request always starts over.
-4. A chunk must start where `{fileId}.part` ends; otherwise `409` with `received`.
-5. Stream the body to the end of `{fileId}.part`. If the body is longer or shorter than declared, truncate the file back to where the request started.
-6. When the last byte arrives, sync the file, rename it to `{fileId}.bin`, insert the `series_files` row and delete the `uploads` row.
+2. Allow one request at a time per file; another gets `409`.
+3. Creating: check the share's limits against `Upload-Length`, insert an `uploads` row, and start `{fileId}.part`.
+4. Appending: `Upload-Offset` must equal the size of `{fileId}.part`; otherwise `409` with the right `Upload-Offset`.
+5. Stream the body to the end of `{fileId}.part`.
+   - The connection drops, or no byte arrives for 30 s: keep what arrived. The client asks where to continue.
+   - The body would go past `Upload-Length`, or `Upload-Complete: ?1` arrives before the last byte: truncate back to where the request started and answer `400`.
+6. When the last byte arrives with `Upload-Complete: ?1`, sync the file, rename it to `{fileId}.bin`, insert the `series_files` row and delete the `uploads` row.
 
 A link can name the file only after step 6.
 
@@ -211,7 +213,8 @@ Server settings, from `serve` flags or the environment:
 | `--max-share-bytes` | `SHL_MAX_SHARE_BYTES` | 0 (no limit) | Encrypted bytes one share may hold, counting uploads in progress (for example `20G`) |
 | `--max-share-files` | `SHL_MAX_SHARE_FILES` | 0 (no limit) | Series files one share may hold |
 | `--max-shares` | `SHL_MAX_SHARES` | 256 | Shares at once, not counting the sample; 0 for no limit |
-| `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` | Largest upload chunk |
+| `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` | Largest append (`Upload-Limit: max-append-size`) |
+| `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 | Lifetime of a passcode link's capability URL |
 
 JSON and JWE request bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. Series file bodies stream to disk and have no body cap.
 
@@ -235,7 +238,7 @@ The data directory is resolved once at startup. The process runs as an unprivile
 
 `cargo test -p shl-dicom-server` covers:
 1. range reads of single and spanning records, from disk, with exact `Content-Range`;
-2. chunked uploads: a chunk that skips ahead gets `409` with `received`, the status `GET` reports progress, and the file is published after the last chunk;
+2. resumable uploads: creation, `HEAD` offset retrieval, an append at the wrong offset (`409` with `Upload-Offset` and the mismatching-upload-offset problem), an early `Upload-Complete: ?1` (`400`), and publication after the last append;
 3. size checks: a body that doesn't match its declared size leaves nothing behind;
 4. per-share limits (`413`);
 5. `409` when deleting a file a link still lists;

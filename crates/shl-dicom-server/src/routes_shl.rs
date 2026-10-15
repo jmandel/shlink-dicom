@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde_json::json;
 use crate::state::{
     hash_passcode, is_valid_id22, now_unix, parse_series_filename, AccessEvent, AppState,
-    DEFAULT_CAP_TTL_SECS,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -189,7 +188,7 @@ pub async fn post_shl_manifest(
     };
 
     let (long_lived, updated_at) = outcome;
-    let Ok(cap_token) = state.mint_cap(&lid, DEFAULT_CAP_TTL_SECS) else {
+    let Ok(cap_token) = state.mint_cap(&lid, state.quotas.cap_ttl_secs) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "failed to mint cap").into_response();
     };
 

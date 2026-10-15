@@ -22,13 +22,15 @@ pub struct Quotas {
     pub share_files: Option<usize>,
     /// Shares that may exist at once (not counting the server's own sample).
     pub shares: Option<usize>,
-    /// Largest body of one upload request (a chunk, or a whole file sent in one request).
+    /// Largest body of one upload append.
     pub request_bytes: u64,
+    /// Lifetime of a passcode link's capability URL (`/cap/{token}/…`), in seconds.
+    pub cap_ttl_secs: i64,
 }
 
 impl Default for Quotas {
     fn default() -> Self {
-        Self { share_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024 }
+        Self { share_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS }
     }
 }
 

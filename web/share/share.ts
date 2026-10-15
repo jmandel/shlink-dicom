@@ -15,7 +15,7 @@ import {
 } from "./lib/ingest";
 import { buildBundle, ciphertextSize, planSeriesFiles, subsetBundle, type PackedSeries } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
-import { clearJob, loadJob, saveJob, uploadSeries, type UploadJob } from "./lib/upload";
+import { clearJob, loadJob, persist, saveJob, uploadSeries, type Connection, type UploadJob } from "./lib/upload";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
 import { parseStudyIndex } from "../core/bundle";
 import {
@@ -493,6 +493,8 @@ $("up-retry").addEventListener("click", () => {
 
 /** An upload under way: what it needs to continue. */
 interface Pending {
+  /** True until the first try: the share is new, so the server has nothing yet. */
+  fresh?: boolean;
   job: UploadJob;
   api: ShareApi;
   owner: any;
@@ -524,14 +526,16 @@ async function upload() {
     const packed = planSeriesFiles(studies);
     const owner = buildBundle(col, packed);
     const ownerKey = randomKeyB64();
-    const created = await new ShareApi(cfg.apiBase).createShare(job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400);
+    const early = (c: Connection) => ($("up-main").textContent = c.state === "ok" ? "" : "Connection lost, retrying…");
+    const created = await persist(() => new ShareApi(cfg.apiBase).createShare(job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400), early);
     const api = new ShareApi(cfg.apiBase, { sid: created.share.id, token: created.controlToken });
     // The owner Bundle first: with the manage credential it is all a reload needs to continue.
-    await api.putOwner(await encryptJwe(utf8(JSON.stringify(owner)), ownerKey));
+    const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
+    await persist(() => api.putOwner(ownerJwe), early);
     const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
     const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000) };
     saveJob(full);
-    await runUpload({ job: full, api, owner, packed });
+    await runUpload({ job: full, api, owner, packed, fresh: true });
   } catch (x) {
     uploadFailed(x);
   }
@@ -551,27 +555,50 @@ function uploadFailed(x: unknown) {
 
 /** Uploads what the server doesn't have yet, then makes the link. */
 async function runUpload(p: Pending) {
-  pending = p;
+  pending = { ...p, fresh: false };
   show(4);
   setUploadError(null);
   const { job, api, owner, packed } = p;
   const totalRecords = packed.reduce((a, x) => a + x.records, 0);
-  const paint = (sent: number, total: number, done: number) => {
+  let last = { sent: 0, total: packed.reduce((a, x) => a + ciphertextSize(x), 0), done: 0 };
+  let conn: Connection = { state: "ok" };
+  const paint = () => {
+    const { sent, total, done } = last;
     $<HTMLElement>("up-bar").style.width = `${((sent / total) * 100).toFixed(1)}%`;
-    $("up-main").textContent = `Uploaded ${formatBytes(sent)} of ${formatBytes(total)}`;
-    $("up-tech").textContent = `Encrypting ${plural(packed.length, "series", "series")} on this device: ${done} done · ${Math.min(totalRecords, Math.floor(sent / 65536))} of ${totalRecords} records uploaded`;
+    const amount = `${formatBytes(sent)} of ${formatBytes(total)}`;
+    $("up-main").textContent =
+      conn.state === "offline"
+        ? `Connection lost. Waiting for the network… ${amount} sent`
+        : conn.state === "retrying"
+          ? `Connection lost, retrying… ${amount} sent`
+          : `Uploaded ${amount}`;
+    $("up-main").classList.toggle("warn", conn.state !== "ok");
+    $("up-tech").textContent = `Encrypting ${plural(packed.length, "series", "series")} on this device: ${done} done · ${Math.min(totalRecords, Math.floor(sent / 65536))} of ${totalRecords} records uploaded${conn.state === "retrying" ? ` · next try in ${Math.round(conn.inMs / 1000)} s (${conn.reason})` : ""}`;
+  };
+  const onConn = (c: Connection) => {
+    conn = c;
+    document.body.dataset.connection = c.state;
+    paint();
   };
   try {
-    await uploadSeries(api, packed, (u) => {
-      paint(u.sent, u.total, u.seriesDone);
-      if (u.finished) $("up-log").prepend(h("li", null, `${seriesName(u.finished.series)} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
-    });
+    await uploadSeries(
+      api,
+      packed,
+      (u) => {
+        last = { sent: u.sent, total: u.total, done: u.seriesDone };
+        paint();
+        if (u.finished) $("up-log").prepend(h("li", null, `${seriesName(u.finished.series)} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
+      },
+      onConn,
+      { fresh: p.fresh },
+    );
     $("up-tech").textContent = `Encrypted ${plural(packed.length, "series", "series")} · ${totalRecords} records uploaded · making the link`;
     const studyIds = owner.entry.filter((e: any) => e.resource.resourceType === "ImagingStudy").map((e: any) => e.resource.id);
     const { bundle, allowedFiles } = subsetBundle(owner, studyIds);
-    let link = (await api.getShare()).links[0];
-    link ??= await api.createLink({ label: job.recipient, passcode: job.passcode, exp: job.exp, longLived: job.longLived, allowedFiles });
-    link = await publishLinkBundle(api, job.ownerKey, link.id, bundle);
+    let link = (await persist(() => api.getShare(), onConn)).links[0];
+    link ??= await persist(() => api.createLink({ label: job.recipient, passcode: job.passcode, exp: job.exp, longLived: job.longLived, allowedFiles }), onConn);
+    const made = link;
+    link = await persist(() => publishLinkBundle(api, job.ownerKey, made.id, bundle), onConn);
     const cred = { sid: job.sid, token: job.token, ownerKey: job.ownerKey };
     const shlink = await shlinkFor(link, job.ownerKey, cfg.viewerPrefix);
     const saved = saveShare({ ...cred, title: `${job.title}${job.recipient ? ` · for ${job.recipient}` : ""}`, createdAt: job.startedAt, apiBase: cfg.apiBase });

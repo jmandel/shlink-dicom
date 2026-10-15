@@ -79,6 +79,9 @@ enum Commands {
         /// Largest upload chunk (for example 64M)
         #[arg(long, env = "SHL_MAX_CHUNK_BYTES", default_value = "64M", value_parser = parse_size)]
         max_chunk_bytes: u64,
+        /// Lifetime of a passcode link's capability URL, in seconds
+        #[arg(long, env = "SHL_CAP_TTL_SECS", default_value_t = 3600)]
+        cap_ttl_secs: i64,
     },
 }
 
@@ -112,12 +115,14 @@ async fn main() {
             max_share_files,
             max_shares,
             max_chunk_bytes,
+            cap_ttl_secs,
         } => {
             let quotas = Quotas {
                 share_bytes: (max_share_bytes > 0).then_some(max_share_bytes),
                 share_files: (max_share_files > 0).then_some(max_share_files),
                 shares: (max_shares > 0).then_some(max_shares),
                 request_bytes: max_chunk_bytes,
+                cap_ttl_secs,
             };
             let state = AppState::with_quotas(&data_dir, quotas).expect("failed to initialize AppState");
             let origin = public_origin.unwrap_or_else(|| format!("http://localhost:{port}"));

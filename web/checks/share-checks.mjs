@@ -7,7 +7,7 @@
 // Needs the server on :3333 and the imaging sandbox on :3334 started with
 //   SHARE_REDIRECT_URIS=http://localhost:3333/share/smart-callback/ bun src/server.ts
 // Screenshots go to docs/shots/share/. Exits non-zero if any check fails. Deletes the shares it makes.
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
@@ -70,7 +70,7 @@ const check = (name, ok, detail = "") => {
 };
 const made = []; // manage URLs, deleted at the end
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const browser = await launchBrowser();
 
 async function newPage(dev, opts = {}) {
   const context = await browser.newContext({ ...DEVICES[dev] });
@@ -499,7 +499,7 @@ async function flowBigCt(dev) {
   const { readdirSync } = await import("node:fs");
   const files = readdirSync(dir).filter((f) => f.endsWith(".dcm")).sort().map((f) => `${dir}/${f}`);
   const mem = await memoryWatch();
-  const { context, page, errors } = await newPage(dev, { allowErrors: [/interrupted|ERR_ABORTED|net::ERR/i] });
+  const { context, page, errors } = await newPage(dev, { allowErrors: [/interrupted|ERR_ABORTED|net::ERR/i, /status of 404/] });
   await page.goto(`${BASE}/share`);
   await page.click("[data-src=files]");
   await page.setInputFiles("#in-files", files);
@@ -539,6 +539,187 @@ async function flowBigCt(dev) {
   await context.close();
 }
 
+// ------------------------------------------------------------------------ network failures
+
+const NET_DIR = process.env.NET_DIR ?? "/media/barracuda/shlink-dicom-share-big/ct200";
+
+/** A TCP proxy to the server that stalls one upload mid-body (it stops forwarding, keeps the socket). */
+async function stallProxy(port, upstreamPort, stallAtPatch) {
+  const net = await import("node:net");
+  let patches = 0, stalled = false;
+  const sockets = new Set();
+  const server = net.createServer((client) => {
+    const up = net.connect(upstreamPort, "127.0.0.1");
+    sockets.add(client).add(up);
+    let counting = -1;
+    client.on("data", (d) => {
+      if (counting < 0 && d.includes("PATCH /api/shares/") && !stalled && ++patches === stallAtPatch) counting = 0;
+      if (counting >= 0) {
+        counting += d.length;
+        if (counting > 1 << 20) {
+          stalled = true;
+          client.pause();
+          return; // stop forwarding; both sockets stay open
+        }
+      }
+      // Links name the server, not the proxy (same length, so bodies are untouched).
+      up.write(Buffer.from(d.toString("latin1").replaceAll(`Host: 127.0.0.1:${port}`, `Host: 127.0.0.1:${upstreamPort}`), "latin1"));
+    });
+    up.on("data", (d) => client.write(d));
+    for (const [a, b] of [[client, up], [up, client]]) {
+      a.on("error", () => b.destroy());
+      a.on("close", () => b.destroy());
+    }
+  });
+  await new Promise((r) => server.listen(port, "127.0.0.1", r));
+  return {
+    get stalled() {
+      return stalled;
+    },
+    close() {
+      for (const x of sockets) x.destroy();
+      server.close();
+    },
+  };
+}
+
+/** Starts the upload of NET_DIR's files and waits until `pct` percent is sent. */
+async function startNetUpload(page, dev, files, pct, o = {}) {
+  await page.goto(`${BASE}/share${o.query ?? ""}`);
+  await page.click("[data-src=files]");
+  await page.setInputFiles("#in-files", files);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+  await page.click("#rv-next");
+  await page.click("#who-form button[type=submit]");
+  await page.waitForFunction((p) => parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= p, pct, { timeout: 300000, polling: 100 });
+}
+
+async function finishNetUpload(page, P, files, timeout = 900000) {
+  await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout });
+  if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
+  const result = await page.evaluate(() => window.__share.result);
+  made.push(result.manage);
+  const v = verify(result.shlink, [NET_DIR]);
+  check(`${P}: every instance byte-identical to the files`, v.instances === files.length && v.matched === files.length, `${v.matched} of ${files.length} matched`);
+}
+
+/** Waits until the page reports a connection problem, and returns what it shows. */
+async function seesTrouble(page, timeout = 60000) {
+  await page.waitForFunction(() => ["offline", "retrying"].includes(document.body.dataset.connection), null, { timeout, polling: 100 });
+  return page.textContent("#up-main");
+}
+
+async function flowNetwork(dev) {
+  const { readdirSync } = await import("node:fs");
+  execFileSync("bun", [`${ROOT}web/checks/share-big.ts`, NET_DIR, "200", "512"], { cwd: ROOT, encoding: "utf8" });
+  const files = readdirSync(NET_DIR).filter((f) => f.endsWith(".dcm")).sort().map((f) => `${NET_DIR}/${f}`);
+  const slow = { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 4 << 20 };
+  const noise = [/ERR_INTERNET_DISCONNECTED|ERR_FAILED|ERR_CONNECTION|ERR_ABORTED|ERR_EMPTY_RESPONSE|net::/i, /503|502/];
+
+  // Offline for 5 s and for 60 s, on a connection limited to 4 MB/s.
+  for (const secs of [5, 60]) {
+    const P = `offline-${secs}s/${dev}`;
+    const { context, page, errors } = await newPage(dev, { allowErrors: noise });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.emulateNetworkConditions", slow);
+    await startNetUpload(page, dev, files, 20);
+    await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });
+    const shown = await seesTrouble(page);
+    check(`${P}: the page says the connection is lost`, /Connection lost/.test(shown), shown);
+    await page.screenshot({ path: `${SHOTS}${dev}-net-offline.png` });
+    await page.waitForTimeout(secs * 1000);
+    await cdp.send("Network.emulateNetworkConditions", slow);
+    await page.waitForFunction(() => document.body.dataset.connection === "ok", null, { timeout: 120000, polling: 200 });
+    check(`${P}: resumes when the network is back`, true);
+    await finishNetUpload(page, P, files);
+    await noErrors(P, errors);
+    await context.close();
+  }
+
+  // Flaky: a third of the appends fail (connection reset or a 503 from the proxy).
+  {
+    const P = `flaky/${dev}`;
+    const { context, page, errors } = await newPage(dev, { allowErrors: noise });
+    let failed = 0;
+    await page.route(/\/api\/shares\/[^/]+\/files\//, async (route) => {
+      const r = route.request();
+      if (r.method() === "PATCH" && Math.random() < 0.33) {
+        failed++;
+        return failed % 2 ? route.abort("connectionreset") : route.fulfill({ status: 503, body: "Service Unavailable" });
+      }
+      return route.continue();
+    });
+    await startNetUpload(page, dev, files, 0);
+    await finishNetUpload(page, P, files);
+    check(`${P}: rode out ${failed} failed requests`, failed > 0, `${failed} failed`);
+    await noErrors(P, errors);
+    await context.close();
+  }
+
+  // A server that stops responding mid-request (a proxy that stops forwarding part-way through a body).
+  if (/localhost|127\.0\.0\.1/.test(BASE)) {
+    const P = `stall/${dev}`;
+    const proxy = await stallProxy(3399, Number(new URL(BASE).port || 80), 3);
+    const { context, page, errors } = await newPage(dev, { allowErrors: noise });
+    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399" });
+    const shown = await seesTrouble(page, 120000);
+    check(`${P}: a stalled request is noticed`, proxy.stalled && /Connection lost/.test(shown), shown);
+    await finishNetUpload(page, P, files);
+    await noErrors(P, errors);
+    await context.close();
+    proxy.close();
+  }
+}
+
+/** A passcode link whose capability URLs last 5 s, re-shared while uploading slowly. */
+async function flowCapExpiry(dev) {
+  if (!/localhost|127\.0\.0\.1/.test(BASE)) return;
+  const P = `cap-expiry/${dev}`;
+  const { spawn } = await import("node:child_process");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const data = mkdtempSync("/media/barracuda/shlink-dicom-share-big/capsrv-");
+  const srv = spawn(`${ROOT}target/release/shl-dicom-server`, ["serve", "--port", "3398", "--data-dir", data], { env: { ...process.env, SHL_CAP_TTL_SECS: "5" }, stdio: "ignore" });
+  try {
+    for (let i = 0; i < 100; i++) {
+      try {
+        if ((await fetch("http://127.0.0.1:3398/api/demo-shares")).ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const src = JSON.parse(execFileSync("bun", [`${ROOT}web/checks/share-source.ts`, "http://127.0.0.1:3398", NET_DIR], { cwd: ROOT, encoding: "utf8" }).trim().split("\n").pop());
+    const { context, page, errors } = await newPage(dev, { allowErrors: [/404 .*\/cap\//, /status of 404/] });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 4 << 20 });
+    await page.goto(`${BASE}/share`);
+    await page.click("[data-src=link]");
+    await page.fill("#in-link", src.link);
+    await page.click("#link-form button[type=submit]");
+    await page.waitForSelector("#in-link-pass:visible");
+    await page.fill("#in-link-pass", "4321");
+    await page.click("#link-form button[type=submit]");
+    await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+    await page.click("#rv-next");
+    await page.click("#who-form button[type=submit]");
+    await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 900000 });
+    if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
+    const result = await page.evaluate(() => window.__share.result);
+    made.push(result.manage);
+    const ev = await (await fetch(`http://127.0.0.1:3398/api/shares/${src.sid}/access?limit=5000`, { headers: { Authorization: `Bearer ${src.token}` } })).json();
+    const posts = ev.events.filter((e) => e.method === "POST" && e.status === 200).length;
+    const expired = ev.events.filter((e) => /\/cap\//.test(e.path) && e.status === 404).length;
+    check(`${P}: the capability URL expired and was renewed with the remembered passcode`, posts >= 2, `${posts} manifest requests, ${expired} expired-capability 404s logged`);
+    const v = verify(result.shlink, [], undefined, [`--ref-link=${src.link}`, "--ref-passcode=4321"]);
+    check(`${P}: every instance byte-identical to the source link`, v.instances > 0 && v.matched === v.instances, `${v.matched} of ${v.instances}`);
+    await noErrors(P, errors);
+    await context.close();
+  } finally {
+    srv.kill();
+    rmSync(data, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 for (const dev of Object.keys(DEVICES)) {
@@ -550,6 +731,10 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "reshare") await flowReshare(dev);
     if (files && (!only || only === "manage")) await flowManage(dev, files);
     if (!only || only === "slide") await flowSlide(dev);
+    if (!only || only === "network") {
+      await flowNetwork(dev);
+      await flowCapExpiry(dev);
+    }
     // --big: the 1.2 GB slide and a multi-GB CT (local disk space and time; not run by default).
     if (args.includes("--big") && (!only || only === "big")) {
       await flowSlide(dev, { full: true });
@@ -559,6 +744,8 @@ for (const dev of Object.keys(DEVICES)) {
     check(`${dev}: flow ran to the end`, false, String(e.stack ?? e).split("\n").slice(0, 3).join(" "));
   }
 }
+
+pageErrorCheck(browser, check);
 
 await browser.close();
 // Clean up the shares the checks made.
