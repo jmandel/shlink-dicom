@@ -39,9 +39,11 @@ const sample = {
   mriSeries: studies[mri].series.map((s) => s.description),
   wristStudy: studies.findIndex((s) => /extremity|wrist/i.test(s.description ?? "")),
 };
+// The first wrist study only (the sample may hold several).
+const wristResource = bundle.entry.find((e: any) => e.resource?.resourceType === "ImagingStudy" && /extremity|wrist/i.test(e.resource.description ?? ""))?.resource;
 const wristOnly = {
   ...bundle,
-  entry: bundle.entry.filter((e: any) => e.resource?.resourceType !== "ImagingStudy" || /extremity|wrist/i.test(e.resource.description ?? "")),
+  entry: bundle.entry.filter((e: any) => e.resource?.resourceType !== "ImagingStudy" || e.resource === wristResource),
 };
 const subset = await links.mint(wristOnly, { label: "Wrist only" });
 const revoked = await links.mint(bundle, { label: "Revoked test" });

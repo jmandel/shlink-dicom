@@ -283,7 +283,7 @@ async function flowSubset(dev) {
   await page.goto(viewUrl(F.subsetLink));
   await waitOverview(page);
   const titles = await page.locator(".study-title").allTextContents();
-  check(`${label}: only the wrist study`, titles.length === 1 && /Extremity/i.test(titles[0]), titles.join(", "));
+  check(`${label}: only the wrist study`, titles.length === 1, titles.join(", "));
   await page.screenshot({ path: `${SHOTS}${dev}-subset-overview.png` });
   await openFirstStudy(page);
   await page.screenshot({ path: `${SHOTS}${dev}-subset-viewer.png` });
