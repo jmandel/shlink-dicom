@@ -2,7 +2,10 @@
 
 ## How to write this post
 
-- **Plain, clear language.** Write the way Josh writes: first person, short sentences, concrete nouns, numbers with units. Say what happened and what it means; stop when the point is made.
+**Use this outline as raw material, not a checklist** (Josh, after the first full draft read as long and tedious). The writer chooses what makes the best piece: restructure, merge or drop sections, and link out for detail. Not every figure, screenshot or fact needs to appear. Write it as an essay with a point of view, in Josh's voice, with natural sentence rhythm. The rules below are about truth and avoiding slop, not about style mechanics.
+
+
+- **Plain, clear language.** Write the way Josh writes: first person, concrete nouns, numbers with units where they matter. Say what happened and what it means; stop when the point is made.
 - **No AI slop.** None of the telltale signs:
   - no hype words ("revolutionary", "seamless", "game-changer", "unlock", "powerful", "robust" as filler, "cutting-edge");
   - no false contrasts ("It's not X, it's Y"), no rhetorical questions as transitions, no "Here's the thing";
