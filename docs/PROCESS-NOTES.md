@@ -388,3 +388,56 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
     - The `/how` page baked its numbers from a gitignored corpus report.
     - The server needed `libsqlite3-dev`.
   - **The lesson:** "it builds on my machine" had been hiding gaps between the working tree and git for a day.
+
+## 15 Oct, late morning to evening: from "it works" to "it handles everything"
+
+- **The slide viewer and the offset-table question.** The whole-slide agent built a deep-zoom viewer that fetches only visible tiles: 13.8 MB to look around a 1.2 GB slide at full resolution.
+  - **The catch:** most IDC slides converted by PixelMed have no frame offset table, so the viewer had to read 128–379 MB of fragment headers before the first sharp screen.
+  - **The agent's answer:** it prototyped putting frame offsets in the Bundle.
+  - **Josh's question:** "Is this suggestion only to rescue slides that lack metadata that could be present in DICOM?" It was.
+  - **Decision:** fix the files, not the protocol. The sandbox writes Basic Offset Tables into the sample slide, and the packer can add them at share time (fragments byte-identical). The Bundle prototype was deleted.
+  - **Follow-up:** Josh asked that a large first screen at least show progress, so the viewer gained a "Finding tiles: 42 MB of about 101 MB read" card, checked on a throttled 20 Mbit/s connection.
+- **"Greenfield, no legacy."** When the coordinator mentioned removing `/legacy`, Josh made it a standing rule: "we want to keep our code clean and to the point without accumulating tech debt within our own never-announced, unused-by-anyone repos". That day the repo lost:
+  - pi's original single page and its end-to-end test;
+  - the core Rust render path;
+  - most of the wasm session API, taking the wasm from 2.6 MB to 50 KB;
+  - viewer-kit's "legacy" CPU helpers.
+- **Uniform, realistic sample data.**
+  - **The decision:** Josh replaced the fictional Morgan Rivera with his own studies, de-identified as "Josh Example". "Just stripping names and identifiers is fine… I would like to have a uniform sample data set that is realistic." The five studies (brain MRI, CT abdomen/pelvis, three hand and wrist radiograph studies) went into his public `my-health-data` repo, one tgz per series.
+  - **The plan:** he asked for it before any work started. The coordinator wrote it out: Example^Josh; birth date reduced to 1 January of the real year; study dates kept; every other identifier, private tag and UID replaced or removed; burned-in text reviewed on contact sheets.
+  - **The coordinator's own review before pushing:**
+    - read every remaining header value;
+    - searched all files for the real name, birth date and record numbers, reading them from the sources at run time so they never landed in a repo;
+    - looked at full-resolution radiographs for CR ID flashes;
+    - found that the agent's first pass had kept the real insurer on a reconstructed order form, and sent it back.
+  - **"Synthesize, don't drop":** the agent had dropped a CT dose screen, a scanned order form and four MRI viewer captures because they showed identity. Josh: "Rather than dropping data from my report, please create a synthetic equivalent… to maintain verisimilitude." They were rebuilt from the sources with fictional identities and marked "(reconstructed)", plus a CT dose SR built from the screen's values.
+- **Reports come from somewhere else.** Josh pointed out that DICOM from imaging systems rarely carries the report: reports are FHIR DiagnosticReports from the clinical side. The viewer shows them beside the images and labels where each part came from.
+  - Because we create the sample, Josh rejected any "labelled as a guess" matching for our own data. Every report carries the same accession, Study UID and imagingStudy reference as its images, and a data check asserts it.
+  - The bland "SAMPLE REPORT" texts became realistic synthetic reports from fictional clinicians and facilities, with one plain footer line saying they are synthetic.
+- **"You're not really thinking big."** After the long-tail sweep, the coordinator called floating-point pixel data "out of scope". Josh asked what else was being swept under the rug. The honest answer: "out of scope" was the coordinator's own tier label, not a decision. The first proposal listed defensive fixes. Josh: "I'm seeing a bunch of overly defensive ideas here and you're not really thinking big. Please come back at the proposal that addresses everything we plausibly can."
+  - **The result:** docs/COVERAGE-PLAN.md, with seven workstreams and five agents in parallel. Only three things stay refused: JPIP references, Hologic's private tomosynthesis and undocumented vendor compression.
+  - **What landed the same day:**
+    - every JPEG mode, JPEG XL, JPEG 2000 Part 2, float pixel data and the retired colour models (corpus 942 → 1,176);
+    - SR, PDF/CDA, waveforms, 3D models, SEG/RTSTRUCT/presentation-state layers;
+    - LUT-accurate display and MPR;
+    - focal planes, fluorescence, slide annotations;
+    - H.264/HEVC playback through the browser, and MPEG-2 through an LGPL FFmpeg wasm whose source is served alongside;
+    - resumable streaming uploads that took a 3.36 GB CT from a phone with flat memory.
+- **Josh caught what the checks missed.**
+  - A "Glass slide" button showed on a CT after visiting a slide.
+  - The Download button crashed on the CT. Only the MRI's download had a check, so the matrix of studies and view states became a test.
+  - Josh also redefined downloads: the whole study is the one-click default, and viewer-made images (reformats) are never offered as files.
+  - On reformats, he asked "do we use algorithms that match, say, Cornerstone?" They were simple axis cuts checked only against our own numpy. They are now being rebuilt against SimpleITK/vtk with patient-space resampling, oblique planes and slabs.
+- **Coordination failures and fixes.**
+  - **A commit swept in staged work.** A commit meant for two files also took another agent's staged deletions, which broke the build. The fix was a forward commit, and from then on every commit uses an explicit pathspec. (Josh: rewriting history is fine before launch.)
+  - **Builds collided.** Five agents rebuilding `dist/web` produced phantom check failures, because the build deleted the site before writing it. The build now assembles in a private folder and swaps it into place.
+  - **Two lost writes, one caught.** The objects agent overwrote the slide agent's new `icc.ts`, then rebuilt it from that agent's transcript, and the slide agent confirmed the rebuild exact. The slide agent briefly reverted and restored shared files to prove a test caught its bug; nothing was lost, but only because the timing was lucky.
+- **exe.dev was the infrastructure lesson.** SSH failed on our VMs and on some of Josh's older ones, yet worked on others. Josh's observation that one old VM worked pointed at broken hosts rather than our setup. The SSH keys here can't change the account's region, so Josh moved it to Dallas himself. The VMs, recreated there, worked at once, including first-boot setup scripts.
+- **Upload design with Josh.**
+  - **His priority:** network hiccups matter more than page reloads. The client now retries without limit with offset checks, holds a re-shared link's passcode in memory ("we receive passcodes on every access attempt"), and follows the IETF resumable-upload draft.
+  - **Study-level files:** a second pi session wrote the study-file and S3 plan. Josh and the coordinator refined it:
+    - a hybrid `linked-file` (study default, optional per-series override);
+    - HL7 canonical extension addresses;
+    - proxy or redirect as a server setting, with no "unguessable public objects" ("doesn't pass the sniff test");
+    - no protocol change.
+- **Blog.** pi drafted the post from both journals and the annotated outline (figure specs and a screenshot list). Josh's corrections: he is the author of both SMART Health Links and the SMART Imaging IG, so the post shouldn't thank "their authors", but it shouldn't announce his authorship either. The Codex header image was first started without closing stdin and sat waiting for input; the coordinator noticed hours later.

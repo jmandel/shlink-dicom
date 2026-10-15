@@ -104,6 +104,12 @@ Related docs:
   - Encapsulated PDF in DICOM is the secondary case: only one or two in the demo sample.
 - **De-identification (Josh, 15 Oct):** never drop PHI-bearing content. Rebuild it as a synthetic equivalent with fake names (dose screens, scanned documents, viewer captures).
 
+- **Study files and S3 (Josh, 15 Oct):** docs/STUDY-FILES-AND-S3-PLAN.md is approved.
+  - **Format:** a hybrid `linked-file` (study default, optional per-series override; offsets per file) under the HL7 SMART Health Cards and Links canonical URLs, to be published in that IG.
+  - **Reads:** proxy or redirect is a server setting for S3 (default proxy); the protocol is unchanged.
+  - **Storage:** rusty-s3 + reqwest; refcounted blobs.
+  - **Who:** pi (tmux session 1) wrote the plan. Part 1 is one new Claude agent once web/view is quiet; Part 2 is the Share agent after its current items; pi reviews Part 1 against the plan.
+
 ## Decisions pending (ask Josh)
 
 - **PROPOSAL §8, DiagnosticReport** (Share agent's suggestion, not yet written into the spec):
