@@ -40,6 +40,8 @@ pub const DEFAULT_CAP_TTL_SECS: i64 = 3600; // 1 hour
 /// Longest lifetime a sharer may ask for with `POST /api/shares` or `PATCH /api/shares/{sid}`.
 pub const MAX_SHARE_TTL_SECS: i64 = 31 * 24 * 3600;
 pub const DEFAULT_PASSCODE_ATTEMPTS: i64 = 5;
+/// An upload not finished this long after it started is dropped by the sweep.
+pub const STALE_UPLOAD_SECS: i64 = 24 * 3600;
 const MAX_OPEN_SHARE_DBS: usize = 64;
 
 pub fn now_unix() -> i64 {
@@ -246,6 +248,7 @@ impl AppState {
             demo_shares: Arc::new(Mutex::new(Vec::new())),
         };
         state.run_sweep()?;
+        state.sweep_stale_uploads();
         Ok(state)
     }
 
@@ -260,6 +263,25 @@ impl AppState {
 
     pub fn part_path(&self, sid: &str, file_id: &str) -> PathBuf {
         self.staging_dir(sid).join(format!("{file_id}.part"))
+    }
+
+    /// A staged part on its way to the store: `{fileId}.part.{n}`. Its bytes count toward the
+    /// upload's offset only once the part is recorded.
+    pub fn sending_path(&self, sid: &str, file_id: &str, part_num: u32) -> PathBuf {
+        self.staging_dir(sid).join(format!("{file_id}.part.{part_num}"))
+    }
+
+    /// Removes an upload's staged files: `{fileId}.part` and any `{fileId}.part.{n}`.
+    pub fn remove_staged(&self, sid: &str, file_id: &str) {
+        let _ = std::fs::remove_file(self.part_path(sid, file_id));
+        let prefix = format!("{file_id}.part.");
+        if let Ok(entries) = std::fs::read_dir(self.staging_dir(sid)) {
+            for e in entries.flatten() {
+                if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- blobs and their references
@@ -295,7 +317,8 @@ impl AppState {
         let _ = cat.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, ?2)", params![key, upload_id]);
     }
 
-    /// Deletes trashed blobs and aborts trashed uploads in the store.
+    /// Deletes trashed blobs and aborts trashed uploads in the store. An item stays in the trash
+    /// until the store confirms it is gone.
     pub async fn empty_trash(&self) {
         let items: Vec<(i64, String, Option<String>)> = {
             let cat = self.catalog.lock().unwrap();
@@ -306,11 +329,16 @@ impl AppState {
             st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
         };
         for (rowid, key, upload_id) in items {
-            match upload_id {
+            let done = match upload_id {
                 Some(id) => self.store.abort_upload(&key, &id).await,
                 None => self.store.delete(&key).await,
+            };
+            match done {
+                Ok(()) => {
+                    let _ = self.catalog.lock().unwrap().execute("DELETE FROM trash WHERE rowid = ?1", params![rowid]);
+                }
+                Err(e) => eprintln!("trash: {e} (will retry)"),
             }
-            let _ = self.catalog.lock().unwrap().execute("DELETE FROM trash WHERE rowid = ?1", params![rowid]);
         }
     }
 
@@ -370,6 +398,49 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    /// Drops uploads started more than `STALE_UPLOAD_SECS` ago: their rows, staged files and
+    /// multipart uploads. Uploads with a request in progress are left alone.
+    pub fn sweep_stale_uploads(&self) {
+        let cutoff = now_unix() - STALE_UPLOAD_SECS;
+        let sids: Vec<String> = {
+            let cat = self.catalog.lock().unwrap();
+            cat.prepare("SELECT sid FROM shares")
+                .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default()
+        };
+        let mut trashed = false;
+        for sid in sids {
+            // Opened directly, so the sweep doesn't churn the pool of open databases.
+            let path = self.share_db_path(&sid);
+            let Ok(conn) = Connection::open(&path) else { continue };
+            let _ = conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+            let stale: Vec<(String, String, Option<String>)> = conn
+                .prepare("SELECT file_id, storage_key, s3_upload_id FROM uploads WHERE started_at < ?1")
+                .and_then(|mut st| st.query_map(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default();
+            for (fid, key, upload_id) in stale {
+                let Some(_busy) = self.claim_upload(&sid, &fid) else { continue };
+                if conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![fid]).is_err() {
+                    continue;
+                }
+                self.remove_staged(&sid, &fid);
+                if let Some(id) = upload_id {
+                    self.trash_upload(&key, &id);
+                    trashed = true;
+                }
+            }
+        }
+        if trashed {
+            self.empty_trash_soon();
+        }
+    }
+
+    /// Marks `{sid}/{fileId}` as having a request in progress; None when one already has.
+    pub fn claim_upload(&self, sid: &str, file_id: &str) -> Option<UploadClaim> {
+        let key = format!("{sid}/{file_id}");
+        self.uploading.lock().unwrap().insert(key.clone()).then(|| UploadClaim(self.clone(), key))
     }
 
     pub fn catalog_has_share(&self, sid: &str) -> bool {
@@ -591,7 +662,7 @@ impl AppState {
                     .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
                     .unwrap_or_default();
                 let uploads = conn
-                    .prepare("SELECT file_id, s3_upload_id FROM uploads WHERE s3_upload_id IS NOT NULL")
+                    .prepare("SELECT storage_key, s3_upload_id FROM uploads WHERE s3_upload_id IS NOT NULL")
                     .and_then(|mut st| st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()))
                     .unwrap_or_default();
                 (keys, uploads)
@@ -599,8 +670,8 @@ impl AppState {
             for k in keys {
                 self.blob_release(&k);
             }
-            for (fid, id) in uploads {
-                self.trash_upload(&storage_key(sid, &fid), &id);
+            for (key, id) in uploads {
+                self.trash_upload(&key, &id);
             }
         }
         if let Some(conn_arc) = self.pool.lock().unwrap().remove(sid) {
@@ -856,9 +927,17 @@ pub fn build_link_resource_from_row(
     })
 }
 
-/// A blob's storage key: the share it was uploaded to and the file id.
-pub fn storage_key(sid: &str, file_id: &str) -> String {
-    format!("{sid}/{file_id}.bin")
+/// A request in progress on an upload; dropping it ends the claim.
+pub struct UploadClaim(AppState, String);
+impl Drop for UploadClaim {
+    fn drop(&mut self) {
+        self.0.uploading.lock().unwrap().remove(&self.1);
+    }
+}
+
+/// A fresh storage key for a new blob: random, so it is never reused and names no share.
+pub fn new_storage_key() -> String {
+    format!("{}.bin", b64url_encode(&random_bytes::<16>().expect("random bytes")))
 }
 
 /// Records a complete file (already in the store under `storage_key`) in the share's database.
@@ -880,7 +959,7 @@ pub async fn store_file(state: &AppState, sid: &str, file_id: &str, ciphertext: 
     std::fs::create_dir_all(state.staging_dir(sid)).map_err(|e| e.to_string())?;
     let part = state.part_path(sid, file_id);
     std::fs::write(&part, ciphertext).map_err(|e| e.to_string())?;
-    let key = storage_key(sid, file_id);
+    let key = new_storage_key();
     state.store.put_file(&key, &part).await?;
     state.blob_add(&key);
     let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
@@ -945,8 +1024,8 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
            owner_updated_at    INTEGER
          );
 
-         -- Complete encrypted files. The bytes are in the blob store under storage_key, which a
-         -- cloned share shares with its source.
+         -- Complete encrypted files. The bytes are in the blob store under storage_key (random,
+         -- never reused), which a cloned share shares with its source.
          CREATE TABLE IF NOT EXISTS files (
            file_id      TEXT PRIMARY KEY,
            storage_key  TEXT NOT NULL,
@@ -957,6 +1036,7 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          -- Uploads in progress. Upload-Offset = flushed_bytes + the size of shares/{sid}/{file_id}.part.
          CREATE TABLE IF NOT EXISTS uploads (
            file_id        TEXT PRIMARY KEY,
+           storage_key    TEXT NOT NULL,           -- the blob it will become
            size           INTEGER NOT NULL,
            s3_upload_id   TEXT,
            flushed_bytes  INTEGER NOT NULL DEFAULT 0,

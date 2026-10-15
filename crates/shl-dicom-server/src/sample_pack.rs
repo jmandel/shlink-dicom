@@ -1,7 +1,7 @@
 //! Packs the server's sample (`samples/*.tgz`) into a share's study files on disk, holding at most
 //! one record and one header in memory: each archive member is written to a scratch file while its
 //! header is read, then every study is encrypted record by record (PROPOSAL.md §9.2, §11.1: one
-//! file per study, its series in order) from those files straight into `shares/{sid}/{fileId}.bin`.
+//! file per study, its series in order) from those files into a staged file, which goes into the blob store.
 //! Instances are kept byte for byte.
 use std::{
     collections::BTreeMap,
@@ -14,7 +14,7 @@ use shl_dicom_core::{
     crypto::{b64url_encode, encrypt_file_stream, random_bytes},
     dicom_io::{parse_dicom_header_reader, ParsedDicomInstance},
 };
-use crate::state::{record_file, storage_key, AppState};
+use crate::state::{new_storage_key, record_file, AppState};
 
 /// Puts a staged file into the blob store from this synchronous packer (the CLI runs it inside
 /// Tokio, so the store call runs on the runtime).
@@ -146,7 +146,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             out.flush().map_err(|e| e.to_string())?;
             drop(out);
             // Into the blob store (local files, or S3 as a multipart upload streamed from disk).
-            let storage = storage_key(sid, &file_id);
+            let storage = new_storage_key();
             store_sync(state, &storage, &part)?;
             state.blob_add(&storage);
             record_file(&conn_arc.lock().unwrap(), &file_id, &storage, size)?;

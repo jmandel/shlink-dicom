@@ -10,7 +10,7 @@ use shl_dicom_core::{
 use shl_dicom_server::{
     build_app_router,
     state::AppState,
-    storage::{BlobStore, LocalFsStore, ReadDelivery, ReadMode, S3Config, S3Store},
+    storage::{BlobStore, BoxFuture, LocalFsStore, ReadDelivery, ReadError, ReadMode, S3Config, S3Store},
 };
 use tokio::net::TcpListener;
 
@@ -56,6 +56,101 @@ async fn blob_exists(state: &AppState, key: &str) -> bool {
         Err(_) => false,
         Ok(ReadDelivery::Stream(_)) => true,
         Ok(ReadDelivery::Redirect(url)) => reqwest::Client::new().get(url).header("Range", "bytes=0-0").send().await.is_ok_and(|r| r.status().is_success()),
+    }
+}
+
+/// A file's storage key, from the share's database.
+fn file_key(state: &AppState, sid: &str, fid: &str) -> String {
+    let c = state.open_share_db(sid).unwrap();
+    let conn = c.lock().unwrap();
+    conn.query_row("SELECT storage_key FROM files WHERE file_id = ?1", params![fid], |r| r.get(0)).unwrap()
+}
+
+/// A store that fails on request: the next `flush_part`, or every `delete` while `fail_delete` is set. Over the local
+/// store (which sends no parts) it keeps parts itself, as S3 would, so the part logic runs too.
+struct Flaky {
+    inner: Arc<dyn BlobStore>,
+    parts_dir: std::path::PathBuf,
+    fail_flush: std::sync::atomic::AtomicBool,
+    fail_delete: std::sync::atomic::AtomicBool,
+}
+
+impl Flaky {
+    fn new(inner: Arc<dyn BlobStore>, dir: &std::path::Path) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            parts_dir: dir.join("flaky-parts"),
+            fail_flush: false.into(),
+            fail_delete: false.into(),
+        })
+    }
+    fn emulates_parts(&self) -> bool {
+        self.inner.part_target(1).is_none()
+    }
+}
+
+impl BlobStore for Flaky {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn locate(&self, key: &str) -> String {
+        self.inner.locate(key)
+    }
+    fn read_range<'a>(&'a self, key: &'a str, start: u64, end: u64) -> BoxFuture<'a, Result<ReadDelivery, ReadError>> {
+        self.inner.read_range(key, start, end)
+    }
+    fn part_target(&self, total: u64) -> Option<u64> {
+        self.inner.part_target(total).or(Some(8 << 20))
+    }
+    fn begin_upload<'a>(&'a self, key: &'a str, total: u64) -> BoxFuture<'a, Result<Option<String>, String>> {
+        if self.emulates_parts() {
+            return Box::pin(async { Ok(Some("emulated".to_string())) });
+        }
+        self.inner.begin_upload(key, total)
+    }
+    fn flush_part<'a>(&'a self, key: &'a str, upload_id: &'a str, part_num: u32, staged: &'a std::path::Path) -> BoxFuture<'a, Result<(String, u64), String>> {
+        Box::pin(async move {
+            if self.fail_flush.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err("injected part failure".to_string());
+            }
+            if !self.emulates_parts() {
+                return self.inner.flush_part(key, upload_id, part_num, staged).await;
+            }
+            std::fs::create_dir_all(&self.parts_dir).unwrap();
+            let len = std::fs::copy(staged, self.parts_dir.join(format!("{key}.{part_num}"))).map_err(|e| e.to_string())?;
+            Ok((format!("etag{part_num}"), len))
+        })
+    }
+    fn complete_upload<'a>(&'a self, key: &'a str, upload_id: Option<&'a str>, parts: &'a [(u32, String)], staged: &'a std::path::Path) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if !self.emulates_parts() || upload_id.is_none() {
+                return self.inner.complete_upload(key, upload_id, parts, staged).await;
+            }
+            let whole = self.parts_dir.join(format!("{key}.whole"));
+            let mut out = Vec::new();
+            for (n, _) in parts {
+                out.extend(std::fs::read(self.parts_dir.join(format!("{key}.{n}"))).unwrap());
+            }
+            std::fs::write(&whole, out).unwrap();
+            self.inner.put_file(key, &whole).await
+        })
+    }
+    fn abort_upload<'a>(&'a self, key: &'a str, upload_id: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        if self.emulates_parts() {
+            return Box::pin(async { Ok(()) });
+        }
+        self.inner.abort_upload(key, upload_id)
+    }
+    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("injected delete failure".to_string());
+            }
+            self.inner.delete(key).await
+        })
+    }
+    fn put_file<'a>(&'a self, key: &'a str, path: &'a std::path::Path) -> BoxFuture<'a, Result<(), String>> {
+        self.inner.put_file(key, path)
     }
 }
 
@@ -977,7 +1072,7 @@ async fn test_chunked_resumable_upload_and_disk_range_reads() {
     let r = append(200_000, 300_000, true).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.headers()["upload-complete"], "?1");
-    assert!(blob_exists(&state, &shl_dicom_server::state::storage_key(&sid, &fid)).await);
+    assert!(blob_exists(&state, &file_key(&state, &sid, &fid)).await);
     let h = head(&client).await.unwrap();
     assert_eq!(h.headers()["upload-complete"], "?1");
 
@@ -1051,7 +1146,8 @@ async fn test_clone_shares_blobs_by_reference() {
     let fid = b64url_encode(&[42u8; 16]);
     let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
     shl_dicom_server::state::store_file(&state, &src, &fid, &data).await.unwrap();
-    let key = shl_dicom_server::state::storage_key(&src, &fid);
+    let key = file_key(&state, &src, &fid);
+    assert!(!key.contains(&src), "storage keys name no share: {key}");
     let clone: Value = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap().json().await.unwrap();
     let (sid, token) = (clone["share"]["id"].as_str().unwrap().to_string(), clone["controlToken"].as_str().unwrap().to_string());
 
@@ -1199,6 +1295,12 @@ async fn test_redirect_reads() {
     assert_eq!(r.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
     let to = r.headers()[header::LOCATION].to_str().unwrap().to_string();
     assert!(to.contains("X-Amz-Signature="), "{to}");
+    assert!(!to.contains(&sid), "the presigned URL names no share");
+    // HEAD is answered by the server (a presigned URL is for GET only).
+    let h = client.head(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", "bytes=100-199").send().await.unwrap();
+    assert_eq!(h.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(h.headers()[header::CONTENT_LENGTH], "100");
+    assert_eq!(h.headers()[header::ACCEPT_RANGES], "bytes");
     let got = reqwest::Client::new().get(&to).header("Range", "bytes=100-199").send().await.unwrap();
     assert_eq!(got.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(got.bytes().await.unwrap().as_ref(), &data[100..200]);
@@ -1245,7 +1347,8 @@ async fn test_deleting_an_upload_aborts_its_multipart_upload() {
     assert_eq!(parts, 1, "9 MiB staged should have gone up as one part");
     let bucket = rusty_s3::Bucket::new(std::env::var("SHL_TEST_S3_ENDPOINT").unwrap().parse().unwrap(), rusty_s3::UrlStyle::Path, bucket_name, "us-east-1").unwrap();
     let creds = rusty_s3::Credentials::new(std::env::var("AWS_ACCESS_KEY_ID").unwrap(), std::env::var("AWS_SECRET_ACCESS_KEY").unwrap());
-    let object = state.store.locate(&shl_dicom_server::state::storage_key(&sid, &fid));
+    let key: String = state.open_share_db(&sid).unwrap().lock().unwrap().query_row("SELECT storage_key FROM uploads WHERE file_id = ?1", params![fid], |r| r.get(0)).unwrap();
+    let object = state.store.locate(&key);
     let object = object.splitn(4, '/').nth(3).unwrap().to_string(); // s3://bucket/<object>
     use rusty_s3::S3Action;
     let list = || rusty_s3::actions::ListParts::new(&bucket, Some(&creds), &object, &upload_id).sign(std::time::Duration::from_secs(60));
@@ -1254,5 +1357,176 @@ async fn test_deleting_an_upload_aborts_its_multipart_upload() {
     state.empty_trash().await;
     let st = client.get(list()).send().await.unwrap().status();
     assert_eq!(st, StatusCode::NOT_FOUND, "ListParts after the abort");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A part that fails on its way to the store leaves the upload where the last stored part ended:
+/// the append gets a 502, HEAD reports that offset (never more), and the client sends the rest
+/// again. A leftover `{fileId}.part.{n}` from a crash doesn't count either.
+#[tokio::test]
+async fn test_a_failed_part_rolls_the_offset_back() {
+    let dir = temp_data_dir("failed_part");
+    let flaky = Flaky::new(test_store(&dir), &dir);
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas::default(), flaky.clone()).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[11u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    let total = 20usize << 20;
+    let data: Vec<u8> = (0..total as u32).map(|i| (i.wrapping_mul(2246822519) >> 24) as u8).collect();
+    let r = client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").header("Upload-Length", total.to_string()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let append = |off: usize, end: usize| {
+        let (c, u, t, body) = (client.clone(), url.clone(), token.clone(), data[off..end].to_vec());
+        async move {
+            c.patch(&u)
+                .bearer_auth(&t)
+                .header("Content-Type", "application/partial-upload")
+                .header("Upload-Offset", off.to_string())
+                .header("Upload-Complete", if end == total { "?1" } else { "?0" })
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let offset = || {
+        let (c, u, t) = (client.clone(), url.clone(), token.clone());
+        async move { c.head(&u).bearer_auth(&t).send().await.unwrap().headers()["upload-offset"].to_str().unwrap().parse::<usize>().unwrap() }
+    };
+    // 3 + 3 MiB stay staged; the third append reaches the 8 MiB part size and the part fails.
+    assert!(append(0, 3 << 20).await.status().is_success());
+    assert!(append(3 << 20, 6 << 20).await.status().is_success());
+    flaky.fail_flush.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = append(6 << 20, 9 << 20).await;
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    let body = r.text().await.unwrap();
+    assert!(!body.contains("injected"), "store detail kept out of the response: {body}");
+    assert_eq!(offset().await, 0, "nothing was stored yet");
+    // A stray part file from a crash mid-send doesn't count toward the offset.
+    std::fs::write(state.sending_path(&sid, &fid, 1), vec![0u8; 1000]).unwrap();
+    assert_eq!(offset().await, 0);
+    // Continue from HEAD's offset to the end.
+    let mut off = offset().await;
+    while off < total {
+        let end = (off + (3 << 20)).min(total);
+        let r = append(off, end).await;
+        assert!(r.status().is_success(), "append at {off}: {}", r.status());
+        off = end;
+        if end < total {
+            assert_eq!(offset().await, end);
+        }
+    }
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap();
+    for (a, b) in [(0usize, 99usize), ((8 << 20) - 50, (8 << 20) + 50), (total - 100, total - 1)] {
+        let r = reqwest::get(format!("{base}/shl/{lid}/{fid}.bin")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(&r.bytes().await.unwrap()[a..=b], &data[a..=b], "range {a}-{b}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A blob whose delete fails stays in the trash and goes on the next try.
+#[tokio::test]
+async fn test_a_failed_delete_stays_in_the_trash() {
+    let dir = temp_data_dir("trash_retry");
+    let flaky = Flaky::new(test_store(&dir), &dir);
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas::default(), flaky.clone()).unwrap();
+    let (sid, _) = state.create_share(true, None).unwrap();
+    let fid = b64url_encode(&[12u8; 16]);
+    shl_dicom_server::state::store_file(&state, &sid, &fid, &[7u8; 5000]).await.unwrap();
+    let key = file_key(&state, &sid, &fid);
+    flaky.fail_delete.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.delete_share(&sid).unwrap();
+    state.empty_trash().await;
+    assert!(blob_exists(&state, &key).await, "the failed delete is retried later");
+    flaky.fail_delete.store(false, std::sync::atomic::Ordering::SeqCst);
+    state.empty_trash().await;
+    assert!(!blob_exists(&state, &key).await, "deleted on the second try");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The sweep drops uploads started more than a day ago: the row, the staged bytes, and (on S3)
+/// the multipart upload.
+#[tokio::test]
+async fn test_the_sweep_drops_stale_uploads() {
+    let dir = temp_data_dir("stale_uploads");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = |fid: &str| format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    let (old, new) = (b64url_encode(&[13u8; 16]), b64url_encode(&[14u8; 16]));
+    for fid in [&old, &new] {
+        let r = client
+            .put(url(fid))
+            .bearer_auth(&token)
+            .header("Upload-Complete", "?0")
+            .header("Upload-Length", (20u64 << 20).to_string())
+            .body(vec![3u8; 1000])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+    }
+    let day_ago = shl_dicom_server::state::now_unix() - shl_dicom_server::state::STALE_UPLOAD_SECS - 60;
+    state.open_share_db(&sid).unwrap().lock().unwrap().execute("UPDATE uploads SET started_at = ?1 WHERE file_id = ?2", params![day_ago, old]).unwrap();
+    state.sweep_stale_uploads();
+    state.empty_trash().await;
+    assert_eq!(client.head(url(&old)).bearer_auth(&token).send().await.unwrap().status(), StatusCode::NOT_FOUND, "stale upload dropped");
+    assert!(!state.part_path(&sid, &old).exists(), "its staged bytes are gone");
+    let h = client.head(url(&new)).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(h.headers()["upload-offset"], "1000", "a recent upload is kept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose blob is missing from the store reads as 404, not 502. HEAD needs no store read.
+#[tokio::test]
+async fn test_a_missing_blob_is_not_found() {
+    if std::env::var("SHL_TEST_S3_READ_MODE").as_deref() == Ok("redirect") {
+        return; // the bucket answers that read
+    }
+    let dir = temp_data_dir("missing_blob");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[15u8; 16]);
+    let r = client.put(format!("{base}/api/shares/{sid}/files/{fid}.bin")).bearer_auth(&token).body(vec![9u8; 4096]).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap();
+    let h = client.head(format!("{base}/shl/{lid}/{fid}.bin")).send().await.unwrap();
+    assert_eq!(h.status(), StatusCode::OK);
+    assert_eq!(h.headers()[header::CONTENT_LENGTH], "4096");
+    state.store.delete(&file_key(&state, &sid, &fid)).await.unwrap();
+    let r = client.get(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", "bytes=0-9").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
     let _ = std::fs::remove_dir_all(&dir);
 }

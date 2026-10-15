@@ -19,10 +19,10 @@
    data/
    ├── catalog.db                        # Routing catalog: shares(sid, expires_at), links(lid -> sid), caps(token -> lid, expires_at), blobs(refcounts), trash
    ├── samples/                          # The server's sample: one .tgz per study, sample.json, reports.json
-   ├── blobs/{sid}/{fileId}.bin          # Encrypted files, one per study (local store; with S3, objects {prefix}{sid}/{fileId}.bin)
+   ├── blobs/{key}                       # Encrypted files, one per study, under random storage keys (local store; with S3, objects {prefix}{key})
    └── shares/
        ├── {sid}.db                      # Per-share SQLite DB: share(control_token_hash, owner_bundle), files, uploads, upload_parts, links, link_files, access_log
-       └── {sid}/{fileId}.part           # Staged bytes of an upload in progress
+       └── {sid}/{fileId}.part           # Staged bytes of an upload in progress ({fileId}.part.{n} while part n goes to S3)
    ```
 
 ---
@@ -45,7 +45,7 @@ shlink-dicom/
 ├── data/                               # Default --data-dir (gitignored; see docs/storage.md)
 │   ├── catalog.db                      # Routing SQLite DB (shares, links, caps)
 │   ├── samples/                        # The server's sample (one .tgz per study, sample.json, reports.json)
-│   ├── blobs/{sid}/{fileId}.bin        # Encrypted files (local store)
+│   ├── blobs/{key}                     # Encrypted files under random storage keys (local store)
 │   └── shares/
 │       ├── {sid}.db                    # Per-share SQLite DB (share, files, uploads, upload_parts, links, link_files, access_log)
 │       └── {sid}/{fileId}.part         # Uploads in progress

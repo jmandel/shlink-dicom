@@ -11,7 +11,7 @@ use crate::state::{
     DEFAULT_PASSCODE_ATTEMPTS,
 };
 
-const SEED_VERSION: u32 = 4;
+const SEED_VERSION: u32 = 5;
 
 /// Title and description of the sample share, from `samples/sample.json` when present.
 #[derive(serde::Deserialize)]

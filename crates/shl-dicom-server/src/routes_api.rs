@@ -19,7 +19,7 @@ use crate::{
     routes_shl::request_origin,
     state::{
         build_link_resource_from_row, hash_passcode, is_valid_id22, now_unix,
-        parse_file_name, record_file, sha256_bytes, storage_key, AccessEvent, AppState, ShareFileEntry,
+        new_storage_key, parse_file_name, record_file, sha256_bytes, AccessEvent, AppState, ShareFileEntry,
         DEFAULT_PASSCODE_ATTEMPTS, DEFAULT_SANDBOX_TTL_SECS, MAX_SHARE_TTL_SECS,
     },
 };
@@ -160,10 +160,12 @@ pub async fn clone_share(
             .into_response();
     };
 
-    // The clone names the same blobs (no bytes are copied); each gains a reference.
+    // The clone names the same blobs (no bytes are copied); each gains a reference. The source's
+    // database stays locked until then, so a file deleted from it meanwhile can't lose its blob.
+    // Lock order: the source share, then the new share, then the catalog.
     let copy_res: Result<(), String> = (|| {
+        let src_conn = src_conn_arc.lock().unwrap();
         let rows: Vec<(String, String, i64)> = {
-            let src_conn = src_conn_arc.lock().unwrap();
             let mut stmt = src_conn.prepare("SELECT file_id, storage_key, size FROM files").map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
@@ -446,16 +448,10 @@ pub async fn head_share_file(
     }
 }
 
-struct UploadGuard(AppState, String);
-impl Drop for UploadGuard {
-    fn drop(&mut self) {
-        self.0.uploading.lock().unwrap().remove(&self.1);
-    }
-}
-
-fn claim(state: &AppState, sid: &str, file_id: &str) -> Option<UploadGuard> {
-    let key = format!("{sid}/{file_id}");
-    state.uploading.lock().unwrap().insert(key.clone()).then(|| UploadGuard(state.clone(), key))
+/// A store request that failed: the detail goes to the log, the client gets a plain 502.
+fn store_failed(what: &str, e: String) -> Response {
+    eprintln!("{what}: {e}");
+    json_err(StatusCode::BAD_GATEWAY, "the file store did not respond as expected; ask HEAD where the upload stands and try again")
 }
 
 /// How a request's body is appended.
@@ -522,22 +518,29 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
     Append::Ok(start + got)
 }
 
-/// The upload's multipart id and the parts sent so far, in order.
-fn upload_parts(state: &AppState, sid: &str, file_id: &str) -> (Option<String>, Vec<(u32, String)>) {
-    let Some(c) = state.open_share_db(sid) else { return (None, Vec::new()) };
+/// An upload's storage key, its multipart id, and the parts sent so far, in order.
+fn upload_row(state: &AppState, sid: &str, file_id: &str) -> Option<(String, Option<String>, Vec<(u32, String)>)> {
+    let c = state.open_share_db(sid)?;
     let conn = c.lock().unwrap();
-    let id: Option<String> = conn.query_row("SELECT s3_upload_id FROM uploads WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok().flatten();
+    let (key, id): (String, Option<String>) = conn
+        .query_row("SELECT storage_key, s3_upload_id FROM uploads WHERE file_id = ?1", params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .ok()?;
     let parts = conn
         .prepare("SELECT part_num, etag FROM upload_parts WHERE file_id = ?1 ORDER BY part_num")
         .and_then(|mut st| st.query_map(params![file_id], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()))
         .unwrap_or_default();
-    (id, parts)
+    Some((key, id, parts))
 }
 
 /// Sends the staged bytes on to the store as the next part, when the store takes parts and
 /// `force` (the last part) or the staged file has reached the store's part size.
+///
+/// The staged file is first renamed to `{fileId}.part.{n}`, so from then on its bytes no longer
+/// count toward the upload's offset; they count again only once the part is recorded. A failure or
+/// a crash in between leaves the offset at the last recorded part, and the client sends the rest
+/// again. Appends always start a fresh `{fileId}.part`.
 async fn flush_staged(state: &AppState, sid: &str, file_id: &str, total: u64, force: bool) -> Result<(), String> {
-    let (Some(upload_id), parts) = upload_parts(state, sid, file_id) else { return Ok(()) };
+    let Some((key, Some(upload_id), parts)) = upload_row(state, sid, file_id) else { return Ok(()) };
     let Some(target) = state.store.part_target(total) else { return Ok(()) };
     let part = state.part_path(sid, file_id);
     let staged = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
@@ -545,34 +548,38 @@ async fn flush_staged(state: &AppState, sid: &str, file_id: &str, total: u64, fo
         return Ok(());
     }
     let num = parts.last().map_or(1, |p| p.0 + 1);
-    let key = storage_key(sid, file_id);
-    let (etag, len) = state.store.flush_part(&key, &upload_id, num, &part).await?;
-    {
+    let sending = state.sending_path(sid, file_id, num);
+    tokio::fs::rename(&part, &sending).await.map_err(|e| format!("stage part {num}: {e}"))?;
+    let sent = async {
+        let (etag, len) = state.store.flush_part(&key, &upload_id, num, &sending).await?;
         let c = state.open_share_db(sid).ok_or("share not found")?;
-        let conn = c.lock().unwrap();
-        conn.execute(
+        let mut conn = c.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             "INSERT INTO upload_parts (file_id, part_num, etag, size) VALUES (?1, ?2, ?3, ?4)",
             params![file_id, num, etag, len as i64],
         )
         .map_err(|e| e.to_string())?;
-        conn.execute("UPDATE uploads SET flushed_bytes = flushed_bytes + ?1 WHERE file_id = ?2", params![len as i64, file_id])
+        tx.execute("UPDATE uploads SET flushed_bytes = flushed_bytes + ?1 WHERE file_id = ?2", params![len as i64, file_id])
             .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
-    let f = tokio::fs::OpenOptions::new().write(true).open(&part).await.map_err(|e| e.to_string())?;
-    f.set_len(0).await.map_err(|e| e.to_string())
+    .await;
+    let _ = tokio::fs::remove_file(&sending).await;
+    sent
 }
 
 /// Publishes a finished upload through the store and records the file.
 async fn publish_file(state: &AppState, sid: &str, file_id: &str, size: u64) -> Result<ShareFileEntry, String> {
-    let key = storage_key(sid, file_id);
     let part = state.part_path(sid, file_id);
     flush_staged(state, sid, file_id, size, true).await?;
-    let (upload_id, parts) = upload_parts(state, sid, file_id);
+    let (key, upload_id, parts) = upload_row(state, sid, file_id).ok_or("the upload is gone")?;
     match upload_id {
         Some(id) => state.store.complete_upload(&key, Some(&id), &parts, &part).await?,
         None => state.store.put_file(&key, &part).await?,
     }
     state.blob_add(&key);
+    state.remove_staged(sid, file_id);
     let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
     let conn = conn_arc.lock().unwrap();
     record_file(&conn, file_id, &key, size)
@@ -591,8 +598,9 @@ fn finished(state: &AppState, status: StatusCode, entry: ShareFileEntry) -> Resp
 /// to a store that takes parts starts a multipart upload there.
 async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64, resumable: bool) -> Result<(), Response> {
     forget_upload(state, sid, file_id);
+    let key = new_storage_key();
     let upload_id = if resumable {
-        state.store.begin_upload(&storage_key(sid, file_id), total).await.map_err(|e| json_err(StatusCode::BAD_GATEWAY, e))?
+        state.store.begin_upload(&key, total).await.map_err(|e| store_failed("start upload", e))?
     } else {
         None
     };
@@ -615,14 +623,14 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64, re
     };
     if let Some(over) = over {
         if let Some(id) = &upload_id {
-            state.trash_upload(&storage_key(sid, file_id), id);
+            state.trash_upload(&key, id);
             state.empty_trash_soon();
         }
         return Err(json_err(StatusCode::PAYLOAD_TOO_LARGE, over));
     }
     conn.execute(
-        "INSERT INTO uploads (file_id, size, s3_upload_id, flushed_bytes, started_at) VALUES (?1, ?2, ?3, 0, ?4)",
-        params![file_id, total as i64, upload_id, now_unix()],
+        "INSERT INTO uploads (file_id, storage_key, size, s3_upload_id, flushed_bytes, started_at) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        params![file_id, key, total as i64, upload_id, now_unix()],
     )
     .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = std::fs::create_dir_all(state.staging_dir(sid));
@@ -631,13 +639,14 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64, re
 
 /// Drops an upload in progress: its staged bytes, its row and parts, and its multipart upload.
 fn forget_upload(state: &AppState, sid: &str, file_id: &str) {
-    let _ = std::fs::remove_file(state.part_path(sid, file_id));
+    state.remove_staged(sid, file_id);
     if let Some(c) = state.open_share_db(sid) {
         let conn = c.lock().unwrap();
-        let id: Option<String> = conn.query_row("SELECT s3_upload_id FROM uploads WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok().flatten();
+        let row: Option<(String, Option<String>)> =
+            conn.query_row("SELECT storage_key, s3_upload_id FROM uploads WHERE file_id = ?1", params![file_id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
         let _ = conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![file_id]);
-        if let Some(id) = id {
-            state.trash_upload(&storage_key(sid, file_id), &id);
+        if let Some((key, Some(id))) = row {
+            state.trash_upload(&key, &id);
             state.empty_trash_soon();
         }
     }
@@ -681,7 +690,7 @@ pub async fn put_share_file(
     if total == 0 {
         return json_err(StatusCode::BAD_REQUEST, "file body must not be empty");
     }
-    let Some(_guard) = claim(&state, &sid, &file_id) else {
+    let Some(_guard) = state.claim_upload(&sid, &file_id) else {
         return json_err(StatusCode::CONFLICT, "another upload of this file is in progress");
     };
     if let Some((_, length, true)) = upload_state(&state, &sid, &file_id) {
@@ -719,11 +728,14 @@ pub async fn put_share_file(
         }
         return match publish_file(&state, &sid, &file_id, total).await {
             Ok(entry) => finished(&state, if resumable.is_some() { StatusCode::CREATED } else { StatusCode::OK }, entry),
-            Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
+            Err(e) => store_failed("publish upload", e),
         };
     }
-    // Staged bytes beyond a part's size go on to the store (if this fails, they stay staged).
-    let _ = flush_staged(&state, &sid, &file_id, total, false).await;
+    // Staged bytes of a part's size go on to the store. If that fails, the offset falls back to the
+    // last part stored; the client asks HEAD and sends the rest again.
+    if let Err(e) = flush_staged(&state, &sid, &file_id, total, false).await {
+        return store_failed("send part", e);
+    }
     with_upload_headers(Response::builder().status(StatusCode::CREATED), &state, end, Some(total), false)
         .header(header::LOCATION, format!("/api/shares/{sid}/files/{file_id}.bin"))
         .body(Body::empty())
@@ -750,7 +762,7 @@ pub async fn patch_share_file(
     let (Some(Ok(offset)), Some(Ok(complete_flag))) = (sf_int(&headers, "upload-offset"), sf_bool(&headers, "upload-complete")) else {
         return json_err(StatusCode::BAD_REQUEST, "appends need Upload-Offset and Upload-Complete");
     };
-    let Some(_guard) = claim(&state, &sid, &file_id) else {
+    let Some(_guard) = state.claim_upload(&sid, &file_id) else {
         return json_err(StatusCode::CONFLICT, "another upload of this file is in progress");
     };
     let Some((have, length, complete)) = upload_state(&state, &sid, &file_id) else {
@@ -796,10 +808,12 @@ pub async fn patch_share_file(
         }
         return match publish_file(&state, &sid, &file_id, total).await {
             Ok(entry) => finished(&state, StatusCode::OK, entry),
-            Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
+            Err(e) => store_failed("publish upload", e),
         };
     }
-    let _ = flush_staged(&state, &sid, &file_id, total, false).await;
+    if let Err(e) = flush_staged(&state, &sid, &file_id, total, false).await {
+        return store_failed("send part", e);
+    }
     with_upload_headers(Response::builder().status(StatusCode::NO_CONTENT), &state, end, length, false).body(Body::empty()).unwrap()
 }
 
@@ -822,18 +836,21 @@ pub async fn delete_share_file(
     if had_upload {
         forget_upload(&state, &sid, file_id);
     }
+    // The blob's reference is dropped while the share's database is locked, as a clone adds its
+    // references (lock order: the share, then the catalog).
     let res = {
         let conn = conn_arc.lock().unwrap();
         let key: Option<String> = conn.query_row("SELECT storage_key FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok();
-        conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]).map(|n| (n + had_upload as usize, key))
+        let res = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
+        if let (Ok(1), Some(key)) = (&res, &key) {
+            state.blob_release(key);
+        }
+        res.map(|n| n + had_upload as usize)
     };
     match res {
-        Ok((0, _)) => StatusCode::NOT_FOUND.into_response(),
-        Ok((_, key)) => {
-            if let Some(key) = key {
-                state.blob_release(&key);
-                state.empty_trash_soon();
-            }
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => {
+            state.empty_trash_soon();
             StatusCode::NO_CONTENT.into_response()
         }
         Err(rusqlite::Error::SqliteFailure(err, _))

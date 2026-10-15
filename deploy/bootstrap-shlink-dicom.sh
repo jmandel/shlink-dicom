@@ -11,15 +11,16 @@
 # plus the CC BY slide) and seed it as the public sample share, then install and
 # start the systemd unit. Server data lives in /var/lib/shlink-dicom.
 #
-# Encrypted files are kept in $DATA/blobs unless $ENV_FILE (default /etc/shlink-dicom.env,
-# mode 600) names an S3 bucket, with lines such as:
+# Encrypted files are kept in $DATA/blobs unless $ENV_FILE (default /etc/shlink-dicom.env) names
+# an S3 bucket, with lines such as these (SHL_S3_ENDPOINT only for a service other than AWS;
+# SHL_S3_READ_MODE proxy or redirect, and redirect needs the bucket CORS in docs/storage.md):
 #   SHL_S3_BUCKET=my-bucket
-#   SHL_S3_ENDPOINT=https://s3.example.net   (omit for AWS)
+#   SHL_S3_ENDPOINT=https://s3.example.net
 #   SHL_S3_REGION=us-east-1
-#   SHL_S3_READ_MODE=proxy                   (or redirect; see docs/storage.md for the bucket CORS it needs)
+#   SHL_S3_READ_MODE=proxy
 #   AWS_ACCESS_KEY_ID=...
 #   AWS_SECRET_ACCESS_KEY=...
-# The seed and the service both read it.
+# The seed and the service both read it; the file is made root-owned, mode 600.
 # Log: /var/log/shlink-bootstrap.log
 
 set -euo pipefail
@@ -111,14 +112,34 @@ $SUDO tee "$DATA/samples/sample.json" >/dev/null <<'EOF2'
   "description": "Brain MRI, CT of the abdomen and pelvis, and hand and wrist X-rays: real images of one person, de-identified as Josh Example and published by him. Also a lung pathology slide from a different person, from the NCI Imaging Data Commons (CPTAC-LUAD, CC BY 4.0), relabelled for this sample (see the study note)."
 }
 EOF2
+# One-time wipe for the blob-store layout (random storage keys, the files and uploads tables):
+# shares made before it can't be read. Only the sample matters, and it is packed again below.
+LAYOUT=blob-store-1
+if [ -d "$DATA/shares" ] && [ "$(cat "$DATA/.layout" 2>/dev/null)" != "$LAYOUT" ]; then
+  $SUDO systemctl stop shlink-dicom 2>/dev/null || true
+  $SUDO rm -rf "$DATA/catalog.db" "$DATA"/catalog.db-* "$DATA/shares" "$DATA/blobs" "$DATA/seeded_demos.json"
+  echo "== one-time wipe: shares from before the blob-store layout removed; the sample is packed again"
+fi
+echo "$LAYOUT" | $SUDO tee "$DATA/.layout" >/dev/null
 $SUDO chown -R shlink:shlink "$DATA"
+if [ -f "$ENV_FILE" ]; then
+  $SUDO chown root:root "$ENV_FILE"
+  $SUDO chmod 600 "$ENV_FILE"
+fi
 # Pack the sample into its share when it changed (or there is none). The server only loads it, so
 # restarts are immediate. Packing streams one record at a time from scratch files in $DATA.
 # A change to $ENV_FILE (a different store) also packs it again.
 store_env() { $SUDO cat "$ENV_FILE" 2>/dev/null || true; }
 sums="$( (cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json; store_env | sha256sum) | sha256sum | cut -d' ' -f1)"
 if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ] || [ ! -f "$DATA/seeded_demos.json" ]; then
-  store_env | sudo -u shlink sh -c 'while IFS= read -r l; do case "$l" in [A-Za-z_]*=*) export "$l" ;; esac; done
+  # Read as systemd reads an EnvironmentFile: KEY=value lines, # and ; comments, surrounding
+  # whitespace and one pair of quotes around the value removed.
+  store_env | sudo -u shlink sh -c 'while read -r l; do
+      case "$l" in [A-Za-z_]*=*) ;; *) continue ;; esac
+      k=$(printf %s "${l%%=*}" | tr -d " \t"); v=${l#*=}; v=${v#"${v%%[! ]*}"}
+      case "$v" in \"*\") v=${v#\"}; v=${v%\"} ;; \'"'"'*\'"'"') v=${v#\'"'"'}; v=${v%\'"'"'} ;; esac
+      export "$k=$v"
+    done
     exec "$0" seed --data-dir "$1"' "$DIR/target/release/shl-dicom-server" "$DATA"
   echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
 fi

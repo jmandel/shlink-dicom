@@ -7,9 +7,9 @@
 //!   multipart uploads, read either through the server (`proxy`) or by a `307` to a presigned
 //!   URL valid for 60 s (`redirect`). Objects are never public.
 //!
-//! A blob is named by its storage key, `{sid}/{fileId}.bin` for the share it was uploaded to. A
-//! cloned share points at the same keys; the catalog counts references (`blobs`) and a blob is
-//! deleted when the count reaches zero.
+//! A blob is named by its storage key, a random `{22 base64url chars}.bin` drawn for each upload,
+//! so a key is never reused and names no share. A cloned share points at the same keys; the
+//! catalog counts references (`blobs`) and a blob is deleted when the count reaches zero.
 //!
 //! An upload in progress is staged in `shares/{sid}/{fileId}.part` on local disk. The S3 store
 //! sends it to the bucket as multipart parts while the upload goes on, so the staged file stays
@@ -40,6 +40,15 @@ pub enum ReadDelivery {
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+/// Why a read failed.
+#[derive(Debug)]
+pub enum ReadError {
+    /// The store has no such blob.
+    NotFound,
+    /// Anything else, for the log (never sent to clients).
+    Failed(String),
+}
+
 pub trait BlobStore: Send + Sync {
     /// Where blobs are kept, for logs.
     fn describe(&self) -> String;
@@ -48,7 +57,7 @@ pub trait BlobStore: Send + Sync {
     fn locate(&self, key: &str) -> String;
 
     /// Bytes `[start, end_inclusive]` of a blob.
-    fn read_range<'a>(&'a self, key: &'a str, start: u64, end_inclusive: u64) -> BoxFuture<'a, Result<ReadDelivery, String>>;
+    fn read_range<'a>(&'a self, key: &'a str, start: u64, end_inclusive: u64) -> BoxFuture<'a, Result<ReadDelivery, ReadError>>;
 
     /// The staged file's size at which it is sent on as a part; None when parts are never sent
     /// before the end (the local store).
@@ -70,11 +79,11 @@ pub trait BlobStore: Send + Sync {
         staged: &'a Path,
     ) -> BoxFuture<'a, Result<(), String>>;
 
-    /// Drops an unfinished multipart upload.
-    fn abort_upload<'a>(&'a self, key: &'a str, upload_id: &'a str) -> BoxFuture<'a, ()>;
+    /// Drops an unfinished multipart upload. One that is already gone counts as dropped.
+    fn abort_upload<'a>(&'a self, key: &'a str, upload_id: &'a str) -> BoxFuture<'a, Result<(), String>>;
 
-    /// Deletes a blob.
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, ()>;
+    /// Deletes a blob. One that is already gone counts as deleted.
+    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), String>>;
 
     /// Stores a whole local file as a blob (the server's sample). The file is consumed.
     fn put_file<'a>(&'a self, key: &'a str, path: &'a Path) -> BoxFuture<'a, Result<(), String>>;
@@ -82,7 +91,7 @@ pub trait BlobStore: Send + Sync {
 
 // ------------------------------------------------------------------------------- local disk
 
-/// Blobs as files: `{root}/{sid}/{fileId}.bin`.
+/// Blobs as files: `{root}/{key}`.
 pub struct LocalFsStore {
     pub root: PathBuf,
 }
@@ -110,10 +119,13 @@ impl BlobStore for LocalFsStore {
     fn locate(&self, key: &str) -> String {
         self.path(key).display().to_string()
     }
-    fn read_range<'a>(&'a self, key: &'a str, start: u64, end_inclusive: u64) -> BoxFuture<'a, Result<ReadDelivery, String>> {
+    fn read_range<'a>(&'a self, key: &'a str, start: u64, end_inclusive: u64) -> BoxFuture<'a, Result<ReadDelivery, ReadError>> {
         Box::pin(async move {
-            let mut f = tokio::fs::File::open(self.path(key)).await.map_err(|e| e.to_string())?;
-            f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| e.to_string())?;
+            let mut f = tokio::fs::File::open(self.path(key)).await.map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => ReadError::NotFound,
+                _ => ReadError::Failed(format!("open {key}: {e}")),
+            })?;
+            f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| ReadError::Failed(e.to_string()))?;
             let s = tokio_util::io::ReaderStream::with_capacity(f.take(end_inclusive - start + 1), 256 * 1024);
             Ok(ReadDelivery::Stream(Box::pin(s)))
         })
@@ -130,15 +142,14 @@ impl BlobStore for LocalFsStore {
     fn complete_upload<'a>(&'a self, key: &'a str, _: Option<&'a str>, _: &'a [(u32, String)], staged: &'a Path) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(self.place(key, staged))
     }
-    fn abort_upload<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, ()> {
-        Box::pin(async {})
+    fn abort_upload<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
     }
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let p = self.path(key);
-            let _ = tokio::fs::remove_file(&p).await;
-            if let Some(dir) = p.parent() {
-                let _ = tokio::fs::remove_dir(dir).await; // only when empty
+            match tokio::fs::remove_file(self.path(key)).await {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("delete {key}: {e}")),
+                _ => Ok(()),
             }
         })
     }
@@ -188,6 +199,11 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// A request error without its URL: presigned URLs carry signatures and must not reach logs or clients.
+fn http_err(what: &str, e: reqwest::Error) -> String {
+    format!("S3 {what}: {}", e.without_url())
+}
+
 impl S3Store {
     pub fn new(c: S3Config) -> Result<Self, String> {
         let endpoint = c.endpoint.unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", c.region));
@@ -222,7 +238,7 @@ impl S3Store {
     }
 
     async fn ok(r: Result<reqwest::Response, reqwest::Error>, what: &str) -> Result<reqwest::Response, String> {
-        let r = r.map_err(|e| format!("S3 {what}: {e}"))?;
+        let r = r.map_err(|e| http_err(what, e))?;
         if r.status().is_success() {
             return Ok(r);
         }
@@ -254,7 +270,7 @@ impl S3Store {
     async fn create_multipart(&self, key: &str) -> Result<String, String> {
         let obj = self.object(key);
         let url = CreateMultipartUpload::new(&self.bucket, Some(&self.creds), &obj).sign(SIGN_TTL);
-        let body = Self::ok(self.http.post(url).send().await, "CreateMultipartUpload").await?.text().await.map_err(err)?;
+        let body = Self::ok(self.http.post(url).send().await, "CreateMultipartUpload").await?.text().await.map_err(|e| http_err("CreateMultipartUpload", e))?;
         Ok(CreateMultipartUpload::parse_response(&body).map_err(err)?.upload_id().to_string())
     }
 
@@ -288,14 +304,29 @@ impl BlobStore for S3Store {
         format!("s3://{}/{}", self.bucket.name(), self.object(key))
     }
 
-    fn read_range<'a>(&'a self, key: &'a str, start: u64, end_inclusive: u64) -> BoxFuture<'a, Result<ReadDelivery, String>> {
+    fn read_range<'a>(&'a self, key: &'a str, start: u64, end_inclusive: u64) -> BoxFuture<'a, Result<ReadDelivery, ReadError>> {
         Box::pin(async move {
             let url = self.presign_get(key);
             if self.read_mode == ReadMode::Redirect {
                 return Ok(ReadDelivery::Redirect(url));
             }
-            let r = Self::ok(self.http.get(url).header("Range", format!("bytes={start}-{end_inclusive}")).send().await, "GetObject").await?;
-            Ok(ReadDelivery::Stream(Box::pin(r.bytes_stream().map_err(std::io::Error::other))))
+            let r = self
+                .http
+                .get(url)
+                .header("Range", format!("bytes={start}-{end_inclusive}"))
+                .send()
+                .await
+                .map_err(|e| ReadError::Failed(http_err("GetObject", e)))?;
+            // Only the asked-for bytes may be streamed: a 206 for the range, or a 200 when the
+            // range is the whole object.
+            let whole = start == 0 && r.content_length() == Some(end_inclusive + 1);
+            match r.status().as_u16() {
+                206 => {}
+                200 if whole => {}
+                404 => return Err(ReadError::NotFound),
+                st => return Err(ReadError::Failed(format!("S3 GetObject {key}: status {st} for bytes {start}-{end_inclusive}"))),
+            }
+            Ok(ReadDelivery::Stream(Box::pin(r.bytes_stream().map_err(|e| std::io::Error::other(e.without_url())))))
         })
     }
 
@@ -339,18 +370,28 @@ impl BlobStore for S3Store {
         })
     }
 
-    fn abort_upload<'a>(&'a self, key: &'a str, upload_id: &'a str) -> BoxFuture<'a, ()> {
+    fn abort_upload<'a>(&'a self, key: &'a str, upload_id: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let obj = self.object(key);
             let url = AbortMultipartUpload::new(&self.bucket, Some(&self.creds), &obj, upload_id).sign(SIGN_TTL);
-            let _ = self.http.delete(url).send().await;
+            let r = self.http.delete(url).send().await.map_err(|e| http_err("AbortMultipartUpload", e))?;
+            // 404 (NoSuchUpload): already aborted or completed.
+            if r.status().is_success() || r.status().as_u16() == 404 {
+                return Ok(());
+            }
+            Err(format!("S3 AbortMultipartUpload {key}: status {}", r.status()))
         })
     }
 
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, ()> {
+    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             self.presigned.lock().unwrap().remove(key);
-            let _ = self.http.delete(self.bucket.delete_object(Some(&self.creds), &self.object(key)).sign(SIGN_TTL)).send().await;
+            let url = self.bucket.delete_object(Some(&self.creds), &self.object(key)).sign(SIGN_TTL);
+            let r = self.http.delete(url).send().await.map_err(|e| http_err("DeleteObject", e))?;
+            if r.status().is_success() || r.status().as_u16() == 404 {
+                return Ok(());
+            }
+            Err(format!("S3 DeleteObject {key}: status {}", r.status()))
         })
     }
 
@@ -369,14 +410,14 @@ impl BlobStore for S3Store {
                     match self.upload_part_from(key, &id, parts.len() as u32 + 1, path, at, len).await {
                         Ok(etag) => parts.push((parts.len() as u32 + 1, etag)),
                         Err(e) => {
-                            self.abort_upload(key, &id).await;
+                            let _ = self.abort_upload(key, &id).await;
                             return Err(e);
                         }
                     }
                     at += len;
                 }
                 if let Err(e) = self.complete_multipart(key, &id, &parts).await {
-                    self.abort_upload(key, &id).await;
+                    let _ = self.abort_upload(key, &id).await;
                     return Err(e);
                 }
             }

@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -9,7 +9,7 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
-use crate::storage::ReadDelivery;
+use crate::storage::{ReadDelivery, ReadError};
 use crate::state::{
     hash_passcode, is_valid_id22, now_unix, parse_file_name, AccessEvent, AppState,
 };
@@ -43,6 +43,7 @@ pub async fn get_shl_file(
     State(state): State<AppState>,
     Path((lid, tail)): Path<(String, String)>,
     Query(query): Query<RecipientQuery>,
+    method: Method,
     headers: HeaderMap,
 ) -> Response {
     if !is_valid_id22(&lid) {
@@ -63,6 +64,7 @@ pub async fn get_shl_file(
             false,
             &path_str,
             query.recipient,
+            method == Method::HEAD,
             &headers,
         )
         .await
@@ -239,6 +241,7 @@ pub async fn get_cap_file(
     State(state): State<AppState>,
     Path((token, tail)): Path<(String, String)>,
     Query(query): Query<RecipientQuery>,
+    method: Method,
     headers: HeaderMap,
 ) -> Response {
     let Some((sid, lid)) = state.lookup_cap(&token) else {
@@ -256,6 +259,7 @@ pub async fn get_cap_file(
             true,
             &path_str,
             query.recipient,
+            method == Method::HEAD,
             &headers,
         )
         .await
@@ -358,6 +362,7 @@ async fn serve_series_file(
     via_cap: bool,
     path_str: &str,
     recipient: Option<String>,
+    head: bool,
     headers: &HeaderMap,
 ) -> Response {
     let Some(conn_arc) = state.open_share_db(sid) else {
@@ -426,11 +431,39 @@ async fn serve_series_file(
         None => (0, file_size - 1, StatusCode::OK),
     };
 
-    // The store streams the range, or names a presigned URL to send the reader to.
     let len = end_byte_inclusive - start_byte + 1;
+    let mut builder = Response::builder()
+        .status(status_code)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, len.to_string())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "Content-Range, Content-Length, Accept-Ranges",
+        );
+    if status_code == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!(
+                "bytes {start_byte}-{end_byte_inclusive}/{file_size}"
+            ))
+            .unwrap(),
+        );
+    }
+    // HEAD is answered here, in every mode (a presigned URL is for GET only).
+    if head {
+        return builder.body(Body::empty()).unwrap();
+    }
+
+    // The store streams the range, or names a presigned URL to send the reader to.
     let delivery = match state.store.read_range(&key, start_byte, end_byte_inclusive).await {
         Ok(d) => d,
-        Err(e) => {
+        Err(ReadError::NotFound) => {
+            eprintln!("read {key}: not in the store");
+            return not_found();
+        }
+        Err(ReadError::Failed(e)) => {
             eprintln!("read {key}: {e}");
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -468,27 +501,6 @@ async fn serve_series_file(
                 .unwrap();
         }
     };
-    let mut builder = Response::builder()
-        .status(status_code)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, len.to_string())
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(
-            header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "Content-Range, Content-Length, Accept-Ranges",
-        );
-
-    if status_code == StatusCode::PARTIAL_CONTENT {
-        builder = builder.header(
-            header::CONTENT_RANGE,
-            HeaderValue::from_str(&format!(
-                "bytes {start_byte}-{end_byte_inclusive}/{file_size}"
-            ))
-            .unwrap(),
-        );
-    }
-
     builder.body(body).unwrap()
 }
 
