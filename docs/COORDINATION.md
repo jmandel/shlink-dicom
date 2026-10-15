@@ -109,6 +109,14 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct, afternoon:**
+  - **Deployed:** both VMs are live in dal; the sandbox passes remote e2e 109/109, and How passes 68/68 against the live site.
+  - **Committed:** View follow-ups (2bdb6c8); the sweep (f1dfcde: Leica max_abs 3; empty slide frames stay refused, and the viewer shows them blank).
+  - **New data decision (Josh):** one sample set of Josh's own studies (MRI 2020, CT abdomen/pelvis 2012, CR hand/wrist 2012), de-identified as **Josh Example**, published in jmandel/my-health-data; plus the CC BY slide. It replaces Morgan Rivera.
+    - Rules: Example^Josh, JEXAMPLE01, birth date YYYY0101, dates kept, all other identifiers removed.
+    - Sandbox agent ab83241fb7aa4e1f8 is building it. The coordinator reviews the values report and the contact sheets, then pushes my-health-data, then the sandbox and server redeploy.
+  - **Commit rule:** commit with an explicit pathspec, so other agents' staged work can't sneak in. History rewrites are OK (Josh).
+
 - **15 Oct, about 10:00:**
   - **Committed:** reduced-resolution JPEG 2000/HTJ2K (ebe1dd4); offset tables at pack time and the prune (7760d55).
   - **In progress:** Core+View agent a3832d83abfd092fc is resumed on the View follow-ups plus a dead-code cleanup:
