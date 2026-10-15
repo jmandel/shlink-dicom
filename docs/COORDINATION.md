@@ -1,6 +1,6 @@
 # Coordination state (coordinator's working file)
 
-Last updated 15 Oct 2026, mid-day. This is the coordinator's source of truth for what is in flight, what is decided, and what comes next. **Read this first after a context compaction.** Update it whenever an agent finishes, a decision is made, or the queue changes.
+Last updated 15 Oct 2026, about 18:45. This is the coordinator's source of truth for what is in flight, what is decided, and what comes next. **Read this first after a context compaction.** Update it whenever an agent finishes, a decision is made, or the queue changes.
 
 Related docs:
 - `docs/EXPERIENCES.md`: the product design for the three experiences, with Josh's decisions.
@@ -13,6 +13,7 @@ Related docs:
 
 - **No legacy code (Josh, 15 Oct):** greenfield repo. Delete superseded pages, shims and prototypes outright, together with their routes, checks and docs.
 
+- **Commit with a pathspec on the commit itself** (`git commit -m … -- <paths>`), never `git add <paths>` then a bare `git commit`: a bare commit takes everything staged, including other agents' `git mv`/`git rm` (2a7f37f, and bc0d95f, which broke a deploy and was fixed by b29a072). Subagents must not touch the index at all.
 - **One owner per area.** Each subagent owns specific directories. Shared files belong to the coordinator unless a brief says otherwise. **Subagents never commit; the coordinator commits** after verifying.
 - **Verify, don't trust summaries.** Re-run check.py and the scripted Chromium checks, and look at the screenshots, before telling Josh something works.
 - **Copy rules.** Plain, true, short; no hype words, no false contrasts, no filler. Fact-check claims.
@@ -126,6 +127,18 @@ Resolved 15 Oct:
 - **Robustness:** "detect what we can for the most robust behaviour". The foundation agent (aac32c9d770084d05) is implementing inferred Planar Configuration by smoothness, plus a survey of other safe "infer instead of refuse" cases, each with a warning and tests.
 
 ## Next-step queue (in order once their inputs exist)
+
+- **15 Oct, about 18:45: everything landed on main and deployed (3671bd5).**
+  - Study files (d3c8a1b), the display pipeline and LUT fix (fef0a72), pan/Reset (bc0d95f, b29a072), the plain-page How (3b5969c), S3 blob store with review fixes (d5664ff; the public server stays on local disk; the one-time wipe ran), and the phone layout with study times (3671bd5).
+  - No branches are left; the study-files and s3-store worktrees are removed.
+  - The blog md and the LinkedIn draft are synced and verified (43 blocks, 39 links, 8 images). The section is "How I built it", with 42 subagents.
+  - Open: the viewer agent's older queue (thumbnail loading indicator, isLocalizer page error, slide ZIP mismatch in the live download matrix, progress bar going backwards, dark-flow click timeout, dark-mode audit). Ask it for status before calling the demo done.
+
+- **15 Oct, about 15:45:**
+  - **Part 1 (ad12646f03ce41389)** is done on `study-files` (4 commits on 8fea40f). A fresh review (ae70a73f51f694415) found nothing blocking; the 12 should-fix and nit items went back to ad12646f03ce41389. **Then:** push `study-files` to main, deploy, and have the viewer agent rebase its uncommitted web/core work onto it (heads-up sent).
+  - **Viewer agent (a3832d83abfd092fc):** after its slide gate, the X-ray display bug Josh found (Hand OBLI shows white). The cause: readLut only corrects LUT data wider than the descriptor; NK5 says 16 bits but holds 12-bit data. Thumbnail paths also skip the header (view.ts:304, share.ts:544). **Josh: no spot fix.** One display pipeline for every pixel path, a LUT bit-depth rule for both directions with citations, and a conformance check against dcmtk and pydicom over the corpus, the IDC LUT/MONOCHROME1 files and synthetic edge cases, plus a check that thumbnails match the main view.
+  - **Visuals agent (ad67bc6fa7abc2a00):** Josh says to align the blog and every visual with one file per study now. Redo link-to-pixels (and check architecture) from the branch's numbers; after the deploy, retake shot-how and any format-specific shots and re-measure the post's numbers (6 files, the bytes to the first slice, footnote 1). The coordinator then updates the post text (the "work is under way" sentence, footnote 7) and syncs LinkedIn.
+  - **Blog/LinkedIn:** "What went wrong" was cut, and the next-steps paragraph reworded per Josh, in both the blog md and LinkedIn (verified after a reload). Leave the LinkedIn draft alone while Josh reviews it; compare it with the md before each sync.
 
 - **15 Oct, about 14:40:**
   - **pi:** Josh stopped the newer pi session (tmux session 1), because Gemini Argon isn't routing reliably. Part 1's review against the plan now goes to a fresh Claude agent.
