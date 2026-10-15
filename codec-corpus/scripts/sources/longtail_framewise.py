@@ -215,7 +215,11 @@ def verify(inst: dict, a) -> dict:
         ours_errors = []
         split = subprocess.Popen([PY, str(Path(__file__)), "--split", str(src), str(a.chunk), str(work)],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        empty = []
         for line in split.stdout:
+            if line.startswith("empty "):
+                empty.append(int(line.split()[1]))
+                continue
             k, first, cnt, path = line.split()
             k, first, cnt = int(k), int(first), int(cnt)
             out = work / f"chunk-{k}.raw"
@@ -237,6 +241,9 @@ def verify(inst: dict, a) -> dict:
         rec["hash_pass"] = {"frames_hashed": sum(h is not None for h in hashes), "errors": ours_errors[:5],
                             "n_error_chunks": len(ours_errors), "split_exit": split.returncode,
                             "split_err": split.stderr.read()[-300:]}
+        rec["empty_frames"] = {"count": len(empty), "first": empty[:1], "last": empty[-1:]}
+        sample = [i for i in sample if i not in set(empty)]
+        rec["sample"] = sample
         rec["frame_hashes_sha256"] = hashlib.sha256("".join(h or "-" for h in hashes).encode()).hexdigest()
         # 2. determinism: each sampled frame alone
         det_bad = []
@@ -279,6 +286,10 @@ def verify(inst: dict, a) -> dict:
                 dis = max([maxdiff(o, (work / f"ref-{r.replace(':', '_')}" / f"{i}.raw").read_bytes(), dt)
                            for r in others if r != oracle] or [0])
                 allowed = max(1, dis) if ts in LOSSY else 0
+                if ts in J2K and ph == "YBR_FULL_422":
+                    # jpeg2000 FORMAT.md ruling: oracle pylibjpeg-raw, max_abs 2 (OpenJPEG's sYCC
+                    # conversion vs ours differs by <= 2)
+                    allowed = max(2, dis)
                 op = work / f"ours-{i}.raw"
                 d = maxdiff(op.read_bytes(), o, dt) if op.exists() else None
                 per_frame.append({"frame": i, "ours_max_abs": d, "allowed": allowed, "refs_disagree": dis,
@@ -290,7 +301,7 @@ def verify(inst: dict, a) -> dict:
                               **{r: refres[r]["rss_mb"] for r in refs}}
         if split.returncode != 0:
             rec["outcome"] = "framewise-error"
-        elif ours_errors or rec["hash_pass"]["frames_hashed"] < n:
+        elif ours_errors or rec["hash_pass"]["frames_hashed"] + len(empty) < n:
             rec["outcome"] = "our-error"
         elif det_bad:
             rec["outcome"] = "nondeterministic"
@@ -323,14 +334,30 @@ def main() -> int:
         import pydicom
         hdr = pydicom.dcmread(src, stop_before_pixels=True, force=True)
         first = 0
+        sub = 0
         for k, frames in chunk_files(src, chunk, outdir):
-            p = outdir / f"chunk-{k}.dcm"
-            _save(hdr.copy(), frames, p)
-            print(k, first, len(frames), p, flush=True)
+            # empty frames (zero-length items) cannot be re-encapsulated; report them and decode
+            # the non-empty runs of the chunk separately
+            runs, cur, start = [], [], first
+            for j, f in enumerate(frames):
+                if len(f) < 2:
+                    if cur:
+                        runs.append((start, cur))
+                    print("empty", first + j, flush=True)
+                    cur, start = [], first + j + 1
+                else:
+                    cur.append(f)
+            if cur:
+                runs.append((start, cur))
+            for rstart, rframes in runs:
+                p = outdir / f"chunk-{sub}.dcm"
+                _save(hdr.copy(), rframes, p)
+                print(sub, rstart, len(rframes), p, flush=True)
+                sub += 1
+                # wait until the consumer has deleted the file, so at most one chunk is on disk
+                while p.exists():
+                    time.sleep(0.02)
             first += len(frames)
-            # wait until the consumer has deleted the file, so at most one chunk is on disk
-            while p.exists():
-                time.sleep(0.02)
         return 0
     if a.subset:
         write_subset(Path(a.subset[0]), [int(x) for x in a.subset[1].split(",")], Path(a.subset[2]))

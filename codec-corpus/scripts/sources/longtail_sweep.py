@@ -254,6 +254,8 @@ def process(inst: dict, a, disk: Budget, mem: Budget) -> dict:
         worst = max(dis) if dis else 0
         rec["refs_disagree_max_abs"] = worst
         allowed = max(1, worst) if lossy else 0
+        if rec.get("refs_rule") == "j2k-ybr422-raw":
+            allowed = max(2, worst)   # jpeg2000 FORMAT.md ruling for these files: max_abs 2
         rec["max_abs_allowed"] = allowed
         ours_ok = ours["exit"] == 0
         crashed = ours["exit"] == "timeout" or (isinstance(ours["exit"], int) and (ours["exit"] < 0 or ours["exit"] not in (0, 2, 3)))
