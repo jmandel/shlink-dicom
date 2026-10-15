@@ -29,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pack DICOM files, folders, .zip or .tgz archives into an SHL Bundle + series .bin files
+    /// Pack DICOM files, folders, .zip or .tgz archives into an SHL Bundle + one .bin file per study
     Pack {
         /// Input paths (.tgz, .zip, .dcm, or directory)
         #[arg(required = true)]
@@ -119,10 +119,10 @@ async fn main() {
             let state = AppState::new(&data_dir).expect("failed to initialize AppState");
             match seed_sample(&state) {
                 Ok(r) => println!(
-                    "Sample packed in {:.1} s: share {}, {} series files, {} instances, {:.1} MB",
+                    "Sample packed in {:.1} s: share {}, {} files (one per study), {} instances, {:.1} MB",
                     t0.elapsed().as_secs_f64(),
                     r.sid,
-                    r.series,
+                    r.files,
                     r.instances,
                     r.bytes as f64 / 1e6
                 ),

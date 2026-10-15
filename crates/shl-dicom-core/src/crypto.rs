@@ -106,10 +106,10 @@ pub fn decrypt_range(
     Ok(joined[r.skip_prefix..r.skip_prefix + r.length].to_vec())
 }
 
-/// Encrypts a series file as it is read (§9.2), one record at a time: reads plaintext from
-/// `reader` until it ends and writes the records to `writer`. Returns the ciphertext length.
-pub fn encrypt_series_stream<R: std::io::Read, W: std::io::Write>(mut reader: R, mut writer: W, series_key: &[u8; 32]) -> Result<u64> {
-    let cipher = Aes256Gcm::new(series_key.into());
+/// Encrypts a file as it is read (§9.2), one record at a time: reads plaintext from `reader`
+/// until it ends and writes the records to `writer`. Returns the ciphertext length.
+pub fn encrypt_file_stream<R: std::io::Read, W: std::io::Write>(mut reader: R, mut writer: W, file_key: &[u8; 32]) -> Result<u64> {
+    let cipher = Aes256Gcm::new(file_key.into());
     let mut buf = vec![0u8; RECORD_PLAINTEXT as usize];
     let mut i = 0u64;
     let mut written = 0u64;

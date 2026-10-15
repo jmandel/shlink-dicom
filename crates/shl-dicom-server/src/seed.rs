@@ -55,7 +55,8 @@ pub fn load_sample(state: &AppState, origin: &str) -> bool {
 /// What `seed_sample` did, for the CLI's report.
 pub struct SeedReport {
     pub sid: String,
-    pub series: usize,
+    /// Encrypted files written: one per study.
+    pub files: usize,
     pub instances: usize,
     pub bytes: u64,
 }
@@ -150,7 +151,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
             let _ = state.delete_share(&prev.sid);
         }
     }
-    Ok(SeedReport { sid: saved.sid, series: packed.file_ids.len(), instances: packed.instances, bytes: packed.bytes })
+    Ok(SeedReport { sid: saved.sid, files: packed.file_ids.len(), instances: packed.instances, bytes: packed.bytes })
 }
 
 fn populate_demo_list(

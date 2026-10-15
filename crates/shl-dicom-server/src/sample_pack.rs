@@ -1,7 +1,8 @@
-//! Packs the server's sample (`samples/*.tgz`) into a share's series files on disk, holding at most
+//! Packs the server's sample (`samples/*.tgz`) into a share's study files on disk, holding at most
 //! one record and one header in memory: each archive member is written to a scratch file while its
-//! header is read, then every series is encrypted record by record (PROPOSAL.md §9.2) from those
-//! files straight into `shares/{sid}/{fileId}.bin`. Instances are kept byte for byte.
+//! header is read, then every study is encrypted record by record (PROPOSAL.md §9.2, §11.1: one
+//! file per study, its series in order) from those files straight into `shares/{sid}/{fileId}.bin`.
+//! Instances are kept byte for byte.
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -9,8 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use shl_dicom_core::{
-    bundle::{build_fhir_bundle, BundleBuildInput, InstanceBuildInput, SeriesBuildInput, StudyBuildInput},
-    crypto::{b64url_encode, encrypt_series_stream, random_bytes},
+    bundle::{build_fhir_bundle, BundleBuildInput, InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput},
+    crypto::{b64url_encode, encrypt_file_stream, random_bytes},
     dicom_io::{parse_dicom_header_reader, ParsedDicomInstance},
 };
 use crate::state::{record_series_file, AppState};
@@ -87,14 +88,15 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             studies.entry(m.h.study_instance_uid.clone()).or_default().entry(m.h.series_instance_uid.clone()).or_default().push(m);
         }
 
-        // 3. Encrypt each series from its members into the share's directory.
+        // 3. Encrypt each study from its members into the share's directory.
         std::fs::create_dir_all(state.share_files_dir(sid)).map_err(|e| e.to_string())?;
         let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
         let mut study_inputs = Vec::new();
         let (mut file_ids, mut instances, mut bytes) = (Vec::new(), 0usize, 0u64);
         for (study_uid, series_map) in studies {
             let (mut description, mut started, mut accession) = (None, None, None);
-            let mut series_inputs = Vec::new();
+            // Each series' members, ordered; then the series ordered as the Bundle lists them.
+            let mut series: Vec<(SeriesBuildInput, Vec<Member>)> = Vec::new();
             for (series_uid, mut insts) in series_map {
                 insts.sort_by(|a, b| {
                     a.h.instance_number
@@ -107,30 +109,12 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
                 description = description.or_else(|| first.study_description.clone());
                 started = started.or_else(|| first.study_date.clone());
                 accession = accession.or_else(|| first.accession_number.clone());
-                let file_id = b64url_encode(&random_bytes::<16>().map_err(|e| e.to_string())?);
-                let key = random_bytes::<32>().map_err(|e| e.to_string())?;
-                // The series plaintext: its instances end to end, read as the records are written.
-                let reader = Concat { paths: insts.iter().map(|m| m.path.clone()).collect(), next: 0, cur: None };
-                let part = state.part_path(sid, &file_id);
-                let mut out = BufWriter::new(File::create(&part).map_err(|e| e.to_string())?);
-                let size = encrypt_series_stream(reader, &mut out, &key).map_err(|e| e.to_string())?;
-                out.flush().map_err(|e| e.to_string())?;
-                drop(out);
-                std::fs::rename(&part, state.series_path(sid, &file_id)).map_err(|e| e.to_string())?;
-                record_series_file(&conn_arc.lock().unwrap(), &file_id, size)?;
-                for m in &insts {
-                    let _ = std::fs::remove_file(&m.path);
-                }
-                instances += insts.len();
-                bytes += size;
-                file_ids.push(file_id.clone());
-                series_inputs.push(SeriesBuildInput {
+                let input = SeriesBuildInput {
                     uid: series_uid,
                     number: first.series_number,
                     modality: first.modality.clone(),
                     description: first.series_description.clone(),
-                    file_id,
-                    key_b64: b64url_encode(&key),
+                    file: None,
                     instances: insts
                         .iter()
                         .map(|m| InstanceBuildInput {
@@ -140,9 +124,29 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
                             length: m.len,
                         })
                         .collect(),
-                });
+                };
+                series.push((input, insts));
             }
-            series_inputs.sort_by(|a, b| a.number.unwrap_or(i32::MAX).cmp(&b.number.unwrap_or(i32::MAX)).then_with(|| a.uid.cmp(&b.uid)));
+            series.sort_by(|(a, _), (b, _)| a.number.unwrap_or(i32::MAX).cmp(&b.number.unwrap_or(i32::MAX)).then_with(|| a.uid.cmp(&b.uid)));
+
+            // The study's plaintext: every series' instances end to end, read as the records are written.
+            let file_id = b64url_encode(&random_bytes::<16>().map_err(|e| e.to_string())?);
+            let key = random_bytes::<32>().map_err(|e| e.to_string())?;
+            let paths: Vec<PathBuf> = series.iter().flat_map(|(_, m)| m.iter().map(|m| m.path.clone())).collect();
+            let reader = Concat { paths, next: 0, cur: None };
+            let part = state.part_path(sid, &file_id);
+            let mut out = BufWriter::new(File::create(&part).map_err(|e| e.to_string())?);
+            let size = encrypt_file_stream(reader, &mut out, &key).map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())?;
+            drop(out);
+            std::fs::rename(&part, state.series_path(sid, &file_id)).map_err(|e| e.to_string())?;
+            record_series_file(&conn_arc.lock().unwrap(), &file_id, size)?;
+            for m in series.iter().flat_map(|(_, m)| m.iter()) {
+                let _ = std::fs::remove_file(&m.path);
+            }
+            instances += series.iter().map(|(_, m)| m.len()).sum::<usize>();
+            bytes += size;
+            file_ids.push(file_id.clone());
             study_inputs.push(StudyBuildInput {
                 id: String::new(),
                 study_instance_uid: study_uid,
@@ -150,7 +154,8 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
                 started,
                 accession,
                 note: None,
-                series: series_inputs,
+                file: LinkedFileInput { file_id, key_b64: b64url_encode(&key) },
+                series: series.into_iter().map(|(s, _)| s).collect(),
             });
         }
         // Larger studies first, as the packer orders them.
