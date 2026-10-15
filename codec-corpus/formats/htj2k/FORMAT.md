@@ -163,41 +163,42 @@ The block counts come from a decoder instrumented outside the tree. Both referen
 
 ### Robustness
 
-- **Header checks:** the same as JPEG 2000 (shared `prep`, [jpeg2000 STATUS](../jpeg2000/FORMAT.md#robustness)). The wrapper also checks that oxideav's output planes have the sizes SIZ implies.
-- **Fuzzing:** `cargo fuzz` in `codecs/shl-codec-htj2k/fuzz`, with the same target design as JPEG 2000. The seeds are the HTJ2K frames plus JPEG 2000 frames, since oxideav decodes Part 1 too.
+- **Header checks:** the same as JPEG 2000 (shared `prep`, [jpeg2000 STATUS](../jpeg2000/FORMAT.md#robustness)). The oxideav path also checks that its output planes have the sizes SIZ implies.
+- **Fuzzing:** `cargo fuzz` in `codecs/shl-codec-htj2k/fuzz`, with the same target design as JPEG 2000. Seeds: the HTJ2K frames, JPEG 2000 frames (both decoders read Part 1 too), and from run 4 the MIXED, refinement-pass and MULTIHT streams.
 
-  | Run | Execs | Crashes | Timeouts | OOMs |
-  |---|---|---|---|---|
-  | 1 (10 min, 4 workers) | 663,249 | 0 | 0 | 0 |
-  | 2 (10 min, 4 workers, with the new cases and JPEG 2000 frames as seeds) | 61,380 | 0 | 0 | 0 |
+  | Run | Decoder | Execs | Crashes | Timeouts | OOMs |
+  |---|---|---|---|---|---|
+  | 1 (10 min, 4 workers) | oxideav as released | 663,249 | 0 | 0 | 0 |
+  | 2 (10 min, 4 workers, new cases and JPEG 2000 frames as seeds) | oxideav as released | 61,380 | 0 | 0 | 0 |
+  | 3 (10 min, 4 workers) | oxideav, patched | 271,655 | 0 | 0 | 0 |
+  | 4 (10 min, 4 workers, MIXED seeds; coverage 3,438 → 3,589 edges) | oxideav, patched | 424,989 | 0 | 0 | 0 |
+  | 5 (10 min, 4 workers; coverage 6,832 edges) | hayro HT path, oxideav fallback | 495,618 | 0 | 0 | 0 |
+  | 6 (10 min, 4 workers, final code; coverage 7,187 edges) | hayro HT path, oxideav fallback | 487,924 | 0 | 0 | 0 |
 
-  | 3 (10 min, 4 workers, after the speed patches) | 271,655 | 0 | 0 | 0 |
-  | 4 (10 min, 4 workers, MIXED frames added as seeds; coverage 3,438 → 3,589 edges) | 424,989 | 0 | 0 | 0 |
-
-  Runs 1 and 2 used the as-released oxideav. Run 2 had fewer executions because the larger Part 1 seeds decode slowly in oxideav.
-- **Differential check** of the speed patches: see [PERF.md, Exactness](PERF.md#exactness).
+  Run 2 had fewer executions because the larger Part 1 seeds decode slowly in the unpatched oxideav. Fuzz builds have overflow checks on.
+- **HT block decoder tests** (`shl-codec-jpeg2000/vendor/hayro-jpeg2000/src/j2c/ht/tests.rs`):
+  - round trips through the test-only encoder: 1,500 random blocks, from 1×1 to 1024×4 and 4×1024, K_max 2–28, densities 0–100%, decoded into a buffer filled with junk to check that exactly the block's samples are written;
+  - truncated and corrupted segments, which must not panic.
+- **Cross-check** of hayro against oxideav on every corpus frame (`tests/cross_check.rs`): [Phase 2d](#phase-2d-ht-decoding-in-hayro).
+- **Differential check** of the oxideav patches: see [PERF.md, Exactness](PERF.md#exactness).
 - **Checks:** all clean:
-  - `cargo test` for `shl-codec-htj2k` and the vendored `oxideav-jpeg2000` (839 unit tests);
-  - `cargo clippy -p shl-codec-htj2k -p oxideav-jpeg2000 -p shl-codec-jpeg2000 --all-targets -- -D warnings`;
-  - the wasm32 build.
+  - `cargo test` for `shl-codec-htj2k`, `shl-codec-jpeg2000`, the vendored `hayro-jpeg2000` and `oxideav-jpeg2000` (839 unit tests);
+  - `cargo clippy -p shl-codec-htj2k -p oxideav-jpeg2000 -p shl-codec-jpeg2000 -p hayro-jpeg2000 --all-targets -- -D warnings`;
+  - wasm32 builds, with and without `+simd128`.
+- **check.py, final build:** htj2k 42/42. jpeg2000 165/166: `ext-gdcm-FUJI-ffff-MONO1-J2K` (`expect=error`, since no reference decodes it) now decodes. That is from the CLI change of 2026-10-15 (`shl-dicom-decode/src/infer.rs`), which infers Bits Allocated 16 where the data set says 65535. Given the data set's own values, the codec still refuses the frame. The case's expectation is for the coordinator to revisit.
 
 ### Speed
 
-**The gate passes:** a 512×512 16-bit frame takes 30 ms in wasm32 (budget 150 ms), against 621 ms before the patches. The other frames:
-
-| Frame | native | wasm32 | before, wasm32 |
-|---|---|---|---|
-| 512×512 16-bit lossless | 22 ms | **30 ms** | 621 ms |
-| 512×512 16-bit lossy (9/7) | 22 ms | 29 ms | 627 ms |
-| 640×480 RGB (`HTJ2KLossless_08_RGB`) | 75 ms | 86 ms | 2,053 ms |
-| 2048×2048 16-bit lossless | 435 ms | 540 ms | 10,113 ms |
-
-Method, each step and the JPEG 2000 comparison: [PERF.md](PERF.md). JPEG 2000 (hayro) timings did not move.
+Phase 2c met the first gate: 30 ms in wasm32 for 512×512 16-bit, against a 150 ms budget. Phase 2d's goal was within about 3× of OpenJPH. Paired measurements under load put native decoding at 2.0–3.8× OpenJPH's time (2048² lossless: 2.0–3.3×) and wasm-simd at 2.5–4.6× (2048² lossless: 3.7×). JPEG 2000 averages 1.20× OpenJPEG natively and 1.32× in wasm-simd. Method, steps and all figures: [PERF.md](PERF.md#phase-2d-ht-decoding-in-hayro).
 
 ### Known gaps
 
-- MIXED code-blocks are covered only by streams from oxideav's own encoder, which no reference decoder reads ([MIXED cases](#mixed-cases-extragen_mixedpy)).
-- Part 1 code-blocks in HTJ2K files go through oxideav's MQ decoder: 166 ms for 512×512 16-bit in wasm32, against hayro's 63 ms on .90/.91.
-- The vendored oxideav carries two patches not yet offered upstream ([vendor README](../../../codecs/shl-codec-htj2k/vendor/README.md)).
-- The `openjph` reference cannot check signed cases, so the signed lossy cases have a single reference (OpenJPEG).
-- The JPEG 2000 gaps on POC, tile-level MCT and subsampling ([jpeg2000 Known gaps](../jpeg2000/FORMAT.md#known-gaps)) apply here, except that oxideav supports POC and Maxshift RGN.
+- **Speed:**
+  - wasm-simd is above the 3× goal on the larger frames. The scalar HT block decoder is most of the time; [PERF.md, What is left](PERF.md#what-is-left).
+  - Frames hayro declines (MIXED, MULTIHT) decode through oxideav at phase 2c speed.
+  - So do Part 1 code-blocks inside a MIXED tile-component.
+- **MIXED** code-blocks are covered only by streams from oxideav's own encoder, which no reference decoder reads ([cases](#cases-from-the-oxideav-encoder-extragen_oxideavpy)).
+- **MULTIHT** streams (one HT set per quality layer, from oxideav's encoder) decode through oxideav. No reference here reads them either, so they are not corpus cases.
+- **Upstream:** the patches to oxideav and hayro are not yet offered upstream (vendor READMEs).
+- **Signed lossy cases:** the `openjph` reference cannot check signed cases, so these have a single reference (OpenJPEG).
+- **JPEG 2000 gaps:** the gaps on POC, tile-level MCT and subsampling ([jpeg2000 Known gaps](../jpeg2000/FORMAT.md#known-gaps)) apply on the hayro path. On the oxideav path, POC and Maxshift RGN are supported.

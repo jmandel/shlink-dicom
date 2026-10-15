@@ -2,6 +2,10 @@
 
 ## oxideav-jpeg2000 0.0.17, patched for speed
 
+Since phase 2d, `shl-codec-htj2k` decodes through the vendored hayro in `shl-codec-jpeg2000`
+(its patch 5 adds HT decoding). oxideav is the fallback for what hayro declines (MIXED
+code-blocks, more than one HT set) and the cross-check in `../tests/cross_check.rs`.
+
 Source: crates.io `oxideav-jpeg2000` 0.0.17 (MIT, <https://github.com/OxideAV/oxideav-jpeg2000>).
 The crates.io source is identical to the repository's `v0.0.17` tag. It is copied unchanged
 except for the patches below and these trims:
