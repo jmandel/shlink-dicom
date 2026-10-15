@@ -109,6 +109,14 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct, about 11:50:**
+  - **Josh Example data is live.** It is in my-health-data 911ee41 (5 studies, one tgz per series). The sandbox and the shlink-dicom sample were rebuilt from it plus the CC BY slide (f2eac46), and both VMs were redeployed from GitHub.
+  - **Public checks:** sandbox e2e 130/130, How 68/68, View 142/142 (828b439).
+  - **Still open:**
+    - share-checks still reads the old published tgz files in data/samples; move it to the sandbox data or to synthetic data;
+    - the local :3333 server still seeds the old sample.
+  - **The coverage plan** (docs/COVERAGE-PLAN.md) waits for Josh's go.
+
 - **15 Oct, afternoon:**
   - **Deployed:** both VMs are live in dal; the sandbox passes remote e2e 109/109, and How passes 68/68 against the live site.
   - **Committed:** View follow-ups (2bdb6c8); the sweep (f1dfcde: Leica max_abs 3; empty slide frames stay refused, and the viewer shows them blank).
