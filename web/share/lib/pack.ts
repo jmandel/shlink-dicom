@@ -140,6 +140,13 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
       entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
     }
   });
+  // Reports that name no study, when the person included them: no imagingStudy.
+  for (const { resource: r } of col.looseReports.filter((x) => x.include)) {
+    const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
+    for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
+    dr.subject = { reference: "Patient/p1" };
+    entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
+  }
   return { resourceType: "Bundle", meta: { lastUpdated }, type: "collection", entry };
 }
 
@@ -173,7 +180,8 @@ export function subsetBundle(owner: any, studyIds: string[]): { bundle: any; all
       entry.push(e);
     } else if (r?.resourceType === "DiagnosticReport") {
       const refs = (r.imagingStudy ?? []).map((x: any) => String(x.reference ?? ""));
-      if (refs.some((ref: string) => keepUrls.has(ref) || keep.has(ref.replace(/^.*ImagingStudy\//, "")))) entry.push(e);
+      // A report goes with the studies it names; one that names none goes with every link.
+      if (!refs.length || refs.some((ref: string) => keepUrls.has(ref) || keep.has(ref.replace(/^.*ImagingStudy\//, "")))) entry.push(e);
     } else entry.push(e);
   }
   return { bundle: { ...owner, meta: { ...(owner.meta ?? {}), lastUpdated: new Date().toISOString() }, entry }, allowedFiles: files };

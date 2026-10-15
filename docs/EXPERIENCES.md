@@ -7,7 +7,7 @@ Status: draft for discussion with Josh, 15 Oct 2026. It replaces the single-page
 - **Audience:** all three experiences matter.
 - **Site:** one site, three doors, structured so that **Share** and **How it works** can later be deployed as separate static GitHub Pages sites that talk to the server.
 - **Hosting:** everything on an **exe.dev** VM first (the server needs SQLite). Static parts later point at it through a config flag or a runtime setting (`?api=` or a small `config.json`).
-- **Sharer control:** **manage links**, with no accounts.
+- **Sharer control:** **owner links**, with no accounts.
 - **Recipient import:** **download only** for now: originals as a ZIP with a DICOMDIR.
 - **Explainer:** driven by **live interactive widgets** running on a built-in **public sample SHLink**.
 - **Sharer sources:** files, CD/ZIP folders, a link a provider gave you, **and a SMART on FHIR imaging source** (a DICOMweb-enabled portal). The sharer can show some technical flair (thumbnails, series counts, bytes), because this is a technology demo too.
@@ -63,7 +63,7 @@ Each experience imports only what it needs, so it can ship as its own bundle.
 4. **Encrypt and upload.** A short animation of the real work: "Encrypting 17 series on your device · uploading ciphertext". It shows bytes and records as they go, with the line "The server stores only scrambled data."
 5. **Hand it over.**
    - A large QR code, Copy link, Share (Web Share API) and Email.
-   - The manage link, given prominently: "Save this to manage or revoke later". Saved in this browser too.
+   - The owner link, given prominently: "Save this to manage or revoke later". Saved in this browser too.
 6. **Manage** (`/share/manage#…`).
    - **The share's links,** each showing:
      - recipient and studies;

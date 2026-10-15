@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod routes_api;
 pub mod routes_shl;
+pub mod sample_pack;
 pub mod seed;
 pub mod state;
 

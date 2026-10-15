@@ -100,13 +100,14 @@ $SUDO tee "$DATA/samples/sample.json" >/dev/null <<'EOF2'
   "description": "Brain MRI, CT of the abdomen and pelvis, and hand and wrist X-rays: real images of one person, de-identified as Josh Example and published by him. Also a lung pathology slide from a different person, from the NCI Imaging Data Commons (CPTAC-LUAD, CC BY 4.0), relabelled for this sample (see the study note)."
 }
 EOF2
-# Re-seed when the sample changes (the server keeps an existing seed otherwise).
+$SUDO chown -R shlink:shlink "$DATA"
+# Pack the sample into its share when it changed (or there is none). The server only loads it, so
+# restarts are immediate. Packing streams one record at a time from scratch files in $DATA.
 sums="$(cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json | sha256sum | cut -d' ' -f1)"
-if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ]; then
-  $SUDO rm -f "$DATA/seeded_demos.json"
+if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ] || [ ! -f "$DATA/seeded_demos.json" ]; then
+  sudo -u shlink "$DIR/target/release/shl-dicom-server" seed --data-dir "$DATA"
   echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
 fi
-$SUDO chown -R shlink:shlink "$DATA"
 
 $SUDO tee /etc/systemd/system/shlink-dicom.service >/dev/null <<EOF
 [Unit]

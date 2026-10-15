@@ -35,6 +35,7 @@
           <h2>An upload did not finish</h2>
           <p class="tech" id="resume-title"></p>
           <p id="resume-text"></p>
+          <p class="error hidden" id="resume-error" role="alert"></p>
           <div class="actions">
             <button class="btn" id="resume-discard">Delete it</button>
             <button class="btn btn-primary" id="resume-continue">Continue</button>
@@ -95,7 +96,7 @@
 
       <div id="add-loading" class="panel hidden" aria-live="polite">
         <h1 tabindex="-1" id="loading-title">Reading your imaging</h1>
-        <div class="bar indeterminate" id="loading-bar"><div></div></div>
+        <div class="bar hidden" id="loading-bar" role="progressbar" aria-valuemin="0" aria-describedby="doing" aria-label="Progress"><div></div></div>
         <p class="found" id="found">Looking…</p>
         <p class="tech" id="doing"></p>
         <button class="btn" id="loading-cancel">Cancel</button>
@@ -131,7 +132,7 @@
         <div class="field">
           <label for="in-recipient">Who is it for?</label>
           <input id="in-recipient" type="text" maxlength="60" placeholder="Dr. Patel, Neurology" autocomplete="off" />
-          <p class="hint">The person who opens the link sees this name, and you see it on the manage page.</p>
+          <p class="hint">The person who opens the link sees this name, and so do you when you open your owner link.</p>
         </div>
         <div id="who-expiry"></div>
         <label class="toggle-row">
@@ -154,7 +155,7 @@
     <section class="screen hidden" id="s-upload" data-step="4">
       <h1 tabindex="-1" id="up-title">Encrypting and uploading</h1>
       <p class="lede">The server stores only scrambled data.</p>
-      <div class="bar" id="up-bar-wrap"><div id="up-bar"></div></div>
+      <div class="bar" id="up-bar-wrap" role="progressbar" aria-valuemin="0" aria-describedby="up-main" aria-label="Upload progress"><div id="up-bar"></div></div>
       <p class="found" id="up-main"></p>
       <p class="tech" id="up-tech"></p>
       <ol class="tech-log" id="up-log"></ol>
@@ -182,15 +183,14 @@
       </details>
 
       <section class="card manage-box">
-        <h2>Save this to manage or revoke later</h2>
-        <p>The manage link shows when your link is opened. With it you can extend the link, take it offline, revoke it, or make links for other people.</p>
-        <input type="text" readonly id="manage-url" aria-label="Manage link" />
+        <h2>Save your owner link</h2>
+        <p>Keep it private. It shows when your link is opened, and lets you extend it, take it offline, revoke it, or make links for other people.</p>
+        <input type="text" readonly id="manage-url" aria-label="Owner link" />
         <div class="share-actions left">
-          <button class="btn btn-primary" id="m-copy">Copy manage link</button>
-          <a class="btn" id="m-open" href="#">Open manage page</a>
+          <button class="btn btn-primary" id="m-copy">Copy owner link</button>
+          <a class="btn" id="m-open" href="#">Open</a>
         </div>
         <p class="hint" id="saved-note"></p>
-        <p class="hint">Keep it to yourself: anyone who has it can change or revoke your links.</p>
       </section>
       <p class="center"><button class="btn btn-ghost" id="again">Share something else</button></p>
     </section>

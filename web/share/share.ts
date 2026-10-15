@@ -11,12 +11,13 @@ import { PasscodeError, LinkError, LinkResolver } from "../core/resolver";
 import { getDecoderPool } from "../core/images";
 import { drawThumbnail } from "../core/render";
 import {
-  Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
+  Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
 import { buildBundle, ciphertextSize, planSeriesFiles, subsetBundle, type PackedSeries } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import { clearJob, loadJob, persist, saveJob, uploadSeries, type Connection, type UploadJob } from "./lib/upload";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
+import { canPickHandles, clearHandles, filesFrom, loadHandles, pathOf, permitted, pick, quickId, saveHandles, type PickedHandles } from "./lib/handles";
 import { parseStudyIndex } from "../core/bundle";
 import {
   ApiError, ShareApi, manageUrl, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor, type LinkResource,
@@ -114,8 +115,16 @@ function choose(id: string) {
 }
 
 // Files
-$("pick-files").addEventListener("click", () => $<HTMLInputElement>("in-files").click());
-$("pick-folder").addEventListener("click", () => $<HTMLInputElement>("in-folder").click());
+// Pickers: with the File System Access API the choice is kept (as handles) so an interrupted
+// upload can continue after a reload without picking again; otherwise a plain file input.
+for (const [btn, kind, input] of [["pick-files", "files", "in-files"], ["pick-folder", "folder", "in-folder"]] as const) {
+  $(btn).addEventListener("click", async () => {
+    if (!canPickHandles()) return $<HTMLInputElement>(input).click();
+    const h = await pick(kind);
+    if (!h) return;
+    startFiles(await filesFrom(h), h);
+  });
+}
 for (const id of ["in-files", "in-folder"]) {
   $<HTMLInputElement>(id).addEventListener("change", (e) => {
     const input = e.target as HTMLInputElement;
@@ -133,9 +142,21 @@ drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", async (e) => {
   e.preventDefault();
   drop.classList.remove("over");
+  const handles = await droppedHandles(e.dataTransfer!);
   const files = await droppedFiles(e.dataTransfer!);
-  if (files.length) startFiles(files);
+  if (files.length) startFiles(files, handles);
 });
+
+/** Handles for dropped items, when the browser gives them and they are all files or all folders. */
+async function droppedHandles(dt: DataTransfer): Promise<PickedHandles | null> {
+  try {
+    const hs = (await Promise.all([...dt.items].map((i) => (i as any).getAsFileSystemHandle?.()))).filter(Boolean);
+    if (!hs.length || hs.length !== dt.items.length) return null;
+    if (hs.every((h) => h.kind === "file")) return { kind: "files", handles: hs };
+    if (hs.every((h) => h.kind === "directory")) return { kind: "folder", handles: hs };
+  } catch {}
+  return null;
+}
 
 async function droppedFiles(dt: DataTransfer): Promise<File[]> {
   const out: File[] = [];
@@ -159,7 +180,13 @@ async function droppedFiles(dt: DataTransfer): Promise<File[]> {
   return out;
 }
 
-function startFiles(files: File[]) {
+/** The picked files (for the quick ids saved with an upload) and their handles, if any. */
+let pickedFiles: File[] = [];
+let pickedHandles: PickedHandles | null = null;
+
+function startFiles(files: File[], handles: PickedHandles | null = null) {
+  pickedFiles = files;
+  pickedHandles = handles;
   sourceKind = "files";
   sourceInfo = { kind: "files", files: files.map((f) => ({ name: (f as any).webkitRelativePath || f.name, size: f.size })) };
   runLoad("Reading your imaging", (c, st, on, sig) => loadFiles(files, c, st, on, sig));
@@ -264,7 +291,25 @@ type Loader = (c: Collection, stager: Stager, on: (c: Collection, p: Progress) =
 /** Where this visit stages decompressed and downloaded files, and the source's description for a resumed upload. */
 let stager: Stager | null = null;
 let sourceInfo: UploadJob["source"] = { kind: "files" };
-let offsetsLacking = false;
+/** Studies with multi-frame files that lack a frame offset table. */
+let lackingStudies = new Set<StudyModel>();
+
+/**
+ * A progress bar driven by measured work: `done` of a known `total` in one unit. With no known
+ * total the bar is hidden and only the text (counts so far) is shown.
+ */
+function setBar(id: string, done: number | undefined, total: number | undefined, text = "") {
+  const bar = $(id);
+  const known = total !== undefined && total > 0 && done !== undefined;
+  bar.classList.toggle("hidden", !known);
+  if (!known) return;
+  const v = Math.max(0, Math.min(done!, total!));
+  bar.setAttribute("aria-valuenow", String(v));
+  bar.setAttribute("aria-valuemax", String(total));
+  // The same amount in words ("12 MB of 47 MB"), as the text beside the bar says it.
+  bar.setAttribute("aria-valuetext", text);
+  (bar.firstElementChild as HTMLElement).style.width = `${((v / total!) * 100).toFixed(2)}%`;
+}
 
 function foundLine(c: Collection): string {
   const studies = c.studies.size;
@@ -277,7 +322,7 @@ async function runLoad(title: string, fn: Loader) {
   $("loading-title").textContent = title;
   $("loading-error").classList.add("hidden");
   $("loading-cancel").classList.remove("hidden");
-  $("loading-bar").classList.remove("hidden");
+  setBar("loading-bar", undefined, undefined);
   col = new Collection();
   loadAbort?.abort();
   const ctl = (loadAbort = new AbortController());
@@ -286,8 +331,12 @@ async function runLoad(title: string, fn: Loader) {
     const now = performance.now();
     if (now - last < 80) return;
     last = now;
-    $("found").textContent = foundLine(c);
-    $("doing").textContent = p.doing + (p.bytes ? ` · ${formatBytes(p.bytes)}` : "");
+    // The headline describes the whole selection when the source says it up front.
+    $("found").textContent = p.expected
+      ? `${plural(p.expected.studies, "study", "studies")} · ${plural(p.expected.series, "series", "series")} · ${plural(p.expected.images, "image")}`
+      : foundLine(c);
+    $("doing").textContent = p.doing;
+    setBar("loading-bar", p.done, p.total, p.doing);
   };
   $("found").textContent = foundLine(col);
   $("doing").textContent = "";
@@ -297,8 +346,10 @@ async function runLoad(title: string, fn: Loader) {
     await fn(col, stager, on, ctl.signal);
     if (ctl.signal.aborted) return;
     sourceInfo.stage = stager.onDisk ? stager.session : undefined;
+    setBar("loading-bar", undefined, undefined);
     $("doing").textContent = "Checking for frame offset tables";
-    offsetsLacking = await anyLacksOffsetTable(col.list().flatMap((s) => s.series));
+    lackingStudies = new Set();
+    for (const st of col.list()) if (await anyLacksOffsetTable(st.series)) lackingStudies.add(st);
     $("found").textContent = foundLine(col);
     if (!col.studies.size) throw new Error(col.skipped.length ? `No DICOM images were found in ${plural(col.skipped.length, "file")}.` : "No imaging was found.");
     renderReview();
@@ -307,7 +358,7 @@ async function runLoad(title: string, fn: Loader) {
     if (ctl.signal.aborted) return;
     console.warn(x);
     $("loading-cancel").classList.add("hidden");
-    $("loading-bar").classList.add("hidden");
+    setBar("loading-bar", undefined, undefined);
     $("loading-error-text").textContent = (x as Error).message || "Something went wrong.";
     $("loading-error").classList.remove("hidden");
   }
@@ -327,7 +378,8 @@ function renderReview() {
     ? `${col.patientSource === "fhir" ? "Patient" : "Name in the files"}: ${col.patient.name}${col.patient.birthDate ? `, born ${formatDate(col.patient.birthDate)}` : ""}`
     : "";
   const box = $("rv-studies");
-  box.replaceChildren(...studies.map(studyCard));
+  reportBoxes.clear();
+  box.replaceChildren(...studies.map(studyCard), ...[looseReportsCard()].filter(Boolean) as HTMLElement[]);
   const skipped = col.skipped.length;
   $("rv-skipped").textContent = [
     skipped ? `${plural(skipped, "file")} skipped (not DICOM images, or DICOMDIR)` : "",
@@ -335,9 +387,7 @@ function renderReview() {
   ].filter(Boolean).join(" · ");
   updateTotal();
   // Multi-frame files without an offset table: offer to add one (on by default).
-  const lacking = offsetsLacking;
-  $("rv-offsets-row").classList.toggle("hidden", !lacking);
-  if (lacking && !offsetsTouched) $<HTMLInputElement>("rv-offsets").checked = ADD_OFFSET_TABLES_DEFAULT;
+  if (!offsetsTouched) $<HTMLInputElement>("rv-offsets").checked = ADD_OFFSET_TABLES_DEFAULT;
   drawThumbs(studies, ++thumbGen);
 }
 
@@ -365,65 +415,102 @@ function studyCard(st: StudyModel): HTMLElement {
         h("figure", { class: "thumb", role: "listitem", title: seriesName(se) }, h("canvas", { width: 144, height: 144, "data-uid": se.uid }), h("figcaption", null, seriesName(se))),
       ),
     ),
-    reportsBox(st),
+    reportsBox(st, st.reports),
     h("p", { class: "tech" }, `${plural(c.series, "series", "series")} · ${plural(c.images, "image")} · ${formatBytes(c.bytes)} · ${encodingSummary(st)}${st.description ? ` · “${st.description}”` : ""}`),
   );
   toggle.addEventListener("change", () => {
     st.include = toggle.checked;
     card.classList.toggle("excluded", !st.include);
+    reportBoxes.get(st)?.();
     card.querySelector(".sw-text")!.textContent = st.include ? "Included" : "Left out";
     updateTotal();
   });
   return card;
 }
 
-function switchRow(checked: boolean, label: string, onChange: (on: boolean) => void): HTMLLabelElement {
-  const input = h("input", { type: "checkbox", checked, "aria-label": label }) as HTMLInputElement;
-  const text = h("span", { class: "sw-text" }, checked ? "Included" : "Left out");
+/** An Included / Left out switch. `disabledText`: shown off and disabled, with that reason. */
+function switchRow(checked: boolean, label: string, onChange: (on: boolean) => void, disabledText?: string): HTMLLabelElement {
+  const off = disabledText !== undefined;
+  const input = h("input", { type: "checkbox", checked: checked && !off, disabled: off, "aria-disabled": off ? "true" : undefined, "aria-label": label }) as HTMLInputElement;
+  const text = h("span", { class: "sw-text" }, off ? disabledText : checked ? "Included" : "Left out");
   input.addEventListener("change", () => {
     text.textContent = input.checked ? "Included" : "Left out";
     onChange(input.checked);
   });
-  return h("label", { class: "switch-label" }, h("span", { class: "switch" }, input, h("span", { class: "track", "aria-hidden": "true" })), text);
+  return h("label", { class: "switch-label" + (off ? " disabled" : "") }, h("span", { class: "switch" }, input, h("span", { class: "track", "aria-hidden": "true" })), text);
 }
 
-function reportsBox(st: StudyModel): HTMLElement {
+/** Re-renders a study's reports when the study is included or left out. */
+const reportBoxes = new Map<StudyModel, () => void>();
+
+/**
+ * A study's reports. Each has its own Included / Left out choice, which applies while the study is
+ * included. A left-out study takes its reports with it: their switches show off and disabled, and
+ * re-including the study brings back each report's own choice.
+ */
+function reportsBox(st: StudyModel | null, items: ReportItem[]): HTMLElement {
   const box = h("div", { class: "reports" });
   const render = () => {
+    const studyOff = st !== null && !st.include;
     const file = h("input", { type: "file", class: "hidden", accept: "application/pdf,text/plain,.pdf,.txt" }) as HTMLInputElement;
     file.addEventListener("change", async () => {
       const f = file.files?.[0];
       if (!f) return;
-      st.reports.push({ resource: await reportFromFile(f), include: true, from: "attached" });
+      items.push({ resource: await reportFromFile(f), include: true, from: "attached" });
       render();
+      updateTotal();
     });
     box.replaceChildren(
-      ...st.reports.map((r) => {
+      ...items.map((r) => {
         const forms = (r.resource.presentedForm ?? []).map((a: any) => `${/pdf/.test(a.contentType) ? "PDF" : "text"} ${formatBytes(a.size ?? Math.floor((a.data?.length ?? 0) * 0.75))}`);
         const row = h(
           "div",
-          { class: "report-row" + (r.include ? "" : " excluded") },
+          { class: "report-row" + (r.include && !studyOff ? "" : " excluded") + (studyOff ? " follows-study" : "") },
           h("div", { class: "report-name" }, h("span", { class: "report-line" }, `Report: ${reportTitle(r.resource)}`), h("span", { class: "tech" }, [r.from === "attached" ? "attached by you" : `from the ${r.from}`, ...forms].join(" · "))),
-          switchRow(r.include, `Include report ${reportTitle(r.resource)}`, (on) => {
-            r.include = on;
-            row.classList.toggle("excluded", !on);
-          }),
+          switchRow(
+            r.include,
+            `Include report ${reportTitle(r.resource)}`,
+            (on) => {
+              r.include = on;
+              row.classList.toggle("excluded", !on);
+              updateTotal();
+            },
+            studyOff ? "Left out with the study" : undefined,
+          ),
         );
         return row;
       }),
-      h("button", { class: "btn btn-ghost attach", type: "button", onclick: () => file.click() }, "Attach a report (PDF or text)"),
-      file,
+      st ? h("button", { class: "btn btn-ghost attach", type: "button", disabled: studyOff, "aria-disabled": studyOff ? "true" : undefined, onclick: () => file.click() }, "Attach a report (PDF or text)") : null,
+      st ? file : null,
     );
   };
+  if (st) reportBoxes.set(st, render);
   render();
   return box;
+}
+
+/** Reports that name no study here: their own choice, left out unless the person includes them. */
+function looseReportsCard(): HTMLElement | null {
+  if (!col.looseReports.length) return null;
+  return h(
+    "article",
+    { class: "card study loose" },
+    h("div", { class: "study-head" }, h("div", { class: "study-name" }, h("h2", null, "Reports not linked to a study"), h("p", { class: "date" }, "They name none of these studies. Include one only if it belongs with this imaging."))),
+    reportsBox(null, col.looseReports),
+  );
 }
 
 function updateTotal() {
   const inc = col.list().filter((s) => s.include);
   const bytes = inc.reduce((a, s) => a + studyCounts(s).bytes, 0);
+  // What goes into the Bundle: included studies, their included reports, and included loose reports.
+  const reports = inc.reduce((a, s) => a + s.reports.filter((r) => r.include).length, 0) + col.looseReports.filter((r) => r.include).length;
   $<HTMLButtonElement>("rv-next").disabled = !inc.length;
-  $("rv-total").textContent = inc.length ? `Sharing ${plural(inc.length, "study", "studies")} · ${formatBytes(bytes)}` : "Include at least one study to continue.";
+  $("rv-total").textContent = inc.length
+    ? [`Sharing ${plural(inc.length, "study", "studies")}`, reports ? plural(reports, "report") : null, formatBytes(bytes)].filter(Boolean).join(" · ")
+    : "Include at least one study to continue.";
+  // Frame offset tables: offered while an included study has files that lack them.
+  $("rv-offsets-row").classList.toggle("hidden", !inc.some((s) => lackingStudies.has(s)));
 }
 
 /** Largest instance read whole for a thumbnail. */
@@ -505,6 +592,8 @@ let pending: Pending | null = null;
 async function upload() {
   show(4);
   setUploadError(null);
+  setBar("up-bar-wrap", undefined, undefined);
+  $("up-main").textContent = "";
   const form = $("who-form");
   const job: Omit<UploadJob, "sid" | "token" | "ownerKey" | "title" | "startedAt"> = {
     apiBase: cfg.apiBase,
@@ -520,7 +609,8 @@ async function upload() {
   try {
     if (job.addOffsetTables) {
       await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
-        $("up-tech").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
+        $("up-main").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
+        setBar("up-bar-wrap", done, total, $("up-main").textContent!);
       });
     }
     const packed = planSeriesFiles(studies);
@@ -532,6 +622,12 @@ async function upload() {
     // The owner Bundle first: with the manage credential it is all a reload needs to continue.
     const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
     await persist(() => api.putOwner(ownerJwe), early);
+    if (job.source.kind === "files") {
+      $("up-tech").textContent = "Noting which files these are, to continue after a reload";
+      job.source = { ...job.source, files: await Promise.all(pickedFiles.map(async (f) => ({ name: pathOf(f), size: f.size, id: await quickId(f) }))) };
+      if (pickedHandles) await saveHandles(pickedHandles);
+      else await clearHandles();
+    }
     const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
     const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000) };
     saveJob(full);
@@ -564,8 +660,8 @@ async function runUpload(p: Pending) {
   let conn: Connection = { state: "ok" };
   const paint = () => {
     const { sent, total, done } = last;
-    $<HTMLElement>("up-bar").style.width = `${((sent / total) * 100).toFixed(1)}%`;
     const amount = `${formatBytes(sent)} of ${formatBytes(total)}`;
+    setBar("up-bar-wrap", sent, total, `${amount} sent`);
     $("up-main").textContent =
       conn.state === "offline"
         ? `Connection lost. Waiting for the network… ${amount} sent`
@@ -585,7 +681,8 @@ async function runUpload(p: Pending) {
       api,
       packed,
       (u) => {
-        last = { sent: u.sent, total: u.total, done: u.seriesDone };
+        // Bytes sent only go up: a retry that resends some bytes doesn't move the bar back.
+        last = { sent: Math.max(u.total === last.total ? last.sent : 0, u.sent), total: u.total, done: u.seriesDone };
         paint();
         if (u.finished) $("up-log").prepend(h("li", null, `${seriesName(u.finished.series)} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
       },
@@ -603,6 +700,7 @@ async function runUpload(p: Pending) {
     const shlink = await shlinkFor(link, job.ownerKey, cfg.viewerPrefix);
     const saved = saveShare({ ...cred, title: `${job.title}${job.recipient ? ` · for ${job.recipient}` : ""}`, createdAt: job.startedAt, apiBase: cfg.apiBase });
     clearJob();
+    await clearHandles();
     pending = null;
     await clearStaging(null);
     result = { shlink, manage: manageUrl(manageBase(), cred), link, studies: studyIds.length };
@@ -614,6 +712,26 @@ async function runUpload(p: Pending) {
 }
 
 // ------------------------------------------------------------ continuing after a reload
+
+/** The files this upload started with, among those picked again (by name, size and quick id). */
+async function sameFiles(job: UploadJob, picked: File[]): Promise<File[]> {
+  const want = job.source.files ?? [];
+  if (!want.length) return picked;
+  const byName = new Map<string, File[]>();
+  for (const f of picked) {
+    for (const k of new Set([pathOf(f), f.name])) byName.set(k, [...(byName.get(k) ?? []), f]);
+  }
+  const out: File[] = [];
+  for (const w of want) {
+    const base = w.name.split("/").pop()!;
+    const candidates = [...new Set([...(byName.get(w.name) ?? []), ...(byName.get(base) ?? [])])].filter((f) => f.size === w.size);
+    let hit: File | undefined;
+    for (const f of candidates) if (!hit && (!w.id || (await quickId(f)) === w.id)) hit = f;
+    if (!hit) throw new Error(candidates.length ? `${w.name} is not the same file as before.` : `${w.name} is missing from what you chose.`);
+    out.push(hit);
+  }
+  return out;
+}
 
 /** Rebuilds the series plan of a saved job from its owner Bundle and the re-opened source. */
 function planFromOwner(owner: any, c: Collection): PackedSeries[] {
@@ -648,12 +766,17 @@ async function resumeJob(job: UploadJob, files?: File[]) {
   show(4);
   setUploadError(null);
   $("up-tech").textContent = "Continuing the upload";
+  $("up-main").textContent = "Reading the files again";
+  setBar("up-bar-wrap", undefined, undefined);
   try {
     const owner = await readOwnerBundle(api, job.ownerKey);
     const c = new Collection();
     const st = await openStager(job.source.stage);
-    const on = () => {};
-    if (job.source.kind === "files") await loadFiles(files ?? [], c, st, on);
+    const on = (_c: Collection, p: Progress) => {
+      $("up-main").textContent = p.doing;
+      setBar("up-bar-wrap", p.done, p.total, p.doing);
+    };
+    if (job.source.kind === "files") await loadFiles(await sameFiles(job, files ?? []), c, st, on);
     else if (job.source.kind === "portal") {
       for (const [k, src] of (await st.list()).entries()) await c.add(`staged/${k}`, src);
       c.finish();
@@ -661,23 +784,33 @@ async function resumeJob(job: UploadJob, files?: File[]) {
     if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
     await runUpload({ job, api, owner, packed: planFromOwner(owner, c) });
   } catch (x) {
+    // Back to the notice, saying what was wrong, so the person can choose again.
     pending = null;
-    uploadFailed(x);
+    show(1, "choose");
+    await renderResume(job);
+    $("resume-error").textContent = (x as Error).message || "Something went wrong.";
+    $("resume-error").classList.remove("hidden");
   }
 }
 
-function renderResume(job: UploadJob) {
+async function renderResume(job: UploadJob) {
   $("resume-title").textContent = job.title;
-  const needFiles = job.source.kind === "files";
+  const needFiles = job.source.kind === "files" && !(await loadHandles());
   $("resume-text").textContent = needFiles
     ? `Choose the same ${job.source.files && job.source.files.length > 1 ? "files or folder" : "file"} again to continue. What reached the server is kept.`
     : "What reached the server is kept. Continue to send the rest.";
   $("resume-continue").textContent = needFiles ? "Choose the files" : "Continue";
+  $("resume-error").classList.add("hidden");
   $("resume").classList.remove("hidden");
 }
-$("resume-continue").addEventListener("click", () => {
+$("resume-continue").addEventListener("click", async () => {
   const job = loadJob();
   if (!job) return;
+  if (job.source.kind === "files") {
+    // Remembered handles: one permission click, then continue with the same files.
+    const h = await loadHandles();
+    if (h && (await permitted(h).catch(() => false))) return resumeJob(job, await filesFrom(h));
+  }
   if (job.source.kind === "files") $<HTMLInputElement>(job.source.files?.some((f) => f.name.includes("/")) ? "in-resume-folder" : "in-resume").click();
   else resumeJob(job);
 });
@@ -691,6 +824,7 @@ for (const id of ["in-resume", "in-resume-folder"]) {
   });
 }
 $("resume-discard").addEventListener("click", async () => {
+  await clearHandles();
   const job = loadJob();
   if (job) await new ShareApi(job.apiBase, { sid: job.sid, token: job.token }).deleteShare().catch(() => {});
   clearJob();
@@ -760,5 +894,9 @@ $("again").addEventListener("click", () => {
   },
   get collection() {
     return col;
+  },
+  /** For the checks: share files behind handles, as if picked with the browser's picker. */
+  async pickHandles(h: PickedHandles) {
+    startFiles(await filesFrom(h), h);
   },
 };

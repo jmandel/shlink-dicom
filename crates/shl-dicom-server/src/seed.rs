@@ -2,11 +2,12 @@ use rusqlite::params;
 use shl_dicom_core::{
     crypto::{b64url_encode, random_bytes},
     jwe::encrypt_bundle_jwe,
-    packer::{build_link_bundle, IngestSession},
+    packer::build_link_bundle,
     shl::{compute_shl_flag, encode_shlink_uri, ShlPayload},
 };
+use crate::sample_pack::pack_samples;
 use crate::state::{
-    hash_passcode, now_unix, sha256_bytes, store_series_file, AppState, DemoShareInfo,
+    hash_passcode, now_unix, sha256_bytes, AppState, DemoShareInfo,
     DEFAULT_PASSCODE_ATTEMPTS,
 };
 
@@ -39,76 +40,62 @@ struct PersistedSeed {
     key_p: String,
 }
 
-pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
-    let seed_meta_path = state.data_dir.join("seeded_demos.json");
-    if seed_meta_path.exists() {
-        if let Ok(text) = std::fs::read_to_string(&seed_meta_path) {
-            if let Ok(saved) = serde_json::from_str::<PersistedSeed>(&text) {
-                if saved.version == SEED_VERSION
-                    && state.catalog_has_share(&saved.sid)
-                    && populate_demo_list(state, origin, &saved).is_ok()
-                {
-                    return Ok(());
-                }
-            }
-        }
-    }
+/// Loads the sample made by `shl-dicom-server seed` (`seeded_demos.json`). Never packs anything,
+/// so a restart is immediate. Returns false when there is no sample.
+pub fn load_sample(state: &AppState, origin: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(state.data_dir.join("seeded_demos.json")) else {
+        return false;
+    };
+    let Ok(saved) = serde_json::from_str::<PersistedSeed>(&text) else {
+        return false;
+    };
+    saved.version == SEED_VERSION && state.catalog_has_share(&saved.sid) && populate_demo_list(state, origin, &saved).is_ok()
+}
 
+/// What `seed_sample` did, for the CLI's report.
+pub struct SeedReport {
+    pub sid: String,
+    pub series: usize,
+    pub instances: usize,
+    pub bytes: u64,
+}
+
+/// Packs `samples/*.tgz` (with `samples/reports.json`) into a new read-only sample share, streaming
+/// one record at a time into the share's files, and makes its two links. Replaces an earlier sample.
+pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
     let samples_dir = state.data_dir.join("samples");
-    std::fs::create_dir_all(&samples_dir).map_err(|e| e.to_string())?;
+    let seed_meta_path = state.data_dir.join("seeded_demos.json");
+    let previous = std::fs::read_to_string(&seed_meta_path).ok().and_then(|t| serde_json::from_str::<PersistedSeed>(&t).ok());
 
-    // Every .tgz in samples/, in name order.
-    let mut tgzs: Vec<_> = std::fs::read_dir(&samples_dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "tgz"))
-        .collect();
-    if tgzs.is_empty() {
-        return Ok(());
-    }
-    tgzs.sort();
-
-    let mut ingest = IngestSession::new();
-    for path in &tgzs {
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        ingest.ingest_tar_gz(&bytes).map_err(|e| e.to_string())?;
-    }
-
-    let mut packed = ingest
-        .pack("2026-10-14T16:00:00Z")
-        .map_err(|e| e.to_string())?;
-    packed.owner_bundle_json = add_sample_reports(&samples_dir, &packed.owner_bundle_json)?;
-
-    let meta = sample_meta(state);
     let (sid, _ctrl) = state.create_share(true, None)?;
-    let conn_arc = state.open_share_db(&sid).ok_or("failed to open demo share DB")?;
-
-    let mut all_allowed_files = Vec::new();
+    let scratch = state.data_dir.join(format!("seed-scratch-{sid}"));
+    let packed = match pack_samples(state, &sid, &samples_dir, &scratch, "2026-10-14T16:00:00Z") {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = state.delete_share(&sid);
+            return Err(e);
+        }
+    };
+    let owner_bundle_json = add_sample_reports(&samples_dir, &packed.owner_bundle_json)?;
+    let conn_arc = state.open_share_db(&sid).ok_or("failed to open the sample's database")?;
     {
         let conn = conn_arc.lock().unwrap();
-        let _ = conn.execute_batch("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;");
         let owner_key = random_bytes::<32>().map_err(|e| e.to_string())?;
-        let owner_jwe = encrypt_bundle_jwe(packed.owner_bundle_json.as_bytes(), &owner_key)
-            .map_err(|e| e.to_string())?;
+        let owner_jwe = encrypt_bundle_jwe(owner_bundle_json.as_bytes(), &owner_key).map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE share SET owner_bundle = ?1, owner_updated_at = ?2 WHERE id = 1",
             params![owner_jwe.as_bytes(), now_unix()],
         )
         .map_err(|e| e.to_string())?;
-
-        drop(conn);
-        for sf in &packed.series_files {
-            // The server's own sample is not subject to upload quotas.
-            store_series_file(state, &sid, &sf.file_id, &sf.ciphertext)?;
-            all_allowed_files.push(sf.file_id.clone());
-        }
     }
+    let meta = sample_meta(state);
+    let all_allowed_files = packed.file_ids.clone();
 
     // Link 1: U-mode Brain MRI + Wrist link
     let lid_u = b64url_encode(&random_bytes::<16>().unwrap());
     let key_u = random_bytes::<32>().unwrap();
     let bundle_u = build_link_bundle(
-        &packed.owner_bundle_json,
+        &owner_bundle_json,
         &[],
         &key_u,
         "2026-10-14T16:00:00Z",
@@ -130,7 +117,7 @@ pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
     let lid_p = b64url_encode(&random_bytes::<16>().unwrap());
     let key_p = random_bytes::<32>().unwrap();
     let bundle_p = build_link_bundle(
-        &packed.owner_bundle_json,
+        &owner_bundle_json,
         &[],
         &key_p,
         "2026-10-14T16:00:00Z",
@@ -156,12 +143,14 @@ pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
         lid_p,
         key_p: bundle_p.shl_key_b64,
     };
-    let _ = std::fs::write(
-        &seed_meta_path,
-        serde_json::to_string_pretty(&saved).unwrap_or_default(),
-    );
-    populate_demo_list(state, origin, &saved)?;
-    Ok(())
+    std::fs::write(&seed_meta_path, serde_json::to_string_pretty(&saved).unwrap_or_default()).map_err(|e| e.to_string())?;
+    // The earlier sample goes once the new one is in place.
+    if let Some(prev) = previous {
+        if prev.sid != saved.sid {
+            let _ = state.delete_share(&prev.sid);
+        }
+    }
+    Ok(SeedReport { sid: saved.sid, series: packed.file_ids.len(), instances: packed.instances, bytes: packed.bytes })
 }
 
 fn populate_demo_list(

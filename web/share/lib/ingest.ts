@@ -87,6 +87,8 @@ const DICOMDIR_SOP = "1.2.840.10008.1.3.10";
 /** Collects instances as they are found; counts drive the live "Found …" line. */
 export class Collection {
   studies = new Map<string, StudyModel>();
+  /** Reports that name none of the studies (from the portal or link); each has its own choice. */
+  looseReports: ReportItem[] = [];
   skipped: Skipped[] = [];
   duplicates = 0;
   instanceCount = 0;
@@ -320,18 +322,36 @@ function streamOf(src: Bytes): ReadableStream<Uint8Array> {
  * Expands one file: ZIP and TAR members are read in place where they can be (stored entries, plain
  * TAR); gzip streams and deflated entries are decompressed into the stager. Anything else is itself.
  */
-export async function* expand(name: string, src: Bytes, stager: Stager, depth = 0): AsyncGenerator<FileEntry> {
+export async function* expand(name: string, src: Bytes, stager: Stager, depth = 0, onPos?: (pos: number) => void): AsyncGenerator<FileEntry> {
   const sniff = await src.read(0, Math.min(src.size, 512));
   if (depth < 3 && isGz(sniff)) {
-    const stream = streamOf(src).pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
+    // Count the compressed bytes consumed, for progress.
+    let pos = 0;
+    const counted = streamOf(src).pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(c, ctl) {
+          pos += c.length;
+          onPos?.(pos);
+          ctl.enqueue(c);
+        },
+      }),
+    );
+    const stream = counted.pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
     yield* tarStream(name.replace(/\.(t?gz)$/i, ""), stream, stager);
   } else if (depth < 3 && isZip(sniff)) {
-    for await (const e of zipEntries(src, stager)) yield* expand(`${name}/${e.name}`, e.src, stager, depth + 1);
+    for await (const e of zipEntries(src, stager)) {
+      if (e.src instanceof SubBytes) onPos?.(e.src.offset + e.src.size);
+      yield* expand(`${name}/${e.name}`, e.src, stager, depth + 1);
+    }
   } else if (depth < 3 && isTar(sniff)) {
-    for await (const e of tarEntries(src)) yield* expand(`${name}/${e.name}`, e.src, stager, depth + 1);
+    for await (const e of tarEntries(src)) {
+      if (e.src instanceof SubBytes) onPos?.(e.src.offset + e.src.size);
+      yield* expand(`${name}/${e.name}`, e.src, stager, depth + 1);
+    }
   } else {
     yield { name, src };
   }
+  onPos?.(src.size);
 }
 
 /** Pull-based reader over a byte stream. */

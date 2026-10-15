@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use shl_dicom_server::{
     build_app_router,
     cli::{run_inspect_cli, run_pack_cli},
-    seed::seed_demo_shares,
+    seed::{load_sample, seed_sample},
     state::{AppState, Quotas},
 };
 
@@ -56,6 +56,13 @@ enum Commands {
         #[arg(long)]
         passcode: Option<String>,
     },
+    /// Pack the server's sample (data-dir/samples/*.tgz, sample.json, reports.json) into a share,
+    /// replacing an earlier one. Run at deploy time; `serve` only loads what this made.
+    Seed {
+        /// Data directory (catalog.db, shares/, samples/)
+        #[arg(long, env = "SHL_DICOM_DATA_DIR", default_value = "./data")]
+        data_dir: PathBuf,
+    },
     /// Run the Zero-Knowledge SHL Server and Demo Web App
     Serve {
         /// Port to listen on
@@ -107,6 +114,24 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Seed { data_dir } => {
+            let t0 = std::time::Instant::now();
+            let state = AppState::new(&data_dir).expect("failed to initialize AppState");
+            match seed_sample(&state) {
+                Ok(r) => println!(
+                    "Sample packed in {:.1} s: share {}, {} series files, {} instances, {:.1} MB",
+                    t0.elapsed().as_secs_f64(),
+                    r.sid,
+                    r.series,
+                    r.instances,
+                    r.bytes as f64 / 1e6
+                ),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Serve {
             port,
             data_dir,
@@ -126,9 +151,8 @@ async fn main() {
             };
             let state = AppState::with_quotas(&data_dir, quotas).expect("failed to initialize AppState");
             let origin = public_origin.unwrap_or_else(|| format!("http://localhost:{port}"));
-            println!("Seeding demo shares in {:?}...", data_dir);
-            if let Err(e) = seed_demo_shares(&state, &origin) {
-                eprintln!("Warning: demo seeding failed: {e}");
+            if !load_sample(&state, &origin) {
+                eprintln!("No sample share in {data_dir:?}: run `shl-dicom-server seed --data-dir {}`.", data_dir.display());
             }
             let app = build_app_router(state);
             let addr = format!("0.0.0.0:{port}");

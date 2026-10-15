@@ -37,6 +37,8 @@ pub enum Error {
     InvalidBundle(String),
     #[error("DICOM error: {0}")]
     Dicom(String),
+    #[error("I/O error: {0}")]
+    Io(String),
     #[error("unsupported transfer syntax for built-in pixel decoder: {0}")]
     UnsupportedTransferSyntax(String),
     #[error("JSON error: {0}")]

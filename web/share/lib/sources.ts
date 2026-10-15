@@ -6,15 +6,19 @@ import type { SeriesEntry } from "../../core/bundle";
 import type { DicomHeader } from "../../core/dicom-header";
 import { linkReports } from "../../core/reports";
 import { BlobBytes, SubBytes, type Bytes } from "./bytes";
+import { formatBytes, plural } from "../../core/format";
 import { Collection, expand } from "./ingest";
 import type { Stager } from "./stage";
 import * as S from "./smart";
 
 export interface Progress {
-  /** What is happening now, in plain words. */
+  /** What is happening now, in plain words (including the measured amounts). */
   doing: string;
-  /** Bytes read or downloaded so far, when known. */
-  bytes?: number;
+  /** Measured work done of a known total, in one unit; absent when the total isn't known. */
+  done?: number;
+  total?: number;
+  /** For the headline: the whole selection, when the source says it before downloading. */
+  expected?: { studies: number; series: number; images: number };
 }
 export type OnProgress = (c: Collection, p: Progress) => void;
 
@@ -23,24 +27,29 @@ export type OnProgress = (c: Collection, p: Progress) => void;
  * gzip archives and deflated ZIP entries are decompressed into the stager as they are read.
  */
 export async function loadFiles(files: File[], col: Collection, stager: Stager, on: OnProgress, signal?: AbortSignal) {
+  // Measured by bytes of the picked files: each file counts when it has been read through
+  // (only headers for loose files), an archive as its bytes are consumed.
+  const total = files.reduce((a, f) => a + f.size, 0);
   let read = 0;
+  const say = (at: number, name: string) => on(col, { doing: `Reading ${formatBytes(read + at)} of ${formatBytes(total)} · ${name}`, done: read + at, total });
   for (const f of files) {
     signal?.throwIfAborted();
     const name = (f as any).webkitRelativePath || f.name;
-    on(col, { doing: `Reading ${name}`, bytes: read });
+    say(0, name);
+    let at = 0;
     try {
       let n = 0;
-      for await (const e of expand(name, new BlobBytes(f), stager)) {
+      for await (const e of expand(name, new BlobBytes(f), stager, 0, (pos) => (at = Math.max(at, Math.min(pos, f.size))))) {
         signal?.throwIfAborted();
         await col.add(e.name, e.src);
-        if (++n % 25 === 0) on(col, { doing: `Reading ${name}`, bytes: read });
+        if (++n % 25 === 0) say(at, name);
       }
     } catch (e) {
       if (signal?.aborted) throw e;
       col.skip(name, `could not be read (${(e as Error).message})`);
     }
     read += f.size;
-    on(col, { doing: `Read ${name}`, bytes: read });
+    say(0, name);
   }
   col.finish();
 }
@@ -106,6 +115,12 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
         .map((resource: any) => ({ resource, include: true, from: "link" as const }));
     }
   }
+  // Reports in the link that name none of its studies (or only match by date): kept, left out until chosen.
+  const linked = new Set(linkReports(idx).filter((l) => l.studyId && l.basis !== "date").map((l) => l.report.id));
+  col.looseReports = (idx.bundle.entry ?? [])
+    .map((e: any) => e.resource)
+    .filter((r: any) => r?.resourceType === "DiagnosticReport" && !linked.has(r.id))
+    .map((resource: any) => ({ resource, include: false, from: "link" as const }));
   col.finish();
 }
 
@@ -188,23 +203,39 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
     const rp = await S.fhirSearchAll(`${d.clinicalBase}/DiagnosticReport?patient=${encodeURIComponent(pid)}`, tok);
     reports = rp.flatMap((b) => (b.entry ?? []).map((e: any) => e.resource).filter((r: any) => r?.resourceType === "DiagnosticReport"));
   } catch {}
+  // The search results say how many series and images there are before anything is downloaded.
   const total = found.reduce((a, f) => a + Math.max(1, f.study.series?.length ?? 0), 0);
-  let done = 0, bytes = 0;
+  const images = found.reduce(
+    (a, f) => a + (f.study.numberOfInstances ?? (f.study.series ?? []).reduce((b: number, se: any) => b + (se.numberOfInstances ?? se.instance?.length ?? 0), 0)),
+    0,
+  );
+  const expected = { studies: found.length, series: total, images };
+  let done = 0, bytes = 0, got = 0;
+  const used = new Set<any>();
+  const say = () =>
+    on(col, {
+      doing: images
+        ? `Downloading ${Math.min(got, images)} of ${images} images · ${done} of ${total} series · ${formatBytes(bytes)} so far`
+        : `Downloading ${done} of ${total} series · ${formatBytes(bytes)} so far`,
+      ...(images ? { done: Math.min(got, images), total: images } : { done, total }),
+      expected,
+    });
   for (const f of found) {
     const series: any[] = f.study.series?.length ? f.study.series : [null];
     for (const se of series) {
       signal?.throwIfAborted();
-      on(col, { doing: `Downloading series ${done + 1} of ${total} from the portal`, bytes });
+      say();
       const url = se ? `${f.wadoBase}/studies/${f.studyUID}/series/${se.uid}` : `${f.wadoBase}/studies/${f.studyUID}`;
       let k = 0;
       for await (const part of S.wadoRetrieveParts(url, tok, signal)) {
         const src = await stager.stage(`${se?.description ?? f.studyUID}/${++k}`, part);
         await col.add(`${se?.description ?? f.studyUID}/${k}`, src);
         bytes += src.size;
-        on(col, { doing: `Downloading series ${done + 1} of ${total} from the portal`, bytes });
+        got++;
+        say();
       }
       done++;
-      on(col, { doing: `Downloading series ${done} of ${total} from the portal`, bytes });
+      say();
     }
     const m = col.studies.get(f.studyUID);
     if (m) {
@@ -220,9 +251,16 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
               ref.identifier?.value === `urn:oid:${f.studyUID}` || String(ref.reference ?? "").replace(/^.*ImagingStudy\//, "") === f.study.id,
           ) || (!!m.accession && (r.identifier ?? []).some((i: any) => i.value === m.accession)),
       );
-      on(col, { doing: "Downloading reports", bytes });
+      on(col, { doing: `Downloading the reports · ${images ? Math.min(got, images) : got} of ${images || got} images downloaded`, ...(images ? { done: Math.min(got, images), total: images } : {}), expected });
       m.reports = (await Promise.all(mine.map((r) => S.inlineAttachments(r, tok)))).map((resource) => ({ resource, include: true, from: "portal" as const }));
+      for (const r of mine) used.add(r);
     }
+  }
+  // The patient's other reports, which name none of these studies: offered, left out until chosen.
+  const others = reports.filter((r) => !used.has(r));
+  if (others.length) {
+    on(col, { doing: `Downloading ${plural(others.length, "other report")}`, expected });
+    col.looseReports = (await Promise.all(others.map((r) => S.inlineAttachments(r, tok)))).map((resource) => ({ resource, include: false, from: "portal" as const }));
   }
   col.finish();
 }

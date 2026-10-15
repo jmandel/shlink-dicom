@@ -258,7 +258,7 @@ export class ShareApi {
 
 /**
  * A link's SHL key, derived from the owner key and the link id (HKDF-SHA-256). The owner can
- * rebuild any of their links from the manage link alone; the server never sees either key.
+ * rebuild any of their links from the owner link (the manage URL) alone; the server never sees either key.
  */
 async function linkKey(ownerKey: string, lid: string): Promise<string> {
   const ikm = await crypto.subtle.importKey("raw", b64urlDecode(ownerKey), "HKDF", false, ["deriveBits"]);
@@ -302,7 +302,7 @@ export async function readOwnerBundle(api: ShareApi, ownerKey: string): Promise<
   return JSON.parse(fromUtf8(await decryptJwe(await api.getOwner(), ownerKey)));
 }
 
-// -------------------------------------------------------------------------- the manage link
+// ----------------------------------------------------------- the owner link (manage URL)
 
 export function manageUrl(siteManageUrl: string, c: OwnerCredential): string {
   return `${siteManageUrl}#share=${c.sid}&token=${c.token}&key=${c.ownerKey}`;

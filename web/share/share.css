@@ -1,4 +1,11 @@
 /* Share (/share) and Manage (/share/manage). Mobile first; builds on base.css tokens. */
+:root {
+  /* Images are shown on black in both themes; the QR code stays dark on white so it scans; dialogs
+     dim the page with a dark scrim in both themes. */
+  --image-bg: #000;
+  --qr-bg: #fff;
+  --scrim: rgba(0, 0, 0, 0.5);
+}
 
 .topbar {
   display: flex;
@@ -83,9 +90,6 @@ input[type="number"] { font: inherit; min-height: 44px; padding: 8px 12px; borde
 .found { font-size: 1.05rem; font-weight: 600; font-variant-numeric: tabular-nums; margin: 12px 0 0; }
 .bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; margin: 16px 0 0; }
 .bar > div { height: 100%; width: 0; background: var(--accent); transition: width 0.15s linear; }
-.bar.indeterminate > div { width: 30%; animation: slide 1.2s ease-in-out infinite; }
-@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
-@media (prefers-reduced-motion: reduce) { .bar.indeterminate > div { animation: none; width: 100%; opacity: 0.4; } }
 #add-loading .btn { margin-top: 16px; }
 
 /* Step 2: review */
@@ -99,7 +103,7 @@ input[type="number"] { font: inherit; min-height: 44px; padding: 8px 12px; borde
 .date { margin: 2px 0 0; color: var(--text-2); }
 .thumbs { display: flex; gap: 8px; overflow-x: auto; margin: 12px -14px 0; padding: 0 14px 4px; scrollbar-width: thin; }
 .thumb { margin: 0; flex: none; width: 76px; }
-.thumb canvas { width: 76px; height: 76px; border-radius: 6px; background: #000; }
+.thumb canvas { width: 76px; height: 76px; border-radius: 6px; background: var(--image-bg); }
 .thumb canvas.failed { background: var(--surface-2); }
 .thumb figcaption { font-size: 0.7rem; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
 .report-line { margin: 10px 0 0; font-size: 0.9rem; color: var(--text-2); }
@@ -109,7 +113,7 @@ input[type="number"] { font: inherit; min-height: 44px; padding: 8px 12px; borde
 .switch { display: inline-block; flex: none; }
 .switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
 .track { position: relative; display: block; width: 46px; height: 28px; border-radius: 14px; background: var(--border); transition: background 0.15s; }
-.track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: transform 0.15s; }
+.track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--surface); box-shadow: var(--shadow); transition: transform 0.15s; }
 .switch input:checked + .track { background: var(--accent); }
 .switch input:checked + .track::after { transform: translateX(18px); }
 .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -138,7 +142,7 @@ input[type="number"] { font: inherit; min-height: 44px; padding: 8px 12px; borde
 
 /* Step 5: hand over */
 .qr-wrap { display: flex; justify-content: center; margin: 16px 0; }
-.qr { width: min(320px, 80vw); aspect-ratio: 1; background: #fff; padding: 8px; border-radius: var(--radius); box-shadow: var(--shadow); }
+.qr { width: min(320px, 80vw); aspect-ratio: 1; background: var(--qr-bg); padding: 8px; border-radius: var(--radius); box-shadow: var(--shadow); }
 .qr svg { width: 100%; height: 100%; display: block; }
 .share-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
 @media (min-width: 640px) { .share-actions { display: flex; justify-content: center; flex-wrap: wrap; } }
@@ -185,7 +189,7 @@ input[type="number"] { font: inherit; min-height: 44px; padding: 8px 12px; borde
 .mg-section > h2 { margin-bottom: 8px; }
 .danger-zone { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); }
 dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); max-width: min(420px, calc(100vw - 32px)); padding: 20px; }
-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog::backdrop { background: var(--scrim); }
 .toast { position: fixed; left: 50%; bottom: calc(16px + var(--safe-b)); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: var(--radius-sm); font-size: 0.9rem; z-index: 10; max-width: calc(100vw - 32px); }
 
 .tech-details summary::before { content: "▸"; margin-right: 8px; transition: transform 0.15s; display: inline-block; }
@@ -202,3 +206,9 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 .resume h2 { margin-bottom: 4px; }
 
 .found.warn { color: var(--warn); }
+
+.switch-label.disabled { cursor: default; }
+.switch-label.disabled .track { opacity: 0.5; }
+.switch-label.disabled .sw-text { color: var(--text-3); }
+.report-row.excluded .report-name, .report-row.follows-study .report-name { opacity: 0.55; }
+.attach[disabled] { opacity: 0.45; }

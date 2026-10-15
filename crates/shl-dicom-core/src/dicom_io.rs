@@ -147,6 +147,28 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> Result<Option
         return Ok(None);
     };
 
+    parsed_from_object(source_name, &file_obj, final_bytes, was_bare_wrapped)
+}
+
+/// Reads only the header of a Part 10 file from `reader` (up to Pixel Data), so a large file is
+/// never held. `bytes` in the result is empty. Bare data sets are not handled here.
+pub fn parse_dicom_header_reader<R: std::io::Read>(source_name: &str, reader: R) -> Result<Option<ParsedDicomInstance>> {
+    if is_non_dicom_filename(source_name) {
+        return Ok(None);
+    }
+    let file_obj = OpenFileOptions::new()
+        .read_until(Tag(0x7FE0, 0x0000))
+        .from_reader(reader)
+        .map_err(|e| Error::Dicom(format!("{source_name}: {e}")))?;
+    parsed_from_object(source_name, &file_obj, Vec::new(), false)
+}
+
+fn parsed_from_object(
+    source_name: &str,
+    file_obj: &FileDicomObject<InMemDicomObject>,
+    final_bytes: Vec<u8>,
+    was_bare_wrapped: bool,
+) -> Result<Option<ParsedDicomInstance>> {
     let meta_sop_class = clean_uid(file_obj.meta().media_storage_sop_class_uid());
     let sop_class_uid = get_uid_tag(&file_obj, tags::SOP_CLASS_UID)
         .filter(|s| !s.is_empty())

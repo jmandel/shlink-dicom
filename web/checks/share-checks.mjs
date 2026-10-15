@@ -8,7 +8,7 @@
 //   SHARE_REDIRECT_URIS=http://localhost:3333/share/smart-callback/ bun src/server.ts
 // Screenshots go to docs/shots/share/. Exits non-zero if any check fails. Deletes the shares it makes.
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 const BASE = process.env.BASE ?? "http://localhost:3333";
@@ -73,10 +73,11 @@ const made = []; // manage URLs, deleted at the end
 const browser = await launchBrowser();
 
 async function newPage(dev, opts = {}) {
-  const context = await browser.newContext({ ...DEVICES[dev] });
+  const context = await browser.newContext({ ...DEVICES[dev], ...(opts.dark ? { colorScheme: "dark" } : {}) });
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE }).catch(() => {});
-  const page = await context.newPage();
+  // Progress bars are watched suite-wide (browser.mjs, progressWatch).
   const errors = [];
+  const page = await context.newPage();
   const allowed = (s) => (opts.allowErrors ?? []).some((re) => re.test(s));
   page.on("console", (m) => m.type() === "error" && !allowed(m.text()) && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -151,7 +152,9 @@ async function finish(page, dev, prefix, o = {}) {
   }
   check(`${prefix}: QR code rendered`, (await page.locator("#qr svg").count()) === 1);
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("shl-dicom-shares") ?? "[]").length);
-  check(`${prefix}: manage link saved in this browser`, saved >= 1, `${saved} saved`);
+  check(`${prefix}: owner link saved in this browser`, saved >= 1, `${saved} saved`);
+  const box = { h: await page.textContent(".manage-box h2"), copy: await page.textContent("#m-copy") };
+  check(`${prefix}: hand-over names the owner link`, box.h === "Save your owner link" && box.copy === "Copy owner link", JSON.stringify(box));
   return result;
 }
 
@@ -273,9 +276,26 @@ async function flowPortal(dev) {
   check(`${P}: each report can be left out`, rowToggles, rowToggles ? "" : "not on this site yet");
   if (rowToggles) {
     await page.locator(".study").nth(firstKept).locator(".report-row .switch-label").first().click();
-    check(`${P}: report marked as left out`, (await page.locator(".report-row.excluded").count()) === 1);
+    check(`${P}: report marked as left out`, (await page.locator(".report-row.excluded:not(.follows-study)").count()) === 1);
   }
   const leftOut = rowToggles ? 1 : 0;
+  if (rowToggles) {
+    // A left-out study's report is shown off and disabled, whatever its own choice.
+    const bigReport = await page.locator(".study").nth(big[0]).locator(".report-row").first().evaluate((row) => {
+      const input = row.querySelector("input");
+      return { checked: input.checked, disabled: input.disabled, aria: input.getAttribute("aria-disabled"), text: row.querySelector(".sw-text").textContent, opacity: getComputedStyle(row.querySelector(".report-name")).opacity, attach: row.closest(".study").querySelector(".attach").disabled };
+    });
+    check(`${P}: a left-out study's report shows off and disabled`, !bigReport.checked && bigReport.disabled && bigReport.aria === "true" && bigReport.text === "Left out with the study" && Number(bigReport.opacity) < 1 && bigReport.attach, JSON.stringify(bigReport));
+    // Leaving out and re-including a study restores each report's own choice.
+    const kept = page.locator(".study").nth(firstKept);
+    await kept.locator(".study-head .switch-label").click();
+    const during = await kept.locator(".report-row .sw-text").first().textContent();
+    await kept.locator(".study-head .switch-label").click();
+    const after = await kept.locator(".report-row .sw-text").first().textContent();
+    check(`${P}: re-including a study restores its report's own choice`, during === "Left out with the study" && after === "Left out", `${during} → ${after}`);
+    const total = await page.textContent("#rv-total");
+    check(`${P}: the summary counts what goes in`, new RegExp(`^Sharing ${keep.length} studies · ${keepReports - leftOut} reports · `).test(total), total);
+  }
   await layout(page, `${P} review`, dev);
   await shot(page, `${dev}-2-review-portal`);
   const pass = "2468";
@@ -287,7 +307,7 @@ async function flowPortal(dev) {
   check(`${P}: every report links to its study by reference (fullUrl), none unmatched or by date`, v.reports.every((x) => x.basis === "reference" && x.byFullUrl), JSON.stringify(v.reports.map((x) => [x.title, x.basis, x.byFullUrl])));
   check(`${P}: started date from the portal`, !!v.studies[0].started, v.studies[0].started);
   const view = await openInView(dev, r.shlink, P, { passcode: pass, name: "portal" });
-  check(`${P}: /view shows the reports`, view.reports.length >= keepReports - leftOut && view.reports.some((t) => /SAMPLE REPORT|impression/i.test(t)), view.reports.map((t) => t.slice(0, 60)).join(" | "));
+  check(`${P}: /view shows the reports`, view.reports.length >= keepReports - leftOut && v.reports.every((r) => view.reports.some((t) => t.includes(r.title))), view.reports.map((t) => t.slice(0, 60)).join(" | "));
   await noErrors(P, errors);
   await context.close();
 }
@@ -499,7 +519,7 @@ async function flowBigCt(dev) {
   const { readdirSync } = await import("node:fs");
   const files = readdirSync(dir).filter((f) => f.endsWith(".dcm")).sort().map((f) => `${dir}/${f}`);
   const mem = await memoryWatch();
-  const { context, page, errors } = await newPage(dev, { allowErrors: [/interrupted|ERR_ABORTED|net::ERR/i, /status of 404/] });
+  const { context, page, errors } = await newPage(dev, { allowErrors: [/interrupted|ERR_ABORTED|net::ERR/i, /status of 404/, /\b50[234]\b/] });
   await page.goto(`${BASE}/share`);
   await page.click("[data-src=files]");
   await page.setInputFiles("#in-files", files);
@@ -544,12 +564,14 @@ async function flowBigCt(dev) {
 const NET_DIR = process.env.NET_DIR ?? "/media/barracuda/shlink-dicom-share-big/ct200";
 
 /** A TCP proxy to the server that stalls one upload mid-body (it stops forwarding, keeps the socket). */
-async function stallProxy(port, upstreamPort, stallAtPatch) {
+async function stallProxy(port, upstream, stallAtPatch) {
   const net = await import("node:net");
+  const tls = await import("node:tls");
+  const upHost = upstream.tls ? upstream.host : `127.0.0.1:${upstream.port}`;
   let patches = 0, stalled = false;
   const sockets = new Set();
   const server = net.createServer((client) => {
-    const up = net.connect(upstreamPort, "127.0.0.1");
+    const up = upstream.tls ? tls.connect({ host: upstream.host, port: upstream.port, servername: upstream.host }) : net.connect(upstream.port, "127.0.0.1");
     sockets.add(client).add(up);
     let counting = -1;
     client.on("data", (d) => {
@@ -563,7 +585,7 @@ async function stallProxy(port, upstreamPort, stallAtPatch) {
         }
       }
       // Links name the server, not the proxy (same length, so bodies are untouched).
-      up.write(Buffer.from(d.toString("latin1").replaceAll(`Host: 127.0.0.1:${port}`, `Host: 127.0.0.1:${upstreamPort}`), "latin1"));
+      up.write(Buffer.from(d.toString("latin1").replaceAll(`Host: 127.0.0.1:${port}`, `Host: ${upHost}`), "latin1"));
     });
     up.on("data", (d) => client.write(d));
     for (const [a, b] of [[client, up], [up, client]]) {
@@ -585,7 +607,7 @@ async function stallProxy(port, upstreamPort, stallAtPatch) {
 
 /** Starts the upload of NET_DIR's files and waits until `pct` percent is sent. */
 async function startNetUpload(page, dev, files, pct, o = {}) {
-  await page.goto(`${BASE}/share${o.query ?? ""}`);
+  await page.goto(`${o.pageBase ?? BASE}/share${o.query ?? ""}`);
   await page.click("[data-src=files]");
   await page.setInputFiles("#in-files", files);
   await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
@@ -658,11 +680,16 @@ async function flowNetwork(dev) {
   }
 
   // A server that stops responding mid-request (a proxy that stops forwarding part-way through a body).
-  if (/localhost|127\.0\.0\.1/.test(BASE)) {
+  // Against a remote server, the page comes from the local server and talks to the remote API
+  // through the proxy (a page on https can't call http://127.0.0.1).
+  {
     const P = `stall/${dev}`;
-    const proxy = await stallProxy(3399, Number(new URL(BASE).port || 80), 3);
-    const { context, page, errors } = await newPage(dev, { allowErrors: noise });
-    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399" });
+    const remote = !/localhost|127\.0\.0\.1/.test(BASE);
+    const u = new URL(BASE);
+    const proxy = await stallProxy(3399, remote ? { host: u.hostname, port: Number(u.port || 443), tls: u.protocol === "https:" } : { port: Number(u.port || 80) }, 3);
+    // 409 while the server is still holding the stalled request (until its 30 s idle limit).
+    const { context, page, errors } = await newPage(dev, { allowErrors: [...noise, /409/] });
+    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399", pageBase: remote ? "http://localhost:3333" : BASE });
     const shown = await seesTrouble(page, 120000);
     check(`${P}: a stalled request is noticed`, proxy.stalled && /Connection lost/.test(shown), shown);
     await finishNetUpload(page, P, files);
@@ -720,6 +747,228 @@ async function flowCapExpiry(dev) {
   }
 }
 
+// ------------------------------------------------------------- remembering the picked files
+
+/** Reload mid-upload twice: with remembered handles, and with files picked again (one changed). */
+async function flowRemember(dev) {
+  const { readdirSync, readFileSync, mkdirSync, writeFileSync, symlinkSync, rmSync } = await import("node:fs");
+  const noise = [/status of 404/, /404 .*\/files\//, /ERR_ABORTED|net::/i];
+  const slow = { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 1 << 20 };
+
+  // 1. Picked with the File System Access API (handles kept in IndexedDB). Handles to files in the
+  //    page's private file system stand in for the picker, which can't run headless.
+  {
+    const P = `remember-handles/${dev}`;
+    const { context, page, errors } = await newPage(dev, { allowErrors: noise });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.emulateNetworkConditions", slow);
+    await page.goto(`${BASE}/share`);
+    const files = FX.files.map((f) => ({ name: f.split("/").pop(), b64: readFileSync(f).toString("base64") }));
+    await page.evaluate(async (files) => {
+      const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle("picked", { create: true });
+      const handles = [];
+      for (const f of files) {
+        const h = await dir.getFileHandle(f.name, { create: true });
+        const w = await h.createWritable();
+        await w.write(Uint8Array.from(atob(f.b64), (c) => c.charCodeAt(0)));
+        await w.close();
+        handles.push(h);
+      }
+      await window.__share.pickHandles({ kind: "files", handles });
+    }, files);
+    await page.waitForSelector("#s-review:not(.hidden)", { timeout: 60000 });
+    await page.click("#rv-next");
+    await page.click("#who-form button[type=submit]");
+    await page.waitForFunction(() => parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 20, null, { timeout: 120000, polling: 100 });
+    await page.reload();
+    await page.waitForSelector("#resume:not(.hidden)");
+    const label = await page.textContent("#resume-continue");
+    check(`${P}: after a reload, continues without picking again`, label === "Continue", label);
+    await cdp.send("Network.emulateNetworkConditions", { ...slow, uploadThroughput: -1 });
+    await page.click("#resume-continue");
+    await finishNetUploadFrom(page, P, FX.files, FX.images);
+    await noErrors(P, errors);
+    await context.close();
+  }
+
+  // 2. Picked with a plain file input: after the reload the same files are picked again and matched
+  //    by name, size and a quick hash. A changed file is named, and the right ones then continue.
+  {
+    const P = `remember-repick/${dev}`;
+    execFileSync("bun", [`${ROOT}web/checks/share-big.ts`, NET_DIR, "200", "512"], { cwd: ROOT, encoding: "utf8" });
+    const files = readdirSync(NET_DIR).filter((f) => f.endsWith(".dcm")).sort().map((f) => `${NET_DIR}/${f}`);
+    const wrong = `/media/barracuda/shlink-dicom-share-big/changed-${process.pid}`;
+    rmSync(wrong, { recursive: true, force: true });
+    mkdirSync(wrong, { recursive: true });
+    for (const f of files) symlinkSync(f, `${wrong}/${f.split("/").pop()}`);
+    const first = files[0].split("/").pop();
+    rmSync(`${wrong}/${first}`);
+    const changed = readFileSync(files[0]);
+    changed[2000] ^= 0xff;
+    writeFileSync(`${wrong}/${first}`, changed);
+    const { context, page, errors } = await newPage(dev, { allowErrors: noise });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.emulateNetworkConditions", { ...slow, uploadThroughput: 4 << 20 });
+    await startNetUpload(page, dev, files, 20);
+    await page.reload();
+    await page.waitForSelector("#resume:not(.hidden)");
+    let [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.click("#resume-continue")]);
+    await chooser.setFiles(readdirSync(wrong).sort().map((f) => `${wrong}/${f}`));
+    await page.waitForSelector("#resume-error:not(.hidden)", { timeout: 60000 });
+    const msg = await page.textContent("#resume-error");
+    check(`${P}: a changed file is named`, msg === `${first} is not the same file as before.`, msg);
+    await layout(page, `${P} notice`, dev);
+    await page.screenshot({ path: `${SHOTS}${dev}-resume-changed.png` });
+    [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.click("#resume-continue")]);
+    await chooser.setFiles(files);
+    await finishNetUploadFrom(page, P, files, files.length, NET_DIR);
+    await noErrors(P, errors);
+    await context.close();
+    rmSync(wrong, { recursive: true, force: true });
+  }
+}
+
+async function finishNetUploadFrom(page, P, files, images, ref) {
+  await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 900000 });
+  if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
+  const result = await page.evaluate(() => window.__share.result);
+  made.push(result.manage);
+  const v = verify(result.shlink, ref ? [ref] : files);
+  check(`${P}: every instance byte-identical to the files`, v.instances === images && v.matched === images, `${v.matched} of ${images} matched`);
+}
+
+// --------------------------------------------------------------------------------- dark mode
+
+const DARK_SHOTS = `${ROOT}docs/shots/dark/`;
+
+/** In dark mode: no near-white panels except the QR code, and body text at 4.5:1 or more. */
+async function darkAudit(page, label) {
+  const r = await page.evaluate(() => {
+    const rgb = (c) => (c.match(/[\d.]+/g) ?? []).map(Number);
+    const lum = ([r, g, b]) => {
+      const f = (v) => ((v /= 255) <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    };
+    const bgOf = (el) => {
+      for (let e = el; e; e = e.parentElement) {
+        const c = rgb(getComputedStyle(e).backgroundColor);
+        if (c.length >= 3 && (c[3] === undefined || c[3] > 0.5)) return c;
+      }
+      return rgb(getComputedStyle(document.body).backgroundColor);
+    };
+    const visible = (el) => {
+      const b = el.getBoundingClientRect();
+      return b.width > 0 && b.height > 0 && getComputedStyle(el).visibility !== "hidden" && !el.closest(".hidden");
+    };
+    const dimmed = (el) => {
+      for (let e = el; e; e = e.parentElement) if (Number(getComputedStyle(e).opacity) < 1) return true;
+      return !!el.closest("[disabled], [aria-disabled=true]");
+    };
+    const white = [], low = [];
+    for (const el of document.querySelectorAll("body *")) {
+      if (!visible(el) || el.closest(".qr, canvas, img, svg")) continue;
+      const c = rgb(getComputedStyle(el).backgroundColor);
+      const b = el.getBoundingClientRect();
+      if (c.length >= 3 && (c[3] === undefined || c[3] > 0.5) && lum(c) > 0.7 && b.width * b.height > 2000) white.push(`${el.tagName.toLowerCase()}.${el.className}`);
+      const own = [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+      if (!own || dimmed(el)) continue;
+      const fg = rgb(getComputedStyle(el).color), bg = bgOf(el);
+      const [a, z] = [lum(fg), lum(bg)].sort((x, y) => y - x);
+      const ratio = (a + 0.05) / (z + 0.05);
+      if (ratio < 4.5) low.push(`${el.tagName.toLowerCase()} "${el.textContent.trim().slice(0, 30)}" ${ratio.toFixed(2)}`);
+    }
+    return { white: [...new Set(white)], low: [...new Set(low)] };
+  });
+  check(`${label}: no near-white panels`, r.white.length === 0, r.white.slice(0, 5).join(", "));
+  check(`${label}: text contrast ≥ 4.5:1`, r.low.length === 0, r.low.slice(0, 5).join(", "));
+}
+
+async function flowDark(dev) {
+  mkdirSync(DARK_SHOTS, { recursive: true });
+  const P = `dark/${dev}`;
+  const shotD = (page, name) => page.screenshot({ path: `${DARK_SHOTS}${dev}-${name}.png`, fullPage: true });
+  const noise = [/ERR_INTERNET_DISCONNECTED|ERR_FAILED|net::/i, /status of 404/, /404 .*\/files\//];
+  const { context, page, errors } = await newPage(dev, { dark: true, allowErrors: noise });
+  await page.goto(`${BASE}/share`);
+  await page.waitForSelector(".choice");
+  check(`${P}: the page is in dark mode`, await page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches));
+  await darkAudit(page, `${P} sources`);
+  await shotD(page, "1-sources");
+  await page.click("[data-src=portal]");
+  await darkAudit(page, `${P} portal panel`);
+  await shotD(page, "1-portal");
+  await page.click("#add-portal [data-back]");
+  await page.click("[data-src=files]");
+  await darkAudit(page, `${P} files panel`);
+  await page.setInputFiles("#in-files", FX.files);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 60000 });
+  await page.waitForFunction(() => document.body.dataset.thumbs === "done", null, { timeout: 30000 });
+  writeFileSync(`${FXDIR}/Report.txt`, "SYNTHETIC REPORT FOR TESTING.\n");
+  await page.locator(".study").first().locator(".reports input[type=file]").setInputFiles(`${FXDIR}/Report.txt`);
+  await page.waitForSelector(".study .report-row");
+  await page.locator(".study").nth(1).locator(".study-head .switch-label").click();
+  await darkAudit(page, `${P} review`);
+  await shotD(page, "2-review");
+  await page.locator(".study").nth(1).locator(".study-head .switch-label").click();
+  await page.click("#rv-next");
+  await darkAudit(page, `${P} who`);
+  await shotD(page, "3-who");
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Network.enable");
+  const slow = { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 512 << 10 };
+  await cdp.send("Network.emulateNetworkConditions", slow);
+  await page.click("#who-form button[type=submit]");
+  await page.waitForFunction(() => parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 10, null, { timeout: 120000, polling: 100 });
+  await darkAudit(page, `${P} upload`);
+  await shotD(page, "4-upload");
+  await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });
+  await page.waitForFunction(() => ["offline", "retrying"].includes(document.body.dataset.connection), null, { timeout: 60000 });
+  await darkAudit(page, `${P} connection lost`);
+  await shotD(page, "4-upload-connection-lost");
+  await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: false, uploadThroughput: -1 });
+  await page.waitForSelector("#s-done:not(.hidden)", { timeout: 300000 });
+  const result = await page.evaluate(() => window.__share.result);
+  made.push(result.manage);
+  await darkAudit(page, `${P} hand-over`);
+  const qr = await page.evaluate(() => getComputedStyle(document.querySelector(".qr")).backgroundColor);
+  check(`${P}: the QR code stays dark on white`, qr === "rgb(255, 255, 255)", qr);
+  await shotD(page, "5-done");
+  await page.goto(result.manage);
+  await page.waitForSelector(".link-card", { timeout: 20000 });
+  await page.locator(".link-card").first().getByRole("button", { name: "Show link" }).click();
+  await page.waitForSelector(".lc-qr .qr svg");
+  await darkAudit(page, `${P} owner page`);
+  await shotD(page, "6-owner");
+  await page.locator(".link-card").first().getByRole("button", { name: "Revoke" }).click();
+  await page.waitForSelector("dialog[open]");
+  await shotD(page, "6-owner-dialog");
+  await page.keyboard.press("Escape");
+  await noErrors(P, errors);
+  await context.close();
+
+  // The portal callback and its review, with reports.
+  if (/localhost|127\.0\.0\.1/.test(BASE)) {
+    const { context: c2, page: p2, errors: e2 } = await newPage(dev, { dark: true });
+    await p2.goto(`${BASE}/share`);
+    await p2.click("[data-src=portal]");
+    await Promise.all([p2.waitForURL((u) => u.host === new URL(PORTAL).host && u.pathname.includes("/auth")), p2.click("#portal-form button[type=submit]")]);
+    await p2.locator("input[name=patient]").first().check();
+    await p2.getByRole("button", { name: "Continue" }).click();
+    await p2.waitForSelector("input[name=study]");
+    await Promise.all([p2.waitForURL(/\/share\/smart-callback\//), p2.getByRole("button", { name: "Allow" }).click()]);
+    await p2.waitForFunction(() => document.getElementById("loading-bar")?.getAttribute("aria-valuenow") > 0, null, { timeout: 120000 });
+    await darkAudit(p2, `${P} portal download`);
+    await shotD(p2, "1-portal-download");
+    await p2.waitForSelector("#s-review:not(.hidden)", { timeout: 600000 });
+    await darkAudit(p2, `${P} portal review`);
+    await shotD(p2, "2-review-portal");
+    await noErrors(`${P} portal`, e2);
+    await c2.close();
+  }
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 for (const dev of Object.keys(DEVICES)) {
@@ -731,6 +980,8 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "reshare") await flowReshare(dev);
     if (files && (!only || only === "manage")) await flowManage(dev, files);
     if (!only || only === "slide") await flowSlide(dev);
+    if (!only || only === "dark") await flowDark(dev);
+    if (!only || only === "remember") await flowRemember(dev);
     if (!only || only === "network") {
       await flowNetwork(dev);
       await flowCapExpiry(dev);

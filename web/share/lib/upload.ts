@@ -174,7 +174,7 @@ export interface UploadJob {
   sid: string;
   token: string;
   ownerKey: string;
-  source: { kind: "files" | "portal" | "link" | "sample"; link?: string; stage?: string; files?: { name: string; size: number }[] };
+  source: { kind: "files" | "portal" | "link" | "sample"; link?: string; stage?: string; files?: { name: string; size: number; id?: string }[] };
   addOffsetTables: boolean;
   recipient: string | null;
   passcode: string;

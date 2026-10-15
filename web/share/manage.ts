@@ -61,7 +61,7 @@ function confirmBox(title: string, text: string, ok: string): Promise<boolean> {
     const e = x as ApiError;
     main.replaceChildren(
       h("h1", null, "This share can't be opened"),
-      h("p", { class: "lede" }, e.status === 404 ? "The server no longer has it. It may have expired or been deleted." : e.status === 403 ? "The manage link is not valid for this share." : `${e.message || "The owner data did not decrypt with this manage link."}`),
+      h("p", { class: "lede" }, e.status === 404 ? "The server no longer has it. It may have expired or been deleted." : e.status === 403 ? "This owner link is not valid for this share." : `${e.message || "The share did not decrypt with this owner link."}`),
       h("p", null, h("a", { class: "btn", href: siteUrl("share/manage"), onclick: () => e.status === 404 && forgetShare(cred.sid) }, "Your shares")),
     );
     return;
@@ -105,14 +105,14 @@ function renderPicker() {
         e.preventDefault();
         const c = parseManageHash(input.value);
         if (!c) {
-          err.textContent = "That isn't a manage link. It should contain #share=…&token=…&key=….";
+          err.textContent = "That isn't an owner link. It should contain #share=…&token=…&key=….";
           err.classList.remove("hidden");
           return;
         }
         location.href = manageUrl(siteUrl("share/manage"), c);
         location.reload();
       } },
-      h("label", { for: "in-manage" }, "Open a manage link"),
+      h("label", { for: "in-manage" }, "Open an owner link"),
       input,
       h("button", { class: "btn btn-primary", type: "submit" }, "Open"),
       err,
@@ -126,7 +126,7 @@ function renderPicker() {
 function render() {
   const linksBox = h("div", { class: "links", id: "links" });
   main.replaceChildren(
-    h("h1", null, "Manage your share"),
+    h("h1", null, "Your share"),
     h(
       "p",
       { class: "mg-summary" },
@@ -235,7 +235,7 @@ async function fillLinkPanel(panel: HTMLElement, l: LinkResource) {
         null,
         h("p", { class: "mono break" }, shlink),
         h("div", { class: "lc-actions" }, h("button", { class: "btn btn-primary", onclick: async (e: Event) => flash(e.currentTarget as HTMLElement, (await copyText(shlink)) ? "Copied" : "Copy failed") }, "Copy link"), h("a", { class: "btn", href: shlink, target: "_blank", rel: "noopener" }, "Open it")),
-        h("p", { class: "hint" }, "This is the same link you sent. It is rebuilt here from the manage link; the server does not have its key."),
+        h("p", { class: "hint" }, "This is the same link you sent. It is rebuilt here from your owner link; the server does not have its key."),
       ),
     ),
   );
