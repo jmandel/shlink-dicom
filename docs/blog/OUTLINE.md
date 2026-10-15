@@ -41,7 +41,7 @@
   - opens in a browser without downloading the whole study first;
   - from files, a CD, a patient portal, or a link someone gave you.
 
-**[FIGURE F1] Header image** (*Codex*, watercolor and ink, 1920×1080; `docs/blog/images/header.png`).
+**[FIGURE F1] Header image** (*Codex*; done: `docs/blog/images/header.png`, the SMART-logo version Josh chose. Clean, abstract watercolor and ink in the SMART palette; the SMART star sits in the QR code. The spec below is the original idea, kept for reference).
 - **The story, left to right:**
   1. A patient at a kitchen table pushes aside an old jewel-case CD and loose films. A phone shows a QR code, with a small brass key tucked into it.
   2. A plain archive building holds rows of sealed, wax-stamped parcels labelled only with random scribbles. Its clerk can't see inside, and sends a few small slips across ("only the bytes it needs").
