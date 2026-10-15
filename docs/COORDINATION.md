@@ -127,6 +127,11 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct, about 14:40:**
+  - **pi:** Josh stopped the newer pi session (tmux session 1), because Gemini Argon isn't routing reliably. Part 1's review against the plan now goes to a fresh Claude agent.
+  - **Share agent:** Part 2 prep is done (MinIO in container shl-minio, /media/barracuda/s3-prep). Now it adds the stable `/sample` link and the /view "Open the sample" button.
+  - **Blog:** the Claude writer is editing the argon one-shot draft (/tmp/article-arogn.html → /tmp/article-argon-edit.html): trim "what went wrong", shorten codecs, verify and measure, real links, pi described in one plain line.
+
 - **15 Oct evening: study-file Part 1 started** (agent ad12646f03ce41389).
   - **Now:** the spec, the reference vector, core parsing, web/core and How.
   - **Where:** the whole of Part 1 now happens on branch `study-files` in the worktree ../shlink-dicom-study-files, which keeps main building for the other agents. The agent rebases on main when main is quiet, and the coordinator merges.
