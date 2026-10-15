@@ -951,6 +951,122 @@ async function flowAgreement(dev) {
   await context.close();
 }
 
+// Touch on a phone: one finger pans a zoomed image (and an image with nothing to step through),
+// steps slices at fit; Reset (button and double-tap) returns to exactly the first view.
+async function openSeries(page, study, seriesName) {
+  if (await page.isVisible("#btn-back")) {
+    await page.click("#btn-back");
+    await page.waitForSelector("#screen-overview:not(.hidden)");
+  }
+  const n = await page.locator(".study-open").count();
+  for (let i = 0; i < n; i++) {
+    if (study.test(await page.locator(".study-card .study-title").nth(i).textContent())) {
+      await page.locator(".study-open").nth(i).click();
+      break;
+    }
+  }
+  await page.waitForSelector(".series-btn");
+  await page.locator(".series-btn", { hasText: seriesName }).first().click();
+  await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)") && window.__viewHooks.renderShown(8, 8), null, { timeout: 120000 });
+  await page.waitForTimeout(400);
+}
+
+async function flowTouchReset(dev) {
+  const label = `touch-reset/${dev}`;
+  const phone = dev !== "desktop";
+  const { context, page, errors } = await newPage(dev);
+  const cdp = phone ? await context.newCDPSession(page) : null;
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  const box = async () => {
+    const b = await page.locator("#stage").boundingBox();
+    return { cx: b.x + b.width / 2, cy: b.y + b.height / 2 };
+  };
+  const pinchOut = async () => {
+    const { cx, cy } = await box();
+    await touch(page, cdp, lerp(0, 1, 10).map((t) => [[cx - 30 - 60 * t, cy], [cx + 30 + 60 * t, cy]]));
+    await page.waitForTimeout(150);
+  };
+  const drag = async () => {
+    const { cx, cy } = await box();
+    await touch(page, cdp, lerp(0, 1, 12).map((t) => [[cx - 20 + 60 * t, cy - 30 + 70 * t]]));
+    await page.waitForTimeout(150);
+  };
+  const snap = () => page.evaluate(() => ({ ...window.__viewHooks.state(), img: window.__viewHooks.renderShown(96, 96).grey }));
+  const same = (a, b) => a.sliceIdx === b.sliceIdx && a.img.every((v, i) => Math.abs(v - b.img[i]) <= 1) && a.wc === b.wc && a.ww === b.ww && a.zoom === b.zoom && a.panX === b.panX && a.panY === b.panY && a.presetId === b.presetId;
+  if (phone) {
+    // A radiograph (one image): zoomed, one finger pans; the slice stays.
+    await openSeries(page, /HAND AND WRIST/, "Hand OBLI");
+    await pinchOut();
+    const s0 = await snap();
+    await drag();
+    const s1 = await snap();
+    check(`${label}: Hand OBLI zoomed, one finger pans`, s0.zoom > 1.5 && (s1.panX !== s0.panX || s1.panY !== s0.panY) && s1.sliceIdx === s0.sliceIdx, `zoom ${s0.zoom.toFixed(2)}, pan ${Math.round(s0.panX)},${Math.round(s0.panY)} → ${Math.round(s1.panX)},${Math.round(s1.panY)}`);
+    // Thrown far: part of the image stays on screen.
+    const { cx, cy } = await box();
+    await touch(page, cdp, lerp(0, 1, 12).map((t) => [[cx - 150 + 300 * t, cy]]));
+    await touch(page, cdp, lerp(0, 1, 12).map((t) => [[cx - 150 + 300 * t, cy]]));
+    await touch(page, cdp, lerp(0, 1, 12).map((t) => [[cx - 150 + 300 * t, cy]]));
+    const on = await page.evaluate(() => window.__viewHooks.imageOnScreen());
+    check(`${label}: panning stops before the image leaves the screen`, on.x >= 60 * on.scale && on.y > 0, `${Math.round(on.x / on.scale)} × ${Math.round(on.y / on.scale)} CSS px of the image still on screen`);
+    check(`${label}: the page does not scroll while panning`, (await page.evaluate(() => scrollY)) === 0);
+    // The T2 MRI: at fit one finger steps slices; zoomed, it pans.
+    await openSeries(page, /BRAIN/, "T2 FSE AX");
+    const m0 = await snap();
+    await drag();
+    const m1 = await snap();
+    check(`${label}: T2 MRI at fit, one finger steps slices`, m1.sliceIdx !== m0.sliceIdx && m1.panX === m0.panX, `slice ${m0.sliceIdx} → ${m1.sliceIdx}`);
+    await pinchOut();
+    const m2 = await snap();
+    await drag();
+    const m3 = await snap();
+    check(`${label}: T2 MRI zoomed, one finger pans`, m2.zoom > 1.5 && m3.sliceIdx === m2.sliceIdx && (m3.panX !== m2.panX || m3.panY !== m2.panY), `slice ${m2.sliceIdx} → ${m3.sliceIdx}, pan ${Math.round(m2.panX)} → ${Math.round(m3.panX)}`);
+  }
+  // Reset returns to the first view: CR views with VOI LUTs (MONOCHROME1), CT, MR, and a reformat.
+  const cases = [[/HAND AND WRIST/, "Hand OBLI"], [/HAND AND WRIST/, "Hand PA"], [/HAND AND WRIST/, "Hand LAT"], [/CT ABDOMEN/, "ABD/PEL"], [/BRAIN/, "T2 FSE AX"], [/CT ABDOMEN/, "ABD/PEL", "sagittal"]];
+  for (const [study, name, plane] of cases) {
+    for (const how of phone ? ["button", "double-tap"] : ["button"]) {
+      await openSeries(page, study, name);
+      if (plane) {
+        await page.evaluate((p) => window.__viewHooks.enterMpr(p), plane);
+        await page.waitForFunction(() => window.__viewHooks.current().mpr && !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+      }
+      const first = await snap();
+      // Change window, zoom and pan.
+      await page.evaluate(() => {
+        const s = window.__viewHooks.state();
+        window.__viewHooks.setWindow(s.wc + 200, s.ww * 0.5 + 1);
+      });
+      if (phone) {
+        await pinchOut();
+        await drag();
+      } else {
+        // Ctrl + wheel zooms (the wheel alone steps slices).
+        const b = await page.locator("#stage").boundingBox();
+        await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+        await page.keyboard.down("Control");
+        await page.mouse.wheel(0, -200);
+        await page.keyboard.up("Control");
+      }
+      const changed = await snap();
+      if (how === "button") await page.click("#btn-reset");
+      else {
+        const { cx, cy } = await box();
+        for (let k = 0; k < 2; k++) {
+          await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: cx, y: cy, id: 0 }] });
+          await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+          await page.waitForTimeout(80);
+        }
+      }
+      await page.waitForTimeout(400);
+      const after = await snap();
+      check(`${label}: ${name}${plane ? ` ${plane}` : ""}: ${how} returns to the first view`, !same(changed, first) && same(after, first), `W ${Math.round(first.ww)} L ${Math.round(first.wc)} ${first.presetId} → W ${Math.round(changed.ww)} → W ${Math.round(after.ww)} L ${Math.round(after.wc)} ${after.presetId}, zoom ${after.zoom}`);
+    }
+  }
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 const flows = {
@@ -965,6 +1081,9 @@ const flows = {
   thumbs: () => Promise.all(["desktop", "phone390"].map(flowThumbs)),
   dark: () => Promise.all(["desktop", "phone390"].map(flowDark)),
   "mpr-ui": () => Promise.all(["desktop", "phone390"].map(flowMprUi)),
+  "touch-reset": async () => {
+    for (const dev of ["phone390", "desktop"]) await flowTouchReset(dev);
+  },
   agreement: async () => {
     for (const dev of ["desktop", "phone390"]) await flowAgreement(dev);
   },

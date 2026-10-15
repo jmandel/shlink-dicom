@@ -413,6 +413,47 @@ async function darkObjects() {
   }
 }
 
+/** Reset returns to the first view on a float image and a colour image (view-checks covers the sample's). */
+async function resetOthers() {
+  for (const [c, file] of [["float-maps", "ext-cs3d-paramap-float.dcm"], ["icc-photo", "vl-photo-1.dcm"]]) {
+    const { context, page, errors } = await open(c);
+    // The study holding the file's series.
+    const uid = E[`${c}/${file}`].series;
+    const ns = await page.locator(".study-open").count();
+    for (let si = 0; si < ns; si++) {
+      if (si) {
+        await page.click("#btn-back");
+        await page.waitForSelector("#screen-overview:not(.hidden)");
+      }
+      await page.locator(".study-open").nth(si).click();
+      await page.waitForSelector(".series-btn");
+      if (await page.locator(`.series-btn[data-uid="${uid}"]`).count()) break;
+    }
+    await page.locator(`.series-btn[data-uid="${uid}"]`).click();
+    await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)") && window.__viewHooks.renderShown(8, 8), null, { timeout: 60000 });
+    await page.waitForTimeout(400);
+    const snap = () => page.evaluate(() => ({ ...window.__viewHooks.state(), img: window.__viewHooks.renderShown(96, 96).grey }));
+    const first = await snap();
+    await page.evaluate(() => {
+      const s = window.__viewHooks.state();
+      window.__viewHooks.setWindow(s.wc + s.ww / 4, s.ww / 2);
+    });
+    // Ctrl + wheel zooms (the wheel alone steps slices).
+    await page.mouse.move(700, 400);
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, -200);
+    await page.keyboard.up("Control");
+    await page.waitForTimeout(200);
+    await page.click("#btn-reset");
+    await page.waitForTimeout(400);
+    const after = await snap();
+    const same = after.sliceIdx === first.sliceIdx && after.zoom === 1 && after.img.every((v, i) => Math.abs(v - first.img[i]) <= 1) && after.wc === first.wc && after.ww === first.ww && after.zoom === first.zoom && after.presetId === first.presetId;
+    check(`reset/${c}: Reset returns to the first view`, same, `W ${first.ww} L ${first.wc} ${first.presetId} slice ${first.sliceIdx} → W ${after.ww} L ${after.wc} ${after.presetId} slice ${after.sliceIdx}, zoom ${after.zoom}, max |Δ| ${Math.max(...after.img.map((v, i) => Math.abs(v - first.img[i])))}`);
+    check(`reset/${c}: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
+    await context.close();
+  }
+}
+
 /** Originals of a share's files (sample-originals.py), cached per name. */
 function originals(name, files) {
   const out = `/tmp/originals-${name}.json`;
@@ -464,6 +505,7 @@ async function objectDownloads() {
 const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap"];
 try {
   for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "reset") await resetOthers().catch((e) => check("reset: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "dark") await darkObjects().catch((e) => check("dark: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "icons") await iconPreviews().catch((e) => check("icons: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "downloads") await objectDownloads().catch((e) => check("downloads: flow threw", false, String(e?.stack ?? e).slice(0, 400)));

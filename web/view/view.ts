@@ -1498,23 +1498,7 @@ function draw(img: DecodedImage, frame: number) {
     return;
   }
   const k = Math.min(frame, img.frames - 1);
-  if (autoWw === 0) {
-    // What the file's maker chose: its window, or its VOI LUT (then dragging starts from the full range).
-    const auto = displayPlan(img, k, headerNow(img), { kind: "auto" });
-    seriesModel(auto.model);
-    if (auto.lut !== null && presetId === "auto") {
-      presetId = `lut-${auto.lut}`;
-      $<HTMLSelectElement>("preset").value = presetId;
-    }
-    // (Colour images have no window: the identity.)
-    const w = auto.window ?? displayPlan(img, k, headerNow(img), { kind: "minmax" }).window ?? { center: 128, width: 256 };
-    autoWc = w.center;
-    autoWw = w.width;
-  }
-  if (ww === 0) {
-    wc = autoWc;
-    ww = autoWw;
-  }
+  if (autoWw === 0) initialDisplay(img, k);
   viewport!.show(img, k, { ...displayView(img, k), zoom, panX, panY }, displayFrame(img, k));
   shown = { img, frame: Math.min(frame, img.frames - 1), sop: se.instances[sliceTarget(sliceIdx).inst].uid };
   const t = iccs.get(img);
@@ -1753,6 +1737,16 @@ function applyPreset(p: WindowPreset) {
 
 function setZoomPan(z: number, x: number, y: number) {
   zoom = Math.max(0.5, Math.min(12, z));
+  // Keep part of the image on screen: at most this far from centred (canvas pixels).
+  const f = viewport?.renderer.frame;
+  if (viewport && f) {
+    const cw = viewport.canvas.width, ch = viewport.canvas.height;
+    const k = Math.min(cw / f.columns, ch / f.rows) * zoom;
+    const keep = 64 * viewport.scale;
+    const mx = Math.max(0, (f.columns * k + cw) / 2 - keep), my = Math.max(0, (f.rows * k + ch) / 2 - keep);
+    x = Math.max(-mx, Math.min(mx, x));
+    y = Math.max(-my, Math.min(my, y));
+  }
   panX = x;
   panY = y;
   viewport?.setView({ zoom, panX, panY });
@@ -1768,14 +1762,36 @@ function zoomAt(k: number, px: number, py: number) {
   setZoomPan(z1, px - cx - (px - cx - panX) * kk, py - cy - (py - cy - panY) * kk);
 }
 
+/**
+ * The display an image opens with: what the file's maker chose (its window, else its VOI LUT,
+ * else a window over its values; displayPlan "auto"). The first draw of a series and Reset both
+ * come here, so Reset returns exactly to the first view.
+ */
+function initialDisplay(img: DecodedImage, k: number) {
+  const auto = displayPlan(img, k, headerNow(img), { kind: "auto" });
+  seriesModel(auto.model);
+  presetId = auto.lut !== null ? `lut-${auto.lut}` : "auto";
+  $<HTMLSelectElement>("preset").value = presetId;
+  // With a VOI LUT, dragging starts from the full range; colour images have the identity.
+  const w = auto.window ?? displayPlan(img, k, headerNow(img), { kind: "minmax" }).window ?? { center: 128, width: 256 };
+  autoWc = wc = w.center;
+  autoWw = ww = w.width;
+}
+
+/** Reset: the first view of the image on screen (initialDisplay), at fit with no pan. */
 function resetView() {
   zoom = 1;
   panX = 0;
   panY = 0;
-  presetId = "auto";
-  $<HTMLSelectElement>("preset").value = "auto";
-  viewport?.setView({ zoom, panX, panY });
-  applyPreset({ id: "auto", label: "Auto", center: null, width: null });
+  if (mpr) {
+    wc = autoWc;
+    ww = autoWw;
+    showMpr(sliceIdx);
+  } else if (shown) {
+    initialDisplay(shown.img, shown.frame);
+    draw(shown.img, shown.frame);
+  } else viewport?.setView({ zoom, panX, panY });
+  updateHud();
 }
 
 function stepSlice(d: number) {
@@ -1832,7 +1848,8 @@ function wireGestures() {
         return;
       }
       lastTap = now;
-      mode = "slice";
+      // One finger pans a zoomed image, or an image with nothing to step through; else steps slices.
+      mode = zoom > 1.01 || sliceCount <= 1 ? "pan" : "slice";
       if (holdTimer) clearTimeout(holdTimer);
       holdTimer = setTimeout(() => {
         const p = pts.get(e.pointerId);
@@ -1879,7 +1896,7 @@ function wireGestures() {
       presetId = "custom";
       return;
     }
-    if (mode === "pan") {
+    if (mode === "pan" && (pts.size === 1 || p.type === "mouse")) {
       const s = viewport.scale;
       setZoomPan(zoom, panX + dx * s, panY + dy * s);
       return;
@@ -2400,9 +2417,25 @@ function closeSheetForce() {
    * comparing with its thumbnail (same file, same display transform).
    */
   renderShown: (w: number, h: number) => {
-    if (!shown) return null;
-    const out = renderCpu(displayFrame(shown.img, shown.frame), { ...defaultView(), ...displayView(shown.img, shown.frame), interpolation: "linear" }, w, h);
-    return { grey: Array.from({ length: w * h }, (_, i) => out[i * 4]), colour: shown.img.samplesPerPixel === 3 };
+    let out: Uint8ClampedArray | Uint8Array;
+    let colour = false;
+    if (mpr?.frame) {
+      const e = linearWindow(mpr.first.float ? "LINEAR_EXACT" : "LINEAR", wc, ww);
+      out = renderCpu(mpr.frame, { ...defaultView(), windowCenter: e.center, windowWidth: e.width, interpolation: "linear" }, w, h);
+    } else if (shown) {
+      out = renderCpu(displayFrame(shown.img, shown.frame), { ...defaultView(), ...displayView(shown.img, shown.frame), interpolation: "linear" }, w, h);
+      colour = shown.img.samplesPerPixel === 3;
+    } else return null;
+    return { grey: Array.from({ length: w * h }, (_, i) => out[i * 4]), colour };
+  },
+  /** How much of the image is on screen (canvas pixels, across and down), after zoom and pan. */
+  imageOnScreen: () => {
+    const f = viewport?.renderer.frame;
+    if (!viewport || !f) return null;
+    const cw = viewport.canvas.width, ch = viewport.canvas.height;
+    const k = Math.min(cw / f.columns, ch / f.rows) * zoom;
+    const x0 = cw / 2 + panX - (f.columns * k) / 2, y0 = ch / 2 + panY - (f.rows * k) / 2;
+    return { x: Math.max(0, Math.min(cw, x0 + f.columns * k) - Math.max(0, x0)), y: Math.max(0, Math.min(ch, y0 + f.rows * k) - Math.max(0, y0)), scale: viewport.scale };
   },
   /** What is open, for the download checks: study and series UIDs, and the stored instance on screen (or why there is none). */
   current: () => {
