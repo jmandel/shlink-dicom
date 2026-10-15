@@ -129,15 +129,22 @@ async function run(dev, details, dark) {
   await page.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok") && window.__how?.scenes.size === 9, null, { timeout: 30000 });
   check(L("sample opens"), true, await text(page, "#status"));
   check(L(`details switch ${details ? "on" : "off"} and remembered`), (await page.isChecked("#details")) === details && (await page.evaluate(() => document.body.classList.contains("details"))) === details);
-  // The thread, recomputed here from the decrypted Bundle JSON.
+  // The thread, recomputed here from the decrypted Bundle JSON (PROPOSAL.md §8.1): each series is
+  // in its own linked-file, else its study's; offsets run per file through the series in order.
   const truth = await page.evaluate(() => {
     const { S } = window.__how;
-    const se = S.share.index.bundle.entry.flatMap((e) => e.resource?.series ?? []).find((x) => x.uid === S.series.uid);
-    const lens = se.instance.map((i) => i.extension.find((x) => /length$/.test(x.url)).valueDecimal);
-    const off = lens.slice(0, S.slice).reduce((a, b) => a + b, 0), len = lens[S.slice];
-    const first = Math.floor(off / 65520), last = Math.floor((off + len - 1) / 65520);
-    const total = lens.reduce((a, b) => a + b, 0), C = total + 16 * Math.ceil(total / 65520);
-    return { off, len, first, last, range: `bytes=${first * 65536}-${Math.min(C, (last + 1) * 65536) - 1}`, slice: S.slice, n: lens.length };
+    const study = S.share.index.bundle.entry.map((e) => e.resource).find((r) => r?.resourceType === "ImagingStudy" && (r.series ?? []).some((x) => x.uid === S.series.uid));
+    const fileOf = (el) => el.extension?.find((x) => /linked-file$/.test(x.url))?.extension.find((x) => x.url === "id").valueString;
+    const len = (i) => i.extension.find((x) => /instance-length$/.test(x.url)).valueDecimal;
+    const se = study.series.find((x) => x.uid === S.series.uid);
+    const file = fileOf(se) ?? fileOf(study);
+    const inFile = study.series.filter((x) => (fileOf(x) ?? fileOf(study)) === file);
+    const before = inFile.slice(0, inFile.indexOf(se)).flatMap((x) => x.instance).map(len).reduce((a, b) => a + b, 0);
+    const lens = se.instance.map(len);
+    const off = before + lens.slice(0, S.slice).reduce((a, b) => a + b, 0), len0 = lens[S.slice];
+    const first = Math.floor(off / 65520), last = Math.floor((off + len0 - 1) / 65520);
+    const total = inFile.flatMap((x) => x.instance).map(len).reduce((a, b) => a + b, 0), C = total + 16 * Math.ceil(total / 65520);
+    return { off, len: len0, first, last, range: `bytes=${first * 65536}-${Math.min(C, (last + 1) * 65536) - 1}`, slice: S.slice, n: lens.length };
   });
 
   for (const id of STEPS) {

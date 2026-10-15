@@ -67,11 +67,15 @@ export function unlockScene(): Scene {
   };
   const flush = () => canvas.getContext("2d")!.putImageData(im!, 0, 0);
 
-  /** Reads the image geometry from the first piece's header (decrypted in a worker). */
+  /**
+   * Reads the image geometry from the header (decrypted in a worker). The slice can start near the
+   * end of its first piece, so the header is read from its first two pieces.
+   */
   const learn = async (ct: Uint8Array, firstRec: number) => {
     const pool = await S.pool!;
-    const rec = ct.slice(0, recordLength(f, firstRec));
-    const p = await decryptParams(series, planBytes(series, firstRec * RECORD_PLAINTEXT, span(firstRec)[1]));
+    const lastRec = Math.min(inst.lastRecord, firstRec + 1);
+    const rec = ct.slice(0, (lastRec - firstRec) * RECORD_CIPHERTEXT + recordLength(f, lastRec));
+    const p = await decryptParams(series, planBytes(series, firstRec * RECORD_PLAINTEXT, span(lastRec)[1]));
     const pt = await pool.decrypt(rec, p);
     const start = inst.offset - firstRec * RECORD_PLAINTEXT;
     const head = pt.subarray(start);
