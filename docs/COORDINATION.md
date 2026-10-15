@@ -127,6 +127,12 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct evening: study-file Part 1 started** (agent ad12646f03ce41389).
+  - **Now:** the spec, the reference vector, core parsing, web/core and How.
+  - **Waits for my go:** packer.rs, crates/shl-dicom-server, web/share, deploy and the share checks. The go comes once the Share agent (ac9206ae1a4d9228a) reports its items 3–4 done.
+  - **Then:** Part 2 (BlobStore/S3) goes to the Share agent, and pi (tmux session 1) reviews Part 1 against the plan.
+  - **Blog:** outline v2 committed (40bee86); the Codex header is being regenerated.
+
 - **15 Oct, about 12:10: coverage plan round 1 launched** (docs/COVERAGE-PLAN.md).
   - **A, decoders:** new agent a4b3a594727c938f4. Owns codecs/, codec-corpus/, viewer-kit/INTEGRATION.md.
   - **B+C, objects and display:** Core+View agent a3832d83abfd092fc. Owns web/view (non-WSI) and web/core (non-wsi, non-video).
