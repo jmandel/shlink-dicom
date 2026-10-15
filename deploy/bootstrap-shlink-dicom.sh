@@ -10,6 +10,16 @@
 # web app and the server, build the sandbox dataset (Josh Example, de-identified;
 # plus the CC BY slide) and seed it as the public sample share, then install and
 # start the systemd unit. Server data lives in /var/lib/shlink-dicom.
+#
+# Encrypted files are kept in $DATA/blobs unless $ENV_FILE (default /etc/shlink-dicom.env,
+# mode 600) names an S3 bucket, with lines such as:
+#   SHL_S3_BUCKET=my-bucket
+#   SHL_S3_ENDPOINT=https://s3.example.net   (omit for AWS)
+#   SHL_S3_REGION=us-east-1
+#   SHL_S3_READ_MODE=proxy                   (or redirect; see docs/storage.md for the bucket CORS it needs)
+#   AWS_ACCESS_KEY_ID=...
+#   AWS_SECRET_ACCESS_KEY=...
+# The seed and the service both read it.
 # Log: /var/log/shlink-bootstrap.log
 
 set -euo pipefail
@@ -22,6 +32,7 @@ PORT="${PORT:-8000}"
 ORIGIN="${ORIGIN:-https://shlink-dicom.exe.xyz}"
 MAX_SHARE_BYTES="${MAX_SHARE_BYTES:-20G}"  # per share; the sample is not counted
 MAX_SHARES="${MAX_SHARES:-256}"         # shares at once
+ENV_FILE="${ENV_FILE:-/etc/shlink-dicom.env}"
 BUN_VERSION="1.4.3"
 WASM_BINDGEN_VERSION="0.2.128"
 export BUN_INSTALL=/opt/bun
@@ -103,9 +114,12 @@ EOF2
 $SUDO chown -R shlink:shlink "$DATA"
 # Pack the sample into its share when it changed (or there is none). The server only loads it, so
 # restarts are immediate. Packing streams one record at a time from scratch files in $DATA.
-sums="$(cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json | sha256sum | cut -d' ' -f1)"
+# A change to $ENV_FILE (a different store) also packs it again.
+store_env() { $SUDO cat "$ENV_FILE" 2>/dev/null || true; }
+sums="$( (cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json; store_env | sha256sum) | sha256sum | cut -d' ' -f1)"
 if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ] || [ ! -f "$DATA/seeded_demos.json" ]; then
-  sudo -u shlink "$DIR/target/release/shl-dicom-server" seed --data-dir "$DATA"
+  store_env | sudo -u shlink sh -c 'while IFS= read -r l; do case "$l" in [A-Za-z_]*=*) export "$l" ;; esac; done
+    exec "$0" seed --data-dir "$1"' "$DIR/target/release/shl-dicom-server" "$DATA"
   echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
 fi
 
@@ -124,6 +138,8 @@ Environment=PUBLIC_ORIGIN=$ORIGIN
 # Upload limits (see shl-dicom-server serve --help). 0 means no limit.
 Environment=SHL_MAX_SHARE_BYTES=$MAX_SHARE_BYTES
 Environment=SHL_MAX_SHARES=$MAX_SHARES
+# The S3 store, when $ENV_FILE exists.
+EnvironmentFile=-$ENV_FILE
 ExecStart=$DIR/target/release/shl-dicom-server serve
 Restart=on-failure
 RestartSec=2

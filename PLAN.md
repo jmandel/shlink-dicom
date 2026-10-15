@@ -14,14 +14,15 @@
    - Pre-seeded demo shares (`mri-brain-2020.tgz` and `wrist-low-res.tgz`, Josh Mandel's own studies shared publicly by choice in `jmandel/my-health-data`) are **read-only** on `/api/demo-shares` and never expose a `controlToken`.
    - Users can click **"Clone to Sandbox Share"** (`POST /api/shares/{sid}/clone`) or upload their own files to get an isolated, time-limited sandbox share with its own `controlToken` (the client decrypts the public demo Bundle to get the file keys and writes a fresh `owner.jwe` under the user's new `ownerKey`).
    - `POST /api/shares` and file `PUT`s enforce the server's limits (bytes and files per share, shares at once; see §5.2), and sandbox shares expire, so the server cannot be abused as an open file host.
-3. **Storage: SQLite for state, encrypted files on disk (`--data-dir`, default `./data`, gitignored; see [`docs/storage.md`](docs/storage.md)):**
+3. **Storage: SQLite for state on local disk (`--data-dir`, default `./data`, gitignored), encrypted files in a blob store: local files or a private S3 bucket (see [`docs/storage.md`](docs/storage.md)):**
    ```
    data/
-   ├── catalog.db                        # Routing catalog: shares(sid, expires_at), links(lid -> sid), caps(token -> lid, expires_at)
+   ├── catalog.db                        # Routing catalog: shares(sid, expires_at), links(lid -> sid), caps(token -> lid, expires_at), blobs(refcounts), trash
    ├── samples/                          # The server's sample: one .tgz per study, sample.json, reports.json
+   ├── blobs/{sid}/{fileId}.bin          # Encrypted files, one per study (local store; with S3, objects {prefix}{sid}/{fileId}.bin)
    └── shares/
-       ├── {sid}.db                      # Per-share SQLite DB: share(control_token_hash, owner_bundle), series_files, uploads, links, link_files, access_log
-       └── {sid}/{fileId}.bin            # Encrypted files, one per study ({fileId}.part while an upload is incomplete)
+       ├── {sid}.db                      # Per-share SQLite DB: share(control_token_hash, owner_bundle), files, uploads, upload_parts, links, link_files, access_log
+       └── {sid}/{fileId}.part           # Staged bytes of an upload in progress
    ```
 
 ---
@@ -44,9 +45,10 @@ shlink-dicom/
 ├── data/                               # Default --data-dir (gitignored; see docs/storage.md)
 │   ├── catalog.db                      # Routing SQLite DB (shares, links, caps)
 │   ├── samples/                        # The server's sample (one .tgz per study, sample.json, reports.json)
+│   ├── blobs/{sid}/{fileId}.bin        # Encrypted files (local store)
 │   └── shares/
-│       ├── {sid}.db                    # Per-share SQLite DB (share, series_files, uploads, links, link_files, access_log)
-│       └── {sid}/{fileId}.bin          # Encrypted files
+│       ├── {sid}.db                    # Per-share SQLite DB (share, files, uploads, upload_parts, links, link_files, access_log)
+│       └── {sid}/{fileId}.part         # Uploads in progress
 ├── crates/
 │   ├── shl-dicom-core/                 # Pure Rust library (NO std::fs, NO tokio, NO wasm_bindgen)
 │   │   ├── Cargo.toml
@@ -114,9 +116,10 @@ shlink-dicom/
 - **`lib.rs`**: `offset_table_patch_wasm(bytes)`, the offset-table rewrite for one instance, used by the Share page. Link resolution, record decryption (WebCrypto, in the decoder workers), the Bundle index and browser-side packing are TypeScript in `web/core` and `web/share/lib`.
 
 #### In `crates/shl-dicom-server/src/`:
+- **`storage.rs`**: The `BlobStore` trait and its two stores: `LocalFsStore` (`{data-dir}/blobs/`) and `S3Store` (`rusty-s3` signing, `reqwest` streaming; multipart uploads; presigned URLs for `redirect` reads).
 - **`state.rs`**: Manages `{data-dir}/catalog.db` and the LRU pool of `{data-dir}/shares/{sid}.db` SQLite databases (see [`docs/storage.md`](docs/storage.md)), startup/periodic orphan & expiry sweeps, and per-share `tokio::sync::broadcast` channels for live SSE telemetry.
 - **`routes_api.rs`**: Implements the Zero-Knowledge Share & Link API (`POST /api/shares`, `PUT /api/shares/{sid}/owner.jwe`, `PUT /api/shares/{sid}/files/{name}`, `POST /api/shares/{sid}/links`, `PATCH /api/shares/{sid}/links/{lid}`, `DELETE /api/shares/{sid}/links/{lid}`, `POST /api/shares/{sid}/links/{lid}/end-sessions`, `GET /api/shares/{sid}/access`, `GET /api/shares/{sid}/events`, `GET /api/demo-shares`).
-- **`routes_shl.rs`**: Implements the receiver-facing SHL routes (`GET /shl/{lid}/bundle.jwe`, `POST /shl/{lid}`, `GET /shl/{lid}/{fileId}.bin`, `GET /cap/{token}/...`) and the HTTP `206 Partial Content` byte-range responder, which streams from the encrypted file on disk.
+- **`routes_shl.rs`**: Implements the receiver-facing SHL routes (`GET /shl/{lid}/bundle.jwe`, `POST /shl/{lid}`, `GET /shl/{lid}/{fileId}.bin`, `GET /cap/{token}/...`) and the HTTP `206 Partial Content` byte-range responder, which streams the range from the blob store or, for S3 in `redirect` mode, answers `307` to a presigned URL.
 
 ---
 
@@ -294,8 +297,9 @@ All `/api/*` routes answer `OPTIONS` preflight requests (`Access-Control-Allow-O
   | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` (largest append) |
   | `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 (passcode links' capability URLs) |
 
-- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. File bodies stream to disk.
+- JSON and JWE bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. File bodies stream to a staged file on disk.
 - The server's own sample is not subject to these limits.
+- Where finished files are kept is also a server setting: `{data-dir}/blobs/` by default, or a private S3 bucket with `--s3-bucket` (`SHL_S3_BUCKET`). With S3, large uploads go up as multipart parts while they arrive. The S3 flags (endpoint, region, credentials, prefix, path style, read mode) are listed in [`docs/storage.md`](docs/storage.md#settings).
 
 **Rules enforced by the Share & Link API:**
 - **Owner management across sessions (`owner.jwe`):** The owner's client stores `{ sid, controlToken, ownerKey }` (in `localStorage` and exportable as a management link). Fetching and decrypting `GET /api/shares/{sid}/owner.jwe` with `ownerKey` gives the client the full `StudyIndex` (including every `fileId` and 32-byte file `key`) needed to mint new Links or append studies from any device.
@@ -316,10 +320,14 @@ All inactive, offline, expired, unallowed, or deleted Links and capability prefi
 | Method & Path | Condition | Behaviour |
 |---|---|---|
 | `GET /shl/{lid}/bundle.jwe?recipient=...` | Link exists, `hasBundle`, `online`, `!expired`, and `!hasPasscode` | Returns Link `{lid}`'s `bundle.jwe` (`200 OK`, `application/jose`) with an `ETag` header (answering `If-None-Match` with `304 Not Modified`). Returns `404` otherwise. |
-| `GET /shl/{lid}/{fileId}.bin` | Link exists, `online`, `!expired`, `!hasPasscode`, and `{fileId}.bin` in `allowedFiles` | Honours `Range: bytes=a-b` (`206 Partial Content` + `Content-Range: bytes a-b/C`, `Content-Type: application/octet-stream`, no `Content-Encoding`, `Access-Control-Allow-Origin: *`) or `200 OK`. Returns `404` otherwise. |
+| `GET /shl/{lid}/{fileId}.bin` | Link exists, `online`, `!expired`, `!hasPasscode`, and `{fileId}.bin` in `allowedFiles` | Honours `Range: bytes=a-b` (`206 Partial Content` + `Content-Range: bytes a-b/C`, `Content-Type: application/octet-stream`, no `Content-Encoding`, `Access-Control-Allow-Origin: *`) or `200 OK`. With S3 in `redirect` mode, answers `307` to a presigned URL valid for 60 s instead (see below). Returns `404` otherwise. |
 | `POST /shl/{lid}` | Link exists, `hasBundle`, `online`, `!expired`, `hasPasscode`, and `remainingAttempts > 0` | Atomically checks/decrements `remainingAttempts` on mismatch (returns `401` with `remainingAttempts`, or `404` once exhausted). On match, mints a 1-hour `capToken` (32 random bytes, base64url) bound to `(sid, lid)` and returns `{ "status": "can-change" /* if L flag set */, "files": [{ "contentType": "application/fhir+json;fhirVersion=4.0.1", "location": "{origin}/cap/{capToken}/bundle.jwe", "lastUpdated": "..." }] }`. |
 | `GET /cap/{capToken}/bundle.jwe` | `capToken` valid (<1 hr, not ended) AND parent Link is `online` and `!expired` | Returns Link `{lid}`'s `bundle.jwe` (`200 OK`). Returns `404` if `capToken` expired/ended or parent Link is offline/expired/deleted. |
-| `GET /cap/{capToken}/{fileId}.bin` | `capToken` valid (<1 hr, not ended), parent Link `online`/`!expired`, and `{fileId}.bin` in `allowedFiles` | Honours `Range: bytes=a-b` (`206 Partial Content`, no `Content-Encoding`) or `200 OK`. Returns `404` otherwise. |
+| `GET /cap/{capToken}/{fileId}.bin` | `capToken` valid (<1 hr, not ended), parent Link `online`/`!expired`, and `{fileId}.bin` in `allowedFiles` | Honours `Range: bytes=a-b` (`206 Partial Content`, no `Content-Encoding`) or `200 OK`, or `307` in `redirect` mode. Returns `404` otherwise. |
+
+**S3 read modes** (`--s3-read-mode`, `SHL_S3_READ_MODE`), when files are in S3. The checks above run for every read in both modes; Bundles never contain S3 URLs.
+- **`proxy`** (default): the server reads the range from S3 and streams it in the `206`.
+- **`redirect`**: the server answers `307 Temporary Redirect` with `Location` set to a presigned `GetObject` URL valid for 60 s, `Cache-Control: no-store` and `Access-Control-Allow-Origin: *`. The browser repeats its `Range` request there. The bucket stays private and needs a CORS policy that allows `GET`/`HEAD` with `Range` from any origin, since a redirected cross-origin request carries `Origin: null` ([`docs/storage.md`](docs/storage.md#settings)).
 
 ---
 
