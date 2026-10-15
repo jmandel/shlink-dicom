@@ -369,3 +369,9 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
   - both exe.dev VMs are public (the proxy on port 8000);
   - the public sample will use the sandbox's fictional patient;
   - "detect what we can": an inference round in the decoder (missing Planar Configuration by smoothness, plus other safe inferences, each reported as a warning).
+
+- **Inference round finished.** The decoder now infers missing or impossible pixel attributes and reports each one.
+  - **Planar Configuration** is decided by within-channel smoothness, horizontal plus vertical, with the smoother reading required to win by at least 1.25×; images smaller than 16×16 are refused. It gave the right answer on the 8 real IDC files (2 Philips planar, 6 GE ultrasound interleaved), by margins of 1.8–8.4×.
+  - **Other attributes:** Bits Stored, Samples per Pixel and Photometric, plus dimensions and bit depth from the JPEG or JPEG 2000 header.
+  - **Deliberately still refused:** truncated pixel data, possibly-packed 12-bit native data, and ambiguous layouts.
+  - **Effect on the corpus:** three formerly "must refuse" GDCM quirk files now decode, matching DCMTK, GDCM and OpenJPEG on repaired copies. The coordinator recorded them as repaired-copy rulings. One gotcha: a repair case's oracle must be built before the original that points at it. The corpus went to 935/935.

@@ -24,9 +24,9 @@ Related docs:
 |---|---|---|---|---|
 | ~~How it works~~ DONE, committed | a0bd674282e6512f4 | `web/how/`; may add new files to `web/core/` | Live widgets on the sample link; 50-line receiver | Verify the screenshots in `docs/shots/how/` and the widgets; then commit |
 | ~~Share~~ DONE, committed | ac9206ae1a4d9228a | `web/share/`; may make additive changes to `crates/shl-dicom-server` | Files/CD/ZIP, SMART portal through the sandbox, re-share, manage page | Verify the flows and `docs/shots/share/`; review the server changes; commit |
-| Imaging sandbox | ab83241fb7aa4e1f8 | `imaging-sandbox/` | Fictional patient rewritten into the DICOM (pixels untouched); scripted `build-data.ts` reproducible from git; DiagnosticReports with PDF and text, marked "SAMPLE REPORT"; Josh's rulings (aud array, grant-bound capabilities, `.s`/`.r`, **406 when transfer-syntax is omitted**, token_type and scope); deploy **private** to smart-imaging-sandbox.exe.xyz | Verify; commit the scripts and config (no DICOM); ask Josh before set-public |
+| Imaging sandbox (data, reports, rulings DONE; deploy BLOCKED) | ab83241fb7aa4e1f8 | `imaging-sandbox/` | Fictional patient rewritten into the DICOM (pixels untouched); scripted `build-data.ts` reproducible from git; DiagnosticReports with PDF and text, marked "SAMPLE REPORT"; Josh's rulings (aud array, grant-bound capabilities, `.s`/`.r`, **406 when transfer-syntax is omitted**, token_type and scope); deploy **private** to smart-imaging-sandbox.exe.xyz | Verify; commit the scripts and config (no DICOM); ask Josh before set-public |
 | JPEG 2000/HTJ2K speed, round 2 | aeb346615b443d8de | `codecs/shl-codec-jpeg2000/` (including the vendored hayro), `codecs/shl-codec-htj2k/` (including the vendored oxideav), `formats/{jpeg2000,htj2k}/` | Wavelet (5/3, 9/7) and HT block decoder speed; targets about 3× OpenJPH and about 1.2× OpenJPEG; exactness kept | Then tell the reduced-res agent to go ahead with JPEG 2000/HTJ2K scaled decode |
-| Foundation (CLI), inference round | aac32c9d770084d05 | `codecs/shl-dicom-decode/`, `formats/uncompressed/` | Infer missing Planar Configuration (smoothness) and other safe inferences, each with a warning | Verify check.py and the ruling write-ups; commit |
+| ~~Foundation inference round~~ DONE (935/935 pass) | aac32c9d770084d05 | `codecs/shl-dicom-decode/`, `formats/uncompressed/` | Infer missing Planar Configuration (smoothness) and other safe inferences, each with a warning | Verify check.py and the ruling write-ups; commit |
 | Whole-slide (SM) viewer | adcc54c6231290ab4 | `web/view/` (core+View finished), additive `web/core/`, viewer-kit additions | Tiled deep-zoom viewer: pyramid from headers; tile→frame→byte via EOT/BOT/fragment walk; prototype a frame-offset Bundle extension (protocol decision for the coordinator and Josh); live streaming stats; `docs/wsi-sample.md` recommends a CC BY IDC slide for the public sample | Verify; decide the frame-offset extension with Josh; the sandbox agent adds the slide to the sample data |
 | Long-tail IDC sweep | a364a12e7cfb7c05a | `codec-corpus/scripts/sources/` (new files), `codec-corpus/prevalence/`; temp files in `/media/barracuda/shlink-dicom-sweep/` | Rarity-weighted selection plus a random control of about 1,000; decode-verify-delete; failures registered as `idc-lt-*` cases. **Plus:** frame-wise verification of the 12 oversize whole-slide images (2.4–11.8 GB decoded; skipped by the 2 GB harness cap) | Triage its LONGTAIL.md: route failures to owners, record rulings (below) |
 
@@ -54,6 +54,9 @@ Related docs:
 
 ## Infrastructure
 
+- **BLOCKER (15 Oct, about 16:30):** SSH into **every** exe.dev VM fails after authentication ("closed by remote host"; lobby `ssh exe.dev ssh <vm>` gives "handshake failed: EOF"), including Josh's existing VMs. It is platform or account-wide. A background poll checks every 10 minutes for up to 6 hours. When it recovers: `imaging-sandbox/scripts/deploy.sh`, then `bun test/e2e.ts --base https://smart-imaging-sandbox.exe.xyz`; then the shlink-dicom deploy (queue step 5).
+- **Sandbox done:** Morgan Rivera (born 1979-03-14, MRN SBX4417302), new deterministic UIDs under 2.25 (the original UIDs are public), reports with LOINC 24590-2 and 37550-1 (PDF and text), 406 when transfer-syntax is omitted, grant-bound capabilities, aud list. e2e 124/124, data-check 24/24. Export at `imaging-sandbox/out/dicom/`.
+
 - **exe.dev VMs (both **public** (proxy on port 8000); tagged `#health-skillz-mgmt`):**
   - `smart-imaging-sandbox.exe.xyz`, being deployed by the sandbox agent.
   - `shlink-dicom.exe.xyz`, not yet deployed.
@@ -61,7 +64,7 @@ Related docs:
 - **Local servers:** the shlink-dicom server is on localhost:3333; the sandbox runs on localhost:3334 with `cd imaging-sandbox && bun src/server.ts`.
 - **GitHub issues opened on argonautproject/smart-imaging (Josh approved):** #2 (the token response example lacks token_type and scope) and #3 (transfer-syntax guidance: apps send `*`; servers may answer 406). Watch them for replies.
 - **Tools installed:** binaryen (`~/.local/bin/wasm-opt`, version 133), wasm-tools, rustfilt, and the rustup stable toolchain with wasm32. The system cargo has no wasm32 target, so use `~/.cargo/bin/cargo +stable`.
-- **Commits:** ed67c94 is the last checkpoint (three experiences, sandbox, scaled decode, JPEG-LS speed). docs/shots/ is gitignored, because check scripts regenerate it. Earlier checkpoint: 68e6b9a.
+- **Commits:** see git log; latest checkpoint after the inference round (three experiences, sandbox, scaled decode, JPEG-LS speed). docs/shots/ is gitignored, because check scripts regenerate it. Earlier checkpoint: 68e6b9a.
 
 ## Decisions made (Josh)
 
