@@ -188,11 +188,11 @@ Series are read in runs of up to 8 MiB, so memory stays bounded. ZIP64 records a
 |---|---|
 | `index.html` | Landing (`/`). A `/#shlink:/…` URL forwards to `/view`. |
 | `view/index.html` | View (`/view#shlink:/…`) |
-| `how/`, `share/`, `share/manage/` | Placeholders |
-| `legacy/` | pi's original single page, kept until How and Share replace it |
+| `how/` | How it works, with its baked data and linked pages |
+| `share/`, `share/manage/`, `share/smart-callback/` | Share |
 | `assets/` | `landing.js`, `view.js`, shared `chunk-*.js`, `decoder-worker.js`, `shl_dicom_decode.wasm`, `shl_dicom_wasm_bg.wasm` (wasm decrypt only), CSS |
 | `config.json` | `{}`. A static deployment sets `apiBase` here. |
 
 **Adding a page.** Pages reference `../assets/…` relatively. To add `how.ts` or `share.ts`, add it to `entrypoints` in `web/build.ts` and copy its HTML, as is done for `view`.
 
-**Server routes.** The Rust server maps `/view`, `/how`, `/share`, `/share/manage` and `/legacy`, with or without a trailing slash, to those pages. Everything else is a static file, and unknown paths get the landing page with status 404.
+**Server routes.** The Rust server maps `/view`, `/how`, `/share`, and `/share/manage`, with or without a trailing slash, to those pages. Everything else is a static file, and unknown paths get the landing page with status 404.

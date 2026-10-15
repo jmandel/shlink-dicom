@@ -3,8 +3,7 @@
 //   dist/web/index.html            landing           (/)
 //   dist/web/view/index.html       View              (/view#shlink:/…)
 //   dist/web/how/index.html        How it works      (/how), plus how/data.json and the pages it links (web/how/bake.ts)
-//   dist/web/share/index.html      placeholder       (/share, /share/manage)
-//   dist/web/legacy/               pi's single page  (/legacy)
+//   dist/web/share/                Share             (/share, /share/manage, /share/smart-callback)
 //   dist/web/assets/               one bundle per entry point + shared chunks, decoder worker,
 //                                  shl_dicom_decode.wasm, shl_dicom_wasm_bg.wasm (wasm decrypt option), CSS
 //
@@ -89,22 +88,6 @@ await Bun.write(
 // How it works: codec coverage data, the rendered spec and reference code, the benchmark report.
 const { bakeHow } = await import("./how/bake.ts");
 await bakeHow(root, out);
-
-// Legacy single page (pi's demo), kept at /legacy until /how and /share replace it.
-mkdirSync(`${out}/legacy`, { recursive: true });
-const l = await Bun.build({
-  entrypoints: ["web/legacy/main.ts", "web/legacy/sw-dicomweb.ts"],
-  outdir: `${out}/legacy`,
-  target: "browser",
-  naming: "[name].[ext]",
-});
-if (!l.success) {
-  for (const x of l.logs) console.error(x);
-  process.exit(1);
-}
-cpSync("web/legacy/index.html", `${out}/legacy/index.html`);
-cpSync("web/legacy/styles.css", `${out}/legacy/styles.css`);
-cpSync(sessionWasm, `${out}/legacy/shl_dicom_wasm_bg.wasm`);
 
 const sizes = await $`cd ${out} && find . -type f \( -name '*.js' -o -name '*.wasm' -o -name '*.html' -o -name '*.css' \) -not -name '*.map' -printf '%s\t%p\n' | sort -k2`.text();
 console.log(sizes);

@@ -404,20 +404,10 @@ async function flowPages(dev) {
   await page.click("#sample-public");
   await waitOverview(page);
   check(`${label}: "Try a sample" opens /view`, new URL(page.url()).pathname === "/view");
-  for (const p of ["how", "share", "share/manage"]) {
-    await page.goto(`${BASE}/${p}`);
-    const h = await page.textContent("h1");
-    check(`${label}: /${p} placeholder`, /coming soon/i.test(await page.textContent("main")), h);
-    if (p === "how") await page.screenshot({ path: `${SHOTS}${dev}-how-placeholder.png` });
-  }
   // Root-prefixed links (seeded samples use https://host/#shlink:/…) forward to /view.
   await page.goto(`${BASE}/#${F.subsetLink}`);
   await waitOverview(page);
   check(`${label}: /#shlink:/… forwards to /view`, new URL(page.url()).pathname === "/view");
-  await page.goto(`${BASE}/legacy`);
-  await page.waitForSelector("#dicom-canvas", { timeout: 20000 });
-  await page.waitForTimeout(2500);
-  check(`${label}: /legacy still loads`, true);
   check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
   await context.close();
 }

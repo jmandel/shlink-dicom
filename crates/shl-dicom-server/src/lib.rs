@@ -85,7 +85,7 @@ pub fn build_app_router(state: AppState) -> Router {
         .route("/shl/{lid}", post(routes_shl::post_shl_manifest))
         .route("/shl/{lid}/{tail}", get(routes_shl::get_shl_file))
         .route("/cap/{token}/{tail}", get(routes_shl::get_cap_file))
-        // Experiences: landing (/), View, How it works, Share, and the legacy single page
+        // Experiences: landing (/), View, How it works, Share
         .route_service("/view", page("view"))
         .route_service("/view/", page("view"))
         .route_service("/how", page("how"))
@@ -94,8 +94,6 @@ pub fn build_app_router(state: AppState) -> Router {
         .route_service("/share/", page("share"))
         .route_service("/share/manage", page("share/manage"))
         .route_service("/share/manage/", page("share/manage"))
-        .route_service("/legacy", page("legacy"))
-        .route_service("/legacy/", page("legacy"))
         // Static files (assets, config.json); unknown paths get the landing page
         .fallback_service(serve_dir)
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))

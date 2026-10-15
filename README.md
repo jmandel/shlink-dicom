@@ -1,33 +1,52 @@
 # shlink-dicom
 
-A specification and reference implementation for sharing complete, full-fidelity DICOM imaging studies through SMART Health Links (`shlink:/`). Series are stored as concatenated Part 10 DICOM instances encrypted in 64 KiB `AES-256-GCM` records so a receiver can stream or range-read individual series, instances, or frames from a zero-knowledge host.
+Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each series is one file of Part 10 instances, encrypted in 64 KiB AES-256-GCM records, so a receiver can range-read single instances or frames from a host that never sees the key.
 
 ## Contents
 
-- **[`PROPOSAL.md`](PROPOSAL.md)** — The protocol specification: goals, FHIR R4 `ImagingStudy` profile (`https://example.org/shl-dicom/v1`) and extensions (`series-file` and `length`), 64 KiB STREAM record encryption, HTTP `206` Range fetch contract, security considerations, and test vector.
-- **[`PLAN.md`](PLAN.md)** & **[`docs/storage.md`](docs/storage.md)** — Architecture, API specification, SQLite storage design (`catalog.db` + per-share `shares/{sid}.db`), dependency graph, and stage-by-stage test plan.
-- **`reference/`** — Standalone ~90-line TypeScript/WebCrypto reference implementation (`reference/series-file.ts`) and Appendix B test vector / golden share generator (`reference/test-vector.ts`).
-- **`crates/shl-dicom-core/`** — Pure-Rust core library (compiles to native and `wasm32-unknown-unknown`): STREAM record crypto, compact JWE (`dir` + `A256GCM` + `DEF`), DICOM Part 10 / `.tgz` / `.zip` ingestion, 8/12/16-bit + RLE + JPEG pixel decoding, FHIR R4 Bundle builder/parser, and original Part 10 `.dcm` / `.zip` reconstruction.
-- **`crates/shl-dicom-wasm/`** — WebAssembly bindings (`WasmShlSession` with bounded LRU 64 KiB record cache, range planner, RGBA renderer, and `.dcm`/`.zip` exporter + `WasmPacker` for browser-side zero-knowledge packing).
-- **`crates/shl-dicom-server/`** — Axum HTTP server + CLI (`pack`, `inspect`, `serve`) backed by `catalog.db` + `shares/{sid}.db`.
-- **`web/`** — Default DICOM-aware SHL viewer (`https://viewer/#shlink:/...`), Instant Series Contact Sheet, Interactive Stack Viewer with live 64 KiB Record Map & tamper simulator, Original DICOM Exporter, Cornerstone `shl-dicom:` image loader bridge, Service Worker WADO-RS adapter, and Sharer/Host Control Lab.
+- **[`PROPOSAL.md`](PROPOSAL.md)**: the protocol, covering the ImagingStudy index, series files, record encryption, the Range fetch contract and the test vector.
+- **[`PLAN.md`](PLAN.md)**, **[`docs/`](docs/)**: architecture, server storage ([`docs/storage.md`](docs/storage.md)), the three web experiences ([`docs/EXPERIENCES.md`](docs/EXPERIENCES.md)).
+- **`reference/`**: a short WebCrypto reference receiver and the test vector generator.
+- **`crates/`**:
+  - `shl-dicom-core`: packing, record crypto, JWE, Bundle building and parsing;
+  - `shl-dicom-wasm`: browser bindings for the packer and session;
+  - `shl-dicom-server`: the HTTP server and CLI (`pack`, `inspect`, `serve`).
+- **`codecs/`**: pure-Rust pixel decoders (uncompressed, RLE, JPEG, JPEG-LS, JPEG 2000, HTJ2K), plus their wasm build and benchmarks.
+- **`codec-corpus/`**: the decoder test corpus, with reference decoders and the check harness.
+- **`viewer-kit/`**: the decoder worker pool and WebGL2 renderer.
+- **`web/`**: the site.
+  - `/` landing;
+  - `/view#shlink:/…` the recipient's viewer, including tiled whole-slide images;
+  - `/how` how it works;
+  - `/share` creating and managing shares;
+  - `web/checks/` scripted browser checks.
+- **`imaging-sandbox/`**: a SMART Imaging Access sandbox (FHIR, WADO-RS, SMART App Launch) serving a fictional patient's studies.
+- **`deploy/`**: bootstrap scripts that build and run the sandbox and the server on a fresh VM.
 
-## Quick Start
+## Build and run
 
 ```bash
-# 1. Verify the Appendix B test vector and generate F0 golden fixtures
+# wasm modules
+cargo build --release --target wasm32-unknown-unknown -p shl-dicom-wasm
+wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
+node viewer-kit/scripts/build.mjs
+
+# site and server
+bun install
+bun web/build.ts
+cargo run --release -p shl-dicom-server -- serve --port 3333
+```
+
+The server seeds a sample share from every `.tgz` in `data/samples/`.
+
+## Tests
+
+```bash
 bun reference/test-vector.ts
-
-# 2. Run Stage 1 Rust core tests (Appendix B vector, range edge cases, 100% SHA-256 round-trip on Brain MRI + Wrist, and DCMTK pixel comparison)
-cargo test -p shl-dicom-core
-
-# 3. Run Stage 2 Rust server integration tests (U-mode & P-mode Range reads, quotas, 409 FK checks, concurrent passcode brute-force limit, mid-download session resumption, traversal defense)
-cargo test -p shl-dicom-server
-
-# 4. Run Stage 3 WASM unit tests & Stage 4/5 Chromium E2E tests
+cargo test -p shl-dicom-core -p shl-dicom-server
 bun test test/wasm.test.ts
-bun test test/e2e.test.ts
-
-# 5. Start the live demo server & viewer on http://localhost:3000
-cargo run -p shl-dicom-server -- serve --port 3000
+node web/checks/view-checks.mjs      # with the server on :3333
+node web/checks/share-checks.mjs
+node web/how/checks.mjs
+cd imaging-sandbox && bun test/e2e.ts
 ```
