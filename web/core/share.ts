@@ -1,13 +1,14 @@
 // openShare(): the whole receive path in one call: resolve the link, decrypt the Bundle, index it,
 // and set up the loader. Experiences that need finer control use the parts directly.
 import { parseStudyIndex, type StudyIndex } from "./bundle";
-import { createDecryptor, type DecryptorKind, type RecordDecryptor } from "./decrypt";
+import { WebCryptoDecryptor, type RecordDecryptor } from "./decrypt";
 import { InstanceLoader, type LoaderOptions } from "./loader";
 import { LinkResolver, type ResolverOptions } from "./resolver";
 
 export interface OpenShareOptions extends ResolverOptions, LoaderOptions {
   passcode?: string;
-  decrypt?: DecryptorKind;
+  /** Where records are decrypted: WebCryptoDecryptor (this thread, the default) or PoolDecryptor (images.ts: the decoder workers). */
+  decryptor?: RecordDecryptor;
 }
 
 export interface OpenShare {
@@ -29,7 +30,7 @@ export async function openShare(link: string | LinkResolver, o: OpenShareOptions
   const resolver = typeof link === "string" ? new LinkResolver(link, o) : link;
   const opened = await resolver.open(o.passcode);
   const index = parseStudyIndex(opened.bundleBytes);
-  const decryptor = await createDecryptor(o.decrypt ?? "webcrypto", opened.bundleBytes);
+  const decryptor = o.decryptor ?? new WebCryptoDecryptor();
   const loader = new InstanceLoader(resolver, decryptor, o);
   return { resolver, index, decryptor, loader, bundleBytes: opened.bundleBytes, openMs: performance.now() - t0 };
 }

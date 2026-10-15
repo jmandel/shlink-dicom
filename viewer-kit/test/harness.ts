@@ -1,8 +1,9 @@
 // Browser-side harness for test/gl-vs-cpu.mjs and bench/*.mjs (driven by playwright-core).
 // Loaded by test/harness.html; exposes window.vk.
 import { DecoderPool, Priority } from "../src/decoder-pool";
+import { importSeriesKey, recordNonce, RECORD_PLAINTEXT } from "../src/record-decrypt";
 import { GlRenderer } from "../src/gl-renderer";
-import { renderCpu, defaultView, legacyPrepare, legacyToRgba, type View } from "../src/cpu-render";
+import { renderCpu, defaultView, type View } from "../src/cpu-render";
 import { frameOf, defaultWindow, type DecodedImage, type Frame } from "../src/types";
 
 const WASM = new URL("../dist/shl_dicom_decode.wasm", location.href);
@@ -139,7 +140,7 @@ async function glVsCpu(opts: { url: string; frame?: number }) {
   }
 }
 
-/** Window/level drag: GPU uniforms + redraw vs the viewer's current CPU RGBA re-render. */
+/** Window/level drag: GPU uniforms + redraw vs the CPU fallback renderer. */
 async function wlBench(opts: { url: string; frames: number; canvas?: [number, number] }) {
   const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 1 });
   const img = await pool.decode(await fetchBytes(opts.url));
@@ -173,26 +174,6 @@ async function wlBench(opts: { url: string; frames: number; canvas?: [number, nu
     prev = t;
   }
 
-  // CPU, as the viewer does it today: f32 rescaled values (once), RGBA per change, copy, putImageData.
-  const cpuCanvas = document.createElement("canvas");
-  cpuCanvas.width = frame.columns; cpuCanvas.height = frame.rows;
-  document.body.append(cpuCanvas);
-  const ctx = cpuCanvas.getContext("2d")!;
-  const values = legacyPrepare(frame);
-  const cpuWork: number[] = [], cpuFrame: number[] = [];
-  await nextFrame();
-  prev = await nextFrame();
-  for (let i = 0; i < opts.frames; i++) {
-    const t0 = performance.now();
-    const rgba = legacyToRgba(values, centres[i], widths[i], false).slice(); // rgba_bytes() copies
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer), frame.columns, frame.rows), 0, 0);
-    ctx.getImageData(0, 0, 1, 1); // make the canvas finish the upload before timing stops
-    cpuWork.push(performance.now() - t0);
-    const t = await nextFrame();
-    cpuFrame.push(t - prev);
-    prev = t;
-  }
-
   // CPU fallback renderer of this kit (renderCpu into the same canvas size as the GPU path).
   const fbCanvas = document.createElement("canvas");
   fbCanvas.width = W; fbCanvas.height = H;
@@ -205,13 +186,12 @@ async function wlBench(opts: { url: string; frames: number; canvas?: [number, nu
     fbCtx.putImageData(fbImage, 0, 0);
     fbWork.push(performance.now() - t0);
   }
-  glCanvas.remove(); cpuCanvas.remove();
+  glCanvas.remove();
   const s = (a: number[]) => ({ median: +median(a).toFixed(3), p90: +pct(a, 0.9).toFixed(3), max: +Math.max(...a).toFixed(3) });
   return {
     image: `${frame.columns}×${frame.rows} ${img.bitsAllocated}-bit`,
     canvas: `${W}×${H}`,
     gpu: { submit: s(gpuSubmit), work: s(gpuWork), frameInterval: s(gpuFrame), renderer: gl.gpu },
-    cpuCurrent: { work: s(cpuWork), frameInterval: s(cpuFrame) },
     cpuFallback: { work: s(fbWork) },
   };
 }
@@ -320,6 +300,37 @@ async function poolSemantics(opts: { big: string; multiframe: string; unsupporte
         thumb.rows === Math.ceil(full.rows / 8) && thumb.columns === Math.ceil(full.columns / 8),
         `${thumb.columns}x${thumb.rows}; decode ${full.decodeMs.toFixed(1)} ms full, ${thumb.decodeMs.toFixed(1)} ms at 1/8`,
       );
+    }
+    // Encrypted input (PROPOSAL.md §9): a series file of [garbage, the instance, garbage], the
+    // instance's window decrypted and decoded in the worker; one flipped bit is refused.
+    const one = new Uint8Array(await fetchBytes(opts.big));
+    const pre = 70_000, post = 9_000, P = pre + one.length + post;
+    const plain = new Uint8Array(P);
+    plain.fill(7, 0, pre);
+    plain.set(one, pre);
+    const raw = crypto.getRandomValues(new Uint8Array(32));
+    const enc = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt"]);
+    const n = Math.ceil(P / RECORD_PLAINTEXT);
+    const recs = await Promise.all(Array.from({ length: n }, (_, i) =>
+      crypto.subtle.encrypt({ name: "AES-GCM", iv: recordNonce(i) }, enc, plain.subarray(i * RECORD_PLAINTEXT, Math.min(P, (i + 1) * RECORD_PLAINTEXT))).then((b) => new Uint8Array(b))));
+    const first = Math.floor(pre / RECORD_PLAINTEXT), last = Math.floor((pre + one.length - 1) / RECORD_PLAINTEXT);
+    const ct = new Uint8Array(recs.slice(first, last + 1).reduce((a, r) => a + r.length, 0));
+    recs.slice(first, last + 1).reduce((o, r) => (ct.set(r, o), o + r.length), 0);
+    const key = await importSeriesKey(raw);
+    const encrypted = { key, firstRecord: first, seriesPlaintextLength: P, window: { start: pre - first * RECORD_PLAINTEXT, length: one.length } };
+    const viaEnc = await pool4.decode(ct.slice(), { encrypted });
+    const viaPlain = await pool4.decode(one.slice());
+    const e1 = new Uint8Array(viaEnc.pixels), e2 = new Uint8Array(viaPlain.pixels);
+    check("encrypted input == plain input", e1.length === e2.length && e1.every((v, i) => v === e2[i]), `${last - first + 1} records`);
+    const pt = await pool4.decrypt(ct.slice(), encrypted);
+    check("decrypt returns the window", pt.length === one.length && pt.every((v, i) => v === one[i]));
+    const bad = ct.slice();
+    bad[RECORD_PLAINTEXT + 16 + 5] ^= 1;
+    try {
+      await pool4.decode(bad, { encrypted });
+      check("flipped bit -> RecordAuthenticationError", false, "decoded");
+    } catch (e: any) {
+      check("flipped bit -> RecordAuthenticationError", e?.name === "RecordAuthenticationError" && e.recordIndex === first + 1, `${e?.name}: ${e?.message}`);
     }
   } finally {
     pool4.destroy();

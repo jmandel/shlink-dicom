@@ -17,6 +17,7 @@
 // cannot be interrupted (wasm has no preemption); its promise rejects at once with an AbortError
 // and the result is dropped when it arrives.
 import { decodeError, type DecodedImage, type ImageInfo, type PaletteLut } from "./types";
+import { RecordAuthenticationError } from "./record-decrypt";
 import type { Probe } from "./wasm-decoder";
 
 export const Priority = {
@@ -46,11 +47,29 @@ export interface DecodeOptions {
    */
   scale?: number;
   /**
+   * The input is series-file ciphertext (PROPOSAL.md §9): the worker verifies and decrypts it with
+   * WebCrypto (record-decrypt.ts) and decodes the plaintext window. A record that fails its check
+   * rejects with RecordAuthenticationError and nothing is decoded.
+   */
+  encrypted?: EncryptedInput;
+  /**
    * Deduplication key (for example `${study}/${series}/${instance}`). A second decode() with the
    * same key while the first is queued or running returns the first promise; a higher priority
    * moves the queued job up.
    */
   key?: string;
+}
+
+/** How to decrypt a ciphertext input (see record-decrypt.ts decryptRecords). */
+export interface EncryptedInput {
+  /** Non-extractable AES-GCM series key (structured-cloneable; posted with the job). */
+  key: CryptoKey;
+  /** Index of the input's first record in its series file. */
+  firstRecord: number;
+  /** The series' plaintext length, for the record-length checks. */
+  seriesPlaintextLength: number;
+  /** Plaintext bytes to keep, counted from the start of the first record. */
+  window: { start: number; length: number };
 }
 
 export interface FramesOptions extends Omit<DecodeOptions, "first" | "count" | "key"> {
@@ -82,12 +101,13 @@ interface Job {
   id: number;
   seq: number;
   priority: number;
-  kind: "decode" | "probe";
+  kind: "decode" | "probe" | "decrypt";
   bytes: ArrayBuffer;
   first: number;
   count: number;
   scale: number;
   key?: string;
+  encrypted?: EncryptedInput;
   t0: number;
   resolve(v: any): void;
   reject(e: unknown): void;
@@ -160,6 +180,14 @@ export class DecoderPool {
     return this.submit("decode", bytes, opts);
   }
 
+  /**
+   * Verify and decrypt series-file ciphertext on a worker; resolves with the plaintext window.
+   * Keeps the main thread free of decryption (bulk downloads, whole-slide record reads).
+   */
+  decrypt(ciphertext: ArrayBuffer | Uint8Array, encrypted: EncryptedInput, opts: Pick<DecodeOptions, "priority" | "signal" | "copy"> = {}): Promise<Uint8Array> {
+    return this.submit("decrypt", ciphertext, { ...opts, encrypted });
+  }
+
   /** Frame count and whether frames can be decoded separately. Runs on a worker (copies `bytes`). */
   probe(bytes: ArrayBuffer | Uint8Array, opts: Pick<DecodeOptions, "priority" | "signal"> = {}): Promise<Probe> {
     return this.submit("probe", bytes, { ...opts, copy: true });
@@ -173,6 +201,11 @@ export class DecoderPool {
    */
   async decodeFrames(bytes: ArrayBuffer | Uint8Array, opts: FramesOptions = {}): Promise<DecodedImage> {
     const t0 = performance.now();
+    if (opts.encrypted) {
+      // Decrypt on one worker first; the frame jobs then share out the plaintext.
+      bytes = await this.decrypt(bytes, opts.encrypted, opts);
+      opts = { ...opts, encrypted: undefined, copy: false };
+    }
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const p = await this.probe(u8, opts);
     const per = opts.framesPerJob ?? Math.max(1, Math.ceil(p.frames / this.slots.length));
@@ -248,6 +281,7 @@ export class DecoderPool {
       count: opts.count ?? 0,
       scale: opts.scale ?? 0,
       key: opts.key,
+      encrypted: opts.encrypted,
       t0: performance.now(),
       settled: false,
     } as Job;
@@ -302,7 +336,7 @@ export class DecoderPool {
       slot.job = job;
       const { bytes } = job;
       job.bytes = new ArrayBuffer(0);
-      slot.worker.postMessage({ type: job.kind, id: job.id, bytes, first: job.first, count: job.count, scale: job.scale }, [bytes]);
+      slot.worker.postMessage({ type: job.kind, id: job.id, bytes, first: job.first, count: job.count, scale: job.scale, encrypted: job.encrypted }, [bytes]);
     }
     this.emit();
   }
@@ -312,8 +346,9 @@ export class DecoderPool {
     slot.job = null;
     this.completed++;
     if (job && job.id === m.id && !job.settled) {
-      if (!m.ok) this.settle(job, null, decodeError(m.code, m.message));
+      if (!m.ok) this.settle(job, null, m.auth ? new RecordAuthenticationError(m.auth.record, m.auth.reason) : decodeError(m.code, m.message));
       else if (job.kind === "probe") this.settle(job, m.probe);
+      else if (job.kind === "decrypt") this.settle(job, new Uint8Array(m.plaintext));
       else this.settle(job, toImage(m.info, m.pixels, m.lut, m.ms, performance.now() - job.t0));
     }
     this.pump();

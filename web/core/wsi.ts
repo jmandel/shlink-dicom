@@ -5,7 +5,7 @@
 // walking fragment headers) is in wsi-source.ts.
 import type { SeriesEntry } from "./bundle";
 
-export const WSI_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.77.1.6";
+const WSI_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.77.1.6";
 
 /** True when a series holds a whole-slide image (by SOP Class or modality SM). */
 export function isSlideSeries(s: SeriesEntry): boolean {
@@ -575,7 +575,7 @@ export function frameTableFromHeader(h: SlideHeader, instanceLength: number): Fr
 }
 
 /** The fragments (item values) inside a frame's bytes, which start at an item header. */
-export function fragmentsOf(frameBytes: Uint8Array): Uint8Array[] {
+function fragmentsOf(frameBytes: Uint8Array): Uint8Array[] {
   const dv = new DataView(frameBytes.buffer, frameBytes.byteOffset, frameBytes.byteLength);
   const out: Uint8Array[] = [];
   let p = 0;

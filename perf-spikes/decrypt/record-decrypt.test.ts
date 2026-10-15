@@ -10,7 +10,7 @@ import {
   RECORD_PLAINTEXT as RP,
   RecordAuthenticationError,
   recordNonce,
-} from "./record-decrypt.ts";
+} from "../../viewer-kit/src/record-decrypt.ts";
 
 const fx = join(import.meta.dir, "fixtures");
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");

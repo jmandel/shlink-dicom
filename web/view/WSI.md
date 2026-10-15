@@ -164,7 +164,7 @@ The worst case, the bottom-right tile, reads the whole base level: 1.05 GB for l
 **Adding them when packing.** Josh decided that offsets go in the files, not the Bundle. When asked, the packer fills in the table for each encapsulated multi-frame instance that has an empty BOT and no EOT. The code is `crates/shl-dicom-core/src/offset_tables.rs`, turned on by `IngestSession::set_add_offset_tables`, so it is the same for every packer:
 - the CLI: `shl-dicom pack --add-offset-tables`;
 - the server seed;
-- the wasm packer: `WasmPacker.set_add_offset_tables`, or `offset_table_patch_wasm` for one file;
+- the browser: `offset_table_patch_wasm` (shl-dicom-wasm), one file at a time;
 - /share: a box in the review step, shown only when such files are present.
 
 How it works:

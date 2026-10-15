@@ -306,9 +306,10 @@ pub fn add_offset_table(bytes: Vec<u8>) -> (Vec<u8>, bool) {
     }
 }
 
-/// Test and tool support: frames (concatenated fragment values) of an encapsulated instance,
-/// located through its BOT or EOT when present, else by the same rules as the rewrite.
-pub fn frames_of(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
+/// For tests: frames (concatenated fragment values) of an encapsulated instance, located through
+/// its BOT or EOT when present, else by the same rules as the rewrite.
+#[cfg(test)]
+pub(crate) fn frames_of(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
     let h = scan_header(bytes)?;
     let first_item = h.bot_pos + 8 + h.bot_len as usize;
     let mut frags = Vec::new();

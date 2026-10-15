@@ -2,7 +2,7 @@
 
 Question: is decrypting series-file records (PROPOSAL.md §9: 65,536-byte AES-256-GCM records, nonce `uint96_be(i)`) with the Rust `aes-gcm` crate compiled to wasm a bottleneck, and is WebCrypto faster once its per-call cost is counted?
 
-Answer: yes and yes. In Chromium, WebCrypto decrypts series records 15–20× faster than `aes-gcm` in wasm: about 800 MB/s against about 50 MB/s on one thread. For most transfer syntaxes the wasm decrypt costs as much CPU as decoding, or more. With WebCrypto it costs a small fraction. `record-decrypt.ts` is a drop-in module for the WebCrypto path.
+Answer: yes and yes. In Chromium, WebCrypto decrypts series records 15–20× faster than `aes-gcm` in wasm: about 800 MB/s against about 50 MB/s on one thread. For most transfer syntaxes the wasm decrypt costs as much CPU as decoding, or more. With WebCrypto it costs a small fraction. `record-decrypt.ts`, now `viewer-kit/src/record-decrypt.ts`, is a drop-in module for the WebCrypto path.
 
 ## Setup
 
@@ -111,7 +111,7 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
 ## Recommendation for the viewer
 
 1. **Decrypt with WebCrypto, not `aes-gcm` in wasm.**
-   - Use `perf-spikes/decrypt/record-decrypt.ts`: `importSeriesKey(raw)` and `decryptRecords(key, ciphertext, firstRecordIndex, opts)`.
+   - Use `viewer-kit/src/record-decrypt.ts` (written here; it moved to viewer-kit when the viewer adopted it): `importSeriesKey(raw)` and `decryptRecords(key, ciphertext, firstRecordIndex, opts)`.
    - The series key then never enters wasm memory. It is imported once per series as a non-extractable `CryptoKey`.
    - Tuning the Rust path is not worth it. Per-record re-keying, `wasm-opt` and simd128 together move it by about 20%.
    - Keep the Rust `decrypt_range` for native code (server, CLI). There, `aes` uses AES-NI and runs at 1.1 GB/s.
@@ -146,7 +146,7 @@ With WebCrypto, decryption is negligible next to every compressed decoder. For u
 
 ## Files
 
-- `record-decrypt.ts` is the drop-in module, and `record-decrypt.test.ts` holds its tests (Bun; the module also runs in Node 20+ and Deno).
+- `viewer-kit/src/record-decrypt.ts` is the drop-in module, and `record-decrypt.test.ts` here holds its tests (Bun; the module also runs in Node 20+ and Deno).
 - `rust/` is the benchmark crate:
   - a copy of `decrypt_record` and an in-place variant;
   - raw wasm exports with no wasm-bindgen;

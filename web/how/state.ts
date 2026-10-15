@@ -130,7 +130,7 @@ export const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(
 export const short = (s: string, a = 6, b = 4) => (s.length > a + b + 1 ? `${s.slice(0, a)}…${s.slice(-b)}` : s);
 
 /** The path of a URL, with long ids shortened, for compact request rows. */
-export function shortPath(url: string): string {
+function shortPath(url: string): string {
   try {
     const u = new URL(url);
     return u.pathname.replace(/[A-Za-z0-9_-]{20,}/g, (m) => short(m, 6, 3));

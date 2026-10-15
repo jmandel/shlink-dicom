@@ -60,10 +60,6 @@ Each figure is the median of 3 runs, after one warm-up run per pool size. Every 
 
 - **GPU, submit:** setting uniforms and `drawArrays` on the main thread.
 - **GPU, complete:** submit plus a 1-pixel `readPixels`, so the time includes rasterisation. `gl.finish()` does not block in Chromium.
-- **Current CPU path:** a faithful JS port of today's `render_instance_rgba` path (`legacyToRgba`). For each change it:
-  1. builds RGBA from cached f32 values;
-  2. makes the copy `rgba_bytes()` makes;
-  3. calls `putImageData` at image size.
 - **viewer-kit CPU fallback:** `renderCpu`, which includes zoom and pan, into the GL canvas size, plus `putImageData`.
 - **Frame interval:** the time between animation frames during the drag. 16.7 ms means 60 fps.
 
@@ -73,10 +69,7 @@ Each figure is the median of 3 runs, after one warm-up run per pool size. Every 
 |---|---:|---:|---:|
 | GPU on llvmpipe | 0.06 | 2.7 (4.1) | 16.7 |
 | GPU on SwiftShader | 0.06 | 8.9 (10.6) | 16.7 |
-| Current CPU path (RGBA re-render) | – | 5.5 (8.8)* | 16.7 |
 | viewer-kit CPU fallback | – | 3.2 | – |
-
-\* 2.9 ms (3.5) in the SwiftShader run. The runs differ only in machine load.
 
 **2048² 16-bit DX, canvas 2048²**
 
@@ -84,22 +77,20 @@ Each figure is the median of 3 runs, after one warm-up run per pool size. Every 
 |---|---:|---:|---:|
 | GPU on llvmpipe | 0.05 | 32.5 (41.5) | 33.3 |
 | GPU on SwiftShader | 0.07 | 131 (165) | 150 |
-| Current CPU path (RGBA re-render) | – | 31–35 (34–40) | 33.3 |
 | viewer-kit CPU fallback | – | 36–55 | – |
 
-**2048² 16-bit DX, canvas 1920×1080** (the GPU and fallback paths draw at canvas size; the current path still renders the whole image)
+**2048² 16-bit DX, canvas 1920×1080** (both paths draw at canvas size)
 
 | Path | Submit | Complete | Frame interval |
 |---|---:|---:|---:|
 | GPU on llvmpipe | 0.05 | 22.7 | 16.7 |
 | GPU on SwiftShader | 0.07 | 64 | 67 |
-| Current CPU path | – | 32–35 | 33.3 |
 | viewer-kit CPU fallback | – | 20 | – |
 
 **What the numbers say:**
-- **The GPU path barely touches the main thread.** It costs 0.05–0.07 ms of main-thread time per window change at any image size, against 3 ms (512²) and 31–35 ms (2048²) for the current path. The current path drops to 30 fps on a 2048² image even with nothing else to do.
-- **Even a software GL keeps up.** llvmpipe matches or beats the current CPU path. On a hardware GPU the GPU column will be a small fraction of a millisecond.
-- **SwiftShader is the one bad case.** It is slower than the CPU path (131 ms against 31 ms at 2048²), so `createRenderer()` detects it (`isSwiftShader()`) and uses `CpuRenderer` instead. The demo passes `allowSoftwareGl: true`, so it always shows the GL path.
+- **The GPU path barely touches the main thread.** It costs 0.05–0.07 ms of main-thread time per window change at any image size, against 3 ms (512²) and 20–55 ms (2048²) for the CPU fallback.
+- **Even a software GL keeps up.** llvmpipe matches or beats the CPU fallback. On a hardware GPU the GPU column will be a small fraction of a millisecond.
+- **SwiftShader is the one bad case.** It is slower than the CPU fallback (131 ms against 36–55 ms at 2048²), so `createRenderer()` detects it (`isSwiftShader()`) and uses `CpuRenderer` instead. The demo passes `allowSoftwareGl: true`, so it always shows the GL path.
 
 ## Shader against the CPU reference
 

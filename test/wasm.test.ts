@@ -1,81 +1,114 @@
+// shl-dicom-wasm: the offset-table rewrite the Share page uses (crates/shl-dicom-wasm/src/lib.rs).
+// Self-contained: builds a synthetic multi-frame file. Run: bun test test/wasm.test.ts
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import init, {
-  build_link_bundle_wasm,
-  encode_shlink_wasm,
-  WasmPacker,
-  WasmShlSession,
-} from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+import { initSync, offset_table_patch_wasm } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
-test("Stage 3: WasmPacker, WasmShlSession, bounded LRU cache, DICOM/ZIP export", async () => {
-  const wasmBytes = readFileSync("crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm");
-  await init({ module_or_path: wasmBytes });
+initSync({ module: readFileSync(new URL("../crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm", import.meta.url)) });
 
-  // 1. Pack wrist-low-res.tgz in WASM
-  const wristTgz = readFileSync("data/samples/wrist-low-res.tgz");
-  const packer = new WasmPacker();
-  const count = packer.add_tgz(wristTgz);
-  expect(count).toBe(3);
+const le16 = (n: number) => [n & 0xff, n >> 8];
+const le32 = (n: number) => [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, n >>> 24];
 
-  const packed = packer.pack("2026-10-14T17:00:00Z", undefined);
-  expect(packed.series_file_count).toBe(3);
-  const fileId = packed.series_file_id(0);
-  const seriesCiphertext = packed.series_file_ciphertext(0);
-  expect(fileId.length).toBe(22);
-  expect(seriesCiphertext.length).toBeGreaterThan(1_500_000);
+/** A JPEG-baseline-syntax multi-frame file with an empty Basic Offset Table, frame k split into `split` fragments. */
+function slide(frames: number, split = 1, soi = true): { file: Uint8Array; frames: Uint8Array[] } {
+  const b: number[] = new Array(128).fill(0);
+  b.push(...[0x44, 0x49, 0x43, 0x4d]);
+  const el = (out: number[], g: number, e: number, vr: string, v: number[] | string) => {
+    let val = typeof v === "string" ? Array.from(new TextEncoder().encode(v)) : v;
+    if (val.length % 2) val = [...val, vr === "UI" ? 0 : 0x20];
+    out.push(...le16(g), ...le16(e), vr.charCodeAt(0), vr.charCodeAt(1));
+    if (vr === "OB") out.push(0, 0, ...le32(val.length));
+    else out.push(...le16(val.length));
+    out.push(...val);
+  };
+  const meta: number[] = [];
+  el(meta, 0x0002, 0x0001, "OB", [0, 1]);
+  el(meta, 0x0002, 0x0002, "UI", "1.2.840.10008.5.1.4.1.1.77.1.6");
+  el(meta, 0x0002, 0x0003, "UI", "2.25.1");
+  el(meta, 0x0002, 0x0010, "UI", "1.2.840.10008.1.2.4.50");
+  el(b, 0x0002, 0x0000, "UL", le32(meta.length));
+  b.push(...meta);
+  el(b, 0x0008, 0x0016, "UI", "1.2.840.10008.5.1.4.1.1.77.1.6");
+  el(b, 0x0008, 0x0018, "UI", "2.25.1");
+  el(b, 0x0028, 0x0002, "US", le16(1));
+  el(b, 0x0028, 0x0004, "CS", "MONOCHROME2");
+  el(b, 0x0028, 0x0008, "IS", String(frames));
+  el(b, 0x0028, 0x0010, "US", le16(8));
+  el(b, 0x0028, 0x0011, "US", le16(8));
+  el(b, 0x0028, 0x0100, "US", le16(8));
+  el(b, 0x0028, 0x0101, "US", le16(8));
+  el(b, 0x0028, 0x0102, "US", le16(7));
+  el(b, 0x0028, 0x0103, "US", le16(0));
+  b.push(0xe0, 0x7f, 0x10, 0x00, 0x4f, 0x42, 0, 0, 0xff, 0xff, 0xff, 0xff);
+  b.push(0xfe, 0xff, 0x00, 0xe0, 0, 0, 0, 0); // empty Basic Offset Table
+  const out: Uint8Array[] = [];
+  for (let k = 0; k < frames; k++) {
+    const whole: number[] = [];
+    for (let f = 0; f < split; f++) {
+      const v = f === 0 && soi ? [0xff, 0xd8] : [0x11, 0x22];
+      for (let i = 0; i < 10 + 7 * k + 4 * f; i++) v.push((i * 31 + k) & 0xff);
+      b.push(0xfe, 0xff, 0x00, 0xe0, ...le32(v.length), ...v);
+      whole.push(...v);
+    }
+    out.push(new Uint8Array(whole));
+  }
+  b.push(0xfe, 0xff, 0xdd, 0xe0, 0, 0, 0, 0);
+  return { file: new Uint8Array(b), frames: out };
+}
 
-  // 2. Build a Link Bundle in WASM (subsetting to the first series) and encode shlink:/ URI
-  const linkBundleStr = build_link_bundle_wasm(
-    packed.owner_bundle_json,
-    JSON.stringify([fileId]),
-    undefined,
-    "2026-10-14T17:00:00Z",
-  );
-  const linkBundle = JSON.parse(linkBundleStr);
-  expect(linkBundle.allowedFiles).toEqual([`${fileId}.bin`]);
+/** Reads the Basic Offset Table and the fragments after it from a patched file. */
+function readPixelData(file: Uint8Array) {
+  const dv = new DataView(file.buffer, file.byteOffset);
+  let p = file.length - 1;
+  for (p = 132; p < file.length - 4; p++) if (dv.getUint32(p, true) === 0x00107fe0) break;
+  p += 12;
+  const botLen = dv.getUint32(p + 4, true);
+  const bot = Array.from({ length: botLen / 4 }, (_, i) => dv.getUint32(p + 8 + 4 * i, true));
+  p += 8 + botLen;
+  const fragments: { at: number; bytes: Uint8Array }[] = [];
+  const start = p;
+  while (dv.getUint16(p + 2, true) === 0xe000) {
+    const len = dv.getUint32(p + 4, true);
+    fragments.push({ at: p - start, bytes: file.subarray(p + 8, p + 8 + len) });
+    p += 8 + len;
+  }
+  return { bot, fragments };
+}
 
-  const shlinkUri = encode_shlink_wasm(
-    JSON.stringify({
-      url: "https://host.example/shl/demo/bundle.jwe",
-      key: linkBundle.shlKeyB64,
-      flag: "U",
-      label: "Wrist Study",
-      v: 1,
-    }),
-    "https://viewer.example/",
-  );
-  expect(shlinkUri.startsWith("https://viewer.example/#shlink:/")).toBe(true);
+const apply = (file: Uint8Array) => {
+  const patch = offset_table_patch_wasm(file);
+  if (!patch) return null;
+  const head = patch.head;
+  const out = new Uint8Array(head.length + file.length - patch.resume_at);
+  out.set(head);
+  out.set(file.subarray(patch.resume_at), head.length);
+  const info = { frames: patch.frames, extended: patch.extended };
+  patch.free();
+  return { out, ...info };
+};
 
-  // 3. Initialize WasmShlSession from shlinkUri + bundleJwe
-  const session = new WasmShlSession(shlinkUri, linkBundle.bundleJwe);
-  const index = JSON.parse(session.index_json());
-  expect(index.studies.length).toBe(1);
-  expect(index.studies[0].series.length).toBe(1);
-  expect(index.studies[0].series[0].instances.length).toBe(1);
+test("fills an empty Basic Offset Table; fragment bytes unchanged", () => {
+  const { file, frames } = slide(5);
+  const r = apply(file)!;
+  expect(r.frames).toBe(5);
+  expect(r.extended).toBe(false);
+  const { bot, fragments } = readPixelData(r.out);
+  expect(bot.length).toBe(5);
+  fragments.forEach((f, k) => {
+    expect(bot[k]).toBe(f.at);
+    expect(Array.from(f.bytes)).toEqual(Array.from(frames[k]));
+  });
+});
 
-  // 4. Plan instance range (instance 0) and ingest those 64 KiB records
-  expect(session.has_instance(0, 0, 0)).toBe(false);
-  const plan = JSON.parse(session.plan_instance_range(0, 0, 0));
-  expect(plan.fileId).toBe(fileId);
-  const ctSlice = seriesCiphertext.subarray(plan.ciphertextStart, plan.ciphertextEnd);
+test("frames split over several fragments point at each frame's first fragment", () => {
+  const { file } = slide(4, 3);
+  const r = apply(file)!;
+  const { bot, fragments } = readPixelData(r.out);
+  expect(bot).toEqual([0, 3, 6, 9].map((i) => fragments[i].at));
+});
 
-  const ingestRes = JSON.parse(
-    session.ingest_ciphertext_range(fileId, plan.firstRecord, ctSlice),
-  );
-  expect(ingestRes.verifiedRecords.length).toBe(plan.lastRecord - plan.firstRecord + 1);
-  expect(session.has_instance(0, 0, 0)).toBe(true);
-
-  // 5. Extract exact Part 10 DICOM slice bytes
-  const dcmSlice = session.get_instance_dicom(0, 0, 0);
-  expect(dcmSlice.length).toBe(index.studies[0].series[0].instances[0].length);
-  expect(new TextDecoder().decode(dcmSlice.subarray(128, 132))).toBe("DICM");
-
-  // 6. Export uncompressed ZIP
-  const zipBytes = session.export_series_zip(0, 0);
-  expect(zipBytes.length).toBeGreaterThan(dcmSlice.length);
-
-  // 7. Verify bounded LRU record cache eviction
-  expect(session.cached_record_count()).toBeGreaterThan(10);
-  session.set_max_cached_records(5);
-  expect(session.cached_record_count()).toBe(5);
+test("leaves files that need no table, or whose frames are ambiguous", () => {
+  expect(apply(slide(1).file)).toBeNull(); // one frame
+  expect(apply(apply(slide(3).file)!.out)).toBeNull(); // already has a table
+  expect(apply(slide(3, 2, false).file)).toBeNull(); // 6 fragments, no frame markers
 });

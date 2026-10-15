@@ -29,7 +29,7 @@ Related docs:
 | Imaging sandbox (data, reports, rulings DONE; deploy BLOCKED) | ab83241fb7aa4e1f8 | `imaging-sandbox/` | Fictional patient rewritten into the DICOM (pixels untouched); scripted `build-data.ts` reproducible from git; DiagnosticReports with PDF and text, marked "SAMPLE REPORT"; Josh's rulings (aud array, grant-bound capabilities, `.s`/`.r`, **406 when transfer-syntax is omitted**, token_type and scope); deploy **private** to smart-imaging-sandbox.exe.xyz | Verify; commit the scripts and config (no DICOM); ask Josh before set-public |
 | ~~JPEG 2000/HTJ2K speed round 2~~ DONE (HTJ2K 2–3× OpenJPH native; J2K 1.2× OpenJPEG) | aeb346615b443d8de | `codecs/shl-codec-jpeg2000/` (including the vendored hayro), `codecs/shl-codec-htj2k/` (including the vendored oxideav), `formats/{jpeg2000,htj2k}/` | Wavelet (5/3, 9/7) and HT block decoder speed; targets about 3× OpenJPH and about 1.2× OpenJPEG; exactness kept | Then tell the reduced-res agent to go ahead with JPEG 2000/HTJ2K scaled decode |
 | ~~Foundation inference round~~ DONE (935/935 pass) | aac32c9d770084d05 | `codecs/shl-dicom-decode/`, `formats/uncompressed/` | Infer missing Planar Configuration (smoothness) and other safe inferences, each with a warning | Verify check.py and the ruling write-ups; commit |
-| Whole-slide (SM) viewer (DONE, committed 9cf4a1f; WSI checks 60/60) | adcc54c6231290ab4 | `web/view/` (core+View finished), additive `web/core/`, viewer-kit additions | Tiled deep-zoom viewer: pyramid from headers; tile→frame→byte via EOT/BOT/fragment walk; prototype a frame-offset Bundle extension (protocol decision for the coordinator and Josh); live streaming stats; `docs/wsi-sample.md` recommends a CC BY IDC slide for the public sample | Verify; decide the frame-offset extension with Josh; the sandbox agent adds the slide to the sample data |
+| Whole-slide (SM) viewer (DONE: 9cf4a1f, offset tables + prune 7760d55) | adcc54c6231290ab4 | `web/view/` (core+View finished), additive `web/core/`, viewer-kit additions | Tiled deep-zoom viewer: pyramid from headers; tile→frame→byte via EOT/BOT/fragment walk; prototype a frame-offset Bundle extension (protocol decision for the coordinator and Josh); live streaming stats; `docs/wsi-sample.md` recommends a CC BY IDC slide for the public sample | Verify; decide the frame-offset extension with Josh; the sandbox agent adds the slide to the sample data |
 | Long-tail IDC sweep | a364a12e7cfb7c05a | `codec-corpus/scripts/sources/` (new files), `codec-corpus/prevalence/`; temp files in `/media/barracuda/shlink-dicom-sweep/` | Rarity-weighted selection plus a random control of about 1,000; decode-verify-delete; failures registered as `idc-lt-*` cases. **Plus:** frame-wise verification of the 12 oversize whole-slide images (2.4–11.8 GB decoded; skipped by the 2 GB harness cap) | Triage its LONGTAIL.md: route failures to owners, record rulings (below) |
 
 ## Agents: finished, can be resumed
@@ -56,7 +56,13 @@ Related docs:
 
 ## Infrastructure
 
-- **BLOCKER (15 Oct, about 16:30): exe.dev cannot reach our VMs.**
+- **RESOLVED (15 Oct, about 10:40): exe.dev SSH failures were Los Angeles-host specific.**
+  - Some lax VMs (gathergrid, request-my-ehi, ours) lost SSH and first-boot setup scripts; others in lax (kill-the-clipboard, fhir-snapshots) worked.
+  - Josh ran `set-region dal`. Our SSH keys can't run `set-region`.
+  - Both VMs were recreated in Dallas with `--setup-script`; SSH works and the setup scripts ran.
+  - The sandbox is public and passes remote e2e 109/109.
+  - The API token `shlink-deploy` is revoked.
+  - History:
   - **What fails:** SSH into **every** exe.dev VM, after authentication. Ruled out as causes: both account keys, OpenSSH and paramiko clients, a VM restart. exe.dev's own HTTPS `/exec` API fails the same way: lobby→VM port 4722 "connection reset by peer", trace `2adfa3e5cd5596d6a6cd1d206435ec6e`. So it is on exe.dev's side.
   - **Workaround, committed 9cf4a1f:** `deploy/bootstrap-sandbox.sh` and `deploy/bootstrap-shlink-dicom.sh` build from a public git clone into /opt and need only curl. Run either from Josh's web terminal (`curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-<x>.sh | bash`) or as a `new --setup-script`. Both pass end to end in the `ghcr.io/boldsoftware/exeuntu` container with a systemctl stub, and are pushed (0bbdee0). Waiting on Josh: run them in the web terminal, or allow recreating the VMs with `--setup-script`.
   - **Token:** a 2-day exe API token `shlink-deploy` (ssh to the two VMs only) is in `$CLAUDE_JOB_DIR/tmp/token`, not in the repo. Revoke it with `ssh exe.dev ssh-key remove shlink-deploy`.
@@ -102,6 +108,17 @@ Resolved 15 Oct:
 - **Robustness:** "detect what we can for the most robust behaviour". The foundation agent (aac32c9d770084d05) is implementing inferred Planar Configuration by smoothness, plus a survey of other safe "infer instead of refuse" cases, each with a warning and tests.
 
 ## Next-step queue (in order once their inputs exist)
+
+- **15 Oct, about 10:00:**
+  - **Committed:** reduced-resolution JPEG 2000/HTJ2K (ebe1dd4); offset tables at pack time and the prune (7760d55).
+  - **In progress:** Core+View agent a3832d83abfd092fc is resumed on the View follow-ups plus a dead-code cleanup:
+    - the passcode fixture;
+    - decrypt in the workers;
+    - scaled thumbnails;
+    - test-only wasm exports, viewer-kit's legacy helpers and stale docs;
+    - making the stage1_core tests self-contained;
+    - the landing copy.
+  - **VMs:** recreated with `--setup-script` (SSH is still failing on them); monitor b6veiskb3 is watching.
 
 1. **When How and Share report:**
    - verify them with my own Chromium scripts, at desktop and phone;

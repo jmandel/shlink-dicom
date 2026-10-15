@@ -43,7 +43,7 @@ export interface Skipped {
   reason: string;
 }
 
-export const DICOMDIR_SOP = "1.2.840.10008.1.3.10";
+const DICOMDIR_SOP = "1.2.840.10008.1.3.10";
 
 /** Collects instances as they are found; counts drive the live "Found …" line. */
 export class Collection {
@@ -151,7 +151,7 @@ function toInt(s: string): number | null {
 }
 
 /** DICOM DA (+TM) to an ISO date ("2020-07-29"); null when absent. */
-export function dicomDate(da: string, _tm: string): string | null {
+function dicomDate(da: string, _tm: string): string | null {
   const m = /^(\d{4})(\d{2})(\d{2})/.exec(da.trim());
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }

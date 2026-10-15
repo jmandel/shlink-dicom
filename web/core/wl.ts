@@ -37,7 +37,7 @@ export function autoWindow(img: DecodedImage, frame = 0): { center: number; widt
   return percentileWindow(img, frame);
 }
 
-export function percentileWindow(img: DecodedImage, frame = 0, lo = 0.01, hi = 0.99): { center: number; width: number } {
+function percentileWindow(img: DecodedImage, frame = 0, lo = 0.01, hi = 0.99): { center: number; width: number } {
   if (img.samplesPerPixel !== 1) return { center: 127.5, width: 256 };
   const f = frameOf(img, frame);
   const d = f.data;
@@ -50,12 +50,4 @@ export function percentileWindow(img: DecodedImage, frame = 0, lo = 0.01, hi = 0
   const a1 = sample[Math.floor(hi * (sample.length - 1))] * m + b;
   const low = Math.min(a0, a1), high = Math.max(a0, a1);
   return { center: (low + high) / 2, width: Math.max(1, high - low) };
-}
-
-/** Rescaled value range, for slider bounds. */
-export function valueRange(img: DecodedImage): { min: number; max: number } {
-  const m = img.rescaleSlope, b = img.rescaleIntercept;
-  if (img.minValue == null || img.maxValue == null) return { min: 0, max: 2 ** img.bitsStored };
-  const a = img.minValue * m + b, z = img.maxValue * m + b;
-  return { min: Math.min(a, z), max: Math.max(a, z) };
 }

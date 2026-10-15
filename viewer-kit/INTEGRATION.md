@@ -1,28 +1,19 @@
-# Adopting viewer-kit in web/
+# Using viewer-kit
 
-This guide is for the owner of `web/` and `crates/`. It covers three steps:
-- **Decoding:** a pool of workers decodes decrypted instances off the main thread.
+viewer-kit is the browser's decoding and rendering layer. `web/core` (`images.ts`, `render.ts`) is its user:
+- **Decrypting and decoding:** a pool of workers verifies and decrypts series records (WebCrypto) and decodes instances (`shl_dicom_decode.wasm`) off the main thread.
 - **Caching:** raw frames are cached, not RGBA.
-- **Rendering:** window/level, zoom and pan become WebGL uniforms.
-
-Nothing in `crates/` has to change.
+- **Rendering:** window/level, zoom and pan are WebGL uniforms, with a CPU fallback.
 
 ## What to ship
 
-Build it with `node viewer-kit/scripts/build.mjs`. That produces the three files in `viewer-kit/dist/`; ship them next to `main.js`.
+Build it with `node viewer-kit/scripts/build.mjs`. That builds the wasm into `viewer-kit/dist/`. `web/build.ts` bundles the worker and the API and copies the wasm into `dist/web/assets/`.
 
 | File | What it is |
 |---|---|
-| `shl_dicom_decode.wasm` | 1071 KiB, 341 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm` |
+| `shl_dicom_decode.wasm` | 1087 KiB, 347 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm` |
 | `decoder-worker.js` | the worker script; must be a separate file |
-| the API | `viewer-kit/src/index.ts`; import it into `web/main.ts` and bun bundles it |
-
-Add this to `build:web` in `package.json`:
-
-```sh
-bun build viewer-kit/src/decoder-worker.ts --outdir dist/web --target browser \
-  && cp viewer-kit/dist/shl_dicom_decode.wasm dist/web/
-```
+| the API | `viewer-kit/src/index.ts`; `web/core` imports it and bun bundles it |
 
 The pool needs no COOP/COEP headers. If a Content-Security-Policy is ever added, it needs `worker-src 'self'` and `script-src 'wasm-unsafe-eval'`.
 
@@ -30,12 +21,15 @@ The pool needs no COOP/COEP headers. If a Content-Security-Policy is ever added,
 
 ```ts
 import { DecoderPool, Priority, FrameCache, createRenderer, frameOf, defaultWindow,
-         DicomDecodeError, InvalidDicomError, UnsupportedDicomError } from "../viewer-kit/src/index";
+         DicomDecodeError, InvalidDicomError, UnsupportedDicomError,
+         RecordAuthenticationError } from "../viewer-kit/src/index";
 
 const pool = await DecoderPool.create({ wasm: "shl_dicom_decode.wasm", workerUrl: "decoder-worker.js" });
 // workers: navigator.hardwareConcurrency - 1, capped at 8; override with { workers: n }
 
 const img = await pool.decode(bytes, { priority: Priority.Visible, key, signal });
+const img2 = await pool.decode(ciphertext, { encrypted: { key: cryptoKey, firstRecord, seriesPlaintextLength, window } });
+const plain = await pool.decrypt(ciphertext, { key: cryptoKey, firstRecord, seriesPlaintextLength, window });
 // img: DecodedImage = canonical pixels (CONTRACT.md) + rows, columns, frames, samplesPerPixel,
 //      bitsAllocated, bitsStored, pixelRepresentation, photometric, rescaleSlope/Intercept,
 //      windowCenter/Width (first value, or null), minValue/maxValue, frameOffsets, palette, decodeMs
@@ -51,7 +45,7 @@ renderer.setView({ windowCenter, windowWidth, zoom, panX, panY, interpolation, i
 
 **Pool behaviour:**
 - **Priorities.** `Visible` (0) runs before `Near` (1), which runs before `Prefetch` (2). A job starts only when a worker is free, so the slice on screen goes next.
-- **`key`.** A second `decode` with the same key returns the first job's promise, and raises that job's priority if it is still queued. Use `${study}/${series}/${instance}` as the key.
+- **`key`.** A second `decode` with the same key returns the first job's promise, and raises that job's priority if it is still queued. Use `${fileId}/${instance}` as the key.
 - **`signal`.** Aborting a queued job removes it. Aborting a running job rejects its promise at once and drops the result when it arrives; wasm cannot be interrupted.
 - **Transfer.** The input `ArrayBuffer` is transferred, so the caller's copy is detached. Pass `copy: true` to keep it. Output pixels come back transferred too.
 
@@ -62,56 +56,46 @@ renderer.setView({ windowCenter, windowWidth, zoom, panX, panY, interpolation, i
 | `InvalidDicomError` | decoder exit 2: the file is malformed | show `e.decoderMessage` with the slice |
 | `UnsupportedDicomError` | exit 3: for example video syntaxes, float pixel data, an image too large for wasm32 | same |
 | `DecoderCrashError` | the wasm trapped | the worker has already restarted itself; report it as a bug |
+| `RecordAuthenticationError` | an `encrypted` input or `decrypt` job: a record failed its AES-GCM check, or its length is wrong for its place | refuse the image; nothing from that record reached the decoder |
 
-## Where it replaces `render_instance_rgba`
+## Encrypted input
 
-There are three call sites in `web/main.ts`. All of them now get bytes from `session.get_instance_dicom(...)`. Its `Uint8Array` is a fresh copy made by wasm-bindgen, so it is safe to transfer.
-
-**1. `renderActiveSlice` (line ~424)**
-
-```ts
-await ensureInstanceFetched(st, se, ser, i);          // unchanged: range fetch + decrypt + verify
-const key = `${st}/${se}/${i}`;
-let img = cache.get(key);
-if (!img) {
-  const bytes = session.get_instance_dicom(st, se, i);  // decrypted Part 10 instance
-  img = await pool.decode(bytes, { priority: Priority.Visible, key, signal: seriesAbort.signal });
-  cache.set(key, img);
-}
-if (i !== activeInstanceIdx) return;                  // user moved on
-const w = defaultWindow(img);
-renderer.setFrame(frameOf(img), { windowCenter: overrideWc ?? w.center, windowWidth: overrideWw ?? w.width });
-```
-
-Use `img.minValue`, `img.maxValue`, `img.rescaleSlope` and `img.rescaleIntercept` for the slider ranges. They replace `rendered.min_pixel` and `rendered.max_pixel`.
-
-**2. Window/level drag and sliders (lines ~755 and ~827)**
-
-Replace `void renderActiveSlice(...)` with:
+Series files (PROPOSAL.md §9) are decrypted in the workers, so the main thread never runs AES and the series key never enters wasm memory. `record-decrypt.ts` (WebCrypto) does the work; `web/core` calls it through the pool:
 
 ```ts
-renderer.setView({ windowCenter: overrideWc, windowWidth: overrideWw });
+const key = await importSeriesKey(rawKey);   // non-extractable, decrypt-only; posted with each job
+const encrypted = {
+  key,
+  firstRecord: plan.firstRecord,                                  // first record in the ciphertext
+  seriesPlaintextLength: series.plaintextLength,                  // for the record-length checks
+  window: { start: plan.plaintextStart - plan.firstRecord * 65520, length: plan.plaintextEnd - plan.plaintextStart },
+};
+const img = await pool.decode(ciphertext, { encrypted, key: `${fileId}/${i}`, priority });  // decrypt + decode in one job
+const bytes = await pool.decrypt(ciphertext, encrypted);                                     // plaintext back (downloads, slide records)
 ```
 
-This changes uniforms only, and the redraw is coalesced to the next frame.
+- **What the worker checks.** Every record's tag, and that each record's length is right for its position in the series. A failure rejects with `RecordAuthenticationError(recordIndex, reason)`; no byte of that record is decoded or returned.
+- **Copies.** The ciphertext is transferred to the worker; each record's plaintext is copied once, into a buffer of exactly the window's size, which goes to the decoder.
+- **`decodeFrames` with `encrypted`** decrypts on one worker first, then shares out the plaintext.
+- `record-decrypt.ts` also runs on the main thread or in Bun (`decryptRecords`), which `web/core`'s `WebCryptoDecryptor` uses where a page wants plaintext itself.
 
-**3. Pinch zoom and pan**
+## Rendering
 
-These currently use a CSS transform on the canvas. Replace it with `renderer.setView({ zoom, panX, panY })`, with pan in canvas pixels. The image is then resampled from the raw frame (nearest or linear), so it stays sharp when zoomed.
+```ts
+renderer.setFrame(frameOf(img, k), { windowCenter, windowWidth });   // uploads once
+renderer.setView({ windowCenter, windowWidth, zoom, panX, panY });   // uniforms only, coalesced to the next frame
+```
 
-To size the canvas, set `canvas.width` and `canvas.height` from `clientWidth * devicePixelRatio` in a ResizeObserver, then call `renderer.draw()`. `demo/demo.ts` does exactly this. It also has working pointer handling for window/level, pan, pinch and wheel.
-
-**4. Thumbnails (line ~340) and the Cornerstone bridge (line ~888)**
-
-Don't create a WebGL context per thumbnail; browsers cap contexts at about 16. Decode with `Priority.Near` and `scale: 3` (see [Thumbnails and first display](#thumbnails-and-first-display-scale)), then draw with the CPU reference:
+- **Canvas size.** Set `canvas.width` and `canvas.height` from `clientWidth * devicePixelRatio` in a ResizeObserver, then call `renderer.draw()`. `web/core/render.ts` (`Viewport`) and `demo/demo.ts` do this.
+- **Zoom and pan** are view parameters, with pan in canvas pixels. The image is resampled from the raw frame (nearest or linear), so it stays sharp when zoomed.
+- **Slider ranges.** Use `img.minValue`, `img.maxValue`, `img.rescaleSlope` and `img.rescaleIntercept`.
+- **Thumbnails.** Don't create a WebGL context per thumbnail; browsers cap contexts at about 16. Decode with `scale` (see [below](#thumbnails-and-first-display-scale)) and draw with the CPU reference:
 
 ```ts
 const ctx = thumb.getContext("2d")!; const im = ctx.createImageData(64, 64);
 renderCpu(frameOf(img), { ...defaultView(), windowCenter: w.center, windowWidth: w.width }, 64, 64, im.data);
 ctx.putImageData(im, 0, 0);
 ```
-
-The Cornerstone bridge needs RGBA. Get it from `renderCpu` at image size with `fit: "none"`.
 
 ## Prefetch
 
@@ -121,7 +105,7 @@ When a series is selected:
 3. Decode ±1–3 with `Near`.
 4. Decode the rest with `Prefetch`, working outward.
 
-Each decode still needs its records fetched first, through `ensureInstanceFetched`. The pool's queue orders only decodes, so issue the fetches nearest-first as well. When the slider moves to a slice that is not decoded yet, call `pool.decode` again with `Priority.Visible` and the same key. It moves that queued job to the front.
+Each decode needs its ciphertext fetched first. The pool's queue orders only decodes, so issue the fetches nearest-first as well (`web/core/loader.ts` does). When the slider moves to a slice that is not decoded yet, call `pool.decode` again with `Priority.Visible` and the same key. It moves that queued job to the front.
 
 **Multi-frame instances.** One instance holding many frames, such as cine, enhanced CT/MR or tomosynthesis, should use `pool.decodeFrames(bytes, { onChunk })`. Its frames become the slices, and `onChunk` lets the first frames show while the rest decode. Frames are only decoded in parallel for encapsulated syntaxes. A native (uncompressed) instance is decoded whole in one worker, because its decode is a copy.
 
@@ -154,8 +138,6 @@ A full-size decode of the slice on screen can follow the thumbnail at `Priority.
 
 - **Budget.** Suggested: `512 MiB`, or `min(512 MiB, navigator.deviceMemory * 64 MiB)`. A 512² 16-bit slice costs 0.5 MiB, half its RGBA. A 300-slice CT is 150 MiB.
 - **Never cache RGBA.** The renderer applies window/level, so a cached frame never needs CPU re-rendering.
-- **Records.** The session's encrypted-record cache in Rust (`records`, 64 KiB plaintext records) stays as it is: it is what `get_instance_dicom` reads.
-- **Rust's decoded-frame cache.** `frame_cache` (24 `DecodedRawFrame`) becomes unused once `render_instance_rgba` has no callers.
 - **What the renderer holds.** It keeps the one `Frame` on screen, a view on the cached buffer with no copy, to restore after a lost WebGL context. If an evicted image is on screen, it stays valid, because the renderer still references it.
 
 ## CPU fallback
@@ -164,14 +146,13 @@ A full-size decode of the slice on screen can follow the thumbnail at `Priority.
 - WebGL2 is missing;
 - WebGL2 is SwiftShader, which is slower than the CPU path (see PERF.md).
 
-`CpuRenderer` has the same API and produces the same pixels, within ±1 per sample; `test/gl-vs-cpu.mjs` checks this. Two more cases need handling:
+`CpuRenderer` has the same API and produces the same pixels, within ±1 per sample; `test/gl-vs-cpu.mjs` checks this. One more case needs handling:
 - **Images too large for a texture.** `GlRenderer.setFrame` throws a `RangeError` when an image exceeds `MAX_TEXTURE_SIZE`, which is 8192 on SwiftShader and usually 16384. Catch it and swap to a `CpuRenderer` on a fresh canvas element, since a canvas keeps its first context type. `setFrame` in `demo/demo.ts` shows how.
-- **What to keep in Rust.** Nothing in Rust is needed for the fallback. `DecodedRawFrame::to_rgba` can go once nothing calls it, but keep `get_instance_dicom`.
 
-## Behaviour changes users may notice
+## What is rendered
 
-- **Window/level is now DICOM PS3.3 C.11.2.1.2** (`(x − (c − 0.5))/(w − 1) + 0.5`, rounded). Today's `to_rgba` uses `(x − (c − w/2)) · 255/w`, truncated. Grey levels can differ by one or two.
-- **Default window when the file has none.** `defaultWindow()` uses the stored min/max range, where today's code uses `percentile_window`. If the percentile window should stay, compute it from `frameOf(img).data` once per image.
+- **Window/level** follows DICOM PS3.3 C.11.2.1.2: `(x − (c − 0.5))/(w − 1) + 0.5`, rounded.
+- **Default window when the file has none.** `defaultWindow()` uses the stored min/max range. `web/core/wl.ts` uses a 1st–99th percentile window instead.
 - **MONOCHROME1 is inverted in the shader.** The user's Invert toggle is XORed with it.
 - **PALETTE COLOR images render in colour.** The decoder returns the palette as RGBA in `img.palette`; segmented palettes are not read. 16/32-bit RGB is scaled by Bits Stored.
 - **Only LINEAR is rendered.** `img.voiLutFunction` reports SIGMOID when the file asks for it, but it is not drawn that way. VOI LUT sequences and pixel aspect ratio are not applied.

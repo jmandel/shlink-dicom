@@ -54,7 +54,6 @@ export function flash(btn: HTMLElement, text: string, ms = 1600) {
   setTimeout(() => (btn.textContent = old), ms);
 }
 
-const rtf = typeof Intl !== "undefined" && "RelativeTimeFormat" in Intl ? new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }) : null;
 
 /** "today 3:12 pm", "yesterday 3:12 pm", "12 Oct, 3:12 pm". */
 export function when(unix: number): string {
@@ -75,15 +74,7 @@ export function dateOnly(unix: number): string {
 }
 
 /** "in 6 days", "in 3 hours". */
-export function fromNow(unix: number): string {
-  const s = unix - Date.now() / 1000;
-  if (!rtf) return dateOnly(unix);
-  if (Math.abs(s) < 3600) return rtf.format(Math.round(s / 60), "minute");
-  if (Math.abs(s) < 86400 * 2) return rtf.format(Math.round(s / 3600), "hour");
-  return rtf.format(Math.round(s / 86400), "day");
-}
-
-export const EXPIRY_PRESETS = [
+const EXPIRY_PRESETS = [
   { id: "1d", label: "1 day", secs: 86400 },
   { id: "1w", label: "1 week", secs: 7 * 86400 },
   { id: "1m", label: "1 month", secs: 30 * 86400 },

@@ -26,14 +26,6 @@ impl ShlPayload {
     pub fn is_u_mode(&self) -> bool {
         self.flag.as_deref().is_some_and(|f| f.contains('U'))
     }
-
-    pub fn requires_passcode(&self) -> bool {
-        self.flag.as_deref().is_some_and(|f| f.contains('P'))
-    }
-
-    pub fn is_long_lived(&self) -> bool {
-        self.flag.as_deref().is_some_and(|f| f.contains('L'))
-    }
 }
 
 /// Computes the alphabetical SHL `flag` string from link policy properties.

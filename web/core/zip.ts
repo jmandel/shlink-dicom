@@ -12,7 +12,7 @@ const CRC_TABLE = (() => {
   return t;
 })();
 
-export function crc32(b: Uint8Array, crc = 0): number {
+function crc32(b: Uint8Array, crc = 0): number {
   let c = ~crc >>> 0;
   for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xff] ^ (c >>> 8);
   return ~c >>> 0;

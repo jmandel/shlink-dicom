@@ -126,7 +126,7 @@ export function buildBundle(col: Collection, packed: PackedSeries[], lastUpdated
 }
 
 /** Series file ids of an ImagingStudy resource. */
-export function studyFileIds(study: any): string[] {
+function studyFileIds(study: any): string[] {
   const out: string[] = [];
   for (const se of study.series ?? []) {
     const ext = (se.extension ?? []).find((x: any) => x.url === EXT_SERIES_FILE);

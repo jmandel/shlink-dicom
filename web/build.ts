@@ -5,7 +5,7 @@
 //   dist/web/how/index.html        How it works      (/how), plus how/data.json and the pages it links (web/how/bake.ts)
 //   dist/web/share/                Share             (/share, /share/manage, /share/smart-callback)
 //   dist/web/assets/               one bundle per entry point + shared chunks, decoder worker,
-//                                  shl_dicom_decode.wasm, shl_dicom_wasm_bg.wasm (wasm decrypt option), CSS
+//                                  shl_dicom_decode.wasm, shl_dicom_wasm_bg.wasm (Share: offset tables), CSS
 //
 // Pages reference assets relatively, so the static parts can be served from any path.
 // Run: bun web/build.ts   (package.json: build:web)
@@ -22,8 +22,10 @@ if (!existsSync(decodeWasm)) {
   console.log("viewer-kit/dist missing: building viewer-kit");
   await $`node viewer-kit/scripts/build.mjs`;
 }
-const sessionWasm = "crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm";
-if (!existsSync(sessionWasm)) throw new Error(`${sessionWasm} missing: run wasm-pack build crates/shl-dicom-wasm --target web`);
+const offsetWasm = "crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm";
+if (!existsSync(offsetWasm)) {
+  throw new Error(`${offsetWasm} missing: cargo build --release --target wasm32-unknown-unknown -p shl-dicom-wasm, then wasm-bindgen --target web (see deploy/bootstrap-shlink-dicom.sh)`);
+}
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(assets, { recursive: true });
@@ -61,7 +63,7 @@ if (!w.success) {
 }
 
 cpSync(decodeWasm, `${assets}/shl_dicom_decode.wasm`);
-cpSync(sessionWasm, `${assets}/shl_dicom_wasm_bg.wasm`);
+cpSync(offsetWasm, `${assets}/shl_dicom_wasm_bg.wasm`);
 cpSync("web/shared/base.css", `${assets}/base.css`);
 cpSync("web/view/view.css", `${assets}/view.css`);
 cpSync("web/landing/landing.css", `${assets}/landing.css`);

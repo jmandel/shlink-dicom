@@ -9,7 +9,7 @@ Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each 
 - **`reference/`**: a short WebCrypto reference receiver and the test vector generator.
 - **`crates/`**:
   - `shl-dicom-core`: packing, record crypto, JWE, Bundle building and parsing;
-  - `shl-dicom-wasm`: browser bindings for the packer and session;
+  - `shl-dicom-wasm`: the browser binding for adding frame offset tables (the Share page uses it);
   - `shl-dicom-server`: the HTTP server and CLI (`pack`, `inspect`, `serve`).
 - **`codecs/`**: pure-Rust pixel decoders (uncompressed, RLE, JPEG, JPEG-LS, JPEG 2000, HTJ2K), plus their wasm build and benchmarks.
 - **`codec-corpus/`**: the decoder test corpus, with reference decoders and the check harness.

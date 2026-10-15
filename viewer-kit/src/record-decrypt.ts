@@ -12,7 +12,7 @@ export const TAG = 16;
 export const RECORD_CIPHERTEXT = RECORD_PLAINTEXT + TAG; // 65,536
 
 /** Calls in flight per decryptRecords() call unless opts.concurrency says otherwise. */
-export const DEFAULT_CONCURRENCY = 8;
+const DEFAULT_CONCURRENCY = 8;
 
 export interface DecryptRecordsOptions {
   /** Maximum crypto.subtle.decrypt calls in flight (default DEFAULT_CONCURRENCY). */
@@ -48,7 +48,7 @@ export interface DecryptRecordsOptions {
 export class RecordAuthenticationError extends Error {
   constructor(
     readonly recordIndex: number,
-    reason: string,
+    readonly reason: string,
   ) {
     super(`series record ${recordIndex}: ${reason}`);
     this.name = "RecordAuthenticationError";

@@ -2,14 +2,20 @@
 //
 // Messages in:
 //   { type: "init", module: WebAssembly.Module }
-//   { type: "decode", id, bytes: ArrayBuffer, first, count, scale }
+//   { type: "decode", id, bytes: ArrayBuffer, first, count, scale, encrypted? }
 //   { type: "probe", id, bytes: ArrayBuffer }
+//   { type: "decrypt", id, bytes: ArrayBuffer, encrypted }
+// With `encrypted` the bytes are series-file ciphertext: verified and decrypted with WebCrypto
+// (record-decrypt.ts) before decoding, so neither the key nor unverified bytes reach wasm.
 // Messages out:
 //   { type: "ready" }
 //   { id, ok: true, info, pixels, lut, ms }   (pixels and lut transferred)
 //   { id, ok: false, code, message, ms }     (code 2/3 from the decoder; 0 for a wasm trap)
 //   { id, probe }
+//   { id, ok: true, plaintext }               (decrypt; transferred)
+//   { id, ok: false, auth: { record, reason } }  (a record failed its integrity check)
 import { WasmDecoder } from "./wasm-decoder";
+import { decryptRecords, RecordAuthenticationError } from "./record-decrypt";
 
 /** Linear memory never shrinks; recycle the instance after a job leaves it larger than this. */
 const RECYCLE_BYTES = 512 * 1024 * 1024;
@@ -32,8 +38,22 @@ self.onmessage = async (ev: MessageEvent) => {
     post({ type: "ready" });
     return;
   }
+  let bytes = new Uint8Array(m.bytes);
+  if (m.encrypted) {
+    const e = m.encrypted;
+    try {
+      bytes = await decryptRecords(e.key, bytes, e.firstRecord, { window: e.window, seriesPlaintextLength: e.seriesPlaintextLength });
+    } catch (err) {
+      if (err instanceof RecordAuthenticationError) post({ id: m.id, ok: false, auth: { record: err.recordIndex, reason: err.reason } });
+      else post({ id: m.id, ok: false, code: 0, message: `decrypt: ${String((err as Error)?.message ?? err)}`, ms: 0 });
+      return;
+    }
+    if (m.type === "decrypt") {
+      post({ id: m.id, ok: true, plaintext: bytes.buffer }, [bytes.buffer]);
+      return;
+    }
+  }
   const d = dec ?? (await fresh());
-  const bytes = new Uint8Array(m.bytes);
   try {
     if (m.type === "probe") {
       const p = d.probe(bytes);

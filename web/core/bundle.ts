@@ -228,12 +228,12 @@ const LOCALIZER = /\b(loc|locali[sz]er|scout|survey|surview|topogram|3[- ]?plane
 const AXIAL = /\b(ax|axial|tra|trans|transverse)\b/i;
 
 /** True when a series looks like a localizer/scout (by description, or a tiny MR/CT series). */
-export function isLocalizer(s: SeriesEntry): boolean {
+function isLocalizer(s: SeriesEntry): boolean {
   if (s.description && LOCALIZER.test(s.description.replace(/[_]/g, " "))) return true;
   return (s.modality === "MR" || s.modality === "CT") && s.instances.length <= 3 && !s.description;
 }
 
-export function isAxial(s: SeriesEntry): boolean {
+function isAxial(s: SeriesEntry): boolean {
   return !!s.description && AXIAL.test(s.description.replace(/[_]/g, " "));
 }
 

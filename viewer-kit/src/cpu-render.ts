@@ -321,37 +321,3 @@ export class CpuRenderer extends ScheduledRenderer implements Renderer {
     this.frame = null;
   }
 }
-
-// ------------------------------------------------------------------- the viewer's current path
-
-/**
- * A faithful JS port of what the viewer does today (crates/shl-dicom-core/src/dicom_io.rs
- * `decode_dicom_raw_frame` + `DecodedRawFrame::to_rgba`, called via `render_instance_rgba`), for
- * the window/level benchmark: rescaled f32 values once per decode, then a full RGBA buffer per
- * window change (with the copy `rgba_bytes()` makes) and putImageData.
- */
-export function legacyPrepare(frame: Frame): Float32Array {
-  const n = frame.rows * frame.columns;
-  const out = new Float32Array(n);
-  const m = frame.rescaleSlope, b = frame.rescaleIntercept;
-  for (let i = 0; i < n; i++) out[i] = frame.data[i] * m + b;
-  return out;
-}
-
-export function legacyToRgba(values: Float32Array, wc: number, ww: number, invert: boolean): Uint8Array {
-  ww = Math.max(1, ww);
-  const low = Math.fround(wc - ww * 0.5);
-  const invRange = Math.fround(255 / ww);
-  const rgba = new Uint8Array(values.length * 4).fill(255);
-  for (let i = 0; i < values.length; i++) {
-    let norm = Math.fround(Math.fround(values[i] - low) * invRange);
-    norm = norm < 0 ? 0 : norm > 255 ? 255 : norm;
-    let v = norm | 0;
-    if (invert) v = 255 - v;
-    const o = i * 4;
-    rgba[o] = v;
-    rgba[o + 1] = v;
-    rgba[o + 2] = v;
-  }
-  return rgba;
-}

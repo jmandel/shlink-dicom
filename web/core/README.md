@@ -10,12 +10,12 @@ Two entry points:
 
 ```ts
 import { openShare, pickInitialSeries, PasscodeError, LinkError } from "../core/index";
-import { getDecoderPool, ImageStore, Priority } from "../core/images";
+import { getDecoderPool, ImageStore, PoolDecryptor, Priority } from "../core/images";
 import { Viewport, drawThumbnail } from "../core/render";
 import { autoWindow } from "../core/wl";
 
 const pool = getDecoderPool();                     // start early: compiles the decoder wasm, starts workers
-const share = await openShare(location.hash, { passcode, recipient: "My page" });
+const share = await openShare(location.hash, { passcode, recipient: "My page", decryptor: new PoolDecryptor(pool) });
 // share.index: StudyIndex; share.loader: InstanceLoader; share.resolver: LinkResolver
 const images = new ImageStore(share.loader, await pool);
 const study = share.index.studies[0];
@@ -27,7 +27,7 @@ vp.show(img, 0, { windowCenter: w.center, windowWidth: w.width });
 vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); // uniforms only
 ```
 
-`web/checks/fixtures.ts` uses the same modules from Bun, as a sharer would, to mint test links.
+`web/checks/fixtures.ts` (with `pack-share.ts`, which uses the Share page's packer) runs these modules in Bun to make test links, as a sharer would.
 
 ## Modules
 
@@ -77,8 +77,7 @@ The field names match the Rust `StudyIndex` in `shl-dicom-core`, with additions.
 
 Helpers:
 - `reportsForStudy(index, study)`;
-- `pickInitialSeries(study)`: the largest axial non-localizer series of a CT, MR, PT or NM study, else the first non-localizer series, else series 0;
-- `isLocalizer(series)` and `isAxial(series)`.
+- `pickInitialSeries(study)`: the largest axial non-localizer series of a CT, MR, PT or NM study, else the first non-localizer series, else series 0.
 
 ### Byte ranges: `range.ts`
 
@@ -87,52 +86,51 @@ Helpers:
 - `planInstances(series, first, last?)`, `planBytes(series, a, b)` and `planSeries(series)` each return a `RangePlan`: `{ fileId, firstInstance, lastInstance, plaintextStart, plaintextEnd, firstRecord, lastRecord, ciphertextStart, ciphertextEnd, rangeHeader }`.
 - `planRuns(series, maxBytes = 8 MiB)` splits a series into consecutive runs of instances, for streaming downloads.
 
-### Record decryption: `decrypt.ts`, `decrypt-wasm.ts`
+### Record decryption: `decrypt.ts`
 
 ```ts
 interface RecordDecryptor {
-  name: "webcrypto" | "wasm";
   decrypt(series, plan, ciphertext): Promise<Uint8Array>;  // plaintext [plaintextStart, plaintextEnd), fresh buffer
 }
 ```
 
-**Implementations:**
-- `WebCryptoDecryptor` is the default. It imports each series key once, non-extractable and decrypt-only, and decrypts each record with its own `subtle.decrypt` call, all records of a plan in flight at once.
-- `WasmSessionDecryptor` is the previous path: Rust AES-GCM in `WasmShlSession`. It loads `shl_dicom_wasm_bg.wasm` (2.6 MB) on demand and handles instance-aligned plans only.
+Both implementations run viewer-kit's `record-decrypt.ts` (WebCrypto AES-256-GCM; see `perf-spikes/decrypt/RESULTS.md` for why WebCrypto, about 800 MB/s against about 50 MB/s for wasm):
+- `WebCryptoDecryptor` (the default in `openShare`) decrypts on the calling thread. The How page uses it to show single records being checked.
+- `PoolDecryptor(pool)` (`images.ts`) decrypts in the decoder workers. The View page uses it, so its main thread never runs AES.
 
-**Choosing one.** Use `createDecryptor(kind, bundleBytes)`. The kind comes from `config.json` (`"decrypt"`) or `?decrypt=wasm`.
+Helpers: `seriesKey(series)` imports a series key once as a non-extractable, decrypt-only `CryptoKey`; `decryptParams(series, plan)` gives `decryptRecords`' arguments (first record, window, series length) for a plan.
 
-**Why WebCrypto is the default.** In `perf-spikes/decrypt/results/latest.json`, WebCrypto ran at about 750–840 MB/s in one worker, against about 40–52 MB/s for wasm. It also avoids the 2.6 MB download. `perf-spikes/decrypt/RESULTS.md` was not written when this was built; if it reaches a different conclusion, change the default in `config.ts`.
-
-**Failures.** A record that fails its tag, or whose length is wrong for its position, throws `RecordAuthenticationError(fileId, recordIndex)`. No bytes from it are returned.
+**Failures.** A record that fails its tag, or whose length is wrong for its position, throws `RecordAuthenticationError` (`recordIndex`, `reason`). No bytes from it are returned.
 
 ### Loading: `loader.ts`, `share.ts`
 
-**`new InstanceLoader(resolver, decryptor, opts?)`** fetches, verifies and decrypts series bytes through one priority queue.
+**`new InstanceLoader(resolver, decryptor, opts?)`** fetches series ciphertext through one priority queue.
 
 Options:
 - `concurrency`: requests in flight, default 6;
-- `plaintextBudgetBytes`: decrypted instances kept for re-use, default 96 MiB;
+- `cacheBytes`: instance ciphertext kept for re-use (a thumbnail and the full image start from the same bytes), default 96 MiB;
 - `onRecords(fileId, first, last, "fetching" | "verified" | "failed")`: for record maps and the trust count;
 - `onBytes(n)`.
 
 Methods:
-- `instance(series, i, { priority, signal })` returns one Part 10 file in a fresh buffer, which the caller may transfer. Requests for the same instance are deduplicated. Asking again with a lower `priority` number moves a queued request up. Aborting removes a queued request once it has no other waiters.
-- `run(series, plan, o)` returns the instances of a multi-instance plan from one Range read. It is used by downloads and is not cached.
+- `ciphertext(series, i, { priority, signal })` returns `{ plan, bytes }`: instance i's records, in a fresh buffer the caller may transfer. Requests for the same instance are deduplicated. Asking again with a lower `priority` number moves a queued request up. Aborting removes a queued request once it has no other waiters.
+- `instance(series, i, o)` returns one verified, decrypted Part 10 file (through the decryptor).
+- `run(series, plan, o)` returns the instances of a multi-instance plan from one Range read, verified and decrypted. It is used by downloads and is not cached.
+- `report(plan, state)` records a verify outcome from a decryptor running elsewhere (ImageStore's worker jobs).
 - `cancelQueued((fileId, priority) => boolean)` drops queued requests, for example the prefetch of a series the user has left.
-- `has(series, i)` and `bytesFetched`.
+- `bytesFetched`.
 
 `FetchPriority` is `{ Visible: 0, Near: 1, Prefetch: 2, Background: 3 }`, the same numbers as viewer-kit's `Priority`.
 
-**`openShare(link | resolver, { passcode, recipient, decrypt, onRecords, onRequest, … })`** wraps all of this: it resolves the link, decrypts and indexes the Bundle, and creates the decryptor and the loader. It returns `{ resolver, index, decryptor, loader, bundleBytes, openMs }`. To retry with a passcode, pass the same resolver back, so that it keeps count of the attempts.
+**`openShare(link | resolver, { passcode, recipient, decryptor, onRecords, onRequest, … })`** wraps all of this: it resolves the link, decrypts and indexes the Bundle, and creates the loader. It returns `{ resolver, index, decryptor, loader, bundleBytes, openMs }`. To retry with a passcode, pass the same resolver back, so that it keeps count of the attempts.
 
 ### Decoding and the frame cache: `images.ts` (browser)
 
 - `getDecoderPool(workers?)` returns the page's viewer-kit `DecoderPool`. It loads `assets/decoder-worker.js` and `assets/shl_dicom_decode.wasm`.
-- `new ImageStore(loader, pool, budgetBytes?)` keeps an LRU of raw decoded images, keyed by `${fileId}/${index}`. The default budget is `min(512 MiB, deviceMemory × 64 MiB)`, at least 128 MiB.
-  - `get(series, i, { priority, signal })` fetches, decrypts, decodes and caches the image, using the same priority for the fetch and the decode.
-  - `peek(series, i)` returns the cached image without loading anything.
-  - `getFrames(series, i, { onChunk })` decodes a multi-frame instance in parallel chunks. The result is not cached.
+- `new ImageStore(loader, pool, budgetBytes?)` keeps an LRU of raw decoded images, keyed by `${fileId}/${index}` (and `…@1/2^s` when reduced). The default budget is `min(512 MiB, deviceMemory × 64 MiB)`, at least 128 MiB.
+  - `get(series, i, { priority, signal, scale })` takes the instance's ciphertext from the loader and hands it to one worker job that verifies, decrypts and decodes it; the main thread gets pixels only. The same priority orders the fetch and the decode. With `scale` (thumbnails) it decodes at 1/2^scale, falls back to full size when the decoder reports the syntax as unsupported at that scale, and returns a cached full-size image when there is one.
+  - `peek(series, i)` returns the cached full-size image without loading anything.
+- `PoolDecryptor(pool)`: see above.
 - `Priority` is re-exported from viewer-kit.
 
 ### Rendering: `render.ts`, `wl.ts` (browser)
@@ -147,8 +145,7 @@ Methods:
 
 **Windows.** `wl.ts` provides:
 - `presetsFor(modality)`: CT gets Auto, Soft tissue, Lung, Bone and Brain; every other modality gets Auto only;
-- `autoWindow(img, frame)`: the file's own Window Center and Width, else the 1st–99th percentile of the frame's values;
-- `percentileWindow(img)` and `valueRange(img)`.
+- `autoWindow(img, frame)`: the file's own Window Center and Width, else the 1st–99th percentile of the frame's values.
 
 ### Downloads: `export.ts`, `zip.ts`, `dicomdir.ts`, `dicom-header.ts`, `save.ts`
 
@@ -163,18 +160,18 @@ Series are read in runs of up to 8 MiB, so memory stays bounded. ZIP64 records a
 - `exportSize(scope)` and `exportBaseName(study, series?)` give the size and a file name;
 - `readDicomHeader(bytes)` reads the DICOMDIR attributes from a Part 10 header;
 - `buildDicomdir(entries)` builds the DICOMDIR;
-- `ZipWriter` and `crc32` are the ZIP pieces.
+- `ZipWriter` writes the ZIP.
 
 **Saving.** `openSaveTarget(name, mime, ext)` streams to a file with `showSaveFilePicker` where the browser has it, and otherwise collects a Blob and saves it with a link. Call it first in the click handler, before any other `await`. It returns null if the user cancels.
 
 ### Configuration and samples: `config.ts`, `samples.ts`, `format.ts`
 
-**Configuration.** `loadConfig()` returns `{ apiBase, viewerPrefix, decrypt }`. Sources apply in this order, later winning:
-1. defaults: the API on this origin, the viewer at `<site>/view`, WebCrypto;
+**Configuration.** `loadConfig()` returns `{ apiBase, viewerPrefix }`. Sources apply in this order, later winning:
+1. defaults: the API on this origin, the viewer at `<site>/view`;
 2. `<site>/config.json`, which the build writes as `{}`;
-3. `?api=` and `?decrypt=` in the URL.
+3. `?api=` in the URL.
 
-**Site URLs.** `siteRoot`, `siteUrl(path)` and `assetUrl(name)` resolve from where the bundles are served (`<site>/assets/`), so the static pages work under any path prefix.
+**Site URLs.** `siteUrl(path)` and `assetUrl(name)` resolve from where the bundles are served (`<site>/assets/`), so the static pages work under any path prefix.
 
 **Samples.** `fetchSampleLinks(cfg)` reads `GET {apiBase}/api/demo-shares`. The first entry without a passcode is the public sample. `viewerUrl(cfg, shlink)` gives the address to open a link in the viewer.
 
@@ -190,7 +187,7 @@ Series are read in runs of up to 8 MiB, so memory stays bounded. ZIP64 records a
 | `view/index.html` | View (`/view#shlink:/…`) |
 | `how/` | How it works, with its baked data and linked pages |
 | `share/`, `share/manage/`, `share/smart-callback/` | Share |
-| `assets/` | `landing.js`, `view.js`, shared `chunk-*.js`, `decoder-worker.js`, `shl_dicom_decode.wasm`, `shl_dicom_wasm_bg.wasm` (wasm decrypt only), CSS |
+| `assets/` | one bundle per page, shared `chunk-*.js`, `decoder-worker.js`, `shl_dicom_decode.wasm`, `shl_dicom_wasm_bg.wasm` (Share: offset tables), CSS |
 | `config.json` | `{}`. A static deployment sets `apiBase` here. |
 
 **Adding a page.** Pages reference `../assets/…` relatively. To add `how.ts` or `share.ts`, add it to `entrypoints` in `web/build.ts` and copy its HTML, as is done for `view`.

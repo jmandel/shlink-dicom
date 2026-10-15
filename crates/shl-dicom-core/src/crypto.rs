@@ -60,21 +60,6 @@ pub fn encrypt_series(plaintext: &[u8], series_key: &[u8; 32]) -> Result<Vec<u8>
     Ok(out)
 }
 
-pub fn decrypt_record(
-    record_ct: &[u8],
-    record_index: u64,
-    series_key: &[u8; 32],
-) -> Result<Vec<u8>> {
-    if record_ct.len() < TAG_LEN as usize || record_ct.len() > RECORD_CIPHERTEXT as usize {
-        return Err(Error::AuthenticationFailed { record_index });
-    }
-    let cipher = Aes256Gcm::new(series_key.into());
-    let nonce_bytes = record_nonce(record_index);
-    cipher
-        .decrypt(Nonce::from_slice(&nonce_bytes), record_ct)
-        .map_err(|_| Error::AuthenticationFailed { record_index })
-}
-
 pub fn decrypt_range(
     ciphertext_slice: &[u8],
     start: u64,

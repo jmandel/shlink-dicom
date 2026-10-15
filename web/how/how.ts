@@ -60,7 +60,7 @@ async function boot() {
   }
   try {
     // Record decryption is always WebCrypto here: step 4 decrypts single records, which the wasm path does not.
-    S.share = await openShare(S.shlink, { recipient: "How it works page", onRequest: logRequest, fetch: tamperingFetch, decrypt: "webcrypto" });
+    S.share = await openShare(S.shlink, { recipient: "How it works page", onRequest: logRequest, fetch: tamperingFetch });
   } catch (e) {
     const why = e instanceof LinkError ? e.message : String((e as Error)?.message ?? e);
     status(`The sample link did not open: ${why}`, "err");

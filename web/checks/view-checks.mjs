@@ -1,5 +1,6 @@
-// Scripted headless-Chromium checks for /view (and the landing and placeholder pages).
-//   bun web/checks/fixtures.ts && node web/checks/view-checks.mjs [--only=name] [--perf]
+// Scripted headless-Chromium checks for /view and the landing page.
+//   node web/checks/view-checks.mjs [--only=name] [--perf]
+// Each run makes fresh test links first (web/checks/fixtures.ts) and deletes them at the end.
 // Screenshots go to docs/shots/view/. Exits non-zero if any check fails.
 import { chromium } from "playwright-core";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -8,6 +9,7 @@ import { execFileSync } from "node:child_process";
 const BASE = process.env.BASE ?? "http://localhost:3333";
 const SHOTS = new URL("../../docs/shots/view/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
+execFileSync("bun", [new URL("./fixtures.ts", import.meta.url).pathname, BASE], { stdio: ["ignore", "ignore", "inherit"] });
 const F = JSON.parse(readFileSync("/tmp/view-fixtures.json", "utf8"));
 const args = process.argv.slice(2);
 const only = args.find((a) => a.startsWith("--only="))?.slice(7);
@@ -104,10 +106,10 @@ async function flowPublic(dev) {
   const ov = await layoutChecks(page, `${label} overview`, dev);
   check(`${label} overview: scrollY 0 on load`, ov.scrollY === 0, `scrollY=${ov.scrollY}`);
   const nStudies = await page.locator(".study-card").count();
-  check(`${label}: two studies listed`, nStudies === 2, `${nStudies}`);
+  check(`${label}: every study listed`, nStudies === F.sample.studies, `${nStudies} of ${F.sample.studies}`);
   const kicker = await page.textContent("#top-title");
-  check(`${label}: "Shared with you" line`, /^Shared with you · Brain MRI \+ Wrist/.test(kicker), kicker);
-  await openFirstStudy(page);
+  check(`${label}: "Shared with you" line`, kicker.startsWith(`Shared with you · ${F.sample.label}`), kicker);
+  await openFirstStudy(page, F.sample.mriStudy);
   const s = await state(page);
   const seriesName = await page.locator('.series-btn[aria-current="true"] .s-name').textContent();
   check(`${label}: opens on largest axial series`, seriesName === "T2 FSE AX", seriesName);
@@ -140,15 +142,17 @@ async function flowPublic(dev) {
     const s5 = await state(page);
     check(`${label}: double-click resets`, s5.zoom === 1 && s5.ww === s.ww, `zoom=${s5.zoom} W=${Math.round(s5.ww)}`);
     // Series strip.
-    await page.locator('.series-btn[data-series="10"]').click();
-    await page.waitForFunction(() => window.__viewHooks.state().seriesIdx === 10);
+    const t1 = F.sample.mriSeries.indexOf("T1 SE AX");
+    await page.locator(`.series-btn[data-series="${t1}"]`).click();
+    await page.waitForFunction((t1) => window.__viewHooks.state().seriesIdx === t1, t1);
     await page.waitForTimeout(500);
     const t = await page.textContent("#hud-tl");
     check(`${label}: series strip switches series`, t.startsWith("T1 SE AX"), t.split("\n")[0]);
     // Thumbnails drawn.
     await page.waitForTimeout(1500);
     const drawn = await page.locator(".series-btn canvas[data-drawn]").count();
-    check(`${label}: strip thumbnails drawn`, drawn === 14, `${drawn}/14`);
+    const n = F.sample.mriSeries.length;
+    check(`${label}: strip thumbnails drawn`, drawn === n, `${drawn}/${n}`);
   } else {
     const cdp = await context.newCDPSession(page);
     const box = await page.locator("#stage").boundingBox();
@@ -222,8 +226,8 @@ async function flowPublic(dev) {
   check(`${label}: back returns to overview`, true);
 
   // Wrist study opens on the first series.
-  await page.locator(".study-open").nth(1).click();
-  await page.waitForFunction(() => window.__viewHooks.state().studyIdx === 1);
+  await page.locator(".study-open").nth(F.sample.wristStudy).click();
+  await page.waitForFunction((w) => window.__viewHooks.state().studyIdx === w, F.sample.wristStudy);
   await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"));
   await page.waitForTimeout(600);
   await page.screenshot({ path: `${SHOTS}${dev}-viewer-wrist.png` });
@@ -314,7 +318,7 @@ async function flowStates(dev) {
   // Too many attempts.
   {
     const { context, page } = await newPage(dev, { allowErrors: [/401|404/] });
-    await page.goto(viewUrl(F.lockLink));
+    await page.goto(viewUrl(dev === "desktop" ? F.lockLinks.desktop : F.lockLinks.phone));
     let t = "";
     for (let k = 0; k < 12; k++) {
       await page.waitForSelector("#screen-passcode:not(.hidden), #screen-error:not(.hidden)");
@@ -414,8 +418,57 @@ async function flowPages(dev) {
 
 // ---------------------------------------------------------------------------------------- perf
 
+/**
+ * Main-thread cost while a whole series streams in: open a study cold, then until every slice is
+ * decoded, record animation-frame intervals and long tasks (> 50 ms). Decrypt work on the main
+ * thread shows up here; decrypt in the workers should not.
+ */
+async function prefetchLoad(link, studyIdx, want) {
+  const { context, page } = await newPage("desktop");
+  await context.addInitScript(() => {
+    window.__lt = [];
+    new PerformanceObserver((l) => window.__lt.push(...l.getEntries().map((e) => ({ t: e.startTime, d: e.duration })))).observe({ type: "longtask", buffered: true });
+  });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Performance.enable");
+  const busy = async () => Object.fromEntries((await cdp.send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]));
+  await page.goto(viewUrl(link));
+  await page.waitForSelector(".study-open");
+  await page.waitForTimeout(1500); // let the overview's thumbnails finish: measure the series load only
+  const m0 = await busy();
+  await page.locator(".study-open").nth(studyIdx).click();
+  await page.waitForFunction(() => window.__view.marks["first-slice"], null, { timeout: 30000 });
+  const r = await page.evaluate(async (want) => {
+    const t0 = window.__view.marks["first-slice"];
+    const frames = [];
+    let last = performance.now();
+    while (window.__viewHooks.cached() < want && performance.now() - t0 < 60000) {
+      await new Promise(requestAnimationFrame);
+      const now = performance.now();
+      frames.push(now - last);
+      last = now;
+    }
+    const t1 = performance.now();
+    const lt = window.__lt.filter((e) => e.t >= t0 - 1 && e.t <= t1);
+    return { allDecodedMs: Math.round(t1 - t0), frames, longTasks: lt.length, longTaskMs: Math.round(lt.reduce((a, e) => a + e.d, 0)), worstTaskMs: Math.round(Math.max(0, ...lt.map((e) => e.d))) };
+  }, want);
+  const m1 = await busy();
+  await context.close();
+  const s = [...r.frames].sort((a, b) => a - b);
+  const q = (p) => +(s[Math.min(s.length - 1, Math.floor(p * s.length))] ?? 0).toFixed(1);
+  return { allDecodedMs: r.allDecodedMs, mainTaskMs: Math.round((m1.TaskDuration - m0.TaskDuration) * 1000), mainScriptMs: Math.round((m1.ScriptDuration - m0.ScriptDuration) * 1000), longTasks: r.longTasks, longTaskMs: r.longTaskMs, worstTaskMs: r.worstTaskMs, frameMedian: q(0.5), frameP95: q(0.95), frameMax: q(1) };
+}
+
 async function perf() {
   const out = {};
+  const runs = (n, f) => Promise.resolve().then(async () => { const a = []; for (let k = 0; k < n; k++) a.push(await f()); return a; });
+  out["prefetch-mri-t2-20"] = await runs(3, () => prefetchLoad(F.publicLink, 0, 20));
+  out["prefetch-ct-100"] = await runs(3, () => prefetchLoad(F.perfLink, 0, 100));
+  if (process.env.PREFETCH_ONLY) {
+    console.log(JSON.stringify(out, null, 2));
+    writeFileSync("/tmp/view-perf.json", JSON.stringify(out, null, 2));
+    return;
+  }
   // Time to first image from a cold load (fresh context = empty HTTP cache), desktop and phone.
   for (const dev of ["desktop", "phone390"]) {
     const runs = [];
@@ -542,6 +595,9 @@ try {
   if (wantPerf) await perf();
 } finally {
   await browser.close();
+  for (const sh of F.shares) {
+    await fetch(`${BASE}/api/shares/${sh.sid}`, { method: "DELETE", headers: { Authorization: `Bearer ${sh.token}` } }).catch(() => {});
+  }
 }
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

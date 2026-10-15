@@ -177,7 +177,7 @@ export class ShareApi {
  * A link's SHL key, derived from the owner key and the link id (HKDF-SHA-256). The owner can
  * rebuild any of their links from the manage link alone; the server never sees either key.
  */
-export async function linkKey(ownerKey: string, lid: string): Promise<string> {
+async function linkKey(ownerKey: string, lid: string): Promise<string> {
   const ikm = await crypto.subtle.importKey("raw", b64urlDecode(ownerKey), "HKDF", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
     { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf8(`shl-dicom link key ${lid}`) },
@@ -188,7 +188,7 @@ export async function linkKey(ownerKey: string, lid: string): Promise<string> {
 }
 
 /** The label inside the link (shown to the recipient). At most 80 characters, as SHL requires. */
-export function payloadLabel(recipient: string | null): string {
+function payloadLabel(recipient: string | null): string {
   const r = (recipient ?? "").trim();
   const s = r ? `Imaging for ${r}` : "Shared imaging";
   return s.length > 80 ? s.slice(0, 79) + "…" : s;

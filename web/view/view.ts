@@ -12,7 +12,6 @@ import {
   InvalidLinkError,
   LinkError,
   LinkResolver,
-  loadConfig,
   modalityName,
   openShare,
   PasscodeError,
@@ -21,13 +20,12 @@ import {
   reportsForStudy,
   studyTitle,
   FetchPriority,
-  decryptFromQuery,
   RecordAuthenticationError,
   type OpenShare,
   type SeriesEntry,
   type StudyEntry,
 } from "../core/index";
-import { getDecoderPool, ImageStore, Priority, type DecodedImage } from "../core/images";
+import { getDecoderPool, ImageStore, PoolDecryptor, Priority, type DecodedImage } from "../core/images";
 import { drawThumbnail, Viewport } from "../core/render";
 import { autoWindow, presetsFor, type WindowPreset } from "../core/wl";
 import { exportBaseName, exportInstance, exportSize, exportZip, type ExportScope } from "../core/export";
@@ -123,7 +121,19 @@ function slideFor(se: SeriesEntry): Promise<SlideSession> {
 function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority: number, signal?: AbortSignal): Promise<void> {
   if (isSlideSeries(se)) return slideFor(se).then((ss) => drawSlideThumbnail(canvas, ss, signal));
   const mid = Math.floor(se.instances.length / 2);
-  return images!.get(se, mid, { priority, signal }).then((img) => drawThumbnail(canvas, img, Math.floor(img.frames / 2)));
+  return images!
+    .get(se, mid, { priority, signal, scale: thumbScale(se.instances[mid].length, canvas.width) })
+    .then((img) => drawThumbnail(canvas, img, Math.floor(img.frames / 2)));
+}
+
+/**
+ * Reduced-resolution decode for a thumbnail of `px` pixels: the largest 1/2^s (s ≤ 3) that still
+ * covers the canvas. The Bundle has no image size, so it is estimated from the file's length as if
+ * 16-bit uncompressed; compressed files come out smaller, so they are reduced less, never too much.
+ */
+function thumbScale(fileBytes: number, px: number): number {
+  const side = Math.sqrt(fileBytes / 2);
+  return Math.max(0, Math.min(3, Math.floor(Math.log2(side / px))));
 }
 
 // ------------------------------------------------------------------------------------- boot
@@ -169,10 +179,10 @@ async function open(passcode?: string) {
   show("loading");
   $("loading-text").textContent = "Opening the link…";
   try {
-    const cfg = await Promise.race([loadConfig(), new Promise<null>((r) => setTimeout(() => r(null), 300))]);
     share = await openShare(resolver!, {
       passcode,
-      decrypt: cfg?.decrypt ?? decryptFromQuery(),
+      // Records are verified and decrypted in the decoder workers, not on this thread.
+      decryptor: new PoolDecryptor(poolPromise),
       onRecords: (_f, a, b, state) => {
         if (state === "verified") verifiedRecords += b - a + 1;
         if (state === "failed") failedRecords += b - a + 1;
@@ -335,10 +345,14 @@ function renderOverview() {
     card.append(actions);
     list.append(card);
 
-    // Thumbnail: middle slice of the series the study opens on (also warms the viewer).
+    // Thumbnail: middle slice of the series the study opens on, reduced. Then the same slice at
+    // full size, at low priority, so opening the study shows it at once (its ciphertext is cached).
     const se = st.series[pickInitialSeries(st)];
     seriesThumb(thumb, se, Priority.Visible)
-      .then(() => mark("first-thumb"))
+      .then(() => {
+        mark("first-thumb");
+        if (!isSlideSeries(se)) return images!.get(se, Math.floor(se.instances.length / 2), { priority: Priority.Prefetch });
+      })
       .catch(() => {});
   });
   // Reports not tied to a study.

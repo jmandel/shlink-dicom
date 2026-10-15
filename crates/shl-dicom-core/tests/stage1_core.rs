@@ -4,7 +4,6 @@ use shl_dicom_core::{
     bundle::{parse_study_index, PROFILE_URL},
     crypto::{b64url_decode, decode_key_32, decrypt_range, encrypt_series},
     dicom_io::extract_dicom_from_tar_gz,
-    export::{build_uncompressed_zip, split_series_instances},
     jwe::{decrypt_bundle_jwe, encrypt_bundle_jwe},
     packer::{build_link_bundle, IngestSession},
     range::{ciphertext_length, ciphertext_range, RECORD_CIPHERTEXT, RECORD_PLAINTEXT},
@@ -202,34 +201,106 @@ fn test_jwe_and_shlink_roundtrip() {
     assert_eq!(decoded, payload);
 }
 
+/// A synthetic explicit-VR-little-endian Part 10 file (fictional patient, 2.25 UIDs) whose
+/// pixel data is `rows × cols` 16-bit values seeded by `seed`.
+fn synthetic_dicom(study: &str, series: &str, sop: &str, modality: &str, series_no: i32, inst_no: i32, rows: u16, cols: u16, seed: u32) -> Vec<u8> {
+    fn el(b: &mut Vec<u8>, g: u16, e: u16, vr: &[u8; 2], v: &[u8]) {
+        let mut v = v.to_vec();
+        if v.len() % 2 == 1 {
+            v.push(if vr == b"UI" { 0 } else { b' ' });
+        }
+        b.extend_from_slice(&g.to_le_bytes());
+        b.extend_from_slice(&e.to_le_bytes());
+        b.extend_from_slice(vr);
+        if matches!(vr, b"OB" | b"OW") {
+            b.extend_from_slice(&[0, 0]);
+            b.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        } else {
+            b.extend_from_slice(&(v.len() as u16).to_le_bytes());
+        }
+        b.extend_from_slice(&v);
+    }
+    let sop_class: &[u8] = if modality == "CT" { b"1.2.840.10008.5.1.4.1.1.2" } else { b"1.2.840.10008.5.1.4.1.1.1" };
+    let mut meta = Vec::new();
+    el(&mut meta, 0x0002, 0x0001, b"OB", &[0, 1]);
+    el(&mut meta, 0x0002, 0x0002, b"UI", sop_class);
+    el(&mut meta, 0x0002, 0x0003, b"UI", sop.as_bytes());
+    el(&mut meta, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1");
+    let mut b = vec![0u8; 128];
+    b.extend_from_slice(b"DICM");
+    el(&mut b, 0x0002, 0x0000, b"UL", &(meta.len() as u32).to_le_bytes());
+    b.extend_from_slice(&meta);
+    el(&mut b, 0x0008, 0x0016, b"UI", sop_class);
+    el(&mut b, 0x0008, 0x0018, b"UI", sop.as_bytes());
+    el(&mut b, 0x0008, 0x0020, b"DA", b"20260101");
+    el(&mut b, 0x0008, 0x0060, b"CS", modality.as_bytes());
+    el(&mut b, 0x0008, 0x1030, b"LO", format!("Synthetic {modality}").as_bytes());
+    el(&mut b, 0x0010, 0x0010, b"PN", b"TEST^SYNTHETIC");
+    el(&mut b, 0x0010, 0x0020, b"LO", b"SYN0001");
+    el(&mut b, 0x0020, 0x000D, b"UI", study.as_bytes());
+    el(&mut b, 0x0020, 0x000E, b"UI", series.as_bytes());
+    el(&mut b, 0x0020, 0x0011, b"IS", series_no.to_string().as_bytes());
+    el(&mut b, 0x0020, 0x0013, b"IS", inst_no.to_string().as_bytes());
+    el(&mut b, 0x0028, 0x0002, b"US", &1u16.to_le_bytes());
+    el(&mut b, 0x0028, 0x0004, b"CS", b"MONOCHROME2");
+    el(&mut b, 0x0028, 0x0010, b"US", &rows.to_le_bytes());
+    el(&mut b, 0x0028, 0x0011, b"US", &cols.to_le_bytes());
+    el(&mut b, 0x0028, 0x0100, b"US", &16u16.to_le_bytes());
+    el(&mut b, 0x0028, 0x0101, b"US", &12u16.to_le_bytes());
+    el(&mut b, 0x0028, 0x0102, b"US", &11u16.to_le_bytes());
+    el(&mut b, 0x0028, 0x0103, b"US", &0u16.to_le_bytes());
+    let px: Vec<u8> = (0..rows as u32 * cols as u32)
+        .flat_map(|i| (((i.wrapping_mul(2654435761) ^ seed) >> 7) as u16 & 0x0FFF).to_le_bytes())
+        .collect();
+    el(&mut b, 0x7FE0, 0x0010, b"OW", &px);
+    b
+}
+
+/// A two-study share built from synthetic files: a 4-slice CT given as a .tgz (each slice crosses
+/// a 65,520-byte record boundary) and a CR given as a loose file. Checks that packing keeps every
+/// file byte-identical, that whole-series and single-instance Range reads decrypt to the
+/// originals, and that a link Bundle can carry a subset.
 #[test]
-fn test_pack_and_lossless_roundtrip_mri_and_wrist() {
-    let mri_tgz = std::fs::read("../../data/samples/mri-brain-2020.tgz")
-        .expect("data/samples/mri-brain-2020.tgz must exist");
-    let wrist_tgz = std::fs::read("../../data/samples/wrist-low-res.tgz")
-        .expect("data/samples/wrist-low-res.tgz must exist");
+fn test_pack_and_lossless_roundtrip() {
+    let ct_study = "2.25.1001";
+    let ct_series = "2.25.1001.1";
+    let ct_files: Vec<(String, Vec<u8>)> = (0..4)
+        .map(|k| {
+            let sop = format!("2.25.1001.1.{}", k + 1);
+            (format!("CT/{k}.dcm"), synthetic_dicom(ct_study, ct_series, &sop, "CT", 1, k + 1, 256, 200, k as u32 * 7919))
+        })
+        .collect();
+    let cr = synthetic_dicom("2.25.2002", "2.25.2002.1", "2.25.2002.1.1", "CR", 1, 1, 512, 400, 42);
 
-    // Collect ground-truth SHA-256 of every original Part 10 DICOM instance by SOPInstanceUID
+    let mut tgz = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut tgz, flate2::Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        for (name, bytes) in &ct_files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, name, bytes.as_slice()).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
     let mut original_hashes: HashMap<String, String> = HashMap::new();
-    for inst in extract_dicom_from_tar_gz(&mri_tgz).unwrap() {
-        original_hashes.insert(inst.sop_instance_uid, sha256_hex(&inst.bytes));
+    for (k, (_, bytes)) in ct_files.iter().enumerate() {
+        original_hashes.insert(format!("2.25.1001.1.{}", k + 1), sha256_hex(bytes));
     }
-    for inst in extract_dicom_from_tar_gz(&wrist_tgz).unwrap() {
-        original_hashes.insert(inst.sop_instance_uid, sha256_hex(&inst.bytes));
+    original_hashes.insert("2.25.2002.1.1".into(), sha256_hex(&cr));
+    for inst in extract_dicom_from_tar_gz(&tgz).unwrap() {
+        assert_eq!(sha256_hex(&inst.bytes), original_hashes[&inst.sop_instance_uid]);
     }
-    assert!(original_hashes.len() > 100);
 
-    // Ingest both archives into a single multi-study Share
     let mut session = IngestSession::new();
-    let mri_count = session.ingest_tar_gz(&mri_tgz).unwrap();
-    let wrist_count = session.ingest_tar_gz(&wrist_tgz).unwrap();
-    assert!(mri_count > 100);
-    assert_eq!(wrist_count, 3);
-
+    assert_eq!(session.ingest_tar_gz(&tgz).unwrap(), 4);
+    assert!(session.ingest_dicom_bytes("cr.dcm", cr.clone()).unwrap());
     let packed = session.pack("2026-10-14T16:00:00Z").unwrap();
-    assert_eq!(packed.index.studies.len(), 2, "expected 2 studies (Brain MRI + Wrist)");
+    assert_eq!(packed.index.studies.len(), 2);
 
-    // Verify FHIR Bundle JSON declares the profile on both ImagingStudy resources
     let raw_bundle: serde_json::Value = serde_json::from_str(&packed.owner_bundle_json).unwrap();
     let imaging_studies: Vec<&serde_json::Value> = raw_bundle["entry"]
         .as_array()
@@ -243,7 +314,6 @@ fn test_pack_and_lossless_roundtrip_mri_and_wrist() {
         assert_eq!(st["meta"]["profile"][0], PROFILE_URL);
     }
 
-    // Map fileId -> ciphertext
     let file_map: HashMap<String, &[u8]> = packed
         .series_files
         .iter()
@@ -251,93 +321,44 @@ fn test_pack_and_lossless_roundtrip_mri_and_wrist() {
         .collect();
 
     let mut verified_instances = 0usize;
-
     for study in &packed.index.studies {
         for series in &study.series {
             let ct = file_map.get(&series.file_id).expect("series file present");
+            assert_eq!(ct.len() as u64, ciphertext_length(series.plaintext_length));
             let series_key = series.key_bytes().unwrap();
 
-            // 1. Whole-series decrypt + split_series_instances round-trip check
-            let series_pt = decrypt_range(
-                ct,
-                0,
-                series.plaintext_length,
-                series.plaintext_length,
-                &series_key,
-            )
-            .unwrap();
-            let split = split_series_instances(&series_pt, series).unwrap();
-            assert_eq!(split.len(), series.instances.len());
-
-            for ((_name, dcm_bytes), inst_summary) in split.iter().zip(series.instances.iter()) {
-                let expected_hash = original_hashes
-                    .get(&inst_summary.uid)
-                    .expect("SOPInstanceUID found in ground truth");
-                assert_eq!(&sha256_hex(dcm_bytes), expected_hash);
+            // Whole series: decrypt, then cut at the Bundle's instance offsets.
+            let series_pt = decrypt_range(ct, 0, series.plaintext_length, series.plaintext_length, &series_key).unwrap();
+            for inst in &series.instances {
+                let bytes = &series_pt[inst.offset as usize..(inst.offset + inst.length) as usize];
+                assert_eq!(&sha256_hex(bytes), &original_hashes[&inst.uid]);
                 verified_instances += 1;
             }
 
-            // 2. Single-instance Range read + pixel decode on the middle instance of each series
-            let mid_idx = series.instances.len() / 2;
-            let mid_inst = &series.instances[mid_idx];
-            let r = ciphertext_range(
-                mid_inst.offset,
-                mid_inst.offset + mid_inst.length,
-                series.plaintext_length,
-            )
-            .unwrap();
-            let mid_dcm = decrypt_range(
-                &ct[r.ciphertext_start as usize..r.ciphertext_end as usize],
-                mid_inst.offset,
-                mid_inst.offset + mid_inst.length,
-                series.plaintext_length,
-                &series_key,
-            )
-            .unwrap();
-            assert_eq!(
-                &sha256_hex(&mid_dcm),
-                original_hashes.get(&mid_inst.uid).unwrap()
-            );
+            // One instance: the Range read §9.3 plans.
+            for inst in &series.instances {
+                let r = ciphertext_range(inst.offset, inst.offset + inst.length, series.plaintext_length).unwrap();
+                let dcm = decrypt_range(
+                    &ct[r.ciphertext_start as usize..r.ciphertext_end as usize],
+                    inst.offset,
+                    inst.offset + inst.length,
+                    series.plaintext_length,
+                    &series_key,
+                )
+                .unwrap();
+                assert_eq!(&sha256_hex(&dcm), &original_hashes[&inst.uid]);
+            }
         }
     }
-
     assert_eq!(verified_instances, original_hashes.len());
 
-    // 3. Test build_link_bundle subsetting (only first series of first study)
+    // A link Bundle with one series.
     let first_file_id = packed.index.studies[0].series[0].file_id.clone();
     let link_shl_key = [0x55u8; 32];
-    let link_out = build_link_bundle(
-        &packed.owner_bundle_json,
-        &[first_file_id.clone()],
-        &link_shl_key,
-        "2026-10-14T16:05:00Z",
-    )
-    .unwrap();
+    let link_out = build_link_bundle(&packed.owner_bundle_json, &[first_file_id.clone()], &link_shl_key, "2026-10-14T16:05:00Z").unwrap();
     assert_eq!(link_out.allowed_files, vec![format!("{first_file_id}.bin")]);
     let dec_link_bundle = decrypt_bundle_jwe(&link_out.bundle_jwe, &link_shl_key).unwrap();
     let link_index = parse_study_index(&dec_link_bundle).unwrap();
     assert_eq!(link_index.studies.len(), 1);
     assert_eq!(link_index.studies[0].series.len(), 1);
-
-    // 4. Test uncompressed ZIP export on the Wrist series
-    let wrist_study = packed
-        .index
-        .studies
-        .iter()
-        .find(|s| s.number_of_instances == 3)
-        .unwrap();
-    let wrist_series = &wrist_study.series[0];
-    let wrist_ct = file_map.get(&wrist_series.file_id).unwrap();
-    let wrist_pt = decrypt_range(
-        wrist_ct,
-        0,
-        wrist_series.plaintext_length,
-        wrist_series.plaintext_length,
-        &wrist_series.key_bytes().unwrap(),
-    )
-    .unwrap();
-    let wrist_files = split_series_instances(&wrist_pt, wrist_series).unwrap();
-    let zip_bytes = build_uncompressed_zip(&wrist_files).unwrap();
-    assert!(zip_bytes.len() > wrist_pt.len());
 }
-

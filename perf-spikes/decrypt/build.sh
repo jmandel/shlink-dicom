@@ -17,5 +17,5 @@ F="--enable-bulk-memory --enable-bulk-memory-opt --enable-sign-ext --enable-nont
 "$WASM_OPT" -O3 $F out/wasm-base.wasm -o out/wasm-base-opt.wasm
 "$WASM_OPT" -O3 $F --enable-simd out/wasm-simd.wasm -o out/wasm-simd-opt.wasm
 [ -f fixtures/wrist.bin ] || (cd ../.. && bun perf-spikes/decrypt/make-fixtures.ts >/dev/null)
-bun build record-decrypt.ts --target browser --outfile bench/record-decrypt.js >/dev/null
+bun build ../../viewer-kit/src/record-decrypt.ts --target browser --outfile bench/record-decrypt.js >/dev/null
 echo built

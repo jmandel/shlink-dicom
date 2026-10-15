@@ -31,7 +31,7 @@ export const plural = (n: number, one: string, many = one + "s") => `${n} ${n ==
 const MODALITY: Record<string, string> = {
   CT: "CT", MR: "MRI", CR: "X-ray", DX: "X-ray", DR: "X-ray", MG: "Mammogram", US: "Ultrasound",
   PT: "PET", NM: "Nuclear medicine", XA: "Angiography", RF: "Fluoroscopy", OT: "Other",
-  SR: "Report", SEG: "Segmentation", KO: "Key images", PR: "Presentation state",
+  SM: "Slide", SR: "Report", SEG: "Segmentation", KO: "Key images", PR: "Presentation state",
 };
 
 export function modalityName(m: string | null | undefined): string {

@@ -59,16 +59,13 @@ shlink-dicom/
 │   │       ├── jwe.rs                  # SHL compact JWE (alg:dir, enc:A256GCM, zip:DEF)
 │   │       ├── shl.rs                  # shlink:/ URI & payload parser/encoder + flag rules
 │   │       ├── bundle.rs               # FHIR R4 Bundle, Patient, ImagingStudy builder & StudyIndex parser
-│   │       ├── dicom_io.rs             # Part 10 / .tgz / .zip reader, tag extractor & DecodedRawFrame decoder via codecs/shl-dicom-decode
-│   │       ├── packer.rs               # Stateful IngestSession -> PackedStudySet (series .bin + bundle.jwe)
-│   │       └── export.rs               # Reconstruct Part 10 .dcm files & uncompressed .zip from decrypted bytes
+│   │       ├── dicom_io.rs             # Part 10 / .tgz / .zip reader & tag extractor
+│   │       ├── offset_tables.rs        # Adds Basic/Extended Offset Tables to multi-frame files that lack them
+│   │       └── packer.rs               # Stateful IngestSession -> PackedStudySet (series .bin + bundle.jwe)
 │   │
-│   ├── shl-dicom-wasm/                 # Thin wasm-bindgen wrapper over shl-dicom-core
+│   ├── shl-dicom-wasm/                 # wasm-bindgen binding of offset_tables for the Share page
 │   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs                  # Module init & JS error conversion
-│   │       ├── session.rs              # WasmShlSession (sparse 64KiB record cache, 24-slice DecodedRawFrame LRU cache for <1ms W/L, range planner, RGBA renderer, .zip export)
-│   │       └── packer.rs               # WasmPacker (browser-side zero-knowledge packing & L-flag study append)
+│   │   └── src/lib.rs                  # offset_table_patch_wasm
 │   │
 │   └── shl-dicom-server/               # Native CLI + Axum HTTP server
 │       ├── Cargo.toml
@@ -81,19 +78,16 @@ shlink-dicom/
 │           ├── routes_shl.rs           # SHL protocol routes (/shl/{id}/*, /cap/{token}/*) + RFC 9110 HTTP 206 Range engine
 │           └── dicomweb_import.rs      # Optional WADO-RS study importer for server/CLI
 │
-└── web/                                # Browser UI + Bridges (bundled by Bun into dist/web/)
-    ├── index.html                      # Single-page shell (Viewer + Sharer/Host Control Drawer)
-    ├── styles.css                      # Layout, Contact Sheet grid, Scrubber & 64KiB Record Map styles
-    ├── main.ts                         # Entry point: routes #shlink:/..., initializes WASM, binds UI
-    ├── api-client.ts                   # Client for Zero-Knowledge Share & Link API (supports cross-origin ?api=...)
-    ├── shl-resolver.ts                 # Resolves U-mode & P/L-manifest links, refreshes once on 404 under /cap/
-    ├── viewer-contact-sheet.ts         # Fires 1 Range request/series for middle slice & renders series cards
-    ├── viewer-stack.ts                 # Interactive Canvas stack viewer, scrubber, W/L drag, background streamer
-    ├── record-map.ts                   # Live 64KiB Record Map bar (Unfetched / 206 In-Flight / GCM OK / Tamper test)
-    ├── exporter.ts                     # Triggers Current Slice (.dcm), Series (.zip), and Full Study (.zip) downloads
-    ├── control-drawer.ts               # Browser WASM packer, U<->P/L toggles, QR generator, live Host SSE request log
-    ├── cornerstone-bridge.ts           # Stage 5: Custom `shl-dicom:` image loader for Cornerstone
-    └── sw-dicomweb.ts                  # Stage 5: Service Worker translating virtual WADO-RS requests to Range reads
+└── web/                                # The site (bundled by `bun web/build.ts` into dist/web/)
+    ├── build.ts                        # One bundle per page + decoder worker + wasm; see web/core/README.md
+    ├── core/                           # Shared receive path: link resolver, Bundle index, range plans,
+    │                                   # record decrypt, loader, decoder-pool and renderer adapters, export
+    ├── shared/base.css                 # Tokens, buttons, 44 px touch targets
+    ├── landing/                        # /      three doors and the sample links
+    ├── view/                           # /view  recipient viewer (slices, whole-slide images, downloads)
+    ├── how/                            # /how   how it works, live on the sample link
+    ├── share/                          # /share and /share/manage: pack in the browser, links, revocation
+    └── checks/                         # Scripted headless-Chromium checks and their fixtures
 ```
 
 ### 2.2 Strict Crate Boundary Rules (Why WASM Compiles Cleanly)
@@ -101,26 +95,25 @@ shlink-dicom/
 | Crate | Target(s) | Allowed Dependencies | Forbidden Dependencies |
 |---|---|---|---|
 | **`shl-dicom-core`** | `native` AND `wasm32-unknown-unknown` | Pure-Rust crates only: `aes-gcm`, `sha2`, `flate2` (`rust_backend`), `tar`, `zip` (pure Rust), `dicom-object`, `base64`, `serde`, `serde_json`, `getrandom` (`js` feature on wasm32). Operates strictly on `&[u8]` and `Read`/`Write` cursors. | **No** `std::fs`, **no** `tokio`, **no** `reqwest`, **no** C `-sys` crates (`zstd-sys`, `openjp2-sys`, etc.), **no** `wasm-bindgen`. |
-| **`shl-dicom-wasm`** | `wasm32-unknown-unknown` | `shl-dicom-core`, `wasm-bindgen`, `js-sys`, `serde-wasm-bindgen`. | **No** `tokio`, **no** `std::fs`. Network I/O (`fetch` with `Range`) stays in TypeScript and passes `Uint8Array` chunks into WASM. |
+| **`shl-dicom-wasm`** | `wasm32-unknown-unknown` | `shl-dicom-core`, `wasm-bindgen`. | **No** `tokio`, **no** `std::fs`. Everything else in the browser is TypeScript (`web/core`); decoding is `codecs/shl-dicom-decode` through viewer-kit. |
 | **`shl-dicom-server`** | `native` (`x86_64` / `aarch64`) | `shl-dicom-core`, `tokio`, `axum`, `tower-http`, `reqwest`, `clap`. Handles all disk I/O (`data/shares/...`) and HTTP serving. | Never linked into WASM. |
 
 ### 2.3 File-by-File Responsibilities
 
 #### In `crates/shl-dicom-core/src/`:
-- **`crypto.rs`**: Owns the cryptographic primitives in §9.2 (`record_nonce`, `encrypt_series`, `decrypt_record`, `decrypt_range` using AES-256-GCM with each series' 32-byte key and `uint96_be(i)` nonces). Zero knowledge of DICOM or FHIR.
+- **`crypto.rs`**: Owns the cryptographic primitives in §9.2 (`record_nonce`, `encrypt_series`, `decrypt_range` using AES-256-GCM with each series' 32-byte key and `uint96_be(i)` nonces). Zero knowledge of DICOM or FHIR.
 - **`range.rs`**: Pure arithmetic mapping `[plaintext_start, plaintext_end)` to `(first_record, last_record)` and `[ciphertext_start, ciphertext_end)`.
 - **`jwe.rs`**: Compact JWE encryption and decryption (`alg: "dir"`, `enc: "A256GCM"`, `zip: "DEF"`).
 - **`shl.rs`**: Encodes/decodes `shlink:/` payloads and computes legal `flag` strings (`"U"`, `"LU"`, `"P"`, `"LP"`, `"L"`).
 - **`bundle.rs`**: Builds the R4 `Bundle` JSON from ingested DICOM metadata (declaring `meta.profile: ["https://example.org/shl-dicom/v1"]`, `Bundle.meta.lastUpdated`, the complex `series-file` extension with `id` and `key` sub-extensions on `series`, and the `length` extension on `instance`), subsets an owner Bundle for a Link (`subset_fhir_bundle`), and parses a decrypted `Bundle` back into a strongly-typed `StudyIndex` (computing cumulative byte offsets and covering 64 KiB record ranges for every instance).
-- **`dicom_io.rs`**: Parses Part 10 files (or bare datasets), extracts study/series/instance metadata, and decodes **uncompressed and RLE** pixel data (pure Rust, zero C dependencies) with DICOM Window Center / Window Width into 8-bit RGBA buffers. Compressed transfer syntaxes (JPEG, JPEG-LS, JPEG 2000, HTJ2K) are handed as raw Part 10 `.dcm` bytes to Cornerstone's WASM codecs in the browser.
+- **`dicom_io.rs`**: Parses Part 10 files (or bare datasets) and extracts study/series/instance metadata. It does not decode pixels: the browser decodes with `codecs/shl-dicom-decode` in viewer-kit's worker pool.
+- **`offset_tables.rs`**: Gives encapsulated multi-frame instances with an empty Basic Offset Table and no Extended Offset Table a filled-in table (fragment bytes unchanged), so a viewer can range-read one frame.
 - **`packer.rs`**: Split into two clean steps:
-  1. `IngestSession::pack()` (`A5`): groups ingested DICOM files by `(StudyInstanceUID, SeriesInstanceUID)`, sorts by `(InstanceNumber, SOPInstanceUID)`, draws random 16-byte `fileId`s and random 32-byte series `key`s, encrypts `{fileId}.bin` files, and produces the master owner `Bundle` JSON (which can be merged with an existing `owner.jwe` for `L`-flag additions).
+  1. `IngestSession::pack()` (`A5`): groups ingested DICOM files by `(StudyInstanceUID, SeriesInstanceUID)`, sorts by `(InstanceNumber, SOPInstanceUID)`, draws random 16-byte `fileId`s and random 32-byte series `key`s, encrypts `{fileId}.bin` files, and produces the master owner `Bundle` JSON. With `set_add_offset_tables(true)` it first adds offset tables (`offset_tables.rs`).
   2. `build_link_bundle(owner_bundle, selected_file_ids, shl_key)` (`A5b`): filters the owner `Bundle` to `selected_file_ids` and encrypts a per-link `bundle.jwe` under `shl_key`.
-- **`export.rs`**: Extracts individual Part 10 `.dcm` instance byte slices from decrypted series records using `instance.length`.
 
 #### In `crates/shl-dicom-wasm/src/`:
-- **`session.rs` (`WasmShlSession`)**: Holds the decrypted `StudyIndex` (which carries each series' 32-byte `key`) and a **bounded LRU sparse record cache** (capped at e.g. 64 MiB of verified 65,520 B records so multi-GB studies never exhaust `wasm32` memory). When JS fetches any HTTP `Range`, JS feeds the ciphertext into `ingest_ciphertext_range`, which verifies each 64 KiB record's GCM tag under that series' key and populates the bounded cache.
-- **`packer.rs` (`WasmPacker`)**: Allows the browser to pack `.tgz`, `.zip`, or `.dcm` files completely client-side and return `{ shlKey, bundleJwe, seriesFiles }` for zero-knowledge upload to `/api/shares`.
+- **`lib.rs`**: `offset_table_patch_wasm(bytes)`, the offset-table rewrite for one instance, used by the Share page. Link resolution, record decryption (WebCrypto, in the decoder workers), the Bundle index and browser-side packing are TypeScript in `web/core` and `web/share/lib`.
 
 #### In `crates/shl-dicom-server/src/`:
 - **`state.rs`**: Manages `{data-dir}/catalog.db` and the LRU pool of `{data-dir}/shares/{sid}.db` SQLite databases (see [`docs/storage.md`](docs/storage.md)), startup/periodic orphan & expiry sweeps, and per-share `tokio::sync::broadcast` channels for live SSE telemetry.
@@ -177,7 +170,7 @@ pub fn encode_shlink_uri(payload: &ShlPayload, viewer_prefix: Option<&str>) -> S
 pub fn decode_shlink_uri(uri: &str) -> Result<ShlPayload>;
 ```
 
-### 3.3 `dicom_io`, `bundle` & `export` Modules
+### 3.3 `dicom_io` & `bundle` Modules
 - **Inputs accepted by `IngestSession`:**
   - `ingest_dicom_bytes(raw_bytes: Vec<u8>)` (Part 10 file or bare dataset; skips `DICOMDIR`)
   - `ingest_tar_gz(tgz_bytes: &[u8])`
@@ -201,50 +194,15 @@ pub fn decode_shlink_uri(uri: &str) -> Result<ShlPayload>;
         pub last_record: u64,   // floor((offset + length - 1) / 65520)
     }
     ```
-- **Pixel Decoding (`decode_dicom_slice`):**
-  - Input: `dicom_part10_bytes: &[u8]`, `override_wc: Option<f64>`, `override_ww: Option<f64>`
-  - Output:
-    ```rust
-    pub struct DecodedSlice {
-        pub width: u32,
-        pub height: u32,
-        pub rgba: Vec<u8>,      // width * height * 4 bytes ready for Canvas ImageData
-        pub window_center: f64,
-        pub window_width: f64,
-        pub min_pixel: f64,
-        pub max_pixel: f64,
-        pub instance_number: Option<i32>,
-        pub sop_instance_uid: String,
-    }
-    ```
-- **Streaming Original DICOM Export (`exporter.ts` + `export.rs`):**
-  - Rather than buffering an entire series or study `.zip` inside `wasm32` linear memory, JS streams each series' `{fileId}.bin` (or iterates instance-by-instance), verifies records via WASM, and pipes each reconstructed Part 10 `.dcm` file directly into a streaming JS ZIP writer (with ZIP64 support) or a directory via the browser File System Access API.
+- **Downloading originals** (`web/core/export.ts`): the browser reads each series in runs of a few MB, verifies and decrypts them, and streams the Part 10 files into a ZIP (with a DICOMDIR, ZIP64 when needed) on disk through the File System Access API, or a Blob elsewhere.
 
 ---
 
 ## 4. `shl-dicom-wasm` Browser API (`wasm-bindgen`)
 
-### 4.1 `WasmShlSession` (Viewing, Range Planning, Decrypting, Exporting)
-- `WasmShlSession::from_shlink_and_jwe(shlink_uri: &str, bundle_jwe: &str) -> Result<WasmShlSession, JsError>`
-- `session.index_json() -> String`: Returns JSON of `StudyIndex` (patient name/DOB, studies, series, instance offsets, record counts, total byte sizes).
-- `session.plan_instance_range(study_idx: usize, series_idx: usize, instance_idx: usize) -> JsValue`:
-  - Returns `{ fileId, firstRecord, lastRecord, ciphertextStart, ciphertextEnd, rangeHeader: "bytes=a-b" }`.
-- `session.ingest_ciphertext_range(file_id: &str, first_record: u32, ciphertext: &[u8]) -> Result<JsValue, JsError>`:
-  - Verifies the GCM tag of each 64 KiB record in `ciphertext`, stores verified plaintext records in the session's sparse record cache for `file_id`, and returns `{ verifiedRecords: [u32, ...], totalVerifiedBytes: u64 }`.
-- `session.has_instance(study_idx: usize, series_idx: usize, instance_idx: usize) -> bool`:
-  - True if all records `first_record..=last_record` for that instance are in the verified cache.
-- `session.get_instance_dicom(study_idx: usize, series_idx: usize, instance_idx: usize) -> Result<Uint8Array, JsError>`:
-  - Returns the exact original Part 10 `.dcm` bytes for that instance from the verified record cache.
-- `session.render_instance_rgba(study_idx: usize, series_idx: usize, instance_idx: usize, wc: Option<f64>, ww: Option<f64>) -> Result<JsValue, JsError>`:
-  - Decodes uncompressed/RLE cached instances and returns `{ width, height, rgba: Uint8Array, windowCenter, windowWidth, minPixel, maxPixel }` (or signals the frontend to pass `get_instance_dicom()` to Cornerstone's codec for compressed transfer syntaxes).
+- `offset_table_patch_wasm(bytes: &[u8]) -> Option<WasmOffsetTablePatch>`: `undefined` when the instance needs no table or its frames cannot be located unambiguously. Otherwise the patched file is `patch.head` followed by `bytes[patch.resume_at..]`; `patch.frames` and `patch.extended` (an Extended Offset Table, for offsets past 4 GiB) describe it.
 
-### 4.2 `WasmPacker` (Browser-Side Zero-Knowledge Packing & Link Bundle Builder)
-- `WasmPacker::new() -> WasmPacker` (or `WasmPacker::from_owner_jwe(owner_key_b64: &str, owner_jwe: &str)` for `L`-flag study addition!)
-- `packer.add_tgz(bytes: &[u8])` / `packer.add_zip(bytes: &[u8])` / `packer.add_dicom_file(bytes: &[u8])`
-- `packer.pack(owner_key_b64: Option<String>) -> Result<JsValue, JsError>`:
-  - Packs each new series into `{ fileId, key, ciphertext: Uint8Array }`, merges with any prior owner Bundle, encrypts `owner.jwe` under `ownerKey`, and returns `{ ownerKey: string, ownerJwe: string, ownerBundleJson: string, index: StudyIndex, newSeriesFiles: [{ fileId, ciphertext }] }`.
-- `build_link_bundle_wasm(owner_bundle_json: &str, selected_file_ids: Vec<String>, shl_key_b64: Option<String>) -> Result<JsValue, JsError>`:
-  - Filters `owner_bundle_json` to `selected_file_ids` (or all series if empty), encrypts `bundle.jwe` under a fresh (or supplied) 32-byte `shlKey`, and returns `{ shlKey: string, bundleJwe: string, allowedFiles: string[] }`.
+The rest of the browser side is TypeScript: see [`web/core/README.md`](web/core/README.md) for the receive path and `viewer-kit/INTEGRATION.md` for decoding and rendering.
 
 ---
 
@@ -356,12 +314,9 @@ A3 dicom_io parse┤         B2 state: meta.json,       D3 record-map      │
 A4 bundle build/parse ◄ A3    │                                          │
 A5 packer ◄ A1 A3 A4       B3 upload/control API ◄ B2                    │
 A5b link bundle ◄ A2 A4    B4 seed + B5 CLI pack/inspect ◄ A5 A5b        │
-A6 export ◄ A4                                                           │
-A7 pixel decode ◄ A3                                                     │
                                                                          │
-WASM: C1 session ◄ A1 A4 · C2 packer ◄ A5 A5b · C3 render ◄ A7           │
-Web:  D2 viewers ◄ C1 C3 · D4 exporter ◄ C1 A6 · D5 control drawer ◄ B3 C2
-      D6 Cornerstone bridge + Service Worker ◄ C1 (Stage 5)
+WASM: C2 offset tables ◄ A5                                              │
+Web:  D2 viewer (viewer-kit) · D4 exporter · D5 share page ◄ B3 C2
 E2E:  Playwright ◄ B4 D2 D4 D5
 ```
 
@@ -370,19 +325,17 @@ E2E:  Playwright ◄ B4 D2 D4 D5
 Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin` from the TypeScript reference, along with the `StudyIndex` JSON shape and WASM signatures) unlocks parallel execution across all three layers without waiting for the Rust packer:
 
 - **Immediately after `F0` (five independent tracks):** `A1`, `A2`, and `A3` (Rust core), `B1` and `B2` (server routes and state tested against the golden share), `D1` and `D3` (browser SHL resolver and 64 KiB record map).
-- **Critical path:** `A3 → A4 → A5 → C2 → D5 → E2E` (DICOM parsing → Bundle builder → packer → browser WASM packer → control drawer → end-to-end verification). `A5` is the primary join point because seeding (`B4`), the CLI (`B5`), and browser-side packing (`C2`) all depend on it.
-- **Off the critical path:** `A7` and `C3` (pure-Rust pixel decoding for uncompressed/RLE) and `D6` (Cornerstone bridge and Service Worker DICOMweb adapter).
+- **Critical path:** `A3 → A4 → A5 → D5 → E2E` (DICOM parsing → Bundle builder → packer → share page → end-to-end verification). `A5` is the primary join point because seeding (`B4`) and the CLI (`B5`) depend on it.
 
 ### 6.3 Stage Deliverables & Exit Checks
 
 | Stage | Contents | Deliverable | Done When (Exit Check) |
 |---|---|---|---|
 | **Stage 0** | `F0` | Sample `.tgz` archives cached; Appendix B vector JSON + golden share (`bundle.jwe` + `{fileId}.bin`) generated by TS reference; `StudyIndex` & WASM TypeScript interfaces committed. | Golden share decrypts and verifies with the TS reference; contracts are committed. |
-| **Stage 1** | `A1–A7` | `crates/shl-dicom-core`: STREAM crypto, range math, JWE, SHL URI codec, DICOM parser/pixel decoder, FHIR R4 Bundle builder/index parser, packer, and `.dcm` slice extractor. | `cargo test -p shl-dicom-core` passes: Appendix B matches byte for byte, edge-case ranges pass, and `mri-brain-2020.tgz` + `wrist-low-res.tgz` pass 100% SHA-256 round-trip checks. |
+| **Stage 1** | `A1–A5b` | `crates/shl-dicom-core`: STREAM crypto, range math, JWE, SHL URI codec, DICOM parser, offset tables, FHIR R4 Bundle builder/index parser, packer. | `cargo test -p shl-dicom-core` passes: Appendix B matches byte for byte, edge-case ranges pass, and a synthetic two-study share passes 100% SHA-256 round-trip checks. |
 | **Stage 2** | `B1–B5` | `crates/shl-dicom-server`: `/shl` & `/cap` routes with HTTP `206` Range engine, disk state (`meta.json`), atomic passcode counter, zero-knowledge upload/control API, demo seeding, and CLI (`pack`, `inspect`, `serve`). | `cargo test -p shl-dicom-server` passes against both the `F0` golden share and shares built by `A5`. |
-| **Stage 3** | `C1–C3` | `crates/shl-dicom-wasm`: `WasmShlSession` (bounded LRU record cache, range planner, instance extractor, RGBA renderer) and `WasmPacker`. | Headless Bun + WASM integration test passes (packing, partial range ingestion, RGBA decode, and `.dcm` extraction). |
-| **Stage 4** | `D1–D5` | `web/`: SHL resolver (with 1-hr `/cap/` refresh), Instant Contact Sheet, Stack Viewer, 64 KiB Record Map + tamper simulator, streaming `.dcm`/`.zip` exporter, and Zero-Knowledge Control Drawer. | Playwright end-to-end test passes against the running server and demo shares. |
-| **Stage 5** | `D6` | `web/cornerstone-bridge.ts` (`shl-dicom:` loader) and `web/sw-dicomweb.ts` (virtual WADO-RS Service Worker). | Cornerstone / DICOMweb consumer renders a study and frame through the Service Worker Range bridge. |
+| **Stage 3** | `C2` | `crates/shl-dicom-wasm`: the offset-table binding. | `bun test test/wasm.test.ts` passes. |
+| **Stage 4** | `D1–D5` | `web/`: landing, View, How it works, Share (see `docs/EXPERIENCES.md`). | The scripted Chromium checks in `web/checks/` and `web/how/checks.mjs` pass against the running server. |
 
 ---
 
@@ -401,11 +354,11 @@ Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin`
    - A 0-length or inverted range (`start == end` or `start > end`) returning `Err`.
 3. **`test_tamper_and_truncation`**: Flipped ciphertext bit, swapped record 0 and 1, truncated final record, wrong series `key` all return `Err`.
 4. **`test_jwe_roundtrip_and_fresh_iv`**: Encrypts a FHIR Bundle as `dir` + `A256GCM` + `DEF`, verifies compact format has 5 dot-separated parts with empty encrypted key, verifies two encryptions produce distinct 12-byte IVs, and decrypts back to identical JSON.
-5. **`test_pack_and_lossless_roundtrip_mri_and_wrist`**:
-   - Ingests `data/samples/mri-brain-2020.tgz` and `data/samples/wrist-low-res.tgz` into one multi-study Bundle.
-   - Verifies `Bundle` has 2 `ImagingStudy` resources declaring `meta.profile: ["https://example.org/shl-dicom/v1"]` and valid `series-file` (`id`, `key`) and `length` extensions.
-   - For every series, decrypts both full series and individual instances via `decrypt_range`, reconstructs the Part 10 `.dcm` files, and asserts **100% SHA-256 match** against every Part 10 `.dcm` file from the `.tgz` archives (after Part 10 wrapping if any bare dataset was wrapped).
-   - Verifies `decode_dicom_slice` produces non-empty RGBA8 buffers with valid dimensions for the middle slice of every series.
+5. **`test_pack_and_lossless_roundtrip`**:
+   - Builds two synthetic studies in the test (a 4-slice CT in a `.tgz`, each slice crossing a record boundary, and a loose CR file) and ingests them into one Bundle.
+   - Verifies the `Bundle` has 2 `ImagingStudy` resources declaring `meta.profile: ["https://example.org/shl-dicom/v1"]`.
+   - For every series, decrypts the whole series and each instance's Range read via `decrypt_range`, and asserts a **100% SHA-256 match** with the input files.
+   - Builds a one-series link Bundle with `build_link_bundle` and parses it back.
 
 ### Stage 2 Tests (`cargo test -p shl-dicom-server`)
 1. **`test_zero_knowledge_upload_and_u_mode_range`**:
@@ -426,11 +379,8 @@ Fixing `F0` first (generating a small golden share `bundle.jwe` + `{fileId}.bin`
    - **Long-lived (`L`) study append in publish order:** Client `PUT`s new `{fileId}.bin` to Share first, then `PATCH`es `allowedFiles` and `PUT`s updated `bundle.jwe` to the Link, then `DELETE`s replaced `.bin` files; receiver sees both studies.
    - **Read-only demo share protection & cloning:** Confirms `/api/demo-shares` omits `controlToken`, and `POST /api/shares/{sid}/clone` creates a controllable sandbox copy.
 
-### Stage 3 Tests (`bun test/wasm.test.ts`)
-1. Loads the compiled `shl-dicom-wasm` module in Bun, runs `WasmPacker` on sample `.dcm` files, initializes `WasmShlSession`, verifies partial range ingestion (`ingest_ciphertext_range`), bounded LRU cache eviction, RGBA rendering (`render_instance_rgba`), and single-instance `.dcm` extraction (`get_instance_dicom`).
+### Stage 3 Tests (`bun test test/wasm.test.ts`)
+1. On a synthetic multi-frame file: fills an empty Basic Offset Table with fragment bytes unchanged, points frames split over several fragments at their first fragment, and leaves single-frame, already-tabled and ambiguous files alone.
 
-### Stage 4 Tests (Playwright E2E)
-1. Opens the running server, loads the pre-seeded Brain MRI + Wrist multi-study link, verifies the Contact Sheet renders thumbnails via `206` Range requests, scrubs slices while verifying the 64 KiB Record Map updates, downloads an original `.dcm` and `.zip`, clones a demo share into a sandbox share, and exercises the Control Drawer toggles.
-
-### Stage 5 Tests (Cornerstone & Service Worker DICOMweb E2E)
-1. Registers `sw-dicomweb.ts`, requests WADO-RS metadata, instance, and frame URLs (`/dicomweb/studies/{study}/series/{series}/...`), and renders a slice via the `shl-dicom:` Cornerstone loader.
+### Stage 4 Tests (scripted Chromium)
+1. `node web/checks/view-checks.mjs` (makes and deletes its own test links), `node web/checks/share-checks.mjs`, `node web/checks/wsi-checks.mjs`, `node web/how/checks.mjs`: desktop and phone layouts, touch gestures, passcode, subset, revoked, expired and offline links, downloads with DICOMDIR, sharing and revocation, whole-slide streaming.

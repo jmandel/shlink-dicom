@@ -1,6 +1,11 @@
-// InstanceLoader: fetches, verifies and decrypts series-file byte ranges, one instance or a run of
-// instances at a time. Requests are deduplicated and run through a priority queue with a fixed
-// number in flight, so the slice on screen is fetched before neighbours and prefetch.
+// InstanceLoader: fetches series-file byte ranges, one instance or a run of instances at a time.
+// Requests are deduplicated and run through a priority queue with a fixed number in flight, so the
+// slice on screen is fetched before neighbours and prefetch. Verified ciphertext is not needed
+// again once decoded, but a thumbnail and the full image of one instance both start from it, so
+// instance ciphertext is kept in a small LRU (it is safe to keep: it is what the server holds).
+//
+// Decryption is the decryptor's (decrypt.ts): `instance()` and `run()` return plaintext through it.
+// ImageStore (images.ts) instead takes `ciphertext()` and decrypts and decodes in one worker job.
 import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
 import { planInstances, type RangePlan } from "./range";
@@ -14,11 +19,11 @@ export type RecordState = "fetching" | "verified" | "failed";
 export interface LoaderOptions {
   /** Range requests in flight at once (default 6). */
   concurrency?: number;
-  /** Decrypted instances kept for re-use (default 96 MiB). */
-  plaintextBudgetBytes?: number;
-  /** Called when records change state (for record maps). */
+  /** Instance ciphertext kept for re-use (default 96 MiB). */
+  cacheBytes?: number;
+  /** Called when records change state (for record maps and the trust count). */
   onRecords?: (fileId: string, firstRecord: number, lastRecord: number, state: RecordState) => void;
-  /** Called after each verified range with ciphertext bytes received. */
+  /** Called after each range arrives, with its ciphertext bytes. */
   onBytes?: (bytes: number) => void;
 }
 
@@ -36,13 +41,11 @@ interface Waiter {
 
 interface Job {
   key: string;
-  series: SeriesEntry;
   plan: RangePlan;
   priority: number;
   seq: number;
   waiters: Set<Waiter>;
   running: boolean;
-  ctrl: AbortController;
   cache: boolean;
 }
 
@@ -56,8 +59,8 @@ export class InstanceLoader {
   private jobs = new Map<string, Job>();
   private running = 0;
   private seq = 0;
-  private plain = new Map<string, Uint8Array>();
-  private plainBytes = 0;
+  private cached = new Map<string, Uint8Array>();
+  private cachedBytes = 0;
   private budget: number;
 
   constructor(
@@ -66,37 +69,45 @@ export class InstanceLoader {
     private opts: LoaderOptions = {},
   ) {
     this.concurrency = opts.concurrency ?? 6;
-    this.budget = opts.plaintextBudgetBytes ?? 96 * 1024 * 1024;
+    this.budget = opts.cacheBytes ?? 96 * 1024 * 1024;
   }
 
-  /** True when the instance's plaintext is cached (a load would not touch the network). */
-  has(series: SeriesEntry, i: number): boolean {
-    return this.plain.has(`${series.fileId}/${i}`);
+  /** Reports a decrypt outcome for a plan's records (decryptors running elsewhere call this). */
+  report(plan: RangePlan, state: RecordState) {
+    this.opts.onRecords?.(plan.fileId, plan.firstRecord, plan.lastRecord, state);
   }
 
   /**
-   * One instance as a complete DICOM Part 10 file, in a fresh buffer the caller owns (it may be
-   * transferred). Asking again for a queued instance with a higher priority moves it up.
+   * Instance i's ciphertext (the records covering it), in a fresh buffer the caller owns and may
+   * transfer. Asking again for a queued instance with a higher priority moves it up.
    */
-  async instance(series: SeriesEntry, i: number, o: LoadOptions = {}): Promise<Uint8Array> {
+  async ciphertext(series: SeriesEntry, i: number, o: LoadOptions = {}): Promise<{ plan: RangePlan; bytes: Uint8Array }> {
+    const plan = planInstances(series, i);
     const key = `${series.fileId}/${i}`;
-    const hit = this.plain.get(key);
+    const hit = this.cached.get(key);
     if (hit) {
-      this.plain.delete(key);
-      this.plain.set(key, hit);
-      return hit.slice();
+      this.cached.delete(key);
+      this.cached.set(key, hit);
+      return { plan, bytes: hit.slice() };
     }
-    const bytes = await this.enqueue(key, series, planInstances(series, i), o);
-    return bytes.slice();
+    const bytes = await this.enqueue(key, plan, o, true);
+    return { plan, bytes: bytes.slice() };
+  }
+
+  /** One instance as a complete DICOM Part 10 file, verified and decrypted by the decryptor. */
+  async instance(series: SeriesEntry, i: number, o: LoadOptions = {}): Promise<Uint8Array> {
+    const { plan, bytes } = await this.ciphertext(series, i, o);
+    return this.decrypt(series, plan, bytes);
   }
 
   /**
-   * Instances first..last in one Range request. Returns each instance's bytes (views on one
-   * buffer). Used by downloads; the result is not cached.
+   * Instances first..last in one Range request, verified and decrypted. Returns each instance's
+   * bytes (views on one buffer). Used by downloads; not cached.
    */
   async run(series: SeriesEntry, plan: RangePlan, o: LoadOptions = {}): Promise<Uint8Array[]> {
     const key = `${series.fileId}/run/${plan.firstInstance}-${plan.lastInstance}`;
-    const bytes = await this.enqueue(key, series, plan, { priority: o.priority ?? FetchPriority.Background, signal: o.signal }, false);
+    const ct = await this.enqueue(key, plan, { priority: o.priority ?? FetchPriority.Background, signal: o.signal }, false);
+    const bytes = await this.decrypt(series, plan, ct);
     const out: Uint8Array[] = [];
     const base = series.instances[plan.firstInstance].offset;
     for (let i = plan.firstInstance; i <= plan.lastInstance; i++) {
@@ -106,10 +117,10 @@ export class InstanceLoader {
     return out;
   }
 
-  /** Drops queued (not running) requests below the given priority, e.g. on switching series. */
+  /** Drops queued (not running) requests, e.g. the prefetch of a series the user has left. */
   cancelQueued(predicate: (fileId: string, priority: number) => boolean) {
     this.queue = this.queue.filter((j) => {
-      if (!predicate(j.series.fileId, j.priority)) return true;
+      if (!predicate(j.plan.fileId, j.priority)) return true;
       for (const w of j.waiters) {
         w.signal?.removeEventListener("abort", w.onAbort!);
         w.reject(abortError());
@@ -119,12 +130,23 @@ export class InstanceLoader {
     });
   }
 
-  private enqueue(key: string, series: SeriesEntry, plan: RangePlan, o: LoadOptions, cache = true): Promise<Uint8Array> {
+  private async decrypt(series: SeriesEntry, plan: RangePlan, ct: Uint8Array): Promise<Uint8Array> {
+    try {
+      const pt = await this.decryptor.decrypt(series, plan, ct);
+      this.report(plan, "verified");
+      return pt;
+    } catch (e) {
+      if ((e as any)?.name !== "AbortError") this.report(plan, "failed");
+      throw e;
+    }
+  }
+
+  private enqueue(key: string, plan: RangePlan, o: LoadOptions, cache: boolean): Promise<Uint8Array> {
     if (o.signal?.aborted) return Promise.reject(abortError());
     const priority = o.priority ?? FetchPriority.Visible;
     let job = this.jobs.get(key);
     if (!job) {
-      job = { key, series, plan, priority, seq: this.seq++, waiters: new Set(), running: false, ctrl: new AbortController(), cache };
+      job = { key, plan, priority, seq: this.seq++, waiters: new Set(), running: false, cache };
       this.jobs.set(key, job);
       this.queue.push(job);
     } else if (!job.running && priority < job.priority) {
@@ -169,32 +191,20 @@ export class InstanceLoader {
   }
 
   private async runJob(job: Job) {
-    const { series, plan } = job;
-    this.opts.onRecords?.(series.fileId, plan.firstRecord, plan.lastRecord, "fetching");
-    let reported = false;
+    const { plan } = job;
+    this.report(plan, "fetching");
     try {
-      const ct = await this.resolver.fetchRange(plan, job.ctrl.signal);
+      const ct = await this.resolver.fetchRange(plan);
       this.bytesFetched += ct.byteLength;
       this.opts.onBytes?.(ct.byteLength);
-      let pt: Uint8Array;
-      try {
-        pt = await this.decryptor.decrypt(series, plan, ct);
-      } catch (e) {
-        this.opts.onRecords?.(series.fileId, plan.firstRecord, plan.lastRecord, "failed");
-        reported = true;
-        throw e;
-      }
-      this.opts.onRecords?.(series.fileId, plan.firstRecord, plan.lastRecord, "verified");
-      if (job.cache) this.remember(job.key, pt);
+      if (job.cache) this.remember(job.key, ct);
       this.jobs.delete(job.key);
       for (const w of job.waiters) {
         w.signal?.removeEventListener("abort", w.onAbort!);
-        w.resolve(pt);
+        w.resolve(job.waiters.size > 1 ? ct.slice() : ct);
       }
     } catch (e) {
-      if (!reported && (e as any)?.name !== "AbortError") {
-        this.opts.onRecords?.(series.fileId, plan.firstRecord, plan.lastRecord, "failed");
-      }
+      this.report(plan, "failed");
       this.jobs.delete(job.key);
       for (const w of job.waiters) {
         w.signal?.removeEventListener("abort", w.onAbort!);
@@ -203,14 +213,14 @@ export class InstanceLoader {
     }
   }
 
-  private remember(key: string, pt: Uint8Array) {
-    if (pt.byteLength > this.budget / 4) return;
-    this.plain.set(key, pt);
-    this.plainBytes += pt.byteLength;
-    for (const [k, v] of this.plain) {
-      if (this.plainBytes <= this.budget) break;
-      this.plain.delete(k);
-      this.plainBytes -= v.byteLength;
+  private remember(key: string, ct: Uint8Array) {
+    if (ct.byteLength > this.budget / 4) return;
+    this.cached.set(key, ct);
+    this.cachedBytes += ct.byteLength;
+    for (const [k, v] of this.cached) {
+      if (this.cachedBytes <= this.budget) break;
+      this.cached.delete(k);
+      this.cachedBytes -= v.byteLength;
     }
   }
 }

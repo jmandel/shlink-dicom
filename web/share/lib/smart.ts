@@ -3,9 +3,9 @@
 // the WADO-RS Endpoint, and DICOMweb retrieval with the same token. Only fetch and WebCrypto.
 // Adapted from imaging-sandbox/test/client.ts.
 
-export const APP_LAUNCH = "http://fhir.org/argonaut/smart-imaging/capabilities/app-launch";
-export const CLIENT_ID = "shlink-dicom-share";
-export const SCOPE = "launch/patient patient/Patient.rs patient/DiagnosticReport.rs patient/ImagingStudy.rs";
+const APP_LAUNCH = "http://fhir.org/argonaut/smart-imaging/capabilities/app-launch";
+const CLIENT_ID = "shlink-dicom-share";
+const SCOPE = "launch/patient patient/Patient.rs patient/DiagnosticReport.rs patient/ImagingStudy.rs";
 
 export interface Discovery {
   smart: Record<string, any>;
@@ -136,7 +136,7 @@ export function studiesFromBundle(bundle: any): FoundStudy[] {
   return out;
 }
 
-export const DICOM_ACCEPT = 'multipart/related; type="application/dicom"; transfer-syntax=*';
+const DICOM_ACCEPT = 'multipart/related; type="application/dicom"; transfer-syntax=*';
 
 function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
   const first = needle[0];
@@ -147,7 +147,7 @@ function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
   return -1;
 }
 
-export function parseMultipart(body: Uint8Array, contentType: string): { headers: Record<string, string>; bytes: Uint8Array }[] {
+function parseMultipart(body: Uint8Array, contentType: string): { headers: Record<string, string>; bytes: Uint8Array }[] {
   const m = contentType.match(/boundary=("?)([^";]+)\1/i);
   if (!m) throw new Error(`no boundary in ${contentType}`);
   const enc = new TextEncoder();

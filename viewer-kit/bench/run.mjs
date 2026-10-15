@@ -47,7 +47,7 @@ await withHarness(async (page, env) => {
     ]) {
       const r = await page.evaluate((o) => window.vk.wlBench(o), { url, frames: 120, canvas });
       out.wl.push(r);
-      console.log(`W/L ${r.image} canvas ${r.canvas}: GPU submit ${r.gpu.submit.median} ms, work ${r.gpu.work.median} ms (p90 ${r.gpu.work.p90}), frame ${r.gpu.frameInterval.median} ms | current CPU work ${r.cpuCurrent.work.median} ms (p90 ${r.cpuCurrent.work.p90}), frame ${r.cpuCurrent.frameInterval.median} ms | kit CPU fallback ${r.cpuFallback.work.median} ms`);
+      console.log(`W/L ${r.image} canvas ${r.canvas}: GPU submit ${r.gpu.submit.median} ms, work ${r.gpu.work.median} ms (p90 ${r.gpu.work.p90}), frame ${r.gpu.frameInterval.median} ms | CPU fallback ${r.cpuFallback.work.median} ms`);
     }
   }
 });

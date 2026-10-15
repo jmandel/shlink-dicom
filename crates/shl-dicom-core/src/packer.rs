@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use crate::{
     bundle::{
         build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput,
@@ -44,7 +44,6 @@ pub struct LinkBundleOutput {
 }
 
 pub struct IngestSession {
-    existing_bundle: Option<Value>,
     instances: Vec<ParsedDicomInstance>,
     add_offset_tables: bool,
 }
@@ -58,21 +57,9 @@ impl Default for IngestSession {
 impl IngestSession {
     pub fn new() -> Self {
         Self {
-            existing_bundle: None,
             instances: Vec::new(),
             add_offset_tables: false,
         }
-    }
-
-    pub fn from_owner_bundle_json(owner_bundle_json: &str) -> Result<Self> {
-        let val: Value =
-            serde_json::from_str(owner_bundle_json).map_err(|e| Error::Json(e.to_string()))?;
-        let _ = parse_study_index(owner_bundle_json.as_bytes())?;
-        Ok(Self {
-            existing_bundle: Some(val),
-            instances: Vec::new(),
-            add_offset_tables: false,
-        })
     }
 
     /// When on, `pack` gives each encapsulated multi-frame instance that has an empty Basic Offset
@@ -122,7 +109,7 @@ impl IngestSession {
     /// into `{fileId}.bin` with a fresh 16-byte `fileId` and 32-byte `key`, and builds
     /// the master owner FHIR R4 Bundle.
     pub fn pack(self, last_updated: &str) -> Result<PackedStudySet> {
-        if self.instances.is_empty() && self.existing_bundle.is_none() {
+        if self.instances.is_empty() {
             return Err(Error::Dicom("no DICOM instances ingested".into()));
         }
 
@@ -266,15 +253,8 @@ impl IngestSession {
             studies: study_inputs,
         });
 
-        let final_bundle = if let Some(mut existing) = self.existing_bundle {
-            merge_bundles(&mut existing, &new_bundle, last_updated)?;
-            existing
-        } else {
-            new_bundle
-        };
-
         let owner_bundle_json =
-            serde_json::to_string(&final_bundle).map_err(|e| Error::Json(e.to_string()))?;
+            serde_json::to_string(&new_bundle).map_err(|e| Error::Json(e.to_string()))?;
         let index = parse_study_index(owner_bundle_json.as_bytes())?;
 
         Ok(PackedStudySet {
@@ -284,33 +264,6 @@ impl IngestSession {
             series_files,
         })
     }
-}
-
-fn merge_bundles(existing: &mut Value, added: &Value, last_updated: &str) -> Result<()> {
-    existing["meta"]["lastUpdated"] = json!(last_updated);
-    let existing_entries = existing
-        .get_mut("entry")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| Error::InvalidBundle("existing Bundle missing entry".into()))?;
-    let added_entries = added
-        .get("entry")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::InvalidBundle("added Bundle missing entry".into()))?;
-
-    let mut study_counter = existing_entries.len();
-    for entry in added_entries {
-        let Some(res) = entry.get("resource") else {
-            continue;
-        };
-        if res.get("resourceType").and_then(Value::as_str) == Some("ImagingStudy") {
-            study_counter += 1;
-            let mut cloned_entry = entry.clone();
-            cloned_entry["fullUrl"] = json!(format!("urn:uuid:imagingstudy-{study_counter}"));
-            cloned_entry["resource"]["id"] = json!(format!("study-{study_counter}"));
-            existing_entries.push(cloned_entry);
-        }
-    }
-    Ok(())
 }
 
 /// Builds a link-specific Bundle (`bundle.jwe`) from the owner's full Bundle JSON,

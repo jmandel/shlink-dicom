@@ -1,7 +1,6 @@
 pub mod bundle;
 pub mod crypto;
 pub mod dicom_io;
-pub mod export;
 pub mod jwe;
 pub mod offset_tables;
 pub mod packer;
