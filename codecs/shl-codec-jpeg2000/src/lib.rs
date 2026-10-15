@@ -18,11 +18,37 @@
 pub mod prep;
 
 use hayro_jpeg2000::{DecodeSettings, DecoderContext, Image};
-use shl_codec_common::{DecodeError, DecodedFrame, FrameInfo, Result};
+use shl_codec_common::{scaled_extent, DecodeError, DecodedFrame, DecodedScaled, FrameInfo, Result};
 
 /// Decode one frame's codestream. See `shl_codec_common::DecodeFn`.
 pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame> {
-    decode(codestream, info, false)
+    decode(codestream, info, false, 0)
+}
+
+/// Decode one frame at 1/2^`scale_log2` size (`shl_codec_common::DecodeScaledFn`) by
+/// discarding the `scale_log2` highest resolution levels, as OpenJPEG's `reduce` does: the
+/// code-blocks of those levels are not decoded and their wavelet synthesis is skipped (vendored
+/// hayro patch 10). The result is ceil(rows / 2^s) × ceil(columns / 2^s).
+///
+/// Returns `Unsupported` (the caller then decodes in full and downsamples) when the frame
+/// cannot be reduced that way:
+/// - some component has fewer than `scale_log2` decomposition levels;
+/// - the image origin (XOsiz, YOsiz) is not (0, 0), where the reduced grid would not be the
+///   CONTRACT size, or hayro's reduced placement is not trusted;
+/// - subsampled (sYCC) components, unless the frame is one tile whose size is a multiple of the
+///   subsampling times 2^s (the case checked against OpenJPEG).
+pub fn decode_frame_scaled(codestream: &[u8], info: &FrameInfo, scale_log2: u8) -> Result<DecodedScaled> {
+    decode_scaled(codestream, info, false, scale_log2)
+}
+
+/// [`decode_frame_scaled`] through hayro's HT path (for `shl-codec-htj2k`).
+pub fn decode_frame_scaled_high_throughput(codestream: &[u8], info: &FrameInfo, scale_log2: u8) -> Result<DecodedScaled> {
+    decode_scaled(codestream, info, true, scale_log2)
+}
+
+fn decode_scaled(codestream: &[u8], info: &FrameInfo, high_throughput: bool, scale_log2: u8) -> Result<DecodedScaled> {
+    let frame = decode(codestream, info, high_throughput, scale_log2)?;
+    Ok(DecodedScaled { frame, rows: scaled_extent(info.rows, scale_log2), columns: scaled_extent(info.columns, scale_log2) })
 }
 
 /// Decode one HTJ2K frame through hayro with its HT block decoder enabled (vendored patch 5),
@@ -30,11 +56,37 @@ pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame>
 /// code-blocks, more than one HT set, unusual code-block styles); the caller then uses
 /// another decoder. JPEG 2000 frames decode exactly as with [`decode_frame`].
 pub fn decode_frame_high_throughput(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame> {
-    decode(codestream, info, true)
+    decode(codestream, info, true, 0)
 }
 
-fn decode(codestream: &[u8], info: &FrameInfo, high_throughput: bool) -> Result<DecodedFrame> {
-    let prep = prep::prepare(codestream, info)?;
+/// `reduce` > 0: discard that many resolution levels; the frame is then `out` (the reduced
+/// size) instead of `info`.
+fn decode(codestream: &[u8], full: &FrameInfo, high_throughput: bool, reduce: u8) -> Result<DecodedFrame> {
+    let prep = prep::prepare(codestream, full)?;
+    let reduced;
+    let info = if reduce == 0 {
+        full
+    } else {
+        let h = &prep.header;
+        if reduce > 31 {
+            return Err(DecodeError::Unsupported(format!("JPEG 2000 reduction by 2^{reduce}")));
+        }
+        if h.x0 != 0 || h.y0 != 0 {
+            return Err(DecodeError::Unsupported("reduced JPEG 2000 decode with a non-zero image origin".into()));
+        }
+        if let Some((dx, dy)) = prep.sycc() {
+            // Verified against OpenJPEG only for one tile where every reduced chroma sample
+            // covers whole reduced pixels (no odd-size edges); anything else falls back.
+            let (sx, sy) = (u64::from(dx) << reduce, u64::from(dy) << reduce);
+            if h.tiles != 1 || !u64::from(h.width).is_multiple_of(sx) || !u64::from(h.height).is_multiple_of(sy) {
+                return Err(DecodeError::Unsupported(
+                    "reduced JPEG 2000 decode of subsampled components with several tiles or an odd-sized edge".into(),
+                ));
+            }
+        }
+        reduced = FrameInfo { rows: scaled_extent(full.rows, reduce), columns: scaled_extent(full.columns, reduce), ..full.clone() };
+        &reduced
+    };
     // The DC level shift is added below, while converting, instead of in a separate pass in
     // hayro (vendored patch 8): the same f32 additions, in the same order.
     let settings = DecodeSettings {
@@ -43,9 +95,19 @@ fn decode(codestream: &[u8], info: &FrameInfo, high_throughput: bool) -> Result<
         target_resolution: None,
         high_throughput,
         defer_level_shift: true,
+        reduce: (reduce > 0).then_some(reduce),
     };
-    let image = Image::new(prep.codestream, &settings).map_err(map_err)?;
+    let image = Image::new(prep.codestream, &settings).map_err(|e| match e {
+        // Patch 10 refuses a reduction larger than some component's decomposition levels.
+        hayro_jpeg2000::DecodeError::Format(hayro_jpeg2000::FormatError::Unsupported) if reduce > 0 => DecodeError::Unsupported(
+            format!("JPEG 2000: some component has fewer than {reduce} decomposition levels (or the stream is unsupported)"),
+        ),
+        e => map_err(e),
+    })?;
     if image.width() != info.columns || image.height() != info.rows {
+        if reduce > 0 {
+            return Err(DecodeError::Unsupported("reduced JPEG 2000 grid differs from ceil(size / 2^s)".into()));
+        }
         return Err(DecodeError::Invalid("decoder disagrees with SIZ on the image size".into()));
     }
     let mut ctx = DecoderContext::default();

@@ -135,6 +135,13 @@ pub struct DecodeSettings {
     /// only: it is ignored for JP2 files, whose colour conversions need shifted samples. Off
     /// by default.
     pub defer_level_shift: bool,
+    /// shl patch 10: decode at reduced resolution by discarding exactly this many of the
+    /// highest resolution levels (OpenJPEG's `reduce`): the image is ceil(size / 2^n) on the
+    /// reference grid, and the code-blocks and wavelet synthesis of the discarded levels are
+    /// skipped. Unlike `target_resolution`, a component with fewer than `n` decomposition
+    /// levels gives `FormatError::Unsupported` instead of a smaller reduction. Takes
+    /// precedence over `target_resolution`. `None` by default.
+    pub reduce: Option<u8>,
 }
 
 impl Default for DecodeSettings {
@@ -145,6 +152,7 @@ impl Default for DecodeSettings {
             target_resolution: None,
             high_throughput: false,
             defer_level_shift: false,
+            reduce: None,
         }
     }
 }

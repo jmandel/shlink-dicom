@@ -157,3 +157,35 @@ At the start of the round, the shared benchmark put hayro at 1.4–2× OpenJPEG.
 - **The HT block decoder** is 55–60% of an HTJ2K decode, about 20 cycles per sample. It is scalar; OpenJPH decodes MagSgn with SIMD (SSSE3, AVX2 and wasm SIMD versions). Porting that approach would close most of the remaining gap, in wasm especially. It needs per-lane variable shifts, which fearless_simd does not offer on every target, and `#![forbid(unsafe_code)]` rules out raw intrinsics.
 - **MQ tier-1** for lossless JPEG 2000: the code is already tuned; what is visible in profiles is bounds checks on the coefficient arrays (about 5%) and register spills.
 - **Streams hayro declines** (MIXED, MULTIHT) still decode through oxideav at phase 2c speed.
+
+## Reduced-resolution decode
+
+`decode_frame_scaled` in `shl-codec-jpeg2000` and `shl-codec-htj2k` decodes at 1/2^s by discarding the s highest resolution levels (vendored hayro patch 10; [jpeg2000 FORMAT.md, Reduced-resolution decode](../jpeg2000/FORMAT.md#reduced-resolution-decode)). Their code-blocks are never decoded. This table compares it with what a thumbnail costs without it: a full decode followed by a box downsample.
+
+**Method:**
+- **Machine:** Ryzen 5 3600, native release build.
+- **Tool:** `cargo run --release -p shl-codec-htj2k --example scaled_bench -- <frames dir> 20 loop S | loopfull S`, on frame 0.
+  - `loop S` runs `decode_frame_scaled`.
+  - `loopfull S` runs `decode_frame` followed by a box downsample by 2^S. The downsample loop is the same one used in the jpeg-dct measurement, where at 1/8 it cost about 3 ms for 12-bit mono and 4 ms for RGB at these sizes.
+- **Counts:** user-mode instructions and cycles per decode come from `perf stat` over 20 decodes, and include start-up and reading the file.
+- **Load:** the load average was 3–6, so the times (minimum of 20) are usable too.
+
+| Case | Scale | Full decode + box: instructions / min time | Reduced decode: instructions / min time | Instruction ratio |
+|---|---|---|---|---|
+| JPEG 2000 `gen-bench-dx2048-u12-openjpeg-rev` (2048², 12-bit, lossless) | 1/8 | 2,927M / 413 ms | 50M / 7.3 ms | 59× |
+| | 1/4 | 2,944M / 417 ms | 177M / 25.7 ms | 17× |
+| | 1/2 | 3,006M / 420 ms | 708M / 103 ms | 4.2× |
+| JPEG 2000 `gen-bench-dx2048-u12-openjpeg-cr20` (2048², 12-bit, 9/7 at 20:1) | 1/8 | 583M / 70.6 ms | 30M / 4.1 ms | 19× |
+| | 1/4 | 600M / 73.2 ms | 70M / 9.8 ms | 8.5× |
+| | 1/2 | 662M / 76.4 ms | 186M / 26.1 ms | 3.6× |
+| JPEG 2000 `gen-bench-photo-rgb8-2048-openjpeg-cr20` (2048², 8-bit RGB, ICT, 9/7) | 1/8 | 1,530M / 169 ms | 104M / 14.4 ms | 15× |
+| | 1/4 | 1,563M / 171 ms | 255M / 33.6 ms | 6.1× |
+| | 1/2 | 1,671M / 182 ms | 637M / 113 ms | 2.6× |
+| HTJ2K `gen-bench-dx2048-u12-openjph-rev` (2048², 12-bit, lossless) | 1/8 | 421M / 60.0 ms | 9.0M / 1.7 ms | 47× |
+| | 1/4 | 439M / 58.1 ms | 28M / 5.8 ms | 16× |
+| | 1/2 | 501M / 67.9 ms | 104M / 19.1 ms | 4.8× |
+| HTJ2K `gen-bench-photo-rgb8-2048-openjph-q` (2048², 8-bit RGB, 9/7) | 1/8 | 1,179M / 129 ms | 28M / 2.9 ms | 43× |
+| | 1/4 | 1,211M / 133 ms | 83M / 9.6 ms | 15× |
+| | 1/2 | 1,320M / 145 ms | 297M / 33.7 ms | 4.5× |
+
+Each level discarded removes about three quarters of the remaining code-blocks and of the wavelet synthesis, so the saving compounds. It is largest for lossless JPEG 2000, where MQ tier-1 decoding of the finest levels is almost all of the full decode's cost. At 1/8 a 2048² lossless radiograph costs 7 ms instead of 413 ms. That is less than the 12.5 ms a 1/8 JPEG decode of the 2320×2920 radiograph costs ([jpeg-dct PERF.md](../jpeg-dct/PERF.md#reduced-resolution-decode)), because JPEG must still entropy-decode every coefficient.

@@ -22,3 +22,10 @@ bench = false
 # Not part of the codecs workspace.
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "decode_scaled"
+path = "fuzz_targets/decode_scaled.rs"
+test = false
+doc = false
+bench = false

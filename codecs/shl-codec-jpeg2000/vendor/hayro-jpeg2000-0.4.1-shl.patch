@@ -1,6 +1,6 @@
 diff -ruN a/src/error.rs b/src/error.rs
---- a/src/error.rs	2026-10-15 08:13:19.194693394 -0500
-+++ b/src/error.rs	2026-10-15 08:13:19.202654212 -0500
+--- a/src/error.rs	2026-10-15 09:15:46.837090447 -0500
++++ b/src/error.rs	2026-10-15 09:15:46.840064049 -0500
 @@ -106,6 +106,10 @@
      InvalidProgressionIterator,
      /// Unexpected end of data.
@@ -21,7 +21,7 @@ diff -ruN a/src/error.rs b/src/error.rs
      }
  }
 diff -ruN a/src/integration.rs b/src/integration.rs
---- a/src/integration.rs	2026-10-15 08:13:19.197312160 -0500
+--- a/src/integration.rs	2026-10-15 09:15:46.837181269 -0500
 +++ b/src/integration.rs	1969-12-31 18:00:00.000000000 -0600
 @@ -1,342 +0,0 @@
 -//! Integration with the [image] crate
@@ -367,9 +367,26 @@ diff -ruN a/src/integration.rs b/src/integration.rs
 -    true
 -}
 diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
---- a/src/j2c/build.rs	2026-10-15 08:13:19.198815997 -0500
-+++ b/src/j2c/build.rs	2026-10-15 08:13:19.202951855 -0500
-@@ -263,6 +263,7 @@
+--- a/src/j2c/build.rs	2026-10-15 09:15:46.837464726 -0500
++++ b/src/j2c/build.rs	2026-10-15 09:15:46.840477462 -0500
+@@ -26,6 +26,16 @@
+ ) -> Result<()> {
+     let mut component_samples = vec![];
+ 
++    // shl patch 10: a tile-part COD/COC may give a component fewer resolution levels than the
++    // main header did; a reduction it cannot provide is refused instead of underflowing.
++    if skipped_resolution_levels > 0
++        && tile
++            .component_tiles()
++            .any(|c| c.component_info.num_resolution_levels() <= skipped_resolution_levels)
++    {
++        return Err(crate::FormatError::Unsupported.into());
++    }
++
+     for component_tile in tile.component_tiles() {
+         let decoded_resolutions =
+             component_tile.component_info.num_resolution_levels() - skipped_resolution_levels;
+@@ -263,6 +273,7 @@
                  number_of_coding_passes: 0,
                  layers: start..end,
                  non_empty_layer_count: 0,
@@ -377,7 +394,7 @@ diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
              });
  
              x += code_block_width;
-@@ -329,6 +330,9 @@
+@@ -329,6 +340,9 @@
      pub(crate) number_of_coding_passes: u8,
      pub(crate) l_block: u32,
      pub(crate) non_empty_layer_count: u8,
@@ -388,8 +405,8 @@ diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
  
  pub(crate) struct Segment<'a> {
 diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
---- a/src/j2c/codestream.rs	2026-10-15 08:13:19.199099684 -0500
-+++ b/src/j2c/codestream.rs	2026-10-15 08:13:19.203002882 -0500
+--- a/src/j2c/codestream.rs	2026-10-15 09:15:46.837538025 -0500
++++ b/src/j2c/codestream.rs	2026-10-15 09:15:46.840265691 -0500
 @@ -9,7 +9,9 @@
  use crate::error::{MarkerError, Result, ValidationError, bail, err};
  use crate::reader::BitReader;
@@ -485,7 +502,39 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
              markers::CRG => {
                  reader.read_marker()?;
                  skip_marker_segment(reader);
-@@ -180,6 +234,9 @@
+@@ -143,8 +197,15 @@
+         .map(|c| c.num_resolution_levels())
+         .min()
+         .unwrap();
+-    let skipped_resolution_levels =
+-        if let Some((target_width, target_height)) = settings.target_resolution {
++    // shl patch 10: an exact reduction, refused when some component cannot provide it.
++    if let Some(n) = settings.reduce {
++        if u16::from(n) > u16::from(min_num_resolution_levels) - 1 {
++            return Err(crate::FormatError::Unsupported.into());
++        }
++    }
++    let skipped_resolution_levels = if let Some(n) = settings.reduce {
++        n
++    } else if let Some((target_width, target_height)) = settings.target_resolution {
+             let width_log = size_data
+                 .image_width()
+                 .checked_div(target_width)
+@@ -156,11 +217,10 @@
+                 .and_then(|v| v.checked_ilog2())
+                 .unwrap_or(0);
+ 
+-            width_log.min(height_log) as u8
++            (width_log.min(height_log) as u8).min(min_num_resolution_levels - 1)
+         } else {
+             0
+-        }
+-        .min(min_num_resolution_levels - 1);
++        };
+ 
+     // If the user defined a maximum resolution level that is lower than the
+     // maximum available one, the final image needs to be shrinked further.
+@@ -180,6 +240,9 @@
              .collect(),
          skipped_resolution_levels,
          strict: settings.strict,
@@ -495,7 +544,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
      };
  
      validate(&header)?;
-@@ -353,6 +410,27 @@
+@@ -353,6 +416,27 @@
      }
  }
  
@@ -523,7 +572,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  /// Code-block style flags (Table A.19).
  #[derive(Debug, Clone, Copy, Default)]
  pub(crate) struct CodeBlockStyle {
-@@ -361,6 +439,10 @@
+@@ -361,6 +445,10 @@
      pub(crate) termination_on_each_pass: bool,
      pub(crate) vertically_causal_context: bool,
      pub(crate) segmentation_symbols: bool,
@@ -534,7 +583,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  }
  
  impl CodeBlockStyle {
-@@ -373,6 +455,9 @@
+@@ -373,6 +461,9 @@
              // The predictable termination flag is only informative and
              // can therefore be ignored.
              segmentation_symbols: (value & 0x20) != 0,
@@ -544,7 +593,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
          }
      }
  }
-@@ -758,11 +843,6 @@
+@@ -758,11 +849,6 @@
      })
  }
  
@@ -556,7 +605,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
  pub(crate) fn skip_marker_segment(reader: &mut BitReader<'_>) -> Option<()> {
      let length = reader.read_u16()?.checked_sub(2)?;
      reader.skip_bytes(length as usize)?;
-@@ -780,7 +860,6 @@
+@@ -780,7 +866,6 @@
  
      let num_layers = reader.read_u16()?;
  
@@ -564,7 +613,7 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
      if num_layers == 0 || num_layers > MAX_LAYER_COUNT as u16 {
          return None;
      }
-@@ -937,6 +1016,10 @@
+@@ -937,6 +1022,10 @@
      pub(crate) const COD: u8 = 0x52;
      /// Coding component - 'COC'.
      pub(crate) const COC: u8 = 0x53;
@@ -576,8 +625,8 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
      pub(crate) const RGN: u8 = 0x5E;
      /// Quantization default - 'QCD'.
 diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
---- a/src/j2c/decode.rs	2026-10-15 08:13:19.199304682 -0500
-+++ b/src/j2c/decode.rs	2026-10-15 08:13:19.203074237 -0500
+--- a/src/j2c/decode.rs	2026-10-15 09:15:46.837617746 -0500
++++ b/src/j2c/decode.rs	2026-10-15 09:15:46.840544690 -0500
 @@ -43,6 +43,12 @@
  
      ctx.reset(header, &tiles[0])?;
@@ -793,7 +842,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
  fn apply_sign_shift(channel_data: &mut [ComponentData], component_infos: &[ComponentInfo]) {
      use crate::math::{Level, dispatch, f32x8};
  
-@@ -454,9 +604,37 @@
+@@ -454,9 +604,42 @@
      tile_ctx: &mut TileDecodeContext,
      channel_data: &mut ComponentData,
      component_info: &ComponentInfo,
@@ -828,10 +877,15 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
 +        }
 +    }
 +
++    // shl patch 10: at a reduced resolution a small tile can be empty; nothing to store.
++    if header.skipped_resolution_levels > 0 && (idwt_output.rect.width() == 0 || idwt_output.rect.height() == 0) {
++        return;
++    }
++
      let component_tile = ComponentTile::new(tile, component_info);
      let resolution_tile = ResolutionTile::new(
          component_tile,
-@@ -502,7 +680,14 @@
+@@ -502,7 +685,14 @@
                  [resolution_tile.rect.x0.saturating_sub(image_x_offset) as usize..]
                  [..input_row.len()];
  
@@ -847,7 +901,28 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
          }
      } else {
          let image_width = header.size_data.image_width();
-@@ -530,7 +715,8 @@
+@@ -520,17 +710,27 @@
+             .image_area_y_offset
+             .div_ceil(y_shrink_factor);
+ 
++        // shl patch 10: at a reduced resolution the IDWT output covers the resolution tile, not
++        // the full-size component tile, so index it from its own origin (the same origin at
++        // full resolution, where this path is unchanged).
++        let (origin_x, origin_y) = if header.skipped_resolution_levels > 0 {
++            (idwt_output.rect.x0, idwt_output.rect.y0)
++        } else {
++            (component_tile.rect.x0, component_tile.rect.y0)
++        };
++
+         // Otherwise, copy sample by sample.
+         for y in resolution_tile.rect.y0..resolution_tile.rect.y1 {
+-            let relative_y = (y - component_tile.rect.y0) as usize;
++            let relative_y = (y - origin_y) as usize;
+             let reference_grid_y = (scale_y as u32 * y) / y_shrink_factor;
+ 
+             for x in resolution_tile.rect.x0..resolution_tile.rect.x1 {
+-                let relative_x = (x - component_tile.rect.x0) as usize;
++                let relative_x = (x - origin_x) as usize;
                  let reference_grid_x = (scale_x as u32 * x) / x_shrink_factor;
  
                  let sample = idwt_output.coefficients
@@ -859,7 +934,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
                      ..u32::min(reference_grid_x + scale_x as u32, image_width + x_offset)
 diff -ruN a/src/j2c/ht/decode.rs b/src/j2c/ht/decode.rs
 --- a/src/j2c/ht/decode.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/decode.rs	2026-10-15 08:13:19.205803643 -0500
++++ b/src/j2c/ht/decode.rs	2026-10-15 09:15:46.841425097 -0500
 @@ -0,0 +1,640 @@
 +//! HT block decoder: cleanup, `SigProp` and `MagRef` passes (T.814 §7).
 +//!
@@ -1503,7 +1578,7 @@ diff -ruN a/src/j2c/ht/decode.rs b/src/j2c/ht/decode.rs
 +}
 diff -ruN a/src/j2c/ht/encode.rs b/src/j2c/ht/encode.rs
 --- a/src/j2c/ht/encode.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/encode.rs	2026-10-15 08:13:19.205130779 -0500
++++ b/src/j2c/ht/encode.rs	2026-10-15 09:15:46.841052071 -0500
 @@ -0,0 +1,345 @@
 +//! HT block encoder: a single self-contained cleanup pass (T.814 §6).
 +//!
@@ -1852,7 +1927,7 @@ diff -ruN a/src/j2c/ht/encode.rs b/src/j2c/ht/encode.rs
 +}
 diff -ruN a/src/j2c/ht/LICENSE b/src/j2c/ht/LICENSE
 --- a/src/j2c/ht/LICENSE	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/LICENSE	2026-10-15 08:13:19.206031995 -0500
++++ b/src/j2c/ht/LICENSE	2026-10-15 09:15:46.854600980 -0500
 @@ -0,0 +1,53 @@
 +The files in this directory come from ndic-htj2k 0.2.5 (src/block/), MIT licence:
 +
@@ -1909,7 +1984,7 @@ diff -ruN a/src/j2c/ht/LICENSE b/src/j2c/ht/LICENSE
 +OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 diff -ruN a/src/j2c/ht/mel.rs b/src/j2c/ht/mel.rs
 --- a/src/j2c/ht/mel.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/mel.rs	2026-10-15 08:13:19.205553209 -0500
++++ b/src/j2c/ht/mel.rs	2026-10-15 09:15:46.841171627 -0500
 @@ -0,0 +1,331 @@
 +//! MEL (adaptive run-length) coder — T.814 §7.1.1 / §7.3.4.
 +//!
@@ -2244,7 +2319,7 @@ diff -ruN a/src/j2c/ht/mel.rs b/src/j2c/ht/mel.rs
 +}
 diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 --- a/src/j2c/ht/mod.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/mod.rs	2026-10-15 08:13:19.205761192 -0500
++++ b/src/j2c/ht/mod.rs	2026-10-15 09:15:46.841377888 -0500
 @@ -0,0 +1,68 @@
 +//! The HTJ2K (ITU-T T.814) block decoder: HT cleanup, SigProp and MagRef passes.
 +//!
@@ -2316,7 +2391,7 @@ diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 +}
 diff -ruN a/src/j2c/ht/streams.rs b/src/j2c/ht/streams.rs
 --- a/src/j2c/ht/streams.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/streams.rs	2026-10-15 08:13:19.205856212 -0500
++++ b/src/j2c/ht/streams.rs	2026-10-15 09:15:46.841487205 -0500
 @@ -0,0 +1,654 @@
 +//! Sub-bitstream readers and writers for the HT cleanup / refinement passes.
 +//!
@@ -2974,7 +3049,7 @@ diff -ruN a/src/j2c/ht/streams.rs b/src/j2c/ht/streams.rs
 +}
 diff -ruN a/src/j2c/ht/tables_data.rs b/src/j2c/ht/tables_data.rs
 --- a/src/j2c/ht/tables_data.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tables_data.rs	2026-10-15 08:13:19.205676502 -0500
++++ b/src/j2c/ht/tables_data.rs	2026-10-15 09:15:46.841276897 -0500
 @@ -0,0 +1,938 @@
 +//! CxtVLC / UVLC lookup tables for the HT (FBCOT) block coder.
 +//!
@@ -3916,7 +3991,7 @@ diff -ruN a/src/j2c/ht/tables_data.rs b/src/j2c/ht/tables_data.rs
 +];
 diff -ruN a/src/j2c/ht/tables.rs b/src/j2c/ht/tables.rs
 --- a/src/j2c/ht/tables.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tables.rs	2026-10-15 08:13:19.205588806 -0500
++++ b/src/j2c/ht/tables.rs	2026-10-15 09:15:46.841223345 -0500
 @@ -0,0 +1,151 @@
 +//! Lookup-table access for the HT block coder.
 +//!
@@ -4071,7 +4146,7 @@ diff -ruN a/src/j2c/ht/tables.rs b/src/j2c/ht/tables.rs
 +}
 diff -ruN a/src/j2c/ht/tests.rs b/src/j2c/ht/tests.rs
 --- a/src/j2c/ht/tests.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tests.rs	2026-10-15 08:13:19.205312291 -0500
++++ b/src/j2c/ht/tests.rs	2026-10-15 09:15:46.841122374 -0500
 @@ -0,0 +1,158 @@
 +//! Round-trip tests for the HT block decoder: blocks coded by the (test-only) encoder must
 +//! decode back exactly. Adapted from ndic-htj2k's `tests/block_roundtrip.rs` (MIT), with a
@@ -4232,8 +4307,8 @@ diff -ruN a/src/j2c/ht/tests.rs b/src/j2c/ht/tests.rs
 +    std::println!("{ns:.2} ns/sample ({} bytes coded)", coded.len());
 +}
 diff -ruN a/src/j2c/idwt.rs b/src/j2c/idwt.rs
---- a/src/j2c/idwt.rs	2026-10-15 08:13:19.199312193 -0500
-+++ b/src/j2c/idwt.rs	2026-10-15 08:13:19.203136635 -0500
+--- a/src/j2c/idwt.rs	2026-10-15 09:15:46.837673211 -0500
++++ b/src/j2c/idwt.rs	2026-10-15 09:15:46.840611847 -0500
 @@ -175,12 +175,21 @@
      transform: WaveletTransform,
      storage: &DecompositionStorage<'_>,
@@ -4757,8 +4832,8 @@ diff -ruN a/src/j2c/idwt.rs b/src/j2c/idwt.rs
          |s1, s2, s3| (s2 + s3).mul_add(neg_alpha, s1),
          #[inline(always)]
 diff -ruN a/src/j2c/mod.rs b/src/j2c/mod.rs
---- a/src/j2c/mod.rs	2026-10-15 08:13:19.199777317 -0500
-+++ b/src/j2c/mod.rs	2026-10-15 08:13:19.202737329 -0500
+--- a/src/j2c/mod.rs	2026-10-15 09:15:46.837779282 -0500
++++ b/src/j2c/mod.rs	2026-10-15 09:15:46.840207401 -0500
 @@ -3,6 +3,7 @@
  mod build;
  mod codestream;
@@ -4768,8 +4843,8 @@ diff -ruN a/src/j2c/mod.rs b/src/j2c/mod.rs
  mod mct;
  mod progression;
 diff -ruN a/src/j2c/progression.rs b/src/j2c/progression.rs
---- a/src/j2c/progression.rs	2026-10-15 08:13:19.199885782 -0500
-+++ b/src/j2c/progression.rs	2026-10-15 08:13:19.203226174 -0500
+--- a/src/j2c/progression.rs	2026-10-15 09:15:46.837822384 -0500
++++ b/src/j2c/progression.rs	2026-10-15 09:15:46.840723749 -0500
 @@ -120,7 +120,8 @@
      let mut resolution = input.min_resolution();
      let mut component_idx = input.min_comp();
@@ -4806,8 +4881,8 @@ diff -ruN a/src/j2c/progression.rs b/src/j2c/progression.rs
                      ResolutionTile::new(component_tiles[component_idx as usize], resolution);
  
 diff -ruN a/src/j2c/segment.rs b/src/j2c/segment.rs
---- a/src/j2c/segment.rs	2026-10-15 08:13:19.200052898 -0500
-+++ b/src/j2c/segment.rs	2026-10-15 08:13:19.204958874 -0500
+--- a/src/j2c/segment.rs	2026-10-15 09:15:46.837917474 -0500
++++ b/src/j2c/segment.rs	2026-10-15 09:15:46.840822937 -0500
 @@ -8,7 +8,8 @@
  use super::decode::DecompositionStorage;
  use super::progression::ProgressionData;
@@ -4938,8 +5013,8 @@ diff -ruN a/src/j2c/segment.rs b/src/j2c/segment.rs
          let end = storage.segments.len();
          layer.segments = Some(start..end);
 diff -ruN a/src/j2c/tile.rs b/src/j2c/tile.rs
---- a/src/j2c/tile.rs	2026-10-15 08:13:19.200259429 -0500
-+++ b/src/j2c/tile.rs	2026-10-15 08:13:19.205049716 -0500
+--- a/src/j2c/tile.rs	2026-10-15 09:15:46.838023354 -0500
++++ b/src/j2c/tile.rs	2026-10-15 09:15:46.840930370 -0500
 @@ -828,6 +828,9 @@
              ppm_packets: vec![],
              skipped_resolution_levels: 0,
@@ -4951,8 +5026,8 @@ diff -ruN a/src/j2c/tile.rs b/src/j2c/tile.rs
  
          let tile_0_0 = Tile::new(0, &header);
 diff -ruN a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs	2026-10-15 08:13:19.201082387 -0500
-+++ b/src/lib.rs	2026-10-15 08:13:19.206426942 -0500
+--- a/src/lib.rs	2026-10-15 09:15:46.838464109 -0500
++++ b/src/lib.rs	2026-10-15 09:15:46.856402134 -0500
 @@ -64,6 +64,8 @@
  The crate is `no_std` compatible but requires an allocator to be available.
  */
@@ -4971,7 +5046,7 @@ diff -ruN a/src/lib.rs b/src/lib.rs
  mod j2c;
  mod jp2;
  pub(crate) mod reader;
-@@ -127,6 +127,14 @@
+@@ -127,6 +127,21 @@
      pub strict: bool,
      /// A hint for the target resolution that the image should be decoded at.
      pub target_resolution: Option<(u32, u32)>,
@@ -4983,19 +5058,27 @@ diff -ruN a/src/lib.rs b/src/lib.rs
 +    /// only: it is ignored for JP2 files, whose colour conversions need shifted samples. Off
 +    /// by default.
 +    pub defer_level_shift: bool,
++    /// shl patch 10: decode at reduced resolution by discarding exactly this many of the
++    /// highest resolution levels (OpenJPEG's `reduce`): the image is ceil(size / 2^n) on the
++    /// reference grid, and the code-blocks and wavelet synthesis of the discarded levels are
++    /// skipped. Unlike `target_resolution`, a component with fewer than `n` decomposition
++    /// levels gives `FormatError::Unsupported` instead of a smaller reduction. Takes
++    /// precedence over `target_resolution`. `None` by default.
++    pub reduce: Option<u8>,
  }
  
  impl Default for DecodeSettings {
-@@ -135,6 +143,8 @@
+@@ -135,6 +150,9 @@
              resolve_palette_indices: true,
              strict: false,
              target_resolution: None,
 +            high_throughput: false,
 +            defer_level_shift: false,
++            reduce: None,
          }
      }
  }
-@@ -160,7 +170,9 @@
+@@ -160,7 +178,9 @@
      /// Try to create a new JPEG2000 image from the given data.
      pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
          if data.starts_with(JP2_MAGIC) {
@@ -5007,8 +5090,8 @@ diff -ruN a/src/lib.rs b/src/lib.rs
              j2c::parse(data, settings)
          } else {
 diff -ruN a/src/math.rs b/src/math.rs
---- a/src/math.rs	2026-10-15 08:13:19.201252799 -0500
-+++ b/src/math.rs	2026-10-15 08:13:19.206348534 -0500
+--- a/src/math.rs	2026-10-15 09:15:46.838583535 -0500
++++ b/src/math.rs	2026-10-15 09:15:46.856294981 -0500
 @@ -454,7 +454,25 @@
  
  #[inline(always)]
@@ -5084,8 +5167,8 @@ diff -ruN a/src/math.rs b/src/math.rs
 +    }
 +}
 diff -ruN a/src/reader.rs b/src/reader.rs
---- a/src/reader.rs	2026-10-15 08:13:19.201328633 -0500
-+++ b/src/reader.rs	2026-10-15 08:13:19.206384332 -0500
+--- a/src/reader.rs	2026-10-15 09:15:46.838639371 -0500
++++ b/src/reader.rs	2026-10-15 09:15:46.856350837 -0500
 @@ -150,11 +150,11 @@
  
      #[inline]

@@ -6,8 +6,12 @@
 //! - where the fallback applies (every syntax without a reduced codec decode), the result equals
 //!   the full decode box-downsampled by the independent reference below, exactly;
 //! - JPEG baseline/extended uses the codec's reduced decode (checked sample for sample against
-//!   libjpeg-turbo by codec-corpus/formats/jpeg-dct/scaled/check_scaled.py); here its mean
-//!   difference from the box downsample must stay small.
+//!   libjpeg-turbo by codec-corpus/formats/jpeg-dct/scaled/check_scaled.py); its reduced IDCT is
+//!   a block average, so here its mean difference from the box downsample must stay small.
+//! - JPEG 2000 and HTJ2K reduce by discarding resolution levels (checked against OpenJPEG's
+//!   `opj_decompress -r` by codec-corpus/formats/jpeg2000/scaled/check_scaled.py). The wavelet
+//!   low-pass is not a box filter (the 5/3 LL is (−1, 2, 6, 2, −1)/8 per level), so on sharp or
+//!   noisy content it differs from a box average by design; the difference is only printed.
 //!
 //! Slow in debug builds: run with `cargo test --release -p shl-dicom-decode --test scaled_corpus`.
 //! `SCALED_FORMATS=rle,jpeg-ls` limits the formats.
@@ -118,7 +122,19 @@ fn scaled_matches_full_decode_downsampled() {
                     continue;
                 }
                 let reduced = scaled_codec_for(&full.transfer_syntax).is_some() && full.photometric != "PALETTE COLOR";
-                if reduced {
+                let wavelet = matches!(
+                    full.transfer_syntax.as_str(),
+                    "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
+                );
+                if reduced && wavelet {
+                    let mean = got.iter().zip(&want).map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / got.len() as f64;
+                    if s == 3 {
+                        eprintln!("note {name}/{case} 1/{n}: wavelet reduction, mean |diff| {mean:.2} from the box downsample");
+                    }
+                    if s == 1 {
+                        codec_path += 1;
+                    }
+                } else if reduced {
                     // The codec's own reduced decode: close to the box downsample, not equal
                     // (colour more so: chroma is upsampled or not at a different stage). A sanity
                     // bound against gross errors (channel order, offsets); exactness is checked

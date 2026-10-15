@@ -197,8 +197,15 @@ pub(crate) fn read_header<'a>(
         .map(|c| c.num_resolution_levels())
         .min()
         .unwrap();
-    let skipped_resolution_levels =
-        if let Some((target_width, target_height)) = settings.target_resolution {
+    // shl patch 10: an exact reduction, refused when some component cannot provide it.
+    if let Some(n) = settings.reduce {
+        if u16::from(n) > u16::from(min_num_resolution_levels) - 1 {
+            return Err(crate::FormatError::Unsupported.into());
+        }
+    }
+    let skipped_resolution_levels = if let Some(n) = settings.reduce {
+        n
+    } else if let Some((target_width, target_height)) = settings.target_resolution {
             let width_log = size_data
                 .image_width()
                 .checked_div(target_width)
@@ -210,11 +217,10 @@ pub(crate) fn read_header<'a>(
                 .and_then(|v| v.checked_ilog2())
                 .unwrap_or(0);
 
-            width_log.min(height_log) as u8
+            (width_log.min(height_log) as u8).min(min_num_resolution_levels - 1)
         } else {
             0
-        }
-        .min(min_num_resolution_levels - 1);
+        };
 
     // If the user defined a maximum resolution level that is lower than the
     // maximum available one, the final image needs to be shrinked further.

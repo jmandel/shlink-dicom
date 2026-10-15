@@ -26,6 +26,16 @@ fn build_decompositions(
 ) -> Result<()> {
     let mut component_samples = vec![];
 
+    // shl patch 10: a tile-part COD/COC may give a component fewer resolution levels than the
+    // main header did; a reduction it cannot provide is refused instead of underflowing.
+    if skipped_resolution_levels > 0
+        && tile
+            .component_tiles()
+            .any(|c| c.component_info.num_resolution_levels() <= skipped_resolution_levels)
+    {
+        return Err(crate::FormatError::Unsupported.into());
+    }
+
     for component_tile in tile.component_tiles() {
         let decoded_resolutions =
             component_tile.component_info.num_resolution_levels() - skipped_resolution_levels;

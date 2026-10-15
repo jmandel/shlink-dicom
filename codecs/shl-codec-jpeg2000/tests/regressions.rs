@@ -93,3 +93,61 @@ fn rgn_is_unsupported() {
     let r = decode_frame(&cs, &info(4, 4, 1, 8, Photometric::Monochrome2));
     assert!(matches!(r, Err(DecodeError::Unsupported(_))), "{r:?}");
 }
+
+/// Fuzz findings in the reduced-resolution path (vendored hayro patch 10), from the
+/// `decode_scaled` target. Each input is the target's: one selector byte, then a codestream.
+/// The FrameInfo is rebuilt as the target builds it. They panicked in hayro: an empty tile at
+/// the reduced level (`chunks_exact(0)`), a tile-part COD with fewer levels than the
+/// reduction (subtraction overflow), and subsampled-component placement indexed against the
+/// full-size tile origin. Any result but a panic is fine; a decoded frame must have the
+/// reduced size.
+#[test]
+fn reduced_decode_fuzz_findings_do_not_panic() {
+    fn siz_dims(cs: &[u8]) -> Option<(u32, u32, u16)> {
+        let i = cs.windows(2).position(|w| w == [0xFF, 0x51])? + 2;
+        let r32 = |k: usize| -> Option<u32> { Some(u32::from_be_bytes(cs.get(i + k..i + k + 4)?.try_into().ok()?)) };
+        let (x, y, xo, yo) = (r32(4)?, r32(8)?, r32(12)?, r32(16)?);
+        let c = u16::from_be_bytes(cs.get(i + 36..i + 38)?.try_into().ok()?);
+        Some((y.checked_sub(yo)?, x.checked_sub(xo)?, c))
+    }
+    let inputs: [&[u8]; 4] = [
+        include_bytes!("data/reduced-fuzz-1.bin"),
+        include_bytes!("data/reduced-fuzz-2.bin"),
+        include_bytes!("data/reduced-fuzz-3.bin"),
+        include_bytes!("data/reduced-fuzz-4.bin"),
+    ];
+    for data in inputs {
+        let (&sel, cs) = data.split_first().unwrap();
+        let (mut rows, mut cols, mut spp) = (64u32, 64u32, 1u16);
+        if sel & 1 == 0 {
+            if let Some((r, c, s)) = siz_dims(cs) {
+                if u64::from(r).saturating_mul(u64::from(c)).saturating_mul(u64::from(s)) <= 1 << 20 {
+                    (rows, cols, spp) = (r, c, s);
+                }
+            }
+        }
+        let info = FrameInfo {
+            rows,
+            columns: cols,
+            samples_per_pixel: spp,
+            bits_allocated: [16, 8, 32, 16][usize::from((sel >> 1) & 3)],
+            bits_stored: 12,
+            pixel_representation: u16::from((sel >> 3) & 1),
+            photometric: [Photometric::Monochrome2, Photometric::Rgb, Photometric::YbrRct, Photometric::Monochrome1]
+                [usize::from((sel >> 4) & 3)],
+            planar_configuration: 0,
+            transfer_syntax: String::new(),
+        };
+        let s = 1 + (sel >> 6);
+        let results = [
+            shl_codec_jpeg2000::decode_frame_scaled(cs, &info, s),
+            shl_codec_jpeg2000::decode_frame_scaled_high_throughput(cs, &info, s),
+        ];
+        for d in results.into_iter().flatten() {
+            let n = 1u32 << s;
+            assert_eq!((d.rows, d.columns), (rows.div_ceil(n), cols.div_ceil(n)));
+            let small = FrameInfo { rows: d.rows, columns: d.columns, ..info.clone() };
+            assert_eq!(Some(d.frame.data.len()), small.frame_bytes());
+        }
+    }
+}

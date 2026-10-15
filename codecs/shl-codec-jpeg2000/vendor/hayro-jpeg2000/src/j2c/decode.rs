@@ -635,6 +635,11 @@ fn store<'a>(
         }
     }
 
+    // shl patch 10: at a reduced resolution a small tile can be empty; nothing to store.
+    if header.skipped_resolution_levels > 0 && (idwt_output.rect.width() == 0 || idwt_output.rect.height() == 0) {
+        return;
+    }
+
     let component_tile = ComponentTile::new(tile, component_info);
     let resolution_tile = ResolutionTile::new(
         component_tile,
@@ -705,13 +710,22 @@ fn store<'a>(
             .image_area_y_offset
             .div_ceil(y_shrink_factor);
 
+        // shl patch 10: at a reduced resolution the IDWT output covers the resolution tile, not
+        // the full-size component tile, so index it from its own origin (the same origin at
+        // full resolution, where this path is unchanged).
+        let (origin_x, origin_y) = if header.skipped_resolution_levels > 0 {
+            (idwt_output.rect.x0, idwt_output.rect.y0)
+        } else {
+            (component_tile.rect.x0, component_tile.rect.y0)
+        };
+
         // Otherwise, copy sample by sample.
         for y in resolution_tile.rect.y0..resolution_tile.rect.y1 {
-            let relative_y = (y - component_tile.rect.y0) as usize;
+            let relative_y = (y - origin_y) as usize;
             let reference_grid_y = (scale_y as u32 * y) / y_shrink_factor;
 
             for x in resolution_tile.rect.x0..resolution_tile.rect.x1 {
-                let relative_x = (x - component_tile.rect.x0) as usize;
+                let relative_x = (x - origin_x) as usize;
                 let reference_grid_x = (scale_x as u32 * x) / x_shrink_factor;
 
                 let sample = idwt_output.coefficients

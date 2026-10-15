@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
     let (mut rows, mut cols, mut spp) = (64u32, 64u32, 1u16);
     if sel & 1 == 0 {
         if let Some((r, c, s)) = siz_dims(cs) {
-            if u64::from(r) * u64::from(c) * u64::from(s) <= 1 << 20 {
+            if u64::from(r).saturating_mul(u64::from(c)).saturating_mul(u64::from(s)) <= 1 << 20 {
                 (rows, cols, spp) = (r, c, s);
             }
         }

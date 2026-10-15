@@ -46,6 +46,10 @@ pub fn scaled_codec_for(transfer_syntax: &str) -> Option<DecodeScaledFn> {
     Some(match transfer_syntax {
         // Lossless JPEG (.57, .70) has no reduced decode; the codec would return Unsupported.
         "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" => shl_codec_jpeg::decode_frame_scaled,
+        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" => shl_codec_jpeg2000::decode_frame_scaled,
+        "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203" => {
+            shl_codec_htj2k::decode_frame_scaled
+        }
         _ => return None,
     })
 }

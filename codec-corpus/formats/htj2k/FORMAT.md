@@ -187,6 +187,12 @@ The block counts come from a decoder instrumented outside the tree. Both referen
   - wasm32 builds, with and without `+simd128`.
 - **check.py, final build:** htj2k 42/42. jpeg2000 165/166: `ext-gdcm-FUJI-ffff-MONO1-J2K` (`expect=error`, since no reference decodes it) now decodes. That is from the CLI change of 2026-10-15 (`shl-dicom-decode/src/infer.rs`), which infers Bits Allocated 16 where the data set says 65535. Given the data set's own values, the codec still refuses the frame. The case's expectation is for the coordinator to revisit.
 
+### Reduced-resolution decode
+
+`decode_frame_scaled` decodes through hayro's HT path with the highest resolution levels discarded. It shares the JPEG 2000 implementation, checks and results: [jpeg2000 FORMAT.md, Reduced-resolution decode](../jpeg2000/FORMAT.md#reduced-resolution-decode).
+- **Fallback:** a frame that only oxideav decodes (MIXED code-blocks, several HT sets) returns Unsupported at reduced size, since oxideav has no reduced decode. The CLI then decodes it in full and box-downsamples.
+- **Cost:** see [PERF.md, Reduced-resolution decode](PERF.md#reduced-resolution-decode). At 1/8, a 2048² 12-bit lossless frame needs 47× fewer instructions than a full decode plus downsample.
+
 ### Speed
 
 Phase 2c met the first gate: 30 ms in wasm32 for 512×512 16-bit, against a 150 ms budget. Phase 2d's goal was within about 3× of OpenJPH. Paired measurements under load put native decoding at 2.0–3.8× OpenJPH's time (2048² lossless: 2.0–3.3×) and wasm-simd at 2.5–4.6× (2048² lossless: 3.7×). JPEG 2000 averages 1.20× OpenJPEG natively and 1.32× in wasm-simd. Method, steps and all figures: [PERF.md](PERF.md#phase-2d-ht-decoding-in-hayro).

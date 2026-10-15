@@ -161,3 +161,14 @@ Before any downsampling, each codec result is normalised at the size it was deco
   - colour conversion as in full decode.
 - **Checked by** `formats/jpeg-dct/scaled/check_scaled.py`, which compares every corpus frame at every scale against libjpeg-turbo, for 8-bit and 12-bit.
 - **One known difference.** For 4:4:0 sampling (h1v2) libjpeg-turbo uses a fancy vertical upsampler, while this decoder replicates rows, as IJG 6b does. No corpus case has 4:4:0.
+
+**JPEG 2000 and HTJ2K (`shl-codec-jpeg2000`, `shl-codec-htj2k`).**
+
+- **Method.** Any s at which the stream has enough levels: the s highest resolution levels are discarded, as OpenJPEG's `reduce` does. Their code-blocks are not decoded and their wavelet synthesis is skipped (vendored hayro patch 10).
+- **Values.** The wavelet LL band, not a box average; pydicom's MONOCHROME sign rule is applied after it, as at full size.
+- **Checked by** `formats/jpeg2000/scaled/check_scaled.py` against `opj_decompress -r s` on every jpeg2000 and htj2k corpus frame: exact for 5/3 streams, and within the full-size tolerance for 9/7.
+- **Unsupported**, so the caller falls back, for:
+  - a component with fewer than s decomposition levels (main header or tile-part);
+  - an image origin other than (0, 0);
+  - subsampled components, except a single tile whose size is a multiple of the subsampling × 2^s;
+  - HTJ2K frames that only the oxideav fallback decodes.

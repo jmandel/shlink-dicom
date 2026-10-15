@@ -17,13 +17,26 @@
 //! disagrees with the data set is refused first. Neither wrapper dispatches on CAP.
 #![forbid(unsafe_code)]
 
-use shl_codec_common::{DecodeError, DecodedFrame, FrameInfo, Result};
+use shl_codec_common::{DecodeError, DecodedFrame, DecodedScaled, FrameInfo, Result};
 use shl_codec_jpeg2000::prep;
 
 /// Decode one frame's codestream. See `shl_codec_common::DecodeFn`.
 pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame> {
     shl_codec_jpeg2000::decode_frame_high_throughput(codestream, info)
         .or_else(|_| decode_frame_oxideav(codestream, info))
+}
+
+/// Decode one frame at 1/2^`scale_log2` size (`shl_codec_common::DecodeScaledFn`) through
+/// hayro's HT path, discarding the highest resolution levels (see
+/// `shl_codec_jpeg2000::decode_frame_scaled` for what it refuses). Any frame that path does
+/// not decode at reduced size (MIXED code-blocks, several HT sets, too few levels, a
+/// non-zero origin) returns `Unsupported`: oxideav, the full-size fallback, has no reduced
+/// decode, so the caller decodes in full and downsamples.
+pub fn decode_frame_scaled(codestream: &[u8], info: &FrameInfo, scale_log2: u8) -> Result<DecodedScaled> {
+    shl_codec_jpeg2000::decode_frame_scaled_high_throughput(codestream, info, scale_log2).map_err(|e| match e {
+        DecodeError::Unsupported(m) => DecodeError::Unsupported(m),
+        DecodeError::Invalid(m) => DecodeError::Unsupported(format!("no reduced HTJ2K decode for this frame ({m})")),
+    })
 }
 
 /// Decode with hayro's HT path only (no fallback). For tests and benchmarks.
