@@ -207,7 +207,7 @@ export function patientResource(cfg: Config, p: DemoPatient): Record<string, unk
     meta: { lastUpdated: DATA_LAST_UPDATED },
     text: {
       status: "generated",
-      div: `<div xmlns="http://www.w3.org/1999/xhtml">${escXml(patientName(p))}${p.birthDate ? `, born ${p.birthDate}` : ""}${p.synthetic ? " (synthetic test patient)" : " (fictional sample patient)"}</div>`,
+      div: `<div xmlns="http://www.w3.org/1999/xhtml">${escXml(patientName(p))}${p.birthDate ? `, born ${p.birthDate}` : ""}${p.synthetic ? " (synthetic test patient)" : " (de-identified sample patient)"}</div>`,
     },
   };
   if (p.mrn) {
@@ -218,6 +218,7 @@ export function patientResource(cfg: Config, p: DemoPatient): Record<string, unk
     }];
   }
   r.name = [{ text: patientName(p), family: p.family, given: p.given }];
+  if (p.gender) r.gender = p.gender;
   if (p.birthDate) r.birthDate = p.birthDate;
   return r;
 }

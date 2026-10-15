@@ -8,8 +8,8 @@
 //    `tar`), the built file's Pixel Data element is byte-identical, the
 //    transfer syntax is the same, and every top-level element the rewrite
 //    does not target is byte-identical too.
-// 3. Headers: the fictional patient, dates and accession are set, sex is
-//    left as the source had it, and no original UID survives.
+// 3. Headers: the sample patient, study date and accession match the
+//    manifest, and no original UID of a rewritten study survives.
 // 4. Reports: each PDF parses with PDF.js (and passes `qpdf --check` when
 //    qpdf is installed), every page carries the sample banner, and the PDF
 //    text equals the text/plain attachment.
@@ -66,7 +66,7 @@ const cacheDirs = (process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean);
 const findLocal = (name: string) => [join(ROOT, "build/sources", name), join(ROOT, "../data/samples", name), ...cacheDirs.map((d) => join(d, name))].find(existsSync)!;
 const walk = (d: string): string[] => readdirSync(d).flatMap((n) => { const f = join(d, n); return statSync(f).isDirectory() ? walk(f) : [f]; });
 const collectUids = (els: any[]) => { for (const e of els) { if (e.items) e.items.forEach(collectUids); else if (ID_UID_TAGS.includes(e.tag)) { const v = str([e], e.tag); if (v) allOriginalUids.add(v); } } };
-let compared = 0, pixelSame = 0, pixelBot = 0, tsSame = 0, othersSame = 0;
+let compared = 0, pixelSame = 0, pixelBot = 0, tsSame = 0, othersSame = 0, servedAsIs = 0, servedAsIsSame = 0;
 const botPairs: { before: string; after: string; frames: number }[] = [];
 for (const st of manifest.studies) {
   const cfgStudy = studiesCfg.studies.find((x: any) => x.id === st.id);
@@ -91,10 +91,11 @@ for (const st of manifest.studies) {
     const before = new Uint8Array(readFileSync(f));
     const pb = parseDicom(before, { stopAtPixelData: false });
     const sop = str(pb.dataset, 0x00080018)!;
-    collectUids(pb.dataset);
+    if (st.rewritten) collectUids(pb.dataset);
     const built = byOrig.get(sop);
     if (!built) { check(`${f}: present in the build`, false); continue; }
     const after = new Uint8Array(readFileSync(join(DS, built.path)));
+    if (!st.rewritten) { servedAsIs++; if (Buffer.compare(before, after) === 0) servedAsIsSame++; }
     const pa = parseDicom(after, { stopAtPixelData: false });
     compared++;
     if (Buffer.compare(pixelDataElement(before), pixelDataElement(after)) === 0) pixelSame++;
@@ -118,6 +119,7 @@ check(`Pixel Data: element byte-identical for ${pixelSame} instances, fragments 
 check("Basic Offset Table filled exactly for the multi-frame slide levels (3), nowhere else", pixelBot === 3 && botPairs.every((b) => b.after.includes("/slide-lung-2023/") && b.frames > 1));
 check(`transfer syntax unchanged for ${tsSame}/${compared} instances`, tsSame === compared);
 check(`every other non-UID top-level element byte-identical for ${othersSame}/${compared} instances`, othersSame === compared);
+check(`studies served unchanged (the de-identified my-health-data archives): ${servedAsIsSame}/${servedAsIs} files byte-identical to the source archives`, servedAsIs > 0 && servedAsIsSame === servedAsIs);
 
 console.log("\nOffset tables");
 {
@@ -172,9 +174,7 @@ for (const st of manifest.studies) {
       str(d, 0x00100010) === patient.dicomName &&
       str(d, 0x00100020) === patient.mrn &&
       str(d, 0x00100030) === patient.birthDate.replace(/-/g, "") &&
-      str(d, 0x00100040) === undefined &&
       str(d, 0x00080020) === st.studyDate.replace(/-/g, "") &&
-      str(d, 0x00080030) === st.studyTime.replace(/:/g, "") &&
       str(d, 0x00080050) === st.accession &&
       str(d, 0x0020000d) === st.studyInstanceUID &&
       str(d, 0x00080018) === f.sopInstanceUID &&
@@ -185,7 +185,7 @@ for (const st of manifest.studies) {
     for (const u of allOriginalUids) if (text.includes(u)) { leaked++; break; }
   }
 }
-check(`patient, dates, accession and UIDs set in ${headerOk}/${total} files (sex left empty, as in the source)`, headerOk === total);
+check(`patient (${patient.dicomName}, ${patient.mrn}, born ${patient.birthDate}), study date, accession and UIDs match the manifest in ${headerOk}/${total} files`, headerOk === total);
 check(`none of the ${allOriginalUids.size} original instance-identifying UIDs (Study, Series, SOP Instance, Frame of Reference, Pyramid, Acquisition, Dimension Organization, Specimen) appears in any built file`, leaked === 0, leaked);
 {
   // Source identifiers of the slide (CPTAC subject and specimen) must be gone from every header.

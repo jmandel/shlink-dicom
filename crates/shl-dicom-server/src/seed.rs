@@ -100,8 +100,9 @@ pub fn seed_demo_shares(state: &AppState, origin: &str) -> Result<(), String> {
                 &mut conn,
                 &sf.file_id,
                 &sf.ciphertext,
-                state.bytes_max,
-                state.files_max,
+                // The server's own sample is not subject to per-share upload quotas.
+                u64::MAX,
+                usize::MAX,
             )?;
             all_allowed_files.push(sf.file_id.clone());
         }

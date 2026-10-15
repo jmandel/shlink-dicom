@@ -17,7 +17,7 @@ export interface Launch { d: C.Discovery; token: Record<string, any>; }
 export async function launchViaForms(base: string, o: LaunchOptions): Promise<Launch> {
   const clientId = o.clientId ?? "imaging-sandbox-test";
   const redirectUri = o.redirectUri ?? "http://127.0.0.1:9/callback";
-  const patient = o.patient ?? "morgan-rivera";
+  const patient = o.patient ?? "josh-example";
   const d = await C.discover(`${base}/fhir`);
   const { verifier, challenge } = await C.pkce();
   const state = crypto.randomUUID();

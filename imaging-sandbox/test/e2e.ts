@@ -29,7 +29,7 @@ const APP_PORT = PORT_BASE + 9;
 const APP_ORIGIN = `http://localhost:${APP_PORT}`;
 const REDIRECT = `${APP_ORIGIN}/share/smart-callback`;
 const FULL_SCOPE = "launch/patient patient/Patient.rs patient/DiagnosticReport.rs patient/ImagingStudy.rs offline_access";
-const PATIENT = "morgan-rivera";
+const PATIENT = "josh-example";
 let CLIENT_ID = "shlink-dicom-share";
 const OTHER_PATIENT = "robin-example";
 
@@ -195,8 +195,8 @@ async function browserFlow(base: string) {
     check("token response has patient context", out.token.patient === PATIENT, out.token.patient);
     check("token response has a refresh token (offline_access)", typeof out.token.refresh_token === "string");
     check("token response scope", out.token.scope === FULL_SCOPE, out.token.scope);
-    check("Patient read: name", out.patient.name?.[0]?.text === "Morgan Rivera" && out.patient.birthDate === "1979-03-14", out.patient.name);
-    check("DiagnosticReport search (category=RAD): one report per study", out.reports === 2, out.reports);
+    check("Patient read: name", out.patient.name?.[0]?.text === "Josh Example" && out.patient.birthDate === "1982-01-01" && out.patient.gender === "male" && out.patient.identifier?.[0]?.value === "JEXAMPLE01", out.patient.name);
+    check(`DiagnosticReport search (category=RAD): one report per radiology study (${manifest.studies.length - 1})`, out.reports === manifest.studies.length - 1, out.reports);
     check("report PDF fetched cross-origin with the token", out.pdfFetch.status === 200 && out.pdfFetch.type === "application/pdf" && out.pdfFetch.size === out.pdfFetch.expected && out.pdfFetch.head === "%PDF-", out.pdfFetch);
     check("token response has token_type Bearer and scope", out.token.token_type === "Bearer" && typeof out.token.scope === "string");
     check(`ImagingStudy search: ${manifest.studies.length} studies + 1 included Endpoint`, out.total === manifest.studies.length && out.entries === manifest.studies.length + 1, { total: out.total, entries: out.entries });
@@ -221,7 +221,9 @@ async function main() {
   running.push({ stop: () => app.stop(true) });
   if (remoteBase) CLIENT_ID = "imaging-sandbox-e2e"; // open registration; loopback redirect
   const brain = studyUIDById.get("mri-brain-2020")!;
-  const wrist = studyUIDById.get("wrist-low-res")!;
+  // The left wrist radiographs: three single-image series, stored as
+  // Implicit VR Little Endian.
+  const wrist = studyUIDById.get("xr-wrist-left-2012")!;
   const slide = studyUIDById.get("slide-lung-2023")!;
   const ALL = [...studyUIDById.values()];
   const N = ALL.length;
@@ -259,8 +261,8 @@ async function main() {
   const noTsBody = await noTs.text();
   check("Accept without transfer-syntax: 406 with an explanation", noTs.status === 406 && noTsBody.includes("transfer-syntax=*"), noTsBody);
   check("Accept */*: 406", (await status(`${base}/wado-rs/studies/${wrist}`, at, { headers: { accept: "*/*" } })) === 406);
-  const explicitTs = await C.wadoGet(`${studies[0].wadoBase}/studies/${wrist}`, at, 'multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.51');
-  check("Accept with the stored transfer syntax UID (JPEG Baseline): 200", explicitTs.status === 200 && explicitTs.parts?.length === 3);
+  const explicitTs = await C.wadoGet(`${studies[0].wadoBase}/studies/${wrist}`, at, 'multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2');
+  check("Accept with the stored transfer syntax UID (Implicit VR Little Endian): 200", explicitTs.status === 200 && explicitTs.parts?.length === 3);
   check("Accept with a transfer syntax the server does not store: 406", (await status(`${base}/wado-rs/studies/${wrist}`, at, { headers: { accept: 'multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.1' } })) === 406);
   const sopT = truthBySeries.get([...truthBySeries.keys()].find((k) => truthBySeries.get(k)![0].studyUID === wrist)!)![0];
   const one = await C.wadoGet(`${base}/wado-rs/studies/${wrist}/series/${sopT.seriesUID}/instances/${sopT.sopUID}`, at);
@@ -294,7 +296,7 @@ async function main() {
     check("slide metadata: three VOLUME levels, OVERVIEW and THUMBNAIL", JSON.stringify(types) === JSON.stringify(["OVERVIEW", "THUMBNAIL", "VOLUME", "VOLUME", "VOLUME"]), types);
     const pyramid = new Set((meta.json ?? []).map((m: any) => m["00080019"]?.Value?.[0]));
     check("slide instances share one Pyramid UID", pyramid.size === 1 && ![...pyramid][0]?.startsWith("1.3.6.1.4.1.5962"));
-    check("slide headers name the fictional patient", (meta.json ?? []).every((m: any) => m["00100010"]?.Value?.[0]?.Alphabetic === "RIVERA^MORGAN" && m["00400512"]?.Value?.[0] === "SBX23-S0417-A1"));
+    check("slide headers name the sample patient", (meta.json ?? []).every((m: any) => m["00100010"]?.Value?.[0]?.Alphabetic === "Example^Josh" && m["00100020"]?.Value?.[0] === "JEXAMPLE01" && m["00400512"]?.Value?.[0] === "EXSL2023-A1"));
   }
 
   section("Refresh and introspection");
@@ -335,10 +337,10 @@ async function main() {
 
   section("Imaging reports");
   const rad = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=${encodeURIComponent("http://terminology.hl7.org/CodeSystem/v2-0074|RAD")}`, at);
-  check("category=system|RAD: 2 reports", rad.total === 2);
+  check(`category=system|RAD: one report per radiology study (${N - 1})`, rad.total === N - 1);
   check("category=LAB: 0 reports", (await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=LAB`, at)).total === 0);
-  const byCode = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&code=${encodeURIComponent("http://loinc.org|37550-1")}`, at);
-  check("code=http://loinc.org|37550-1: the wrist report only", byCode.total === 1 && byCode.entry[0].resource.id === "report-wrist-low-res");
+  const byCode = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&code=${encodeURIComponent("http://loinc.org|37455-3")}`, at);
+  check("code=http://loinc.org|37455-3: the left wrist report only", byCode.total === 1 && byCode.entry[0].resource.id === "report-xr-wrist-left-2012");
   const sp = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=SP`, at);
   check("category=SP: the slide's pathology report only", sp.total === 1 && sp.entry[0].resource.id === "report-slide-lung-2023" && sp.entry[0].resource.code.coding[0].code === "11529-5");
   const allReports = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}`, at);
@@ -364,7 +366,7 @@ async function main() {
     const pdfBody = pages.flatMap((p) => p.filter((l) => !l.includes(BANNER))).join("\n");
     const lines = text.split("\n");
     check(`${r.id}: PDF parses with PDF.js, every page has the banner, and its text matches the text attachment`, pages.length > 0 && pages.every((p) => p[0] === BANNER) && norm(pdfBody) === norm(lines.slice(2, lines.lastIndexOf(BANNER) - 1).join("\n")));
-    check(`${r.id}: text names the fictional patient and lists the study's series or instances`, text.includes("RIVERA, MORGAN") && norm(text).includes("from the DICOM headers:"));
+    check(`${r.id}: text names the sample patient and lists the study's series or instances`, text.includes("EXAMPLE, JOSH") && norm(text).includes("from the DICOM headers:"));
     const bin = await fetch(pdfA.url, { headers: { authorization: `Bearer ${at}`, accept: "application/fhir+json" } }).then((x) => x.json());
     check(`${r.id}: Binary as FHIR JSON when asked`, bin.resourceType === "Binary" && bin.contentType === "application/pdf" && Buffer.from(bin.data, "base64").byteLength === pdfA.size);
   }
@@ -382,8 +384,8 @@ async function main() {
   section("Negative: token for another patient");
   const other = await httpLaunch(base, { patient: OTHER_PATIENT });
   check("other patient's token has its own patient context", other.token.patient === OTHER_PATIENT);
-  check("search patient=morgan-rivera with robin's token: 403", (await status(`${d.imagingBase}/ImagingStudy?patient=${PATIENT}`, other.token.access_token)) === 403);
-  check("Patient/morgan-rivera with robin's token: 403", (await status(`${base}/fhir/Patient/${PATIENT}`, other.token.access_token)) === 403);
+  check("search for the sample patient with robin's token: 403", (await status(`${d.imagingBase}/ImagingStudy?patient=${PATIENT}`, other.token.access_token)) === 403);
+  check("Patient read for the sample patient with robin's token: 403", (await status(`${base}/fhir/Patient/${PATIENT}`, other.token.access_token)) === 403);
   check("WADO-RS brain study with robin's token: 403", (await status(`${base}/wado-rs/studies/${brain}`, other.token.access_token)) === 403);
   check("WADO-RS brain series with robin's token: 403", (await status(`${base}/wado-rs/studies/${brain}/series/${[...truthBySeries.values()].find((t) => t[0].studyUID === brain)![0].seriesUID}`, other.token.access_token)) === 403);
   check("report attachment with robin's token: 404", (await status(brainPdfUrl, other.token.access_token)) === 404);

@@ -2,15 +2,18 @@
 //
 //   bun scripts/build-data.ts [--out build/dataset] [--sources build/sources]
 //
-// 1. Fetches the source archives from github.com/jmandel/my-health-data,
-//    pinned by commit and SHA-256 (data/studies.json). A local copy with
-//    the right hash (build/sources/ or ../data/samples/) is used instead
-//    of downloading.
-// 2. Rewrites the DICOM headers: the fictional patient from
-//    data/patient.json, study date, time and accession number from
-//    data/studies.json, and new deterministic UIDs. Pixel Data is copied
-//    verbatim, and the build fails if any instance's Pixel Data element or
-//    transfer syntax differs from the source.
+// 1. Fetches the sources, pinned by URL and SHA-256 (data/studies.json):
+//    the de-identified "Josh Example" studies from github.com/jmandel/
+//    my-health-data (imaging/) and the CC BY slide from the NCI Imaging
+//    Data Commons. A local copy with the right hash (build/sources/,
+//    ../data/samples/, or a SOURCE_CACHE directory) is used instead of
+//    downloading.
+// 2. Studies marked "rewrite": false (the my-health-data studies) are
+//    served unchanged, after checking they carry the patient in
+//    data/patient.json. The slide's headers are rewritten to that patient,
+//    with new deterministic UIDs and a filled Basic Offset Table; the
+//    build fails if any frame's data or transfer syntax differs from the
+//    source.
 // 3. Generates a sample report per study (PDF and plain text).
 // 4. Writes everything, with manifest.json and SHA256SUMS, to --out, and a
 //    plain per-study export of the DICOM files and reports to --export.
@@ -40,12 +43,14 @@ const log = (...a: unknown[]) => { if (!quiet) console.log(...a); };
 
 interface StudyConfig {
   id: string;
-  archive?: string; // a .tgz source holding the study's .dcm files
+  rewrite?: boolean; // false: serve the source files unchanged (already de-identified)
+  archives?: string[]; // .tgz sources holding the study's .dcm files
+  archive?: string; // a single .tgz source
   files?: string[]; // or individual .dcm sources (by source archive name)
-  accession: string;
-  studyDate: string;
-  studyTime: string;
-  utcOffset: string;
+  accession?: string; // with rewrite: values written into the headers;
+  studyDate?: string; // without: read from the headers
+  studyTime?: string;
+  utcOffset?: string;
   attribution?: string;
   header?: {
     set?: Record<string, [string, string]>;
@@ -84,7 +89,7 @@ async function source(archive: string): Promise<Uint8Array> {
   if (!res.ok) throw new Error(`download ${s.url}: HTTP ${res.status}`);
   const b = new Uint8Array(await res.arrayBuffer());
   if (sha256(b) !== s.sha256) throw new Error(`${archive}: SHA-256 ${sha256(b)} does not match the pinned ${s.sha256}`);
-  mkdirSync(SOURCES, { recursive: true });
+  mkdirSync(dirname(join(SOURCES, archive)), { recursive: true });
   writeFileSync(join(SOURCES, archive), b);
   return b;
 }
@@ -107,16 +112,26 @@ const write = (rel: string, bytes: Uint8Array | string) => {
 const manifestStudies: unknown[] = [];
 const exportFiles: { from: string; to: string }[] = [];
 for (const st of cfg.studies) {
-  const entries = st.archive
-    ? readTgz(await source(st.archive)).filter((e) => e.path.toLowerCase().endsWith(".dcm"))
+  const tgzs = st.archives ?? (st.archive ? [st.archive] : []);
+  const entries = tgzs.length
+    ? (await Promise.all(tgzs.map(async (a) => readTgz(await source(a))))).flat().filter((e) => e.path.toLowerCase().endsWith(".dcm"))
     : await Promise.all((st.files ?? []).map(async (name) => ({ path: name, bytes: await source(name) })));
+  const rewrite = st.rewrite !== false;
+  if (!rewrite) {
+    // Read the study's date, time and accession number from its headers.
+    const d0 = parseDicom(entries[0].bytes).dataset;
+    const da = str(d0, 0x00080020) ?? "", tm = str(d0, 0x00080030) ?? "";
+    st.studyDate = `${da.slice(0, 4)}-${da.slice(4, 6)}-${da.slice(6, 8)}`;
+    st.studyTime = tm ? `${tm.slice(0, 2)}:${tm.slice(2, 4)}:${tm.slice(4, 6) || "00"}` : undefined;
+    st.accession = str(d0, 0x00080050) ?? "";
+  }
   entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const set = new Map<number, HeaderSet>([
-    [0x00080020, { vr: "DA", value: compact(st.studyDate) }],
-    [0x00080023, { vr: "DA", value: compact(st.studyDate) }],
-    [0x00080030, { vr: "TM", value: compactTime(st.studyTime) }],
-    [0x00080033, { vr: "TM", value: compactTime(st.studyTime) }],
-    [0x00080050, { vr: "SH", value: st.accession }],
+    [0x00080020, { vr: "DA", value: compact(st.studyDate!) }],
+    [0x00080023, { vr: "DA", value: compact(st.studyDate!) }],
+    [0x00080030, { vr: "TM", value: compactTime(st.studyTime ?? "") }],
+    [0x00080033, { vr: "TM", value: compactTime(st.studyTime ?? "") }],
+    [0x00080050, { vr: "SH", value: st.accession! }],
     [0x00100010, { vr: "PN", value: patient.dicomName }],
     [0x00100020, { vr: "LO", value: patient.mrn }],
     [0x00100030, { vr: "DA", value: compact(patient.birthDate) }],
@@ -133,16 +148,16 @@ for (const st of cfg.studies) {
   let studyUID = "", originalStudyUID = "", manufacturer = "", model = "", field = "";
   for (const e of entries) {
     const before = parseDicom(e.bytes, { stopAtPixelData: false });
-    const out = rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid, fillBasicOffsetTable: true });
+    const out = rewrite ? rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid, fillBasicOffsetTable: true }) : e.bytes;
     const after = parseDicom(out, { stopAtPixelData: false });
     // Checks: pixel data and transfer syntax untouched, values applied.
     if (!samePixelFrames(e.bytes, out)) throw new Error(`${e.path}: Pixel Data frames changed`);
     if (after.transferSyntaxUID !== before.transferSyntaxUID) throw new Error(`${e.path}: transfer syntax changed`);
     const d = after.dataset;
-    if (str(d, 0x00100010) !== patient.dicomName || str(d, 0x00080050) !== st.accession) throw new Error(`${e.path}: header rewrite not applied`);
+    if (str(d, 0x00100010) !== patient.dicomName || str(d, 0x00100020) !== patient.mrn || str(d, 0x00080050) !== st.accession) throw new Error(`${e.path}: patient or accession does not match`);
     const origSop = str(before.dataset, 0x00080018)!;
     const sop = str(d, 0x00080018)!;
-    if (sop !== mapUid(origSop) || str(after.meta, 0x00020003) !== sop) throw new Error(`${e.path}: SOP Instance UID not remapped`);
+    if ((rewrite && sop !== mapUid(origSop)) || str(after.meta, 0x00020003) !== sop) throw new Error(`${e.path}: SOP Instance UID mismatch`);
     originalStudyUID = str(before.dataset, 0x0020000d)!;
     studyUID = str(d, 0x0020000d)!;
     const seriesUID = str(d, 0x0020000e)!;
@@ -187,7 +202,7 @@ for (const st of cfg.studies) {
     birthDate: patient.birthDate,
     mrn: patient.mrn,
     accession: st.accession,
-    examDateTime: `${st.studyDate} ${st.studyTime.slice(0, 5)}`,
+    examDateTime: `${st.studyDate}${st.studyTime ? " " + st.studyTime.slice(0, 5) : ""}`,
     equipment,
     series: [...series.values()].sort((a, b) => (a.number ?? 1e9) - (b.number ?? 1e9)),
   });
@@ -200,14 +215,15 @@ for (const st of cfg.studies) {
 
   manifestStudies.push({
     id: st.id,
-    ...(st.archive ? { archive: st.archive } : { sources: st.files }),
+    sources: tgzs.length ? tgzs : st.files,
+    rewritten: rewrite,
     ...(st.attribution ? { attribution: st.attribution } : {}),
     studyInstanceUID: studyUID,
     originalStudyInstanceUID: originalStudyUID,
     accession: st.accession,
     studyDate: st.studyDate,
     studyTime: st.studyTime,
-    utcOffset: st.utcOffset,
+    ...(st.utcOffset ? { utcOffset: st.utcOffset } : {}),
     report: { ...(st.report.category ? { category: st.report.category } : {}), code: st.report.code, title: st.report.title, conclusion: conclusion(st.report), attachments: [pdfAtt, txtAtt] },
     files,
   });
@@ -235,7 +251,7 @@ if (EXPORT) {
     writeFileSync(join(etmp, f.to), require("node:fs").readFileSync(join(tmp, f.from)));
   }
   const index = {
-    _note: "Plain export of the imaging sandbox's rewritten sample studies (fictional patient, real images). Generated by imaging-sandbox/scripts/build-data.ts; files are byte-identical to what the sandbox serves.",
+    _note: "Plain export of the imaging sandbox's sample studies for Josh Example (de-identified real studies, and a CC BY slide rewritten to the same patient). Generated by imaging-sandbox/scripts/build-data.ts; files are byte-identical to what the sandbox serves.",
     patient: { name: `${patient.given.join(" ")} ${patient.family}`, dicomName: patient.dicomName, id: patient.mrn, birthDate: patient.birthDate },
     studies: (manifestStudies as any[]).map((m) => ({
       id: m.id,

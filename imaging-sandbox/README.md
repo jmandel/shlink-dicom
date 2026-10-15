@@ -7,11 +7,11 @@ A small server that plays every actor in the Argonaut [SMART Imaging Access](htt
 - an **Imaging FHIR Server** with `ImagingStudy` search and WADO-RS `Endpoint`s;
 - a **DICOMweb server** for WADO-RS retrieval, which accepts the same access token.
 
-All four run in one Bun process. The patient is fictional, **Morgan Rivera**; the images are real:
-- Josh Mandel's published sample studies, a brain MRI and wrist radiographs from [jmandel/my-health-data](https://github.com/jmandel/my-health-data);
-- a whole-slide microscopy image (an H&E lung slide) from the NCI Imaging Data Commons, under CC BY 4.0. See [the slide's attribution](#slide-attribution).
+All four run in one Bun process. The patient is **Josh Example**, the de-identified name of a real patient:
+- **Josh's own studies,** which he published de-identified in [jmandel/my-health-data](https://github.com/jmandel/my-health-data) (`imaging/`, made by `imaging/deid.py` there): a brain MRI, a CT of the abdomen and pelvis, and three sets of hand and wrist radiographs. The sandbox serves those files unchanged.
+- **A whole-slide microscopy image** (an H&E lung slide) from the NCI Imaging Data Commons, under CC BY 4.0, rewritten to the same patient. See [the slide's attribution](#slide-attribution).
 
-A reproducible build writes the fictional identity into the DICOM headers. How each IG requirement is met is in [CONFORMANCE.md](CONFORMANCE.md).
+How each IG requirement is met is in [CONFORMANCE.md](CONFORMANCE.md).
 
 Deployed (private for now) at **https://smart-imaging-sandbox.exe.xyz**: see [Deploying](#deploying).
 
@@ -32,34 +32,60 @@ On startup the server prints its URLs, the number of studies and instances it lo
 `scripts/build-data.ts` builds everything the server serves into `build/dataset/` (gitignored), using only committed inputs:
 
 - **`data/studies.json`:**
-  - the sources, each pinned by URL and SHA-256: the two my-health-data archives (by commit) and five instances of the IDC slide series (public S3 URLs). Downloads are kept in `build/sources/`. A local copy with the right hash, in `build/sources/`, `../data/samples/`, or a directory in `SOURCE_CACHE` (colon-separated), is used instead of downloading;
-  - each study's date, time, UTC offset and accession number;
-  - the report content.
-- **`data/patient.json`:** the fictional patient (name, birth date, MRN). The sources carry no sex, so none is set.
+  - The sources, each pinned by URL and SHA-256:
+    - the 28 per-series archives of the five my-health-data studies;
+    - five instances of the IDC slide series, from public S3 URLs.
+  - Downloads are kept in `build/sources/`. A local copy with the right hash is used instead of downloading. It can be in `build/sources/`, `../data/samples/`, or a directory listed in `SOURCE_CACHE` (colon-separated; for example a local `my-health-data/imaging`).
+  - The report content for each study.
+  - For the slide, its date, time, accession number and header rules.
+- **`data/patient.json`:** the patient, as in the DICOM headers:
+  - name Josh Example;
+  - identifier JEXAMPLE01;
+  - birth date 1982-01-01 (the year only);
+  - male.
 - **`data/test-patients.json`:** a synthetic second patient with no imaging, Robin Example, used to test a token for another patient.
 
-### Header rewrite
+| Study | Date | Series | Images | Size |
+|---|---|---|---|---|
+| MRI brain (Hitachi Altaire, 0.7 T) | 29 Jul 2020 | 14 | 263 | 43 MB |
+| CT abdomen and pelvis with oral and IV contrast (GE LightSpeed VCT) | 9 Oct 2012 | 5 | 455 | 242 MB |
+| XR left wrist, 3 views | 10 Oct 2012 | 3 | 3 | 41 MB |
+| XR right hand and wrist, 3 views | 10 Oct 2012 | 3 | 3 | 41 MB |
+| XR right hand, 3 views, portable, through a splint | 10 Oct 2012 | 3 | 3 | 31 MB |
+| Whole-slide image, lung, H&E | 17 Apr 2023 | 1 | 5 | 152 MB |
 
-The build rewrites these DICOM headers:
+### The de-identified studies
+
+my-health-data's `imaging/deid.py` made these from the original CD exports, under DICOM PS3.15's Basic Application Level Confidentiality Profile. Dates, descriptions, protocols, equipment and technical attributes are kept. What it changed:
+
+- **Patient:** name, ID and birth date are replaced (the birth date keeps only the year).
+- **Accession numbers and study IDs:** replaced with `EXMRI2020`, `EXCT2012` and `EXCR2012A`–`C`.
+- **Removed:** other person names, institution and station names, serial numbers, order identifiers, comments and private attributes.
+- **UIDs:** all instance UIDs are replaced.
+- **Dropped series:** the CT dose report screen, a scanned document, and four MRI viewer captures, because their pixels show the patient's name.
+
+Pixel data is unchanged, at full resolution, in the original transfer syntax: Implicit VR Little Endian for the CT and radiographs, Explicit VR Little Endian for the MRI. The sandbox serves these files byte for byte, and its build checks that each one carries the sample patient's name, ID and birth date.
+
+### The slide's header rewrite
+
+The build rewrites the slide's DICOM headers:
 
 | Attribute | Value |
 |---|---|
-| PatientName, PatientID, PatientBirthDate | `RIVERA^MORGAN`, `SBX4417302`, `19790314` |
-| StudyDate, StudyTime, ContentDate, ContentTime, AccessionNumber | from `data/studies.json`. The brain MRI keeps 29 Jul 2020 (from its description `BRAIN 7/29/20`). The wrist study uses 24 Jul 2011, the date in its Instance Creation Date. The slide is dated 17 Apr 2023. |
-| Study, Series, SOP Instance, Frame of Reference and referenced instance UIDs; for the slide also Pyramid, Acquisition, Dimension Organization and Specimen UIDs | new UIDs under `2.25`, minted deterministically from `uidNamespace` and the original UID. Coding-scheme, SOP Class and implementation UIDs are kept. |
+| PatientName, PatientID, PatientBirthDate | `Example^Josh`, `JEXAMPLE01`, `19820101` |
+| StudyDate, StudyTime, ContentDate, ContentTime, AccessionNumber | 17 Apr 2023, 13:05; `EXSL2023` |
+| Study, Series, SOP Instance, Frame of Reference, Pyramid, Acquisition, Dimension Organization and Specimen UIDs | new UIDs under `2.25`, minted deterministically from `uidNamespace` and the original UID. Coding-scheme, SOP Class and implementation UIDs are kept. |
 | Patient Identity Removed (0012,0062) | removed, since the headers now carry an identity |
-| Slide only: the series, acquisition and timezone dates and times, Study ID, Container Identifier, and the specimen identifiers inside the Specimen Description Sequence | fictional values from the study's `header` block in `data/studies.json` |
-| Slide only: the Clinical Trial attributes (0012,0010–0040), Image Comments (Aperio scan description with the original file name), and private groups 0009 (PixelMed) and 0013 (CTP) | removed |
-| Slide only: the empty Basic Offset Table of each multi-frame (tiled) level | filled with 32-bit offsets, one per frame, pointing at each frame's first fragment item. The source has no Extended Offset Table, and none is added. |
-
-The UIDs are replaced because the original files are public in my-health-data and seeded as the project's public sample share under their own UIDs. Keeping those UIDs would make two different patients claim the same instances.
+| Series, acquisition and timezone dates and times, Study ID, Container Identifier, and the specimen identifiers in the Specimen Description Sequence | values from the study's `header` block in `data/studies.json` |
+| Clinical Trial attributes (0012,0010–0040), Image Comments (Aperio scan description with the original file name), private groups 0009 (PixelMed) and 0013 (CTP) | removed |
+| The empty Basic Offset Table of each multi-frame (tiled) level | filled with 32-bit offsets, one per frame, pointing at each frame's first fragment item. The source has no Extended Offset Table, and none is added. |
 
 What is left alone:
-- **Pixel Data.** The element is copied byte for byte, except in the slide's three tiled levels, where only the empty Basic Offset Table is filled in. Every fragment (item header and bytes) stays identical and in order, so each frame's compressed data is unchanged. Single-frame and native images (the MRI, the wrist radiographs, the slide's overview and thumbnail) are untouched.
-- **Transfer syntaxes.** The brain MRI stays Explicit VR Little Endian and the wrist radiographs stay JPEG Baseline. The slide keeps JPEG Baseline for its pyramid levels and Explicit VR Little Endian for its overview and thumbnail.
+- **Pixel Data.** It is byte-identical in the overview and thumbnail. In the three tiled levels, only the empty Basic Offset Table is filled in; every fragment (item header and bytes) stays identical and in order, so each frame's compressed data is unchanged.
+- **Transfer syntaxes.** The slide keeps JPEG Baseline for its pyramid levels and Explicit VR Little Endian for its overview and thumbnail.
 - **Everything else.** Every other element is copied verbatim; only changed elements, and the sequences and group lengths around them, are re-encoded.
 
-The build stops if any of these checks fails, and `test/data-check.ts` checks them again against the sources. It also checks that no header still contains the source subject, specimen, collection or file names. For each tiled level it also checks that:
+The build stops if any of these checks fails, and `test/data-check.ts` checks them again against the sources. It also checks that the de-identified studies are byte-identical to their archives, and that no header still contains the slide's source subject, specimen, collection or file names. For each tiled level it also checks that:
 - the offsets point exactly at each frame's first fragment;
 - dcmdump reads the pixel items;
 - pydicom's `get_frame` reads every frame through the table and gets the source's frame. Set `PYDICOM_PYTHON` to a Python with pydicom (3.0.1 tested);
@@ -78,28 +104,31 @@ The whole-slide study is the CPTAC-LUAD C3N-02231 H&E slide recommended in [`doc
 | OVERVIEW 1,600 × 629 | a photo of the glass slide, with the label end dark | 3.3 MB |
 | THUMBNAIL 1,024 × 650 | | 2.3 MB |
 
-Two instances of the source series are not used. The full-resolution level (1.05 GB) is too large for a sample. The label image shows the CPTAC subject ID, which would contradict the fictional patient.
+Two instances of the source series are not used. The full-resolution level (1.05 GB) is too large for a sample. The label image shows the CPTAC subject ID, which would contradict the sample patient.
 
 #### Slide attribution
 
-> Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed.
+> Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with those of the sandbox's sample patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed.
 
 The same text is in the slide's ImagingStudy (`note`), in its sample pathology report, in `build/dataset/manifest.json`, and in `out/index.json`.
 
 ### Reports
 
 Each study gets one sample report, as a PDF and as plain text with the same content:
-- **Kinds:** radiology reports for the MRI and the wrist (category `RAD`; LOINC 24590-2 and 37550-1), and a pathology report for the slide (category `SP`; LOINC 11529-5 "Surgical pathology study"). The slide's report adds an image-source section with the attribution.
+- **Kinds:**
+  - radiology reports (category `RAD`) for the MRI (LOINC 24590-2) and the CT (103859-5);
+  - radiology reports for the left wrist (37455-3), the right hand and wrist (103442-0) and the right hand (47371-0);
+  - a pathology report for the slide (category `SP`; LOINC 11529-5 "Surgical pathology study"), with an image-source section carrying the attribution.
 - **Structure:** patient, exam, date, equipment, technique listing the actual series (or, for the slide, the pyramid levels) from the headers, findings and impression.
 - **Marking:** every PDF page carries **SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION.** at the top and bottom, and the text file starts and ends with it.
 - **Content:** the indication, findings and impression are generic and labelled illustrative; the report says no one produced them by reading the images.
 - **PDF format:** written by a small hand-made PDF writer (`scripts/lib/pdf.ts`). It passes `qpdf --check`, and PDF.js extracts the same text as the text file.
 
-The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The dataset is 201.7 MB (192 MiB), 152.2 MB of it the slide. `deploy/bootstrap-sandbox.sh` checks the digest of `SHA256SUMS` (`EXPECTED_SUMS`) after building on the VM.
+The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The dataset is 550.3 MB (525 MiB): 397 MB of de-identified studies and 152 MB of slide. `deploy/bootstrap-sandbox.sh` checks the digest of `SHA256SUMS` (`EXPECTED_SUMS`) after building on the VM.
 
 ### Plain export for other consumers
 
-The build also writes a plain copy of the rewritten studies to **`imaging-sandbox/out/`** (gitignored). The shlink-dicom server seeds its public sample share from there, so the viewer, the explainer and the portal all show the same fictional patient. The layout:
+The build also writes a plain copy of the served studies to **`imaging-sandbox/out/`** (gitignored), for other consumers such as the shlink-dicom sample share. The layout:
 
 ```
 out/index.json                                   patient, studies (Study Instance UID, accession, date, report paths)
@@ -107,7 +136,7 @@ out/dicom/<study>/S<series number>-<description>/IM<instance number>-<uid tail>.
 out/reports/<study>.pdf, out/reports/<study>.txt
 ```
 
-`<study>` is `mri-brain-2020`, `wrist-low-res` or `slide-lung-2023`. The DICOM files are byte-identical to what WADO-RS serves, and the export is as deterministic as the dataset; `test/data-check.ts` checks both. `--export DIR` writes it elsewhere, and `--export none` skips it.
+`<study>` is `mri-brain-2020`, `ct-abdomen-pelvis-2012`, `xr-wrist-left-2012`, `xr-hand-wrist-right-2012`, `xr-hand-right-2012` or `slide-lung-2023`. The DICOM files are byte-identical to what WADO-RS serves, and the export is as deterministic as the dataset; `test/data-check.ts` checks both. `--export DIR` writes it elsewhere, and `--export none` skips it.
 
 ## Endpoints
 
@@ -170,10 +199,11 @@ A request with an expired or revoked access token is refused with `401` before t
 
 The authorize endpoint shows a sign-in page with two demo patients and no passwords:
 
-- **Morgan Rivera** (`Patient/morgan-rivera`, born 1979-03-14, MRN SBX4417302) is fictional and owns three studies:
-  - MRI Brain, 29 Jul 2020: 14 series, 263 images;
-  - a whole-slide image of lung tissue, H&E, 17 Apr 2023: 1 series, 5 instances (three pyramid levels, the overview and a thumbnail);
-  - XR wrist, left, 3 views, 24 Jul 2011: 3 images.
+- **Josh Example** (`Patient/josh-example`, male, born 1982-01-01, identifier JEXAMPLE01) owns six studies:
+  - MRI brain, 29 Jul 2020: 14 series, 263 images;
+  - CT abdomen and pelvis with contrast, 9 Oct 2012: 5 series, 455 images;
+  - XR left wrist; XR right hand and wrist; and XR right hand, all 10 Oct 2012: 3 images each;
+  - a whole-slide image of lung tissue, H&E, 17 Apr 2023: 1 series, 5 instances (three pyramid levels, the overview and a thumbnail).
 - **Robin Example** (`Patient/robin-example`) is synthetic and has no imaging.
 
 Next comes a consent page that lists the permissions the app asked for and the patient's studies, all ticked:

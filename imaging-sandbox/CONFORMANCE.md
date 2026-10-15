@@ -90,7 +90,7 @@ The sandbox supports the **App Launch** mode only. It does not offer Backend Ser
 - the DiagnosticReport Bundle;
 - both CapabilityStatements.
 
-Result on 15 Oct 2026, after the switch to the fictional patient and the sample reports, with `TX=n/a`:
+Result on 15 Oct 2026, with the sample patient's studies and reports, with `TX=n/a`:
 - **Clean:** no errors and no warnings for any ImagingStudy, Endpoint, search Bundle, the Patient, or either CapabilityStatement.
 - **The DiagnosticReport Bundle** has two kinds of error, both from tooling rather than from the resources:
   - The validator cannot place `application/pdf` (`presentedForm.contentType`) in the R4 `mimetypes` value set. That value set is all of BCP 13, and `application/pdf` is a registered type. The text attachment's `text/plain; charset=utf-8` validates.

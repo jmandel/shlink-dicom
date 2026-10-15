@@ -7,8 +7,8 @@
 #
 # Steps: clone or update the repo in /opt/shlink-dicom, install Rust (with the
 # wasm32 target), wasm-bindgen and a pinned Bun, build the wasm modules, the
-# web app and the server, build the sandbox dataset (Morgan Rivera, a
-# fictional patient) and seed it as the public sample share, then install and
+# web app and the server, build the sandbox dataset (Josh Example, de-identified;
+# plus the CC BY slide) and seed it as the public sample share, then install and
 # start the systemd unit. Server data lives in /var/lib/shlink-dicom.
 # Log: /var/log/shlink-bootstrap.log
 
@@ -79,7 +79,7 @@ bun web/build.ts
 echo "== server"
 cargo build -q --release -p shl-dicom-server
 
-echo "== public sample (sandbox dataset, fictional patient)"
+echo "== public sample (sandbox dataset, Josh Example)"
 (cd imaging-sandbox && bun scripts/build-data.ts --quiet)
 id shlink >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin shlink
 $SUDO mkdir -p "$DATA/samples"
@@ -91,8 +91,8 @@ for d in imaging-sandbox/build/dataset/dicom/*/; do
 done
 $SUDO tee "$DATA/samples/sample.json" >/dev/null <<'EOF2'
 {
-  "title": "Sample imaging: Morgan Rivera",
-  "description": "Brain MRI, wrist X-ray and a lung pathology slide for Morgan Rivera, a fictional patient. Slide image: CPTAC-LUAD from the NCI Imaging Data Commons, CC BY 4.0, changed (see the study note)."
+  "title": "Sample imaging: Josh Example",
+  "description": "Brain MRI, CT of the abdomen and pelvis, and hand and wrist X-rays: real images of one person, de-identified as Josh Example and published by him. Also a lung pathology slide from a different person, from the NCI Imaging Data Commons (CPTAC-LUAD, CC BY 4.0), relabelled for this sample (see the study note)."
 }
 EOF2
 # Re-seed when the sample changes (the server keeps an existing seed otherwise).

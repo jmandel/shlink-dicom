@@ -1,16 +1,147 @@
 {
-  "_note": "Inputs to scripts/build-data.ts. Sources are pinned by commit and SHA-256. Header values are fictional except where noted. The original Study, Series and SOP Instance UIDs are replaced because the same files are published in jmandel/my-health-data and seeded as the project's public sample share under their original UIDs; reusing those UIDs for a different patient identity would make two different patients claim the same instances. New UIDs are minted deterministically under the 2.25 root from uidNamespace and the original UID (see scripts/lib/dicom-rewrite.ts, mintUid).",
+  "_note": "Inputs to scripts/build-data.ts. The DICOM studies are Josh Mandel's own, de-identified as \"Josh Example\" and published in github.com/jmandel/my-health-data (imaging/, made by imaging/deid.py there); the sandbox serves them unchanged. The whole-slide study is a CC BY 4.0 slide from the NCI Imaging Data Commons, rewritten here to the same patient. Sources are pinned by SHA-256.",
   "uidNamespace": "shlink-dicom/imaging-sandbox/v1",
+  "_sources": "my-health-data URLs point at master until the de-identified archives are pushed; the SHA-256 pins hold either way. Set SOURCE_CACHE to a local my-health-data/imaging (and the slide download directory) to build without network.",
   "sources": [
     {
-      "archive": "mri-brain-2020.tgz",
-      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/c23fade48fc6a7ab9ec22a5fce56cb58df550ba8/mri-brain-2020.tgz",
-      "sha256": "fc5c7a027161e4a060964b8f5108d817be0062ae951bcc3a57616baeb720177d"
+      "archive": "mri-brain-2020/0003-4-SHOT-PG-DWI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0003-4-SHOT-PG-DWI.tgz",
+      "sha256": "29a1db523460fb10c3df3e207c768b4cef4184e71224f1a7c773f01d7c72641e"
     },
     {
-      "archive": "wrist-low-res.tgz",
-      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/c23fade48fc6a7ab9ec22a5fce56cb58df550ba8/wrist-low-res.tgz",
-      "sha256": "a2c4dffa8ec93ef658fce1e5ea4803df91e1be0da8df52ae5fa17dc9dc067f8e"
+      "archive": "mri-brain-2020/0004-4-SHOT-PG-DWI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0004-4-SHOT-PG-DWI.tgz",
+      "sha256": "e1ff14471d70771eab5569bf5d2f45b23e2e8b9c5c5a9deb742e3312d76855ed"
+    },
+    {
+      "archive": "mri-brain-2020/0005-4-SHOT-PG-DWI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0005-4-SHOT-PG-DWI.tgz",
+      "sha256": "af4d77555511cc0981d9aba9e414be485435da93de04b689cb92ca9dadace31f"
+    },
+    {
+      "archive": "mri-brain-2020/0006-4-SHOT-PG-DWI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0006-4-SHOT-PG-DWI.tgz",
+      "sha256": "9408d7f9a63817a06c13c9c3725fbbff06ffb05fa5109e32a9831a57db566de7"
+    },
+    {
+      "archive": "mri-brain-2020/0007-DWI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0007-DWI.tgz",
+      "sha256": "eb830881032444e7e28732ecb6b2f4867621c2d5995e5e238c0502d82d65a64d"
+    },
+    {
+      "archive": "mri-brain-2020/0008-ADC-MAP.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0008-ADC-MAP.tgz",
+      "sha256": "8f5c40b0691a0ddbbef9ebdd40cd170ae994dbb1c33bc6a09986cec9450b3feb"
+    },
+    {
+      "archive": "mri-brain-2020/0013-DWI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0013-DWI.tgz",
+      "sha256": "434160f89284d2d9fa8c9edebdc59baa08c71fac0662526eff11c03001e6ba1a"
+    },
+    {
+      "archive": "mri-brain-2020/0014-ADC-MAP.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0014-ADC-MAP.tgz",
+      "sha256": "69cb4e3ae5f889468fb65081c38fec9807734e2cb6756c431af093f230334e36"
+    },
+    {
+      "archive": "mri-brain-2020/0015-T1-SE-SAG.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0015-T1-SE-SAG.tgz",
+      "sha256": "d3db87be14602acd445d26a036e906e82b6aa21a39894903dabcf070bb1b9522"
+    },
+    {
+      "archive": "mri-brain-2020/0016-T2-FSE-AX.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0016-T2-FSE-AX.tgz",
+      "sha256": "dae1d79136ebab6bb4f052557ad1c2acca7ef53a52241be99c74d858e5eed553"
+    },
+    {
+      "archive": "mri-brain-2020/0017-T1-SE-AX.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0017-T1-SE-AX.tgz",
+      "sha256": "cc248d9821e8ce6e5c1285f813ba63f7865603078de47711abd73891348f763b"
+    },
+    {
+      "archive": "mri-brain-2020/0018-FLAIR-AX.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0018-FLAIR-AX.tgz",
+      "sha256": "5cee5ad3ba8d9687a065c8fc0f48f390d3930f3631bd0153b718c4a287b874cf"
+    },
+    {
+      "archive": "mri-brain-2020/0019-T2-GE-AX.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0019-T2-GE-AX.tgz",
+      "sha256": "2299f198fe7e2e314821c7b2a6bb24e66fa9cf873dbe903464256c849589c2bf"
+    },
+    {
+      "archive": "mri-brain-2020/0020-FLAIR-COR.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/mri-brain-2020/0020-FLAIR-COR.tgz",
+      "sha256": "9dd6e5080ea5a0a258328d2ce39e5737b6626d6e0b208eef3fbb0425349b3b58"
+    },
+    {
+      "archive": "ct-abdomen-pelvis-2012/0001-SCOUT.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/ct-abdomen-pelvis-2012/0001-SCOUT.tgz",
+      "sha256": "ed6b80491594c95fb5575b0e56f7d1078932ac1cff82ed27504b5f05180541ec"
+    },
+    {
+      "archive": "ct-abdomen-pelvis-2012/0003-ABD-PEL.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/ct-abdomen-pelvis-2012/0003-ABD-PEL.tgz",
+      "sha256": "ab94bbd7760176eb2bfaf1b7a1fa619c3911bb9b9eddc83b901f73a4b978fcfe"
+    },
+    {
+      "archive": "ct-abdomen-pelvis-2012/0004-LUNG-WINDOWS.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/ct-abdomen-pelvis-2012/0004-LUNG-WINDOWS.tgz",
+      "sha256": "672b5e55e12d5d01d7bede10c5333845fe52266ab4158ed8a885ccfb66121288"
+    },
+    {
+      "archive": "ct-abdomen-pelvis-2012/0601-ABD-PEL-CORONAL-REFORMATS.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/ct-abdomen-pelvis-2012/0601-ABD-PEL-CORONAL-REFORMATS.tgz",
+      "sha256": "9801086a7999b7b1b16037ba428cbba12abd38c5f98d637894e120492315e6a3"
+    },
+    {
+      "archive": "ct-abdomen-pelvis-2012/0602-ABD-PEL-SAGITTAL-REFORMATS.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/ct-abdomen-pelvis-2012/0602-ABD-PEL-SAGITTAL-REFORMATS.tgz",
+      "sha256": "bab00ebdebeb6d01b7c58278e3f7819a5fcd97a89c080f4fdf8c1104406a3422"
+    },
+    {
+      "archive": "xr-wrist-left-2012/0001-Wrist-PA.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-wrist-left-2012/0001-Wrist-PA.tgz",
+      "sha256": "1839496edf100346e85f1ea859dc16071f452eb13be3b1ef73296cf616ccf52c"
+    },
+    {
+      "archive": "xr-wrist-left-2012/0002-Wrist-OBLI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-wrist-left-2012/0002-Wrist-OBLI.tgz",
+      "sha256": "b397131becc0b247dabcf204b8502c45b219ffa3c0357374e154725c03b62b04"
+    },
+    {
+      "archive": "xr-wrist-left-2012/0003-Wrist-LAT.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-wrist-left-2012/0003-Wrist-LAT.tgz",
+      "sha256": "70f5ee8dd093b83d0d7fa4a1e0392a62a44aa56fcc74ac62ba561498765c917d"
+    },
+    {
+      "archive": "xr-hand-wrist-right-2012/0001-Hand-PA.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-hand-wrist-right-2012/0001-Hand-PA.tgz",
+      "sha256": "146b95bc73d273c775ecb417a98e447f1607656af81a081642c12fa653a39bde"
+    },
+    {
+      "archive": "xr-hand-wrist-right-2012/0002-Hand-OBLI.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-hand-wrist-right-2012/0002-Hand-OBLI.tgz",
+      "sha256": "dc4c42dc5799f6471bea1e00333c654b05822b4751ac7e63d3beda601a1935f7"
+    },
+    {
+      "archive": "xr-hand-wrist-right-2012/0003-Hand-LAT.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-hand-wrist-right-2012/0003-Hand-LAT.tgz",
+      "sha256": "a1a4b12ebced56dc396a4c95dee382caf9ddf5fe33ff44ecb21b00836261996c"
+    },
+    {
+      "archive": "xr-hand-right-2012/0001-PA.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-hand-right-2012/0001-PA.tgz",
+      "sha256": "02bc65d7b674ead2d559436472a866f595f100b673a0a70494a66da318f40cf2"
+    },
+    {
+      "archive": "xr-hand-right-2012/0002-PA-OBL.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-hand-right-2012/0002-PA-OBL.tgz",
+      "sha256": "f49cdecdf24d8299198804b40af3acd5913a17e76cd6d8a9517f4a00e34a0927"
+    },
+    {
+      "archive": "xr-hand-right-2012/0003-LATERAL.tgz",
+      "url": "https://raw.githubusercontent.com/jmandel/my-health-data/911ee41622662f0af6afe603fdde6adba80d674f/imaging/xr-hand-right-2012/0003-LATERAL.tgz",
+      "sha256": "6ca387ceb7cbfcf6c040e414525b87392df823cc3ca5c4e7a705821ddc7c833d"
     },
     {
       "archive": "8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
@@ -44,7 +175,7 @@
     }
   ],
   "removeTags": {
-    "_note": "Patient Identity Removed (0012,0062) is dropped: the headers now carry a (fictional) identity.",
+    "_note": "Patient Identity Removed (0012,0062) is dropped from the slide: its headers now carry the sample patient's identity.",
     "tags": [
       "00120062"
     ]
@@ -52,12 +183,23 @@
   "studies": [
     {
       "id": "mri-brain-2020",
-      "archive": "mri-brain-2020.tgz",
-      "accession": "SBX20200729-0418",
-      "studyDate": "2020-07-29",
-      "_studyDate": "From the source StudyDescription, BRAIN 7/29/20.",
-      "studyTime": "07:42:15",
-      "utcOffset": "-04:00",
+      "archives": [
+        "mri-brain-2020/0003-4-SHOT-PG-DWI.tgz",
+        "mri-brain-2020/0004-4-SHOT-PG-DWI.tgz",
+        "mri-brain-2020/0005-4-SHOT-PG-DWI.tgz",
+        "mri-brain-2020/0006-4-SHOT-PG-DWI.tgz",
+        "mri-brain-2020/0007-DWI.tgz",
+        "mri-brain-2020/0008-ADC-MAP.tgz",
+        "mri-brain-2020/0013-DWI.tgz",
+        "mri-brain-2020/0014-ADC-MAP.tgz",
+        "mri-brain-2020/0015-T1-SE-SAG.tgz",
+        "mri-brain-2020/0016-T2-FSE-AX.tgz",
+        "mri-brain-2020/0017-T1-SE-AX.tgz",
+        "mri-brain-2020/0018-FLAIR-AX.tgz",
+        "mri-brain-2020/0019-T2-GE-AX.tgz",
+        "mri-brain-2020/0020-FLAIR-COR.tgz"
+      ],
+      "rewrite": false,
       "report": {
         "code": {
           "system": "http://loinc.org",
@@ -81,23 +223,56 @@
       }
     },
     {
-      "id": "wrist-low-res",
-      "archive": "wrist-low-res.tgz",
-      "accession": "SBX20110724-0093",
-      "studyDate": "2011-07-24",
-      "_studyDate": "Matches the source Instance Creation Date (0008,0012), 20110724.",
-      "studyTime": "21:41:30",
-      "utcOffset": "-04:00",
+      "id": "ct-abdomen-pelvis-2012",
+      "archives": [
+        "ct-abdomen-pelvis-2012/0001-SCOUT.tgz",
+        "ct-abdomen-pelvis-2012/0003-ABD-PEL.tgz",
+        "ct-abdomen-pelvis-2012/0004-LUNG-WINDOWS.tgz",
+        "ct-abdomen-pelvis-2012/0601-ABD-PEL-CORONAL-REFORMATS.tgz",
+        "ct-abdomen-pelvis-2012/0602-ABD-PEL-SAGITTAL-REFORMATS.tgz"
+      ],
+      "rewrite": false,
       "report": {
         "code": {
           "system": "http://loinc.org",
-          "code": "37550-1",
-          "display": "XR Wrist - left PA and Lateral and Oblique"
+          "code": "103859-5",
+          "display": "CT Abdomen and Pelvis W contrast PO and W contrast IV"
+        },
+        "title": "CT ABDOMEN AND PELVIS WITH ORAL AND IV CONTRAST",
+        "indication": "Abdominal pain.",
+        "comparison": "None.",
+        "techniqueIntro": "Helical CT of the abdomen and pelvis after oral and intravenous contrast, with coronal and sagittal reformats.",
+        "findings": [
+          "Lung bases: Clear.",
+          "Liver, gallbladder, spleen, pancreas and adrenal glands: Unremarkable.",
+          "Kidneys: Normal enhancement. No hydronephrosis.",
+          "Bowel: No obstruction or wall thickening. The appendix is normal.",
+          "Pelvis: No free fluid. The bladder is unremarkable.",
+          "Bones: No acute or aggressive osseous abnormality."
+        ],
+        "impression": [
+          "No acute abnormality in the abdomen or pelvis."
+        ]
+      }
+    },
+    {
+      "id": "xr-wrist-left-2012",
+      "archives": [
+        "xr-wrist-left-2012/0001-Wrist-PA.tgz",
+        "xr-wrist-left-2012/0002-Wrist-OBLI.tgz",
+        "xr-wrist-left-2012/0003-Wrist-LAT.tgz"
+      ],
+      "rewrite": false,
+      "report": {
+        "code": {
+          "system": "http://loinc.org",
+          "code": "37455-3",
+          "display": "XR Wrist - left 3 Views"
         },
         "title": "XR WRIST LEFT, 3 VIEWS",
         "indication": "Left wrist pain after a fall.",
         "comparison": "None.",
-        "techniqueIntro": "Computed radiography of the left wrist.",
+        "techniqueIntro": "Radiographs of the left wrist.",
         "findings": [
           "Bones: No acute fracture. Normal bone mineralization.",
           "Alignment: Normal radiocarpal and intercarpal alignment. No dislocation.",
@@ -106,6 +281,63 @@
         ],
         "impression": [
           "No acute osseous abnormality of the left wrist."
+        ]
+      }
+    },
+    {
+      "id": "xr-hand-wrist-right-2012",
+      "archives": [
+        "xr-hand-wrist-right-2012/0001-Hand-PA.tgz",
+        "xr-hand-wrist-right-2012/0002-Hand-OBLI.tgz",
+        "xr-hand-wrist-right-2012/0003-Hand-LAT.tgz"
+      ],
+      "rewrite": false,
+      "report": {
+        "code": {
+          "system": "http://loinc.org",
+          "code": "103442-0",
+          "display": "XR Wrist - right and Hand - right GE 3 Views"
+        },
+        "title": "XR HAND AND WRIST RIGHT, 3 VIEWS",
+        "indication": "Right hand pain after a fall.",
+        "comparison": "None.",
+        "techniqueIntro": "Radiographs of the right hand and wrist.",
+        "findings": [
+          "Bones: No displaced fracture. Normal bone mineralization.",
+          "Alignment: Normal. No dislocation.",
+          "Joints: Joint spaces are preserved.",
+          "Soft tissues: Unremarkable."
+        ],
+        "impression": [
+          "No displaced fracture of the right hand or wrist."
+        ]
+      }
+    },
+    {
+      "id": "xr-hand-right-2012",
+      "archives": [
+        "xr-hand-right-2012/0001-PA.tgz",
+        "xr-hand-right-2012/0002-PA-OBL.tgz",
+        "xr-hand-right-2012/0003-LATERAL.tgz"
+      ],
+      "rewrite": false,
+      "report": {
+        "code": {
+          "system": "http://loinc.org",
+          "code": "47371-0",
+          "display": "XR Hand - right GE 3 Views"
+        },
+        "title": "XR HAND RIGHT, 3 VIEWS (PORTABLE)",
+        "indication": "Hand pain; splint in place.",
+        "comparison": "Right hand and wrist radiographs from the same day.",
+        "techniqueIntro": "Portable radiographs of the right hand, taken through a splint.",
+        "findings": [
+          "Splint: Splint material overlies the hand and obscures fine bony detail.",
+          "Bones: No displaced fracture is seen through the splint.",
+          "Joints: Joint spaces are preserved."
+        ],
+        "impression": [
+          "No displaced fracture seen through the splint."
         ]
       }
     },
@@ -119,11 +351,11 @@
         "4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
         "dc7c0527-9e55-49a2-946c-17471edb63aa.dcm"
       ],
-      "accession": "SBX20230417-0211",
+      "accession": "EXSL2023",
       "studyDate": "2023-04-17",
       "studyTime": "13:05:00",
       "utcOffset": "-04:00",
-      "attribution": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed.",
+      "attribution": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with those of the sandbox's sample patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed.",
       "header": {
         "_note": "Applied to every instance besides the common patient, date and accession attributes. Values in replaceStrings are replaced wherever they occur, including inside sequences (Container Identifier, Specimen Identifier, the specimen's text items).",
         "set": {
@@ -153,11 +385,11 @@
           ],
           "00200010": [
             "SH",
-            "SBX-0211"
+            "EXSL2023"
           ],
           "00400512": [
             "LO",
-            "SBX23-S0417-A1"
+            "EXSL2023-A1"
           ]
         },
         "remove": [
@@ -174,8 +406,8 @@
           "0013"
         ],
         "replaceStrings": {
-          "C3N-02231-21": "SBX23-S0417-A1",
-          "C3N-02231": "SBX4417302"
+          "C3N-02231-21": "EXSL2023-A1",
+          "C3N-02231": "JEXAMPLE01"
         }
       },
       "report": {
@@ -200,7 +432,7 @@
         "impression": [
           "Lung: invasive adenocarcinoma."
         ],
-        "imageSource": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed."
+        "imageSource": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with those of the sandbox's sample patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed."
       }
     }
   ]

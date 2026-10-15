@@ -1,11 +1,10 @@
 {
-  "_note": "Morgan Rivera is a fictional patient. The sandbox writes this identity into the DICOM headers of its copy of the sample studies, which are Josh Mandel's published, anonymized studies. The sources carry no sex, so none is set.",
-  "id": "morgan-rivera",
-  "family": "Rivera",
-  "given": [
-    "Morgan"
-  ],
-  "dicomName": "RIVERA^MORGAN",
-  "birthDate": "1979-03-14",
-  "mrn": "SBX4417302"
+  "_note": "Josh Example is the de-identified name of the real patient whose studies are published in github.com/jmandel/my-health-data/imaging. The birth date keeps only the year, as in the DICOM headers. The whole-slide study is rewritten to this patient.",
+  "id": "josh-example",
+  "family": "Example",
+  "given": ["Josh"],
+  "dicomName": "Example^Josh",
+  "birthDate": "1982-01-01",
+  "gender": "male",
+  "mrn": "JEXAMPLE01"
 }

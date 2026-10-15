@@ -64,6 +64,7 @@ export interface DemoPatient {
   family: string;
   given: string[];
   birthDate?: string;
+  gender?: string;
   mrn?: string;
   synthetic?: boolean;
 }
@@ -89,7 +90,7 @@ export async function loadStore(datasetDir: string, testPatientsFile: string): P
   const binaries = new Map<string, { attachment: Attachment; study: Study }>();
 
   const p = manifest.patient;
-  patients.set(p.id, { id: p.id, family: p.family, given: p.given, birthDate: p.birthDate, mrn: p.mrn });
+  patients.set(p.id, { id: p.id, family: p.family, given: p.given, birthDate: p.birthDate, gender: p.gender, mrn: p.mrn });
   if (existsSync(testPatientsFile)) {
     for (const t of JSON.parse(await Bun.file(testPatientsFile).text()).patients) patients.set(t.id, { ...t, synthetic: true });
   }
@@ -100,7 +101,8 @@ export async function loadStore(datasetDir: string, testPatientsFile: string): P
       uid: m.studyInstanceUID,
       patientId: p.id,
       accession: m.accession,
-      started: `${m.studyDate}T${m.studyTime}${m.utcOffset}`,
+      // A time needs a UTC offset in FHIR; without a known offset, the date only.
+      started: m.utcOffset && m.studyTime ? `${m.studyDate}T${m.studyTime}${m.utcOffset}` : m.studyDate,
       modalities: [],
       series: [],
       lastUpdated: DATA_LAST_UPDATED,
