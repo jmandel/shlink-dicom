@@ -24,7 +24,7 @@ export async function decodeFrom(series: SeriesEntry, i: number, ct: Uint8Array,
   const end = (inst.lastRecord - a) * RECORD_CIPHERTEXT + recordLength(f, inst.lastRecord);
   const encrypted = await decryptParams(series, planInstances(series, i));
   const pool = await S.pool!;
-  return pool.decode(ct.slice(start, end), { encrypted, priority: 0 });
+  return pool.decode(ct.slice(start, end), { encrypted, priority: 0, header: true });
 }
 
 export function reqRow(r: { method: string; url: string; range?: string; status: number; bytes: number; recipient?: string | null }, full = false) {

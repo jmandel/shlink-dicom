@@ -4,7 +4,7 @@
 //     header windows): DCMTK dcm2img with the matching option;
 //   - 60xx overlays: the pixels DCMTK changes when it draws overlays, against the viewer's mask;
 //   - ICC profiles: LittleCMS (references made by objects/make-derived.py);
-//   - reformats: an independent numpy reformat of the same series;
+//   - reformats: SimpleITK resampling of the same series (objects/mpr-ref.py), slabs combined with numpy;
 //   - calibration: lengths and the calibration source, from the header values read by pydicom;
 //   - float pixel data: the default window, the values and units under the cursor (pydicom), and
 //     the rendering (numpy, objects/make-derived.py).
@@ -239,25 +239,72 @@ print(json.dumps({"frames": int(d.NumberOfFrames), "ps":[float(x) for x in pm.Pi
       }
     }
   }
-  // Reformats of a CT volume, against numpy.
-  if (!only || only === "volume-ct") {
+  await reformats();
+}
+
+/**
+ * Reformatted planes against the oracle (objects/mpr-ref.py: SimpleITK, linear, the series'
+ * own lattice including gantry tilt): true axial, sagittal and coronal planes, an oblique one, and
+ * slabs, on an isotropic CT, the Josh Example CT (5 mm), an oblique MR and a tilted CT.
+ */
+async function reformats() {
+  const AX = { axial: [[1, 0, 0], [0, 1, 0]], coronal: [[1, 0, 0], [0, 0, -1]], sagittal: [[0, 1, 0], [0, 0, -1]] };
+  const configs = [
+    ["sagittal", {}],
+    ["coronal", {}],
+    ["axial", {}],
+    ["sagittal", { turn: 20, tilt: 15 }],
+    ["sagittal", { slab: { thickness: 10, mode: "mip" } }],
+    ["coronal", { slab: { thickness: 10, mode: "minip" } }],
+    ["axial", { slab: { thickness: 20, mode: "avg" } }],
+  ];
+  for (const c of ["volume-ct", "mpr-josh-ct", "mpr-oblique-mr", "mpr-tilt"]) {
+    if (only && only !== c && only !== "reformats") continue;
+    const cs = M.cases.find((x) => x.id === c);
+    if (!cs || !F[c]) {
+      check(`${c}: reformat case shared`, false, "run make-derived.py and objects-fixtures.ts");
+      continue;
+    }
     try {
-      const c = M.cases.find((x) => x.id === "volume-ct");
-      const { context, page, errors } = await show("volume-ct", c.files[0]);
-      for (const plane of ["sagittal", "coronal"]) {
-        await page.evaluate((p) => window.__viewHooks.enterMpr(p), plane);
-        await page.waitForTimeout(500);
+      const { context, page, errors } = await show(c, cs.files[0]);
+      for (const engine of ["cpu", "gpu"])
+      for (const [plane, opts] of configs) {
+        await page.evaluate((e) => window.__viewHooks.setMprEngine(e), engine);
+        const label = `${c} (${engine}): ${plane}${opts.turn ? ` turned ${opts.turn}° tilted ${opts.tilt}°` : ""}${opts.slab ? ` ${opts.slab.mode} ${opts.slab.thickness} mm` : ""}`;
+        // A slab stays chosen across planes in the viewer: say "thin" explicitly.
+        await page.evaluate(([p, o]) => window.__viewHooks.enterMpr(p, o), [plane, { slab: { thickness: 0, mode: "mip" }, ...opts }]);
+        await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+        const m = await page.evaluate(() => window.__viewHooks.mprState());
+        if (!m) {
+          // The stored slices are this plane: nothing to resample.
+          check(`${label}: shows the stored images (the plane they were acquired in)`, plane === "axial" && !opts.turn && !opts.slab, (await page.textContent("#stage-msg")).slice(0, 100));
+          continue;
+        }
+        if (!opts.turn) {
+          const [u, v] = AX[plane];
+          const ok = m.spec.u.every((x, i) => Math.abs(x - u[i]) < 1e-9) && m.spec.v.every((x, i) => Math.abs(x - v[i]) < 1e-9);
+          check(`${label}: a true patient plane`, ok, `u ${m.spec.u.map((x) => x.toFixed(3))} v ${m.spec.v.map((x) => x.toFixed(3))}`);
+        }
+        check(`${label}: labelled "Reformatted in the viewer"`, /Reformatted in the viewer/.test(m.hud), m.hud.replace(/\n/g, " | "));
         const st = await page.evaluate(() => window.__viewHooks.state());
-        const ref = `${REFS}volume-${plane}-${st.sliceIdx}.png`;
-        execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "--with", "pillow", "python", `${ROOT}web/checks/objects/reformat-ref.py`, `${M.dataRoot}/volume-ct`, plane, String(st.sliceIdx), String(st.wc), String(st.ww), ref, ...c.files], { stdio: ["ignore", "ignore", "inherit"] });
-        const r = await compare(page, ref);
-        check(`volume-ct: ${plane} reformat matches numpy`, r && !r.error && r.mean < 1 && r.over2 < 0.01, fmt(r));
-        await page.screenshot({ path: `${SHOTS}volume-${plane}.png` });
+        const tag = `${c}-${engine}-${plane}-${opts.turn ?? 0}-${opts.slab?.mode ?? "thin"}`;
+        const job = { files: cs.files.map((f) => file(c, f)), spec: m.spec, window: { center: st.wc, width: st.ww }, out: `${REFS}mpr-${tag}.png` };
+        writeFileSync(`${REFS}mpr-${tag}.json`, JSON.stringify(job));
+        execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "--with", "simpleitk", "--with", "pillow", "python", `${ROOT}web/checks/objects/mpr-ref.py`, `${REFS}mpr-${tag}.json`], { stdio: ["ignore", "ignore", "inherit"] });
+        const r = await compare(page, job.out);
+        if (m.engine !== engine) {
+          check(`${label}: runs on the ${engine}`, false, `ran on the ${m.engine}`);
+          continue;
+        }
+        check(`${label}: matches SimpleITK within 1 grey level (${m.spec.width}×${m.spec.height}, ${m.spec.offsets.length} plane${m.spec.offsets.length > 1 ? "s" : ""}, ${m.ms.toFixed(0)} ms)`, r && !r.error && r.max <= 1, fmt(r));
+        await page.screenshot({ path: `${SHOTS}mpr-${tag}.png` });
       }
-      check(`volume-ct: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
+      await page.evaluate(() => window.__viewHooks.enterMpr(""));
+      await page.evaluate(() => window.__viewHooks.setMprEngine("auto"));
+      check(`${c} reformats: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
       await context.close();
     } catch (e) {
-      check(`volume-ct: reformats`, false, String(e).slice(0, 300));
+      check(`${c}: reformats`, false, String(e).slice(0, 300));
     }
   }
 }
@@ -310,7 +357,41 @@ async function floats() {
   }
 }
 
+/**
+ * The display transform outside the browser, on the LUT edges (display-synthetic.py) and the Josh
+ * Example radiographs, against dcmtk and the expected renderings (display-conformance.ts/.py). The
+ * full sweep over every grayscale file is the same two scripts with the corpus as input.
+ */
+async function conformance() {
+  if (only && only !== "conformance") return;
+  const out = "/tmp/display-conformance-quick";
+  const xr = JSON.parse(execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "python", `${ROOT}web/checks/sample-originals.py`], { maxBuffer: 1 << 26 }).toString());
+  const dirs = [...new Set(Object.values(xr).filter((o) => /\/xr-/.test(o.path)).map((o) => o.path.replace(/\/[^/]+$/, "")))];
+  execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "--with", "pillow", "python", `${ROOT}web/checks/display-synthetic.py`], { stdio: "ignore" });
+  execFileSync("bun", [`${ROOT}web/checks/display-conformance.ts`, out, "/media/barracuda/shlink-display-conformance/synthetic", ...dirs], { stdio: "ignore" });
+  execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "--with", "pillow", "python", `${ROOT}web/checks/display-conformance.py`, out], { stdio: "ignore" });
+  const rep = JSON.parse(readFileSync(`${out}/report.json`, "utf8"));
+  // Where our LUT depth rule (core/display.ts lutOutputBits) departs from dcmtk, which takes the descriptor's depth.
+  const depthRule = (r) => r.features.some((f) => /VOI LUT .*\((\d+)→(\d+) bits\)/.test(f) && f.match(/\((\d+)→(\d+)/).slice(1, 3).reduce((a, b) => a !== b));
+  for (const r of rep) {
+    const name = r.id.replace(/^.*?(synthetic_|xr-)/, "$1").slice(0, 70);
+    if (r.expected) check(`conformance ${name}: as the standard and our LUT rule call for`, r.expected.max <= 1, JSON.stringify(r.expected));
+    if (r.dcmtk.max !== undefined && !depthRule(r)) check(`conformance ${name}: matches dcmtk`, r.dcmtk.max <= 1, JSON.stringify(r.dcmtk));
+  }
+  // The radiographs whose VOI LUT declares 16 bits for 12-bit entries: not washed out.
+  const cr = rep.filter((r) => /xr-/.test(r.id) && depthRule(r));
+  const means = cr.map((r) => {
+    const b = readFileSync(`${out}/${r.id}.ours.pgm`);
+    const px = b.subarray(b.length - r.size[0] * r.size[1]);
+    let s = 0;
+    for (const v of px) s += v;
+    return Math.round(s / px.length);
+  });
+  check(`conformance: the ${cr.length} CR views with an overstated VOI LUT depth show the image, not white`, cr.length >= 6 && means.every((m) => m < 200), means.join(", "));
+}
+
 try {
+  await conformance();
   await floats();
   await grayscale();
   await overlays();

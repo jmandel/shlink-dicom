@@ -62,6 +62,7 @@ export const T = {
   FrameContentSequence: tag(0x0020, 0x9111),
   SamplesPerPixel: tag(0x0028, 0x0002),
   PhotometricInterpretation: tag(0x0028, 0x0004),
+  PlanarConfiguration: tag(0x0028, 0x0006),
   NumberOfFrames: tag(0x0028, 0x0008),
   Rows: tag(0x0028, 0x0010),
   Columns: tag(0x0028, 0x0011),
@@ -198,6 +199,7 @@ export const T = {
   WaveformSampleInterpretation: tag(0x5400, 0x1006),
   WaveformData: tag(0x5400, 0x1010),
   PixelData: tag(0x7fe0, 0x0010),
+  IconImageSequence: tag(0x0088, 0x0200),
   FloatPixelData: tag(0x7fe0, 0x0008),
   DoubleFloatPixelData: tag(0x7fe0, 0x0009),
 } as const;

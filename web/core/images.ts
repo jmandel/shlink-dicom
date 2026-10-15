@@ -44,6 +44,8 @@ export interface ImageGetOptions {
    * full-size decode. Reduced images are cached under their own key.
    */
   scale?: number;
+  /** Ciphertext bytes received so far for this instance, against its length. */
+  onProgress?: (received: number, total: number) => void;
 }
 
 const headers = new WeakMap<DecodedImage, Promise<ParsedDicom>>();
@@ -114,7 +116,7 @@ export class ImageStore {
     const existing = this.inflight.get(key);
     if (existing && !existing.signal?.aborted) {
       // Raise the queued fetch; the decode is deduplicated by key (and raised) in the pool.
-      void this.loader.ciphertext(series, i, { priority, signal: o.signal }).catch(() => {});
+      void this.loader.ciphertext(series, i, { priority, signal: o.signal, onProgress: o.onProgress }).catch(() => {});
       if (existing.signal && !o.signal) {
         // The first request can be cancelled but this one can't: don't tie it to the first.
         return existing.p.catch(() => this.get(series, i, o));
@@ -122,7 +124,7 @@ export class ImageStore {
       return existing.p;
     }
     const p = (async () => {
-      const { plan, bytes } = await this.loader.ciphertext(series, i, { priority, signal: o.signal });
+      const { plan, bytes } = await this.loader.ciphertext(series, i, { priority, signal: o.signal, onProgress: o.onProgress });
       const encrypted = await decryptParams(series, plan);
       const report = (e: unknown) => {
         if (e instanceof RecordAuthenticationError) this.loader.report(plan, "failed");

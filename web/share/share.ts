@@ -539,7 +539,7 @@ async function drawThumbs(studies: StudyModel[], gen: number) {
         if (gen !== thumbGen) return;
         try {
           const bytes = await inst.src.read(0, inst.src.size);
-          const img = await pool.decode(bytes, { copy: true, scale: 2, priority: 2 });
+          const img = await pool.decode(bytes, { copy: true, scale: 2, priority: 2, header: true });
           if (gen !== thumbGen) return;
           drawThumbnail(canvas, img);
           canvas.classList.add("drawn");

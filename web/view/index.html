@@ -73,6 +73,10 @@
           <input id="input-link" type="url" placeholder="https://… or shlink:/…" autocomplete="off" spellcheck="false" />
           <button class="btn btn-primary wide" type="submit">Open</button>
         </form>
+        <div id="sample-row" class="sample-row hidden" style="margin-top: 16px; display: flex; flex-direction: column; gap: 6px; text-align: center">
+          <button id="btn-sample" class="btn wide" type="button">Open the sample</button>
+          <p class="small muted">The de-identified studies of Josh Example, and a lung slide shared under CC BY.</p>
+        </div>
         <p class="small muted error-foot"><a href="../">What is this site?</a></p>
       </div>
     </section>
@@ -93,7 +97,7 @@
         <div id="hud-tr" class="hud hud-tr"></div>
         <div id="hud-bl" class="hud hud-bl"></div>
         <div id="hud-br" class="hud hud-br" aria-live="polite"></div>
-        <div id="stage-busy" class="stage-busy hidden"><div class="spinner"></div></div>
+        <div id="stage-busy" class="stage-busy hidden" role="status"><span id="stage-busy-text"></span><span id="stage-track" class="stage-track hidden" role="progressbar" aria-valuemin="0" aria-label="Loading"><span id="stage-fill" class="stage-fill"></span></span></div>
         <div id="stage-msg" class="stage-msg hidden" role="alert"></div>
       </div>
       <div id="toolbar" class="toolbar">
@@ -107,6 +111,7 @@
           <select id="preset" class="preset hidden"></select>
           <label for="view-plane" class="sr-only">Plane</label>
           <select id="view-plane" class="preset hidden"></select>
+          <button id="btn-plane-opts" class="btn hidden" type="button" aria-haspopup="dialog">Angle and slab</button>
           <button id="btn-label" class="btn hidden" type="button" aria-haspopup="dialog">Label</button>
           <button id="btn-layers" class="btn hidden" type="button" aria-haspopup="dialog">Layers</button>
           <label for="measure-tool" class="sr-only">Measure</label>
@@ -139,7 +144,7 @@
     <p class="muted small">The DICOM files exactly as they were shared. Each ZIP includes a DICOMDIR index, as on an imaging CD.</p>
     <div id="dl-options" class="dl-options"></div>
     <div id="dl-progress" class="dl-progress hidden" aria-live="polite">
-      <div class="bar"><div id="dl-bar" class="bar-fill"></div></div>
+      <div id="dl-track" class="bar" role="progressbar" aria-valuemin="0" aria-label="Download"><div id="dl-bar" class="bar-fill"></div></div>
       <p id="dl-status" class="small"></p>
       <button id="btn-dl-cancel" class="btn" type="button">Cancel</button>
     </div>
@@ -150,6 +155,35 @@
     <div class="sheet-grip" aria-hidden="true"></div>
     <h2 id="label-title">Slide label and glass slide</h2>
     <div id="label-images" class="label-images"></div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-plane" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="plane-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="plane-title">Angle and slab</h2>
+    <p class="muted small">The plane is resampled from the stored slices, in the viewer.</p>
+    <div class="plane-ctl">
+      <label for="plane-turn">Turn <span id="plane-turn-v">0°</span></label>
+      <input id="plane-turn" type="range" min="-60" max="60" step="1" value="0" />
+      <label for="plane-tilt">Tilt <span id="plane-tilt-v">0°</span></label>
+      <input id="plane-tilt" type="range" min="-60" max="60" step="1" value="0" />
+      <label for="slab-thickness">Slab</label>
+      <div class="plane-slab">
+        <select id="slab-thickness" class="preset">
+          <option value="0">Thin</option>
+          <option value="5">5 mm</option>
+          <option value="10">10 mm</option>
+          <option value="20">20 mm</option>
+          <option value="40">40 mm</option>
+        </select>
+        <select id="slab-mode" class="preset hidden" aria-label="Slab method">
+          <option value="mip">Maximum (MIP)</option>
+          <option value="minip">Minimum (MinIP)</option>
+          <option value="avg">Average</option>
+        </select>
+      </div>
+    </div>
+    <button id="plane-reset" class="btn" type="button">Back to a thin, straight plane</button>
     <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
   </section>
 

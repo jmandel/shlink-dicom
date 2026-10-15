@@ -30,6 +30,8 @@ export interface LoaderOptions {
 export interface LoadOptions {
   priority?: number;
   signal?: AbortSignal;
+  /** Ciphertext bytes received so far, against the instance's ciphertext length. */
+  onProgress?: (received: number, total: number) => void;
 }
 
 interface Waiter {
@@ -47,6 +49,7 @@ interface Job {
   priority: number;
   seq: number;
   waiters: Set<Waiter>;
+  listeners: Set<(received: number, total: number) => void>;
   running: boolean;
   cache: boolean;
 }
@@ -90,6 +93,7 @@ export class InstanceLoader {
     if (hit) {
       this.cached.delete(key);
       this.cached.set(key, hit);
+      o.onProgress?.(hit.byteLength, hit.byteLength);
       return { plan, bytes: hit.slice() };
     }
     const bytes = await this.enqueue(key, series.id, plan, o, true);
@@ -151,7 +155,7 @@ export class InstanceLoader {
     const priority = o.priority ?? FetchPriority.Visible;
     let job = this.jobs.get(key);
     if (!job) {
-      job = { key, seriesId, plan, priority, seq: this.seq++, waiters: new Set(), running: false, cache };
+      job = { key, seriesId, plan, priority, seq: this.seq++, waiters: new Set(), listeners: new Set(), running: false, cache };
       this.jobs.set(key, job);
       this.queue.push(job);
     } else if (!job.running && priority < job.priority) {
@@ -159,6 +163,7 @@ export class InstanceLoader {
       job.seq = this.seq++;
     }
     const j = job;
+    if (o.onProgress) j.listeners.add(o.onProgress);
     const p = new Promise<Uint8Array>((resolve, reject) => {
       const w: Waiter = { resolve, reject, signal: o.signal };
       if (o.signal) {
@@ -199,7 +204,8 @@ export class InstanceLoader {
     const { plan } = job;
     this.report(plan, "fetching");
     try {
-      const ct = await this.resolver.fetchRange(plan);
+      // Listeners can join while the request runs (a thumbnail asking for a prefetched slice).
+      const ct = await this.resolver.fetchRange(plan, undefined, (r, t) => job.listeners.forEach((f) => f(r, t)));
       this.bytesFetched += ct.byteLength;
       this.opts.onBytes?.(ct.byteLength);
       if (job.cache) this.remember(job.key, ct);

@@ -5,6 +5,7 @@ import type { SeriesEntry, StudyEntry } from "../core/bundle";
 import { parseDicom, T, type DataSet } from "../core/dicom";
 import { readKeyObjects } from "../core/derived";
 import { formatBytes, formatDate, plural } from "../core/format";
+import { planInstances } from "../core/range";
 import { parseMtl, parseObj, parseStl, type Mesh } from "../core/mesh";
 import { sopInfo, type ObjectKind } from "../core/objects";
 import { readSr, type SrNode, type SrRef } from "../core/sr";
@@ -100,10 +101,13 @@ export class ObjectView {
     actions.append(dl);
     head.append(actions);
     const body = el("div", "obj-body");
-    body.append(el("p", "muted", "Loading…"));
+    const plan = planInstances(se, index);
+    const loading = el("p", "muted", `Loading · ${formatBytes(0)} of ${formatBytes(plan.ciphertextEnd - plan.ciphertextStart)}`);
+    body.append(loading);
     this.box.append(head, body);
     try {
-      const bytes = await this.ctx.loader.instance(se, index, { signal });
+      // Bytes received against the file's length (the ciphertext's, a little larger).
+      const bytes = await this.ctx.loader.instance(se, index, { signal, onProgress: (r, t) => (loading.textContent = `Loading · ${formatBytes(r)} of ${formatBytes(t)}`) });
       if (signal.aborted) return;
       const { ds } = await parseDicom(bytes);
       body.textContent = "";
@@ -380,6 +384,14 @@ function narrative(node: Element): HTMLElement {
   return d;
 }
 
+/** Relative luminance (0–1) of a #rrggbb colour. */
+function luminance(hex: string): number {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
+  if (!m) return 1;
+  const [r, g, b] = [m[1], m[2], m[3]].map((x) => parseInt(x, 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 /** Channel traces on a canvas. ECG: 25 mm/s, 10 mm/mV, 1 mm grid (4 CSS px per mm). Others: each channel fitted. */
 function plotWaveform(g: WaveformGroup, ecg: boolean): HTMLElement {
   const wrap = el("div", "wf-scroll");
@@ -397,18 +409,23 @@ function plotWaveform(g: WaveformGroup, ecg: boolean): HTMLElement {
   c.style.height = `${height}px`;
   const ctx = c.getContext("2d")!;
   ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#fff";
+  // Page colours (light or dark), and ECG paper's red grid in a tint that suits them.
+  const css = getComputedStyle(document.documentElement);
+  const tok = (n: string) => css.getPropertyValue(n).trim();
+  const dark = luminance(tok("--surface")) < 0.4;
+  const [major, minor] = dark ? ["#6b3333", "#3d2526"] : ["#f3b4b4", "#fbe3e3"];
+  ctx.fillStyle = tok("--surface");
   ctx.fillRect(0, 0, width + labelW, height);
   if (ecg) {
     for (let x = 0; x <= width; x += PX_MM) {
-      ctx.strokeStyle = x % (5 * PX_MM) === 0 ? "#f3b4b4" : "#fbe3e3";
+      ctx.strokeStyle = x % (5 * PX_MM) === 0 ? major : minor;
       ctx.beginPath();
       ctx.moveTo(labelW + x + 0.5, 0);
       ctx.lineTo(labelW + x + 0.5, height);
       ctx.stroke();
     }
     for (let y = 0; y <= height; y += PX_MM) {
-      ctx.strokeStyle = y % (5 * PX_MM) === 0 ? "#f3b4b4" : "#fbe3e3";
+      ctx.strokeStyle = y % (5 * PX_MM) === 0 ? major : minor;
       ctx.beginPath();
       ctx.moveTo(labelW, y + 0.5);
       ctx.lineTo(labelW + width, y + 0.5);
@@ -430,7 +447,7 @@ function plotWaveform(g: WaveformGroup, ecg: boolean): HTMLElement {
       const span = hi - lo || 1;
       toY = (v) => k * laneH + 6 + (1 - (v - lo) / span) * (laneH - 12);
     }
-    ctx.strokeStyle = "#111";
+    ctx.strokeStyle = tok("--text");
     ctx.lineWidth = 1;
     ctx.beginPath();
     const n = ch.values.length;
@@ -441,11 +458,11 @@ function plotWaveform(g: WaveformGroup, ecg: boolean): HTMLElement {
       else ctx.moveTo(x, y);
     }
     ctx.stroke();
-    ctx.fillStyle = "#333";
+    ctx.fillStyle = tok("--text-2");
     ctx.font = "12px system-ui, sans-serif";
     ctx.fillText(ch.label.slice(0, 9), 4, k * laneH + 16);
     if (ch.units) {
-      ctx.fillStyle = "#777";
+      ctx.fillStyle = tok("--text-3");
       ctx.fillText(ch.units, 4, k * laneH + 30);
     }
   });

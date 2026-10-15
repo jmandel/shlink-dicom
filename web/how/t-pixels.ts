@@ -4,8 +4,9 @@
 // decoded in a worker.
 import { parseDicomSync, T, tagHex, decryptParams, siteUrl } from "../core/index";
 import type { DecodedImage } from "../core/images";
-import { Viewport } from "../core/render";
-import { autoWindow } from "../core/wl";
+import { showImage, Viewport } from "../core/render";
+import { displayPlan } from "../core/display";
+import type { DataSet } from "../core/dicom";
 import type { Scene } from "./how";
 import { $, h, mb, n, S } from "./state";
 
@@ -30,8 +31,7 @@ function hdrRow(name: string, value: string, tagText: string, bytes: Uint8Array,
 }
 
 /** Wires brightness/contrast sliders and dragging on the stage to a viewport. */
-function windowControls(vp: Viewport, img: DecodedImage, stage: HTMLElement, onChange: (c: number, w: number) => void) {
-  const w0 = autoWindow(img);
+function windowControls(vp: Viewport, img: DecodedImage, header: DataSet | null, w0: { center: number; width: number }, stage: HTMLElement, onChange: (c: number, w: number) => void) {
   const lo = (img.minValue ?? 0) * img.rescaleSlope + img.rescaleIntercept;
   const hi = (img.maxValue ?? 4095) * img.rescaleSlope + img.rescaleIntercept;
   const span = Math.max(1, hi - lo);
@@ -43,7 +43,7 @@ function windowControls(vp: Viewport, img: DecodedImage, stage: HTMLElement, onC
     ws.value = String(Math.round(100 * (1 - Math.log(w / 1) / Math.log(span * 2))));
   };
   const apply = () => {
-    vp.setView({ windowCenter: c, windowWidth: w });
+    vp.setView(displayPlan(img, 0, header, { kind: "window", center: c, width: w }).view);
     onChange(c, w);
   };
   cs.oninput = () => {
@@ -99,12 +99,12 @@ export function pixelsScene(): Scene {
     if (px) parts.push(...hdrRow("Pixels", `start at byte ${n(px.offset)} of ${n(bytes.length)}`, tagHex(T.PixelData), bytes.subarray(px.offset, px.offset + 16), px.offset));
     hdr.replaceChildren(...parts);
     // The pixels: decoded in a worker.
-    img = await pool.decode(bytes, { priority: 0 });
+    // A copy: the header (ds) still reads these bytes, and decode transfers what it is given.
+    img = await pool.decode(bytes, { priority: 0, copy: true });
     vp = new Viewport(stage);
-    const w0 = autoWindow(img);
-    vp.show(img, 0, { windowCenter: w0.center, windowWidth: w0.width });
+    const shownPlan = showImage(vp, img!, 0, { kind: "auto" }, ds);
     const tsName = TS_NAMES[transferSyntax] ?? transferSyntax;
-    windowControls(vp, img, stage, (c, w) => {
+    windowControls(vp, img!, ds, shownPlan.window ?? { center: 128, width: 256 }, stage, (c, w) => {
       $("d-pixels").textContent = `Transfer syntax ${transferSyntax}: ${tsName}. ${img!.columns} × ${img!.rows} pixels, ${img!.bitsStored} bits stored in ${img!.bitsAllocated}. The scanner suggests a window of centre ${img!.windowCenter ?? "–"}, width ${img!.windowWidth ?? "–"}; brightness and contrast set it, now centre ${Math.round(c)}, width ${Math.round(w)}. Decoded in a worker in ${img!.decodeMs.toFixed(1)} ms.`;
     });
   };
@@ -139,8 +139,7 @@ export function compressedScene(): Scene {
       h("div", {}, `As pixels: ${mb(raw)}`, h("div", { class: "sizebar raw", style: "width:100%" })),
     );
     const vp = new Viewport(stage);
-    const w0 = autoWindow(img);
-    vp.show(img, 0, { windowCenter: w0.center, windowWidth: w0.width });
+    showImage(vp, img, 0, { kind: "auto" }, parseDicomSync(bytes, { untilPixelData: true }).ds);
     credit.textContent = meta.credit;
     $("d-compressed").textContent = `Transfer syntax ${img.transferSyntax}: ${TS_NAMES[img.transferSyntax] ?? img.transferSyntax}. ${img.columns} × ${img.rows} pixels, ${img.bitsStored} bits stored. ${n(bytes.length)} bytes in the file, ${n(raw)} once decoded: ${(raw / bytes.length).toFixed(1)} times smaller, with no loss. Decoded in ${img.decodeMs.toFixed(1)} ms in a worker, by our own decoder: Rust compiled to WebAssembly. It also reads the other JPEG modes, JPEG 2000, JPEG-LS, HTJ2K, JPEG XL and RLE.`;
   };

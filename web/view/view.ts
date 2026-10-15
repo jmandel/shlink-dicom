@@ -5,6 +5,8 @@
 // phone returns from the viewer to the overview.
 import {
   extractShlink,
+  fetchSampleLinks,
+  loadConfig,
   formatBytes,
   formatDate,
   formatPersonName,
@@ -15,6 +17,7 @@ import {
   modalityName,
   openShare,
   PasscodeError,
+  isLocalizer,
   pickInitialSeries,
   plural,
   studyTitle,
@@ -25,11 +28,11 @@ import {
   type StudyEntry,
 } from "../core/index";
 import { getDecoderPool, ImageStore, imageHeader, imageHeaderNow, PoolDecryptor, Priority, type DecodedImage } from "../core/images";
-import { applyModalityLut, applySigmoid, applyVoiLut, displayModel, floatFrame, floatRange, formatValue, IDENTITY_WINDOW, imageRealWorld, linearWindow, realValue, realWorldOf, unitText, type DisplayModel, type RealWorld } from "../core/display";
+import { displayPlan, formatValue, imageRealWorld, linearWindow, realValue, realWorldOf, unitText, type DisplayModel, type RealWorld, type VoiChoice } from "../core/display";
 import { defaultView, frameOf, renderCpu, type Frame } from "../../viewer-kit/src/index";
 import { iccToSrgb, type IccTransform } from "../core/icc";
 import { drawThumbnail, Viewport } from "../core/render";
-import { autoWindow, presetsFor, type WindowPreset } from "../core/wl";
+import { presetsFor, type WindowPreset } from "../core/wl";
 import { exportBaseName, exportInstance, exportSize, exportZip, type ExportScope } from "../core/export";
 import { openSaveTarget, saveBlob } from "../core/save";
 import { isSlideSeries } from "../core/wsi";
@@ -38,12 +41,15 @@ import { mayHoldMedia, MediaController } from "../core/video-view";
 import { linkReports, noteAccession, type ReportLink } from "../core/reports";
 import { parseDicom, parseDicomSync, T, tag } from "../core/dicom";
 import { readInstanceBytes, probeInstance, cineTiming } from "../core/video";
-import { RECORD_PLAINTEXT } from "../core/range";
+import { planInstances, RECORD_PLAINTEXT } from "../core/range";
+import { readIcon, type Icon } from "../core/icon";
+import { ThumbTile } from "./thumb-tile";
 import { KIND_LABEL, seriesKind, sopInfo, type ObjectKind } from "../core/objects";
 import { ObjectView, type ObjectContext } from "./object-view";
 import { Layers, mapColours, mapScale, type Layer } from "./layers";
 import { Measure, type Tool } from "./measure";
-import { buildVolume, reformat, reformatPlanes, VolumeError, type Plane, type Volume } from "../core/volume";
+import { GpuReformatter } from "../core/volume-gl";
+import { buildVolume, isAcquired, makeVolume, planeGrid, reformat, VolumeError, type Orientation, type Plane, type PlaneGrid, type PlaneSpec, type Slab, type SlabMode, type Volume } from "../core/volume";
 import { geometryOf } from "../core/geometry";
 import { renderReports, reportHeading } from "./report-view";
 
@@ -155,19 +161,91 @@ function slideFor(se: SeriesEntry): Promise<SlideSession> {
   });
 }
 
-/** Thumbnail of a series: the middle image, or for a slide its coarsest pyramid level. */
-function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority: number, signal?: AbortSignal): Promise<void> {
-  if (isSlideSeries(se)) return slideFor(se).then((ss) => drawSlideThumbnail(canvas, ss));
+/** The instance a series' thumbnail is made from: the middle one, or the smallest when sizes differ (less to fetch). */
+function thumbInstance(se: SeriesEntry): number {
+  const lens = se.instances.map((x) => x.length);
+  const min = Math.min(...lens), max = Math.max(...lens);
+  return max > min * 1.1 ? lens.indexOf(min) : Math.floor(lens.length / 2);
+}
+
+const tiles = new WeakMap<HTMLCanvasElement, ThumbTile>();
+const tileOf = (c: HTMLCanvasElement) => tiles.get(c) ?? (tiles.set(c, new ThumbTile(c)), tiles.get(c)!);
+
+/**
+ * Thumbnail of a series (instance `inst`, by default thumbInstance), or for a slide its coarsest
+ * pyramid level. The tile shows the bytes received while the file arrives, and the file's own
+ * icon (Icon Image Sequence) first when it has one; it ends drawn or with the reason it isn't.
+ */
+async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority: number, signal?: AbortSignal, inst = thumbInstance(se)): Promise<void> {
+  const tile = tileOf(canvas);
+  try {
+    if (isSlideSeries(se)) {
+      tile.status("Opening the slide");
+      await drawSlideThumbnail(canvas, await slideFor(se));
+      return tile.drawn();
+    }
+    const kind = kindOf(se);
+    if (OBJECT_KINDS.has(kind) || DERIVED_KINDS.has(kind)) {
+      drawKindIcon(canvas, kind);
+      return tile.drawn();
+    }
+    // Video series get a drawn placeholder instead of a decode (video-view.ts).
+    if (mayHoldMedia(se) && (await media.drawThumb(canvas, se))) return tile.drawn();
+    const plan = planInstances(se, inst);
+    tile.progress(0, plan.ciphertextEnd - plan.ciphertextStart);
+    const len = se.instances[inst].length;
+    if (len > 384 * 1024) {
+      // A larger file: its header may carry a ready-made icon, one small read away.
+      void readInstanceBytes(share!, se, inst, 0, Math.min(len, RECORD_PLAINTEXT), { signal })
+        .then((head) => {
+          const icon = canvas.dataset.drawn ? null : readIcon(head);
+          if (icon) {
+            drawIcon(canvas, icon);
+            tile.preview();
+          }
+        })
+        .catch(() => {});
+    }
+    const img = await images!.get(se, inst, { priority, signal, scale: thumbScale(len, canvas.width), onProgress: (r, t) => tile.progress(r, t) });
+    const h = await imageHeader(img)?.catch(() => null);
+    drawThumbnail(canvas, img, Math.floor(img.frames / 2), h?.ds);
+    tile.drawn();
+  } catch (e) {
+    if ((e as any)?.name === "AbortError") throw e;
+    tile.failed(`Can't show this image: ${describeError(e).title.replace(/\.$/, "").toLowerCase()}`);
+    throw e;
+  }
+}
+
+/** A strip tile before its thumbnail is asked for: what it will load, nothing received yet. */
+function primeTile(canvas: HTMLCanvasElement, se: SeriesEntry, inst = thumbInstance(se)) {
+  const tile = tileOf(canvas);
   const kind = kindOf(se);
-  if (OBJECT_KINDS.has(kind) || DERIVED_KINDS.has(kind)) return Promise.resolve(drawKindIcon(canvas, kind));
-  const mid = Math.floor(se.instances.length / 2);
-  const image = () =>
-    images!
-      .get(se, mid, { priority, signal, scale: thumbScale(se.instances[mid].length, canvas.width) })
-      .then((img) => drawThumbnail(canvas, img, Math.floor(img.frames / 2)));
-  // Video series get a drawn placeholder instead of a decode (video-view.ts).
-  if (mayHoldMedia(se)) return media.drawThumb(canvas, se).then((drawn) => (drawn ? undefined : image()));
-  return image();
+  if (OBJECT_KINDS.has(kind) || DERIVED_KINDS.has(kind)) {
+    drawKindIcon(canvas, kind);
+    tile.drawn();
+  } else if (isSlideSeries(se) || mayHoldMedia(se)) tile.status("Waiting to load");
+  else {
+    const plan = planInstances(se, inst);
+    tile.progress(0, plan.ciphertextEnd - plan.ciphertextStart);
+  }
+}
+
+/** A file's icon, fitted to the canvas on black. */
+function drawIcon(canvas: HTMLCanvasElement, icon: Icon) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const oc = new OffscreenCanvas(icon.width, icon.height);
+  oc.getContext("2d")!.putImageData(new ImageData(icon.rgba as Uint8ClampedArray<ArrayBuffer>, icon.width, icon.height), 0, 0);
+  const k = Math.min(canvas.width / icon.width, canvas.height / icon.height);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(oc, (canvas.width - icon.width * k) / 2, (canvas.height - icon.height * k) / 2, icon.width * k, icon.height * k);
+  // For checks: the icon's size and mean colour.
+  const m = [0, 0, 0];
+  for (let i = 0; i < icon.rgba.length; i += 4) for (let c = 0; c < 3; c++) m[c] += icon.rgba[i + c];
+  canvas.dataset.icon = `${icon.width}x${icon.height} ${m.map((v) => Math.round(v / (icon.width * icon.height))).join(",")}`;
 }
 
 /**
@@ -494,9 +572,28 @@ async function showDerived(se: SeriesEntry) {
 
 // ------------------------------------------------------------------------------------- reformats
 
-/** The reformatted view on screen: a plane through the series' volume. */
-let mpr: { volume: Volume; plane: Plane; count: number; first: DecodedImage } | null = null;
+/** The reformatted view on screen: planes through the series' volume, sampled in patient space (volume.ts). */
+let mpr: { volume: Volume; orient: Orientation; grid: PlaneGrid; slab: Slab; first: DecodedImage; spec: PlaneSpec | null; ms: number; engine: "gpu" | "cpu"; frame: Frame | null } | null = null;
+/**
+ * Where planes are resampled: on the GPU when the viewer draws with WebGL2 (a 3D texture of the
+ * volume, volume-gl.ts), else on the CPU. Both are held to the same oracle; checks can force one.
+ */
+let mprEngine: "auto" | "cpu" | "gpu" = "auto";
 let acquiredSlice = 0;
+/** The last volume built, by series UID (switching planes reuses it). */
+let lastVolume: { uid: string; volume: Volume; first: DecodedImage; gpu?: GpuReformatter | null } | null = null;
+
+/** The GPU path for the current volume (made on first use; null where it can't run). */
+function gpuFor(v: NonNullable<typeof lastVolume>): GpuReformatter | null {
+  if (v.gpu === undefined) {
+    try {
+      v.gpu = GpuReformatter.create(v.volume);
+    } catch {
+      v.gpu = null;
+    }
+  }
+  return v.gpu;
+}
 
 /** Plane choices for a series that may be a volume (CT, MR, PET, NM with enough slices). */
 function updatePlaneSelect(se: SeriesEntry) {
@@ -510,13 +607,41 @@ function updatePlaneSelect(se: SeriesEntry) {
     sel.append(o);
   }
   sel.value = "";
+  $("btn-plane-opts").classList.add("hidden");
 }
 
-/** Builds the series' volume (every slice decoded, with its header) and shows the middle of a reformatted plane. */
-async function enterMpr(plane: Plane | "") {
+/** The series' volume: every slice decoded, with its header (counted on the stage while it loads). */
+async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: DecodedImage }> {
+  if (lastVolume?.uid === se.uid) return lastVolume;
+  const input = [];
+  if (se.instances.length === 1) {
+    const img = await images!.get(se, 0, { priority: Priority.Visible, onProgress: (r, t) => stageBusy(`Loading the series · ${formatBytes(r)} of ${formatBytes(t)}`, r, t) });
+    const h = await imageHeader(img);
+    for (let f = 0; f < img.frames; f++) input.push({ img, frame: f, geom: geometryOf(h!.ds, f) });
+  } else {
+    const n = se.instances.length;
+    let done = 0;
+    const step = () => stageBusy(`Loading slices · ${done} of ${n}`, done, n);
+    step();
+    const imgs = await Promise.all(se.instances.map((_, i) => images!.get(se, i, { priority: Priority.Visible }).then((im) => (done++, step(), im))));
+    for (const img of imgs) input.push({ img, frame: 0, geom: geometryOf((await imageHeader(img))!.ds, null) });
+  }
+  const volume = buildVolume(input);
+  lastVolume?.gpu?.destroy();
+  lastVolume = { uid: se.uid, volume, first: input[0].img };
+  return lastVolume;
+}
+
+/**
+ * Shows a reformatted plane (true axial, sagittal or coronal, turned and tilted by `opts`, with a
+ * slab), or the stored images for "". The plane the slices were acquired in, untilted, is the
+ * stored images themselves.
+ */
+async function enterMpr(plane: Plane | "", opts: { turn?: number; tilt?: number; slab?: Slab } = {}) {
   const se = series();
   const sel = $<HTMLSelectElement>("view-plane");
   if (!plane) {
+    $("btn-plane-opts").classList.add("hidden");
     if (mpr) {
       mpr = null;
       sliceCount = se.instances.length === 1 ? sliceCount : se.instances.length;
@@ -525,30 +650,26 @@ async function enterMpr(plane: Plane | "") {
     }
     return;
   }
-  $("stage-busy").classList.remove("hidden");
   try {
-    const input = [];
-    if (se.instances.length === 1) {
-      const img = await images!.get(se, 0, { priority: Priority.Visible });
-      const h = await imageHeader(img);
-      for (let f = 0; f < img.frames; f++) input.push({ img, frame: f, geom: geometryOf(h!.ds, f) });
-    } else {
-      const imgs = await Promise.all(se.instances.map((_, i) => images!.get(se, i, { priority: Priority.Visible })));
-      for (const img of imgs) input.push({ img, frame: 0, geom: geometryOf((await imageHeader(img))!.ds, null) });
-    }
+    const { volume, first } = await seriesVolume(se);
     if (series() !== se) return;
-    const volume = buildVolume(input);
-    if (plane === volume.acquired) {
+    const orient: Orientation = { plane, turn: opts.turn ?? 0, tilt: opts.tilt ?? 0 };
+    const slab = opts.slab ?? mpr?.slab ?? { thickness: 0, mode: "mip" };
+    if (isAcquired(volume, orient) && !(slab.thickness > 0)) {
       sel.value = "";
       return enterMpr("");
     }
-    const r = reformatPlanes(volume).find((x) => x.plane === plane)!;
+    const grid = planeGrid(volume, orient);
+    // Keep the same depth through the volume when the plane changes angle.
+    const frac = mpr && mpr.orient.plane === plane ? sliceIdx / Math.max(1, mpr.grid.count - 1) : 0.5;
     if (!mpr) acquiredSlice = sliceIdx;
-    mpr = { volume, plane, count: r.count, first: input[0].img };
-    sliceCount = r.count;
+    mpr = { volume, orient, grid, slab, first, spec: null, ms: 0, engine: "cpu", frame: null };
+    sel.value = plane;
+    $("btn-plane-opts").classList.remove("hidden");
+    sliceCount = grid.count;
     $<HTMLInputElement>("slice").max = String(sliceCount - 1);
     $<HTMLInputElement>("slice").disabled = false;
-    showMpr(Math.floor(r.count / 2));
+    showMpr(Math.round(frac * (grid.count - 1)));
   } catch (e) {
     sel.value = "";
     $("stage-msg").textContent = e instanceof VolumeError ? `These images can't be reformatted: ${e.message}.` : `Reformatting failed: ${(e as Error).message}`;
@@ -558,20 +679,67 @@ async function enterMpr(plane: Plane | "") {
   }
 }
 
+/** Plain words for the plane on screen: "Sagittal, turned 10°, MIP 10 mm". */
+function planeLabel(m: NonNullable<typeof mpr>): string {
+  const parts = [m.orient.plane[0].toUpperCase() + m.orient.plane.slice(1)];
+  if (m.orient.turn) parts.push(`turned ${m.orient.turn}°`);
+  if (m.orient.tilt) parts.push(`tilted ${m.orient.tilt}°`);
+  if (m.slab.thickness > 0) parts.push(`${{ mip: "MIP", minip: "MinIP", avg: "average" }[m.slab.mode]} ${m.slab.thickness} mm`);
+  return parts.join(", ");
+}
+
 function showMpr(i: number) {
   const m = mpr!;
-  sliceIdx = Math.max(0, Math.min(m.count - 1, i));
+  sliceIdx = Math.max(0, Math.min(m.grid.count - 1, i));
   $<HTMLInputElement>("slice").value = String(sliceIdx);
-  $("slice-label").textContent = `${sliceIdx + 1} / ${m.count}`;
-  const { frame, pixelSpacing } = reformat(m.volume, m.plane, sliceIdx);
+  $("slice-label").textContent = `${sliceIdx + 1} / ${m.grid.count}`;
+  const t0 = performance.now();
+  // A slab is many planes: the GPU wins even when it is a software one.
+  const useGpu = mprEngine === "gpu" || (mprEngine === "auto" && (viewport?.kind === "webgl2" || m.slab.thickness > 0));
+  const gpu = useGpu && lastVolume?.volume === m.volume ? gpuFor(lastVolume) : null;
+  const onGpu = gpu?.reformat(m.grid, sliceIdx, m.slab) ?? null;
+  const { frame, pixelSpacing, spec } = onGpu ?? reformat(m.volume, m.grid, sliceIdx, m.slab);
+  m.ms = performance.now() - t0;
+  m.engine = onGpu ? "gpu" : "cpu";
+  m.spec = spec;
+  m.frame = frame;
   shown = null;
   layers?.clear();
   const w = linearWindow(m.first.float ? "LINEAR_EXACT" : "LINEAR", wc, ww);
   viewport!.show(m.first, 0, { windowCenter: w.center, windowWidth: w.width, zoom, panX, panY }, frame);
   const se = series();
-  $("hud-tl").textContent = `${se.description ?? modalityName(se.modality)}\n${m.plane[0].toUpperCase()}${m.plane.slice(1)} reformat · ${sliceIdx + 1}/${m.count}`;
+  $("hud-tl").textContent = `${se.description ?? modalityName(se.modality)}\n${planeLabel(m)} · ${sliceIdx + 1}/${m.grid.count}\nReformatted in the viewer`;
   $("hud-tr").textContent = `${frame.columns}×${frame.rows} · ${pixelSpacing.toFixed(2)} mm\n${m.first.float ? `W ${formatValue(ww)} L ${formatValue(wc)}` : `W ${Math.round(ww)} L ${Math.round(wc)}`}`;
-  measure?.update({ cols: frame.columns, rows: frame.rows, cw: viewport!.canvas.width, ch: viewport!.canvas.height, zoom, panX, panY, scale: viewport!.scale, header: null, frame: 0, key: `mpr/${m.plane}/${sliceIdx}`, spacing: [pixelSpacing, pixelSpacing] });
+  measure?.update({ cols: frame.columns, rows: frame.rows, cw: viewport!.canvas.width, ch: viewport!.canvas.height, zoom, panX, panY, scale: viewport!.scale, header: null, frame: 0, key: `mpr/${planeLabel(m)}/${sliceIdx}`, spacing: [pixelSpacing, pixelSpacing] });
+}
+
+/** The angle and slab sheet: turn and tilt the plane, and choose a slab. */
+function openPlaneSheet() {
+  if (!mpr) return;
+  const m = mpr;
+  $<HTMLInputElement>("plane-turn").value = String(m.orient.turn);
+  $<HTMLInputElement>("plane-tilt").value = String(m.orient.tilt);
+  $<HTMLSelectElement>("slab-thickness").value = String(m.slab.thickness);
+  $<HTMLSelectElement>("slab-mode").value = m.slab.mode;
+  planeSheetText();
+  openSheet("sheet-plane");
+}
+
+function planeSheetText() {
+  $("plane-turn-v").textContent = `${$<HTMLInputElement>("plane-turn").value}°`;
+  $("plane-tilt-v").textContent = `${$<HTMLInputElement>("plane-tilt").value}°`;
+  $("slab-mode").classList.toggle("hidden", $<HTMLSelectElement>("slab-thickness").value === "0");
+}
+
+/** Applies the sheet's controls (on each change, so the plane follows the slider). */
+function applyPlaneSheet() {
+  if (!mpr) return;
+  planeSheetText();
+  void enterMpr(mpr.orient.plane, {
+    turn: Number($<HTMLInputElement>("plane-turn").value),
+    tilt: Number($<HTMLInputElement>("plane-tilt").value),
+    slab: { thickness: Number($<HTMLSelectElement>("slab-thickness").value), mode: $<HTMLSelectElement>("slab-mode").value as SlabMode },
+  });
 }
 
 /** Where a SOP instance is in the share. */
@@ -750,6 +918,7 @@ function showError(e: unknown) {
   $("btn-retry").classList.toggle("hidden", !v.retry);
   $("btn-paste-other").classList.remove("hidden");
   $("paste-form").classList.add("hidden");
+  $("sample-row").classList.add("hidden");
   retryAction = v.retry ? () => void (resolver?.needsPasscode ? showPasscode() : open()) : null;
   document.title = v.title;
 }
@@ -763,9 +932,26 @@ function showPasteScreen() {
   $("btn-retry").classList.add("hidden");
   $("btn-paste-other").classList.add("hidden");
   $("paste-form").classList.remove("hidden");
+  $("sample-row").classList.remove("hidden");
 }
 
 // ------------------------------------------------------------------------------------- overview
+
+/**
+ * What a study card's thumbnail shows: the series the study opens on; for projection images
+ * (radiographs and the like, a few large files) the smallest non-localizer image in the study,
+ * since every byte of an uncompressed file must arrive before it can be drawn.
+ */
+function overviewThumb(st: StudyEntry, se: SeriesEntry): { se: SeriesEntry; inst: number } {
+  if (["CT", "MR", "PT", "NM"].includes(se.modality ?? "") || kindOf(se) !== "image") return { se, inst: thumbInstance(se) };
+  let best = { se, inst: thumbInstance(se) };
+  for (const x of st.series) {
+    if (kindOf(x) !== "image" || isLocalizer(x)) continue;
+    const i = thumbInstance(x);
+    if (x.instances[i].length < best.se.instances[best.inst].length) best = { se: x, inst: i };
+  }
+  return best;
+}
 
 function renderOverview() {
   const idx = share!.index;
@@ -779,6 +965,9 @@ function renderOverview() {
 
   const list = $("ov-studies");
   list.textContent = "";
+  const thumbs: Promise<void>[] = [];
+  const big: { bytes: number; run: () => Promise<void> }[] = [];
+  const after: (() => Promise<unknown>)[] = [];
   idx.studies.forEach((st, si) => {
     const card = el("article", "card study-card");
     const openBtn = el("button", "study-open");
@@ -801,23 +990,34 @@ function renderOverview() {
     for (const l of reportLinks().filter((l) => l.studyId === st.id)) card.append(reportSummary(l));
     card.append(contentsList(st, si));
     const actions = el("div", "study-actions");
-    const dl = el("button", "btn", "Download originals");
-    dl.type = "button";
-    dl.addEventListener("click", () => openDownloadSheet({ kind: "study", study: st }, false));
-    actions.append(dl);
+    if (st.series.length) {
+      const dl = el("button", "btn", `Download study · ${formatBytes(exportSize({ kind: "study", study: st }).bytes)}`);
+      dl.type = "button";
+      dl.addEventListener("click", () => openDownloadSheet(true, st));
+      actions.append(dl);
+    }
     card.append(actions);
     list.append(card);
 
-    // Thumbnail: middle slice of the series the study opens on, reduced. Then the same slice at
-    // full size, at low priority, so opening the study shows it at once (its ciphertext is cached).
+    // Thumbnail: the series the study opens on (for radiographs, the smallest image in the study).
+    // Once every card has one, the slice the study opens on is fetched at full size at low
+    // priority, so opening the study shows it at once.
     const se = st.series[pickInitialSeries(st)];
-    seriesThumb(thumb, se, Priority.Visible)
-      .then(() => {
-        mark("first-thumb");
-        if (!isSlideSeries(se) && !media.isVideo(se)) return images!.get(se, Math.floor(se.instances.length / 2), { priority: Priority.Prefetch });
-      })
-      .catch(() => {});
+    if (!se) return;
+    const target = overviewThumb(st, se);
+    // Large files (uncompressed radiographs) one after another, smallest first, so the first
+    // arrives early rather than all together at the end; small ones at once.
+    const run = () => seriesThumb(thumb, target.se, Priority.Visible, undefined, target.inst).then(() => mark("first-thumb"));
+    const bytes = target.se.instances[target.inst].length;
+    if (!isSlideSeries(target.se) && bytes > 2 * 1024 * 1024) {
+      primeTile(thumb, target.se, target.inst);
+      big.push({ bytes, run });
+    } else thumbs.push(run());
+    if (!isSlideSeries(se) && !media.isVideo(se)) after.push(() => images!.get(se, Math.floor(se.instances.length / 2), { priority: Priority.Prefetch }));
   });
+  let chain: Promise<void> = Promise.resolve();
+  for (const b of big.sort((x, y) => x.bytes - y.bytes)) thumbs.push((chain = chain.then(b.run, b.run)));
+  void Promise.allSettled(thumbs).then(() => after.forEach((f) => void f().catch(() => {})));
   // Reports that match no study in the share still appear, on their own.
   const loose = reportLinks().filter((l) => l.studyId === null);
   if (loose.length) {
@@ -1026,6 +1226,7 @@ function buildStrip() {
     t.append(count);
     if (mayHoldMedia(se)) void labelVideo(se, count);
     b.append(c, t);
+    primeTile(c, se);
     b.addEventListener("click", () => selectSeries(k));
     strip.append(b);
   });
@@ -1036,10 +1237,8 @@ function loadStripThumbs() {
   const signal = studyAbort.signal;
   st.series.forEach((se, k) => {
     const c = $("strip").querySelector<HTMLCanvasElement>(`[data-series="${k}"] canvas`);
-    if (!c || c.dataset.drawn) return;
-    seriesThumb(c, se, Priority.Near, signal)
-      .then(() => (c.dataset.drawn = "1"))
-      .catch(() => {});
+    if (!c || c.dataset.drawn || c.dataset.error) return;
+    seriesThumb(c, se, Priority.Near, signal).catch(() => {});
   });
 }
 
@@ -1055,6 +1254,7 @@ function selectSeries(k: number) {
   updateDownloadButton();
   // Reformats are for image series (set again below when this is one).
   $("view-plane").classList.add("hidden");
+  $("btn-plane-opts").classList.add("hidden");
   if (prevSeries && prevSeries !== se.id) {
     share!.loader.cancelQueued((sid, p) => sid === prevSeries && p >= FetchPriority.Prefetch);
   }
@@ -1139,7 +1339,7 @@ function showSlide(se: SeriesEntry) {
   slideView ??= new SlideView($("stage"));
   document.body.classList.add("slide-mode");
   $("stage-msg").classList.add("hidden");
-  $("stage-busy").classList.remove("hidden");
+  stageBusy("Opening the slide");
   $("hud-tl").textContent = `${se.description ?? "Slide"}\nSlide microscopy`;
   $("hud-tr").textContent = "";
   $("hud-bl").textContent = "";
@@ -1222,10 +1422,15 @@ function showSlice(i: number, startPrefetch = false) {
   if (img) {
     draw(img, frame);
   } else {
-    $("stage-busy").classList.remove("hidden");
     const want = { series: se.id, slice: sliceIdx };
+    const plan = planInstances(se, inst);
+    const total = plan.ciphertextEnd - plan.ciphertextStart;
+    const progress = (r: number, t: number) => {
+      if (series()?.id === want.series && sliceIdx === want.slice) stageBusy(`Loading the image · ${formatBytes(r)} of ${formatBytes(t)}`, r, t);
+    };
+    progress(0, total);
     images!
-      .get(se, inst, { priority: Priority.Visible })
+      .get(se, inst, { priority: Priority.Visible, onProgress: progress })
       .then((im) => {
         if (series()?.id !== want.series) return;
         if (sliceIdx === want.slice) draw(im, sliceTarget(sliceIdx).frame);
@@ -1239,6 +1444,20 @@ function showSlice(i: number, startPrefetch = false) {
   }
   if (startPrefetch) prefetch();
   else nudgePrefetch();
+}
+
+/** The stage's waiting note: what it waits for, with a bar when the amount is known. */
+function stageBusy(text: string, now?: number, total?: number) {
+  $("stage-busy").classList.remove("hidden");
+  $("stage-busy-text").textContent = text;
+  const track = $("stage-track");
+  track.classList.toggle("hidden", total === undefined);
+  if (total !== undefined && now !== undefined) {
+    track.setAttribute("aria-valuemax", String(total));
+    track.setAttribute("aria-valuenow", String(Math.min(now, total)));
+    track.setAttribute("aria-valuetext", text);
+    $("stage-fill").style.width = `${total ? (100 * Math.min(now, total)) / total : 0}%`;
+  }
 }
 
 function sliceError(e: unknown) {
@@ -1272,14 +1491,23 @@ function draw(img: DecodedImage, frame: number) {
       return;
     }
   }
-  // Float images: the default window may come from the header's Real World Value Mapping.
-  const hp = img.float && !imageHeaderNow(img) ? imageHeader(img) : null;
+  // The display transform needs the header (its LUTs, windows, shape): draw once it is read.
+  const hp = img.header && !imageHeaderNow(img) ? imageHeader(img) : null;
   if (hp) {
     void hp.then(() => draw(img, frame), () => draw(img, frame));
     return;
   }
+  const k = Math.min(frame, img.frames - 1);
   if (autoWw === 0) {
-    const w = autoWindow(img, frame, img.float ? realWorldFor(img, frame) : null);
+    // What the file's maker chose: its window, or its VOI LUT (then dragging starts from the full range).
+    const auto = displayPlan(img, k, headerNow(img), { kind: "auto" });
+    seriesModel(auto.model);
+    if (auto.lut !== null && presetId === "auto") {
+      presetId = `lut-${auto.lut}`;
+      $<HTMLSelectElement>("preset").value = presetId;
+    }
+    // (Colour images have no window: the identity.)
+    const w = auto.window ?? displayPlan(img, k, headerNow(img), { kind: "minmax" }).window ?? { center: 128, width: 256 };
     autoWc = w.center;
     autoWw = w.width;
   }
@@ -1287,9 +1515,7 @@ function draw(img: DecodedImage, frame: number) {
     wc = autoWc;
     ww = autoWw;
   }
-  const k = Math.min(frame, img.frames - 1);
-  const shownFrame = displayFrame(img, k);
-  viewport!.show(img, k, { ...displayView(img, k), zoom, panX, panY }, shownFrame);
+  viewport!.show(img, k, { ...displayView(img, k), zoom, panX, panY }, displayFrame(img, k));
   shown = { img, frame: Math.min(frame, img.frames - 1), sop: se.instances[sliceTarget(sliceIdx).inst].uid };
   const t = iccs.get(img);
   iccInUse = t ? t.description || "embedded profile" : "";
@@ -1400,7 +1626,7 @@ function setWindow(c: number, w: number) {
     if (shown) draw(shown.img, shown.frame);
     return;
   }
-  if (shown && imageHeaderNow(shown.img) && seriesDisplay?.voiFunction === "SIGMOID") {
+  if (shown && seriesDisplay?.voiFunction === "SIGMOID" && currentPreset()?.lut === undefined) {
     // SIGMOID is drawn from the values (display.ts): redraw at most once per frame.
     if (!sigmoidPending) {
       sigmoidPending = true;
@@ -1424,31 +1650,27 @@ let sigmoidPending = false;
 /** The first image's display model: decides the presets, VOI function and Presentation LUT Shape. */
 let seriesDisplay: DisplayModel | null = null;
 const frameCache = new WeakMap<DecodedImage, Map<string, Frame>>();
-const sigmoidCache = new WeakMap<DecodedImage, { key: string; frame: Frame }>();
 
 function currentPreset(): WindowPreset | undefined {
   return presetList.find((p) => p.id === presetId);
 }
 
-/** The header's display model for an image frame, when its header has been read (else null; the draw is redone when it is). */
-function modelOf(img: DecodedImage, k: number): DisplayModel | null {
-  const h = imageHeaderNow(img);
-  if (!h) {
-    const p = imageHeader(img);
-    if (p) void p.then(() => { if (shown?.img === img) draw(img, shown.frame); });
-    return null;
-  }
-  const enhanced = (h.ds.num(T.NumberOfFrames) ?? 1) > 1;
-  const m = displayModel(h.ds, enhanced ? k : 0);
-  if (!seriesDisplay) {
-    seriesDisplay = m;
-    presetList = presetsFor(series().modality, m);
-    fillPresets();
-    // A header VOI LUT with no window is what the image's creator chose: start with it.
-    if (!m.windows.length && m.voiLuts.length && presetId === "auto") presetId = "lut-0";
-    $<HTMLSelectElement>("preset").value = presetId;
-  }
-  return m;
+/** An image's parsed header (null when it has none, or before it is read). */
+const headerNow = (img: DecodedImage) => imageHeaderNow(img)?.ds ?? null;
+
+/** The series' presets, from its first image's display model. */
+function seriesModel(m: DisplayModel | null) {
+  if (seriesDisplay || !m) return;
+  seriesDisplay = m;
+  presetList = presetsFor(series().modality, m);
+  fillPresets();
+  $<HTMLSelectElement>("preset").value = presetId;
+}
+
+/** What the viewer's VOI is now: the chosen file VOI LUT, else the window (wc, ww). */
+function voiNow(): VoiChoice {
+  const lut = currentPreset()?.lut;
+  return lut !== undefined ? { kind: "lut", index: lut } : { kind: "window", center: wc, width: ww };
 }
 
 /** The Real World Value Mapping of an image frame: from the header once read, else as the decoder reported it. */
@@ -1458,46 +1680,10 @@ function realWorldFor(img: DecodedImage, k: number): RealWorld | null {
   return realWorldOf(h.ds, (h.ds.num(T.NumberOfFrames) ?? 1) > 1 ? k : 0) ?? imageRealWorld(img);
 }
 
-/** The frame to draw: the decoded frame, through the Modality LUT and a header VOI LUT when they apply. */
-function displayFrame(img: DecodedImage, k: number): Frame | undefined {
-  if (img.float) {
-    let cache = frameCache.get(img);
-    if (!cache) frameCache.set(img, (cache = new Map()));
-    let f = cache.get(`float/${k}`);
-    if (!f) {
-      const rw = realWorldFor(img, k);
-      f = floatFrame(frameOf(img, k), rw, floatRange(img, rw));
-      cache.set(`float/${k}`, f);
-    }
-    return f;
-  }
-  const m = modelOf(img, k);
-  if (m && img.samplesPerPixel === 3) return colourFrame(img, k);
-  const lut = currentPreset()?.lut;
-  const sigmoid = m?.voiFunction === "SIGMOID" && (lut === undefined || !m.voiLuts[lut]);
-  if (!m || (!m.modalityLut && !sigmoid && (lut === undefined || !m.voiLuts[lut]))) return undefined;
-  if (sigmoid) {
-    // Recomputed per window: keep only the latest.
-    const key = `sig/${k}/${wc}/${ww}`;
-    const c = sigmoidCache.get(img);
-    if (c?.key === key) return c.frame;
-    let base = frameOf(img, k);
-    if (m.modalityLut) base = applyModalityLut(base, m.modalityLut);
-    const frame = applySigmoid(base, wc, ww);
-    sigmoidCache.set(img, { key, frame });
-    return frame;
-  }
-  const key = `${k}/${lut ?? ""}`;
-  let cache = frameCache.get(img);
-  if (!cache) frameCache.set(img, (cache = new Map()));
-  let f = cache.get(key);
-  if (!f) {
-    f = frameOf(img, k);
-    if (m.modalityLut) f = applyModalityLut(f, m.modalityLut);
-    if (lut !== undefined && m.voiLuts[lut]) f = applyVoiLut(f, m.voiLuts[lut]);
-    cache.set(key, f);
-  }
-  return f;
+/** The frame to draw (core/display.ts displayPlan; colour images through their ICC profile). */
+function displayFrame(img: DecodedImage, k: number): Frame {
+  if (img.samplesPerPixel === 3) return colourFrame(img, k) ?? frameOf(img, k);
+  return displayPlan(img, k, headerNow(img), voiNow()).frame;
 }
 
 const iccs = new WeakMap<DecodedImage, IccTransform | null>();
@@ -1530,16 +1716,9 @@ function colourFrame(img: DecodedImage, k: number): Frame | undefined {
 let iccOn = true;
 let iccInUse = "";
 
-/** Window, output curve and inversion for the frame: VOI LUT, LINEAR_EXACT, SIGMOID, Presentation LUT Shape. */
+/** The renderer's window and inversion for the frame (displayPlan). */
 function displayView(img: DecodedImage, k: number) {
-  const m = imageHeaderNow(img) ? modelOf(img, k) : null;
-  const invert = m?.presentationShape === "INVERSE" && img.photometric !== "MONOCHROME1";
-  const lutOn = m && currentPreset()?.lut !== undefined && m.voiLuts[currentPreset()!.lut!];
-  if (lutOn || m?.voiFunction === "SIGMOID") {
-    return { windowCenter: IDENTITY_WINDOW.center, windowWidth: IDENTITY_WINDOW.width, invert };
-  }
-  const c = linearWindow(img.float ? "LINEAR_EXACT" : m?.voiFunction ?? "LINEAR", wc, ww);
-  return { windowCenter: c.center, windowWidth: c.width, invert };
+  return displayPlan(img, k, headerNow(img), voiNow()).view;
 }
 
 function fillPresets() {
@@ -1839,19 +2018,20 @@ function instanceOnScreen(): { se: SeriesEntry; i: number } | { reason: string }
  * series, this image, everything shared. Only stored files: a view made in the viewer offers its
  * source series and study, and "This image" greyed out with the reason. Defined for every view state.
  */
-function downloadChoices(): { choices: DownloadChoice[]; def: DownloadChoice | null } {
+function downloadChoices(forStudy?: StudyEntry): { choices: DownloadChoice[]; def: DownloadChoice | null } {
   const choices: DownloadChoice[] = [];
-  const st = share && studyIdx >= 0 ? study() : undefined;
+  // From a study card: that study (and everything shared); in the viewer: what is open.
+  const st = forStudy ?? (share && studyIdx >= 0 ? study() : undefined);
   if (st && st.series.length) {
     const n = exportSize({ kind: "study", study: st });
     choices.push({ id: "study", title: "This study", detail: `${studyTitle(st)} · ${plural(n.files, "file")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, bytes: n.bytes, run: () => void runZip({ kind: "study", study: st }) });
   }
-  const se = st && seriesIdx >= 0 ? st.series[seriesIdx] : undefined;
+  const se = !forStudy && st && seriesIdx >= 0 ? st.series[seriesIdx] : undefined;
   if (st && se) {
     const n = exportSize({ kind: "series", study: st, series: se });
     choices.push({ id: "series", title: "This series", detail: `${se.description ?? modalityName(se.modality)} · ${plural(n.files, "file")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, bytes: n.bytes, run: () => void runZip({ kind: "series", study: st, series: se }) });
   }
-  const on = instanceOnScreen();
+  const on = forStudy ? null : instanceOnScreen();
   if (on && "reason" in on) choices.push({ id: "image", title: "This image", detail: on.reason, bytes: 0, disabled: on.reason, run: () => {} });
   else if (on) {
     const inst = on.se.instances[on.i];
@@ -1885,12 +2065,12 @@ function downloadDefault() {
 }
 
 /** The download menu: every choice with its size. `list` false opens it straight on the progress of a choice. */
-function openDownloadSheet(list = true) {
+function openDownloadSheet(list = true, forStudy?: StudyEntry) {
   const opts = $("dl-options");
   opts.textContent = "";
   $("dl-progress").classList.add("hidden");
   opts.classList.toggle("hidden", !list);
-  for (const c of downloadChoices().choices) {
+  for (const c of downloadChoices(forStudy).choices) {
     const b = el("button", "dl-option");
     b.type = "button";
     b.dataset.choice = c.id;
@@ -1905,6 +2085,16 @@ function openDownloadSheet(list = true) {
   openSheet("sheet-download");
 }
 
+/** The download bar: bytes written against the total, with the text that says so. */
+function setDownloadProgress(bytes: number, total: number, text: string) {
+  const track = $("dl-track");
+  track.setAttribute("aria-valuemax", String(total));
+  track.setAttribute("aria-valuenow", String(bytes));
+  track.setAttribute("aria-valuetext", `${formatBytes(bytes)} of ${formatBytes(total)}`);
+  $("dl-bar").style.width = `${(100 * bytes) / Math.max(1, total)}%`;
+  $("dl-status").textContent = text;
+}
+
 async function runZip(scope: ExportScope) {
   const name = (scope.kind === "all" ? "shared-imaging" : exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined)) + ".zip";
   // Ask for the file first, while the click still counts as a user gesture.
@@ -1915,16 +2105,12 @@ async function runZip(scope: ExportScope) {
   $("dl-progress").classList.remove("hidden");
   $("btn-dl-cancel").classList.remove("hidden");
   const status = $("dl-status");
-  const bar = $("dl-bar");
   try {
     await exportZip(
       scope,
       share!.loader,
       target,
-      (p) => {
-        bar.style.width = `${(100 * p.bytes) / Math.max(1, p.totalBytes)}%`;
-        status.textContent = `Saving ${p.files} of ${plural(p.totalFiles, "file")} · ${formatBytes(p.bytes)} of ${formatBytes(p.totalBytes)}`;
-      },
+      (p) => setDownloadProgress(p.bytes, p.totalBytes, `Saving · ${formatBytes(p.bytes)} of ${formatBytes(p.totalBytes)} · ${plural(p.files, "file")} saved`),
       exportAbort.signal,
     );
     status.textContent = `Saved ${name}`;
@@ -1941,15 +2127,17 @@ async function runOne(se: SeriesEntry, i: number) {
   const name = `${se.instances[i].uid}.dcm`;
   const target = await openSaveTarget(name, "application/dicom", ".dcm");
   if (!target) return;
+  $("dl-options").classList.add("hidden");
+  $("dl-progress").classList.remove("hidden");
+  $("btn-dl-cancel").classList.add("hidden");
+  const plan = planInstances(se, i);
+  const total = plan.ciphertextEnd - plan.ciphertextStart;
+  setDownloadProgress(0, total, `Saving · ${formatBytes(0)} of ${formatBytes(total)}`);
   try {
-    const bytes = await exportInstance(share!.loader, se, i);
+    const bytes = await exportInstance(share!.loader, se, i, (r, t) => setDownloadProgress(r, t, `Saving · ${formatBytes(r)} of ${formatBytes(t)}`));
     await target.write(bytes);
     await target.close();
-    $("dl-options").classList.add("hidden");
-    $("dl-progress").classList.remove("hidden");
-    $("dl-bar").style.width = "100%";
-    $("dl-status").textContent = `Saved ${name}`;
-    $("btn-dl-cancel").classList.add("hidden");
+    setDownloadProgress(total, total, `Saved ${name}`);
   } catch (e) {
     await target.abort(e).catch(() => {});
     $("dl-status").textContent = `The download stopped: ${describeError(e).title}.`;
@@ -2011,6 +2199,19 @@ function wireStatic() {
     location.hash = link;
   });
   $<HTMLInputElement>("input-link").addEventListener("input", () => $<HTMLInputElement>("input-link").setCustomValidity(""));
+  // The current sample (its link changes when the server re-seeds it).
+  $("btn-sample").addEventListener("click", async () => {
+    const btn = $<HTMLButtonElement>("btn-sample");
+    btn.disabled = true;
+    try {
+      const pub = (await fetchSampleLinks(await loadConfig())).find((s) => !s.passcodeHint && s.shlink);
+      if (!pub) throw new Error("no sample");
+      location.hash = pub.shlink;
+    } catch {
+      btn.disabled = false;
+      btn.textContent = "The sample isn't available right now";
+    }
+  });
   window.addEventListener("hashchange", () => location.reload());
   $("btn-back").addEventListener("click", () => {
     if ((history.state as any)?.screen === "viewer") history.back();
@@ -2040,6 +2241,14 @@ function wireStatic() {
   $("btn-report-close").addEventListener("click", closeReports);
   $("btn-layers").addEventListener("click", openLayersSheet);
   $<HTMLSelectElement>("view-plane").addEventListener("change", (e) => void enterMpr((e.target as HTMLSelectElement).value as Plane | ""));
+  $("btn-plane-opts").addEventListener("click", openPlaneSheet);
+  for (const id of ["plane-turn", "plane-tilt", "slab-thickness", "slab-mode"]) $(id).addEventListener("input", applyPlaneSheet);
+  $("plane-reset").addEventListener("click", () => {
+    $<HTMLInputElement>("plane-turn").value = "0";
+    $<HTMLInputElement>("plane-tilt").value = "0";
+    $<HTMLSelectElement>("slab-thickness").value = "0";
+    applyPlaneSheet();
+  });
   $<HTMLSelectElement>("measure-tool").addEventListener("change", (e) => {
     const v = (e.target as HTMLSelectElement).value;
     if (v === "clear") {
@@ -2078,7 +2287,7 @@ function closeSheetForce() {
   compareWith: async (url: string) => {
     let frame: Frame, view;
     if (mpr) {
-      frame = reformat(mpr.volume, mpr.plane, sliceIdx).frame;
+      frame = mpr.frame ?? reformat(mpr.volume, mpr.grid, sliceIdx, mpr.slab).frame;
       const w = linearWindow(mpr.first.float ? "LINEAR_EXACT" : "LINEAR", wc, ww);
       view = { windowCenter: w.center, windowWidth: w.width };
     } else {
@@ -2108,19 +2317,8 @@ function closeSheetForce() {
   minMaxWindow: () => {
     if (!shown) return;
     presetId = "custom";
-    if (shown.img.float) {
-      const r = floatRange(shown.img, realWorldFor(shown.img, shown.frame));
-      if (r) setWindow((r.lo + r.hi) / 2, r.hi - r.lo);
-      return;
-    }
-    const f = displayFrame(shown.img, shown.frame) ?? frameOf(shown.img, shown.frame);
-    let lo = Infinity, hi = -Infinity;
-    for (const v of f.data) {
-      const x = v * f.rescaleSlope + f.rescaleIntercept;
-      if (x < lo) lo = x;
-      if (x > hi) hi = x;
-    }
-    setWindow((lo + hi + 1) / 2, Math.max(1, hi - lo + 1));
+    const w = displayPlan(shown.img, shown.frame, headerNow(shown.img), { kind: "minmax" }).window;
+    if (w) setWindow(w.center, w.width);
   },
   /** The overlay planes drawn now, as a mask, and the counts. */
   overlayMask: () => {
@@ -2138,12 +2336,74 @@ function closeSheetForce() {
       applyPreset(p);
     }
   },
-  enterMpr: (plane: Plane | "") => enterMpr(plane),
+  enterMpr: (plane: Plane | "", opts?: { turn?: number; tilt?: number; slab?: Slab }) => enterMpr(plane, opts),
+  /** The reformatted plane on screen: its pixel grid in patient space, the time it took, the volume's lattice. */
+  mprState: () =>
+    mpr && {
+      spec: mpr.spec,
+      ms: mpr.ms,
+      engine: mpr.engine,
+      count: mpr.grid.count,
+      label: planeLabel(mpr),
+      hud: $("hud-tl").textContent,
+      volume: { origin: mpr.volume.origin, rowDir: mpr.volume.rowDir, colDir: mpr.volume.colDir, step: mpr.volume.step, spacing: mpr.volume.spacing, tilt: mpr.volume.tilt },
+    },
+  /**
+   * Reformat speed on a synthetic volume (cols × rows × depth, 16-bit), in ms per plane: the middle
+   * plane of each orientation, thin and with a 20 mm MIP slab.
+   */
+  /** Forces the CPU or GPU path for reformats ("auto": GPU when the viewer draws with WebGL2). */
+  setMprEngine: (e: "auto" | "cpu" | "gpu") => {
+    mprEngine = e;
+    if (mpr) showMpr(sliceIdx);
+    return mpr?.engine ?? null;
+  },
+  mprPerf: (cols: number, rows: number, depth: number, engine: "cpu" | "gpu" = "cpu") => {
+    const slices: Frame[] = [];
+    for (let k = 0; k < depth; k++) {
+      const data = new Int16Array(cols * rows);
+      for (let i = 0; i < data.length; i++) data[i] = ((i * 7 + k * 13) % 2000) - 1000;
+      slices.push({ rows, columns: cols, samplesPerPixel: 1, bitsAllocated: 16, bitsStored: 16, signed: true, photometric: "MONOCHROME2", rescaleSlope: 1, rescaleIntercept: 0, data });
+    }
+    const vol = makeVolume(slices, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0.7, 0.7], [0, 0, 0.625]);
+    const out: Record<string, number> = {};
+    const t0 = performance.now();
+    const gpu = engine === "gpu" ? GpuReformatter.create(vol) : null;
+    if (engine === "gpu") {
+      if (!gpu) return { error: "no GPU path" };
+      out["upload (once)"] = Math.round(performance.now() - t0);
+    }
+    const run = (g: PlaneGrid, i: number, slab?: Slab) => (gpu ? gpu.reformat(g, i, slab) : reformat(vol, g, i, slab));
+    const time = (name: string, o: Orientation, slab?: Slab) => {
+      const g = planeGrid(vol, o);
+      run(g, Math.floor(g.count / 2), slab);
+      const t0 = performance.now();
+      for (let r = 0; r < 3; r++) run(g, Math.floor(g.count / 2) + r, slab);
+      out[name] = Math.round(((performance.now() - t0) / 3) * 10) / 10;
+    };
+    time("sagittal", { plane: "sagittal", turn: 0, tilt: 0 });
+    time("coronal", { plane: "coronal", turn: 0, tilt: 0 });
+    time("axial", { plane: "axial", turn: 0, tilt: 0 });
+    time("oblique 20°/15°", { plane: "sagittal", turn: 20, tilt: 15 });
+    time("sagittal MIP 20 mm", { plane: "sagittal", turn: 0, tilt: 0 }, { thickness: 20, mode: "mip" });
+    time("axial average 10 mm", { plane: "axial", turn: 0, tilt: 0 }, { thickness: 10, mode: "avg" });
+    gpu?.destroy();
+    return out;
+  },
   measureLength: (x0: number, y0: number, x1: number, y1: number) => measure?.measureAt(x0, y0, x1, y1) ?? null,
   /** The value at image pixel (x, y) of the frame on screen, as the cursor readout shows it. */
   valueAt,
   /** Image pixel under a client point. */
   pixelAtClient,
+  /**
+   * The image on screen as the viewer draws it, at w × h (fit, linear), as grey levels: for
+   * comparing with its thumbnail (same file, same display transform).
+   */
+  renderShown: (w: number, h: number) => {
+    if (!shown) return null;
+    const out = renderCpu(displayFrame(shown.img, shown.frame), { ...defaultView(), ...displayView(shown.img, shown.frame), interpolation: "linear" }, w, h);
+    return { grey: Array.from({ length: w * h }, (_, i) => out[i * 4]), colour: shown.img.samplesPerPixel === 3 };
+  },
   /** What is open, for the download checks: study and series UIDs, and the stored instance on screen (or why there is none). */
   current: () => {
     const on = instanceOnScreen();
@@ -2151,7 +2411,7 @@ function closeSheetForce() {
       study: studyIdx >= 0 ? study()?.studyInstanceUid ?? null : null,
       series: studyIdx >= 0 && seriesIdx >= 0 ? study()?.series[seriesIdx]?.uid ?? null : null,
       onScreen: on && "reason" in on ? { reason: on.reason } : on ? { uid: on.se.instances[on.i].uid } : null,
-      mpr: mpr?.plane ?? null,
+      mpr: mpr?.orient.plane ?? null,
     };
   },
   /** Client point at the centre of image pixel (x, y). */

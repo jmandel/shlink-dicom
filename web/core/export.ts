@@ -86,8 +86,8 @@ export async function exportZip(
 }
 
 /** One instance's bytes, for "This image". */
-export function exportInstance(loader: InstanceLoader, series: SeriesEntry, i: number): Promise<Uint8Array> {
-  return loader.instance(series, i, { priority: FetchPriority.Visible });
+export function exportInstance(loader: InstanceLoader, series: SeriesEntry, i: number, onProgress?: (received: number, total: number) => void): Promise<Uint8Array> {
+  return loader.instance(series, i, { priority: FetchPriority.Visible, onProgress });
 }
 
 /** A file name such as "brain-mri-2020-07-29" from a study's description and date. */

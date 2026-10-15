@@ -92,5 +92,20 @@ for case in man["cases"]:
                     v = float(fr[y, x])
                     samples.append({"frame": int(k), "x": int(x), "y": int(y), "value": None if v != v else v})
             e["float"] = {"window": [c, w], "units": units, "label": str(it.get("LUTLabel", "")) if it is not None else "", "samples": samples}
+        if "IconImageSequence" in ds and "PixelData" in ds.IconImageSequence[0] and int(ds.IconImageSequence[0].get("BitsAllocated", 8)) == 8:
+            it = ds.IconImageSequence[0]
+            from pydicom.pixels import apply_color_lut
+            n = int(it.Rows) * int(it.Columns) * int(it.get("SamplesPerPixel", 1))
+            px = np.frombuffer(bytes(it.PixelData)[:n], np.uint8)
+            px = px.reshape(int(it.Rows), int(it.Columns), -1).squeeze(-1) if int(it.get("SamplesPerPixel", 1)) == 1 else px.reshape(int(it.Rows), int(it.Columns), 3)
+            if it.PhotometricInterpretation == "PALETTE COLOR":
+                rgb = apply_color_lut(px, it)
+                rgb = (rgb / 257).round() if rgb.max() > 255 else rgb
+            elif it.SamplesPerPixel == 3:
+                rgb = px
+            else:
+                g = 255 - px if it.PhotometricInterpretation == "MONOCHROME1" else px
+                rgb = np.stack([g, g, g], -1)
+            e["icon"] = {"size": f"{it.Columns}x{it.Rows}", "mean": [int(round(float(v))) for v in rgb.reshape(-1, 3).mean(0)]}
         out[f"{case['id']}/{f}"] = e
 json.dump(out, sys.stdout, indent=1)

@@ -7,6 +7,7 @@
 // Screenshots go to docs/shots/objects/.
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { downloadMatrix } from "./download-matrix.mjs";
+import { darkAudit } from "./dark.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -33,8 +34,8 @@ const DEV = {
   phone: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
 };
 
-async function open(caseId, dev = "desktop") {
-  const context = await browser.newContext({ ...DEV[dev], acceptDownloads: true });
+async function open(caseId, dev = "desktop", colorScheme = "light") {
+  const context = await browser.newContext({ ...DEV[dev], acceptDownloads: true, colorScheme });
   // Downloads go through the Blob path so the checks can capture them.
   await context.addInitScript(() => delete window.showSaveFilePicker);
   const page = await context.newPage();
@@ -162,7 +163,8 @@ async function objectCase(caseId) {
           await page.waitForFunction((s) => window.__viewHooks.instanceIndex(s) >= 0, sopBest, { timeout: 30000 });
           const idx = await page.evaluate((s) => window.__viewHooks.instanceIndex(s), sopBest);
           await page.evaluate((i) => window.__viewHooks.showSlice(i), idx);
-          await page.waitForFunction(() => +document.querySelector(".layer-canvas")?.dataset.drawn > 0, null, { timeout: 15000 }).catch(() => {});
+          // The layer canvas redraws once the slice's header is read: wait for this slice's count.
+          await page.waitForFunction((n) => +document.querySelector(".layer-canvas")?.dataset.drawn === n, nBest, { timeout: 15000 }).catch(() => {});
           drawn = +(await page.getAttribute(".layer-canvas", "data-drawn"));
           check(`${name}: contours on the image that names them`, drawn === nBest, `${drawn} of ${nBest} on image ${idx + 1}`);
         } else {
@@ -334,6 +336,83 @@ async function pmapOverlay() {
   await context.close();
 }
 
+/** Files with an Icon Image Sequence: on a slow link the icon is drawn first, as pydicom reads it. */
+async function iconPreviews() {
+  for (const c of ["window-presets", "overlay-separate"]) {
+    const files = Object.entries(E).filter(([k, v]) => k.startsWith(`${c}/`) && v.icon);
+    if (!files.length) continue;
+    const context = await browser.newContext(DEV.desktop);
+    const page = await context.newPage();
+    const errors = [];
+    page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 40, downloadThroughput: 1e6 / 8, uploadThroughput: 1e6 / 8 });
+    await page.goto(`${BASE}/view#${F[c].link}`);
+    await page.waitForSelector(".study-open", { timeout: 60000 });
+    // The study cards' thumbnails: record each icon drawn while its tile is still loading.
+    const seen = await page.evaluate(async () => {
+      const t0 = performance.now(), out = new Set();
+      for (;;) {
+        const cs = [...document.querySelectorAll("canvas.study-thumb")];
+        for (const c of cs) if (c.dataset.icon && !c.dataset.drawn) out.add(c.dataset.icon);
+        if (cs.every((c) => c.dataset.drawn || c.dataset.error) || performance.now() - t0 > 90000) return [...out];
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    });
+    for (const [k, v] of files) {
+      const hit = seen.find((x) => {
+        const [size, mean] = x.split(" ");
+        const m = mean.split(",").map(Number);
+        return size === v.icon.size && m.every((y, i) => Math.abs(y - v.icon.mean[i]) <= 2);
+      });
+      check(`${k}: icon drawn before the image, as pydicom reads it`, !!hit, `${seen.join("; ") || "no icon seen"} vs ${v.icon.size} ${v.icon.mean.join(",")}`);
+    }
+    check(`${c} icons: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
+    await context.close();
+  }
+}
+
+/** Dark mode on the object views (report, PDF, waveform, 3D, CDA), layers and video. */
+async function darkObjects() {
+  for (const dev of ["desktop", "phone"]) {
+    for (const c of ["sr-dose", "pdf", "waveform-ecg", "model-stl", "synthetic-objects", "seg"]) {
+      const { context, page, errors } = await open(c, dev, "dark");
+      await page.locator(".study-open").first().click();
+      await page.waitForSelector(".series-btn");
+      const n = Math.min(4, await page.locator(".series-btn").count());
+      for (let k = 0; k < n; k++) {
+        await page.locator(`.series-btn[data-series="${k}"]`).click();
+        await waitObject(page).catch(() => page.waitForTimeout(1500));
+        await page.waitForTimeout(500);
+        await darkAudit(page, `dark/${dev} ${c} series ${k + 1}`, check, `${dev}-${c}-${k + 1}`);
+        if (c === "seg" && (await page.isVisible("#btn-layers"))) {
+          await page.click("#btn-layers");
+          await page.waitForSelector("#sheet-layers:not(.hidden)");
+          await darkAudit(page, `dark/${dev} ${c} layers sheet`, check, `${dev}-layers`);
+          await page.click("#sheet-layers [data-close]");
+        }
+      }
+      check(`dark/${dev} ${c}: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
+      await context.close();
+    }
+    const vf = process.env.VIDEO_FIXTURES_JSON ?? "/tmp/video-fixtures.json";
+    if (existsSync(vf)) {
+      const V = JSON.parse(readFileSync(vf, "utf8"));
+      const base = new URL(JSON.parse(Buffer.from(V.link.slice(V.link.indexOf("/") + 1), "base64url").toString()).url).origin;
+      const context = await browser.newContext({ ...DEV[dev], colorScheme: "dark" });
+      const page = await context.newPage();
+      await page.goto(`${base}/view#${V.link}`);
+      await page.waitForSelector(".study-open");
+      await page.locator(".study-open").first().click();
+      await page.waitForSelector(".series-btn");
+      await page.waitForTimeout(4000);
+      await darkAudit(page, `dark/${dev} video`, check, `${dev}-video`);
+      await context.close();
+    }
+  }
+}
+
 /** Originals of a share's files (sample-originals.py), cached per name. */
 function originals(name, files) {
   const out = `/tmp/originals-${name}.json`;
@@ -385,6 +464,8 @@ async function objectDownloads() {
 const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap"];
 try {
   for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "dark") await darkObjects().catch((e) => check("dark: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "icons") await iconPreviews().catch((e) => check("icons: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "downloads") await objectDownloads().catch((e) => check("downloads: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "pmap-overlay") await pmapOverlay().catch((e) => check("pmap overlay: flow threw", false, String(e).slice(0, 300)));
   if (!only || only === "video-labels") await videoLabels().catch((e) => check("video labels: flow threw", false, String(e).slice(0, 300)));

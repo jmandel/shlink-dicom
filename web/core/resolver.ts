@@ -154,7 +154,8 @@ export class LinkResolver {
    * may have expired: the link is re-resolved once (with the remembered passcode) and the read
    * retried. Checks that exactly the planned number of bytes arrived.
    */
-  async fetchRange(plan: RangePlan, signal?: AbortSignal): Promise<Uint8Array> {
+  /** The ciphertext of a plan. `onProgress` gets the bytes received so far against the plan's length. */
+  async fetchRange(plan: RangePlan, signal?: AbortSignal, onProgress?: (received: number, total: number) => void): Promise<Uint8Array> {
     const want = plan.ciphertextEnd - plan.ciphertextStart;
     const attempt = async () =>
       this.timedFetch(this.fileUrl(plan.fileId), {
@@ -169,7 +170,7 @@ export class LinkResolver {
       res = await attempt();
     }
     if (res.status !== 206 && res.status !== 200) throw this.httpError(res.status);
-    let bytes = new Uint8Array(await res.arrayBuffer());
+    let bytes = onProgress && res.status === 206 && res.body ? await readCounting(res.body, want, onProgress) : new Uint8Array(await res.arrayBuffer());
     if (res.status === 200) bytes = bytes.subarray(plan.ciphertextStart, plan.ciphertextEnd);
     if (bytes.byteLength !== want) {
       throw new LinkError("server", `The host sent ${bytes.byteLength} bytes where ${want} were expected.`);
@@ -271,4 +272,20 @@ export class LinkResolver {
     }
     return res;
   }
+}
+
+/** Reads a response body of `total` bytes, reporting what has arrived. */
+async function readCounting(body: ReadableStream<Uint8Array>, total: number, onProgress: (received: number, total: number) => void): Promise<Uint8Array> {
+  const out = new Uint8Array(total);
+  let n = 0;
+  const reader = body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (n + value.byteLength > total) throw new LinkError("server", `The host sent more than the ${total} bytes expected.`);
+    out.set(value, n);
+    n += value.byteLength;
+    onProgress(n, total);
+  }
+  return n === total ? out : out.subarray(0, n);
 }

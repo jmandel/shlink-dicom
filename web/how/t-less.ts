@@ -2,8 +2,7 @@
 // this page has downloaded against everything the link shares.
 import { plural, RECORD_PLAINTEXT } from "../core/index";
 import { ImageStore, Priority, type DecodedImage } from "../core/images";
-import { Viewport } from "../core/render";
-import { autoWindow } from "../core/wl";
+import { showImage, Viewport } from "../core/render";
 import { isSlideSeries, levelForScale, type Pyramid } from "../core/wsi";
 import { SlideSource } from "../core/wsi-source";
 import type { Scene } from "./how";
@@ -171,8 +170,7 @@ export function lessScene(): Scene {
     vp ??= new Viewport(stage);
     const img = await store.get(series, i, { priority: Priority.Visible });
     if (Number(slider.value) !== i) return;
-    const w = autoWindow(img);
-    vp.show(img, 0, { windowCenter: w.center, windowWidth: w.width });
+    showImage(vp, img);
     shown++;
     const reqs = S.requests.filter((r) => r.purpose === "file").length;
     const pieces = series.instances[i].lastRecord - series.instances[i].firstRecord + 1;

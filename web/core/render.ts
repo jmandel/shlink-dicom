@@ -11,8 +11,8 @@ import {
   type Renderer,
   type View,
 } from "../../viewer-kit/src/index";
-import { autoWindow } from "./wl";
-import { floatFrame, floatRange, imageRealWorld, linearWindow } from "./display";
+import { displayPlan, type DisplayPlan, type VoiChoice } from "./display";
+import { parseDicomSync, type DataSet } from "./dicom";
 
 export type { View };
 
@@ -124,16 +124,33 @@ export class Viewport {
 }
 
 /** Draws a thumbnail of an image on a 2D canvas with the CPU renderer (fit, auto window). */
-export function drawThumbnail(canvas: HTMLCanvasElement, img: DecodedImage, k = 0) {
+/** The header of a decoded image when it carries one (decoded with `header: true`), parsed; else null. */
+export function headerOf(img: DecodedImage): DataSet | null {
+  if (!img.header) return null;
+  try {
+    return parseDicomSync(img.header, { untilPixelData: true }).ds;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Draws a thumbnail of an image on a 2D canvas with the CPU renderer (fit), through the same
+ * display transform as the viewer (displayPlan, "auto": what the file's maker chose).
+ */
+export function drawThumbnail(canvas: HTMLCanvasElement, img: DecodedImage, k = 0, header?: DataSet | null) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const w = canvas.width, h = canvas.height;
   const im = ctx.createImageData(w, h);
-  // Float images: a 16-bit frame of real values, windowed as LINEAR_EXACT (display.ts).
-  const rw = img.float ? imageRealWorld(img) : null;
-  const auto = autoWindow(img, k, rw);
-  const win = img.float ? linearWindow("LINEAR_EXACT", auto.center, auto.width) : auto;
-  const frame = img.float ? floatFrame(frameOf(img, k), rw, floatRange(img, rw)) : frameOf(img, k);
-  renderCpu(frame, { ...defaultView(), windowCenter: win.center, windowWidth: win.width, interpolation: "linear" }, w, h, im.data);
+  const plan = displayPlan(img, k, header ?? headerOf(img));
+  renderCpu(plan.frame, { ...defaultView(), ...plan.view, interpolation: "linear" }, w, h, im.data);
   ctx.putImageData(im, 0, 0);
+}
+
+/** Shows frame k in a Viewport through displayPlan; returns the plan (its window, LUT, model). */
+export function showImage(vp: Viewport, img: DecodedImage, k = 0, choice: VoiChoice = { kind: "auto" }, header?: DataSet | null, view: Partial<View> = {}): DisplayPlan {
+  const plan = displayPlan(img, k, header ?? headerOf(img), choice);
+  vp.show(img, k, { ...plan.view, ...view }, plan.frame);
+  return plan;
 }

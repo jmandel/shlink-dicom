@@ -4,6 +4,7 @@
 // Screenshots go to docs/shots/view/. Exits non-zero if any check fails.
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { downloadMatrix } from "./download-matrix.mjs";
+import { darkAudit } from "./dark.mjs";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
@@ -32,7 +33,7 @@ const check = (name, ok, detail = "") => {
 const browser = await launchBrowser();
 
 async function newPage(dev, opts = {}) {
-  const context = await browser.newContext({ ...DEVICES[dev], acceptDownloads: true });
+  const context = await browser.newContext({ ...DEVICES[dev], acceptDownloads: true, colorScheme: opts.colorScheme ?? "light" });
   await context.addInitScript(() => {
     // Downloads go through the Blob path so the test can capture them.
     delete window.showSaveFilePicker;
@@ -642,7 +643,8 @@ async function perf() {
 // files (web/checks/sample-originals.py over the sample archives).
 async function flowDownloads(dev) {
   const label = `downloads/${dev}`;
-  const O = JSON.parse(readFileSync(process.env.SAMPLE_ORIGINALS ?? "/tmp/sample-originals.json", "utf8"));
+  // The originals: the sample archives as they are now (sample-originals.py), unless given.
+  const O = JSON.parse(process.env.SAMPLE_ORIGINALS ? readFileSync(process.env.SAMPLE_ORIGINALS, "utf8") : execFileSync("uv", ["run", "--project", new URL("../../codec-corpus", import.meta.url).pathname, "python", new URL("./sample-originals.py", import.meta.url).pathname], { maxBuffer: 1 << 26 }).toString());
   const { context, page, errors } = await newPage(dev);
   await page.goto(viewUrl(F.publicLink));
   await waitOverview(page);
@@ -671,9 +673,280 @@ async function flowDownloads(dev) {
         }
         await downloadMatrix(page, `${label} ${name} ${plane}`, O, check);
       }
+      // An oblique plane and a slab: reconstructed too, so still no single stored image.
+      for (const [what, opts] of [["oblique", { turn: 20, tilt: 10 }], ["MIP slab", { slab: { thickness: 10, mode: "mip" } }]]) {
+        await page.evaluate((o) => window.__viewHooks.enterMpr("sagittal", o), opts);
+        await idle();
+        if (!(await page.evaluate(() => window.__viewHooks.current().mpr))) {
+          check(`${label} ${name} ${what}: reformat shown`, false, (await page.textContent("#stage-msg")).slice(0, 120));
+          continue;
+        }
+        await downloadMatrix(page, `${label} ${name} ${what}`, O, check);
+      }
       await page.evaluate(() => window.__viewHooks.enterMpr(""));
     }
   }
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
+// Thumbnail tiles while they load, on a 20 Mbit/s link: never blank or black without a determinate
+// indicator; each ends as an image or a stated error. Times to the first picture per card.
+async function flowThumbs(dev) {
+  const label = `thumbs/${dev}`;
+  const { context, page, errors } = await newPage(dev);
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Network.enable");
+  await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 40, downloadThroughput: 20e6 / 8, uploadThroughput: 5e6 / 8 });
+  if (dev !== "desktop") await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+  await page.goto(viewUrl(F.publicLink));
+  await page.waitForSelector(".study-open");
+  // Watch every tile on the page until all have resolved.
+  const r = await page.evaluate(async () => {
+    const t0 = performance.now();
+    const bad = new Set(), first = {}, indicator = {};
+    const name = (t) => t.closest(".study-card")?.querySelector(".study-title")?.textContent ?? t.closest(".series-btn")?.querySelector(".s-name")?.textContent ?? "?";
+    for (;;) {
+      const tiles = [...document.querySelectorAll(".thumb-tile")];
+      let open = 0;
+      for (const t of tiles) {
+        const c = t.querySelector("canvas"), over = t.querySelector(".thumb-over");
+        const n = name(t);
+        const shown = !over.classList.contains("hidden");
+        const bar = t.querySelector('[role="progressbar"]');
+        if (c.dataset.drawn || c.dataset.preview) first[n] ??= Math.round(performance.now() - t0);
+        if (shown) indicator[n] ??= Math.round(performance.now() - t0);
+        if (c.dataset.drawn || c.dataset.error) continue;
+        open++;
+        const bg = getComputedStyle(t).backgroundColor;
+        if (!c.dataset.preview && /rgb\(0, 0, 0\)/.test(bg)) bad.add(`${n}: black while loading`);
+        if (!shown) bad.add(`${n}: no indicator while loading`);
+        else if (!bar && !over.textContent.trim()) bad.add(`${n}: empty indicator`);
+      }
+      if (!open && tiles.length) break;
+      if (performance.now() - t0 > 120000) {
+        bad.add(`${open} tiles unresolved after 120 s`);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const errorsShown = [...document.querySelectorAll(".thumb-tile canvas[data-error]")].map((c) => c.dataset.error);
+    return { bad: [...bad], first, indicator, errorsShown };
+  });
+  check(`${label}: every card tile shows a determinate indicator until its image, never black or blank`, r.bad.length === 0, r.bad.slice(0, 4).join("; "));
+  check(`${label}: every card tile ends as an image`, r.errorsShown.length === 0, r.errorsShown.join("; "));
+  // "Drawn" is not enough: a thumbnail must not be one flat colour (all black, all white).
+  const flat = await page.evaluate(() =>
+    [...document.querySelectorAll("canvas.study-thumb, .series-btn canvas")]
+      .filter((c) => c.dataset.drawn)
+      .map((c) => {
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let s = 0, s2 = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          s += y;
+          s2 += y * y;
+          n++;
+        }
+        const sd = Math.sqrt(Math.max(0, s2 / n - (s / n) ** 2));
+        return { name: c.closest(".study-card")?.querySelector(".study-title")?.textContent ?? "?", sd: Math.round(sd), mean: Math.round(s / n) };
+      }),
+  );
+  const flatOnes = flat.filter((f) => f.sd < 8);
+  check(`${label}: no thumbnail is one flat colour`, flat.length > 0 && flatOnes.length === 0, flatOnes.map((f) => `${f.name} mean ${f.mean} sd ${f.sd}`).join("; ") || flat.map((f) => `${f.name.slice(0, 12)} sd ${f.sd}`).join(", "));
+  const xr = Object.entries(r.first).filter(([n]) => /HAND|WRIST/.test(n));
+  check(`${label}: time to first picture (ms), radiograph cards`, xr.length === 3, xr.map(([n, t]) => `${n} ${t}`).join(", ") + ` · indicator by ${Math.max(...Object.values(r.indicator))} ms`);
+  // The radiograph studies' series strips.
+  const n = await page.locator(".study-open").count();
+  for (let si = 0; si < n; si++) {
+    const title = await page.locator(".study-card .study-title").nth(si).textContent();
+    if (!/HAND|WRIST/.test(title)) continue;
+    await page.locator(".study-open").nth(si).click();
+    await page.waitForSelector(".series-btn .thumb-tile");
+    const s = await page.evaluate(async () => {
+      const t0 = performance.now();
+      const bad = new Set();
+      for (;;) {
+        let open = 0;
+        for (const t of document.querySelectorAll(".series-btn .thumb-tile")) {
+          const c = t.querySelector("canvas"), over = t.querySelector(".thumb-over");
+          if (c.dataset.drawn || c.dataset.error) continue;
+          open++;
+          if (over.classList.contains("hidden")) bad.add("no indicator while loading");
+          if (!c.dataset.preview && /rgb\(0, 0, 0\)/.test(getComputedStyle(t).backgroundColor)) bad.add("black while loading");
+        }
+        if (!open || performance.now() - t0 > 120000) return { bad: [...bad], open };
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    });
+    check(`${label}: ${title} strip tiles load visibly and resolve`, s.bad.length === 0 && s.open === 0, s.bad.join("; ") || `${s.open} unresolved`);
+    await page.click("#btn-back");
+    await page.waitForSelector("#screen-overview:not(.hidden)");
+  }
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
+// Dark mode: the landing page, the overview, each study in the viewer, the reports panel, the
+// download menu and the sheets (dark.mjs: no near-white panels, text contrast).
+async function flowDark(dev) {
+  const label = `dark/${dev}`;
+  const { context, page, errors } = await newPage(dev, { colorScheme: "dark" });
+  await page.goto(`${BASE}/`);
+  await page.waitForTimeout(500);
+  await darkAudit(page, `${label} landing`, check, `${dev}-landing`);
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  await page.waitForTimeout(800);
+  await darkAudit(page, `${label} overview`, check, `${dev}-overview`);
+  const n = await page.locator(".study-open").count();
+  for (let si = 0; si < n; si++) {
+    if (si) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    await page.locator(".study-open").nth(si).click();
+    await page.waitForSelector("#screen-viewer:not(.hidden)");
+    await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+    await page.waitForTimeout(800);
+    const name = (await page.textContent("#top-title")).trim().replace(/[^A-Za-z0-9]+/g, "-").slice(0, 30);
+    await darkAudit(page, `${label} ${name}`, check, `${dev}-${name}`);
+    if (si === 0) {
+      if (await page.isVisible("#btn-report")) {
+        if ((await page.getAttribute("#btn-report", "aria-expanded")) !== "true") await page.click("#btn-report");
+        await page.waitForTimeout(600);
+        await darkAudit(page, `${label} reports panel`, check, `${dev}-reports`);
+        // On phones the panel covers the screen: close it.
+        if (dev !== "desktop") await page.click("#btn-report-close");
+      }
+      await page.click("#btn-download-menu");
+      await page.waitForSelector("#sheet-download:not(.hidden)");
+      await darkAudit(page, `${label} download menu`, check, `${dev}-download`);
+      await page.click("#sheet-download [data-close]");
+      await page.click("#btn-trust");
+      await page.waitForSelector("#sheet-trust:not(.hidden)");
+      await darkAudit(page, `${label} trust sheet`, check, `${dev}-trust`);
+      await page.click("#sheet-trust [data-close]");
+    }
+  }
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
+// Reformat controls: the plane menu, the angle and slab sheet, and the label that says the
+// plane was made in the viewer.
+async function flowMprUi(dev) {
+  const label = `mpr-ui/${dev}`;
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  const n = await page.locator(".study-open").count();
+  for (let si = 0; si < n; si++) {
+    if (/CT/.test(await page.locator(".study-card .study-title").nth(si).textContent())) {
+      await page.locator(".study-open").nth(si).click();
+      break;
+    }
+  }
+  await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+  const opts = await page.locator("#view-plane option").allTextContents();
+  check(`${label}: plane menu`, opts.join(",") === "As acquired,Axial,Sagittal,Coronal", opts.join(", "));
+  await page.selectOption("#view-plane", "coronal");
+  await page.waitForFunction(() => window.__viewHooks.current().mpr === "coronal" && !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+  const hud = await page.textContent("#hud-tl");
+  check(`${label}: a reformat says "Reformatted in the viewer"`, /Coronal · \d+\/\d+\nReformatted in the viewer/.test(hud), hud.replace(/\n/g, " | "));
+  await page.click("#btn-plane-opts");
+  await page.waitForSelector("#sheet-plane:not(.hidden)");
+  await page.locator("#plane-tilt").fill("15");
+  await page.selectOption("#slab-thickness", "10");
+  await page.waitForTimeout(300);
+  check(`${label}: slab method offered once a slab is chosen`, await page.isVisible("#slab-mode"));
+  await page.selectOption("#slab-mode", "avg");
+  await page.waitForFunction(() => /average 10 mm/.test(document.querySelector("#hud-tl").textContent), null, { timeout: 30000 });
+  const hud2 = await page.textContent("#hud-tl");
+  check(`${label}: tilt and slab applied and named`, /Coronal, tilted 15°, average 10 mm/.test(hud2), hud2.replace(/\n/g, " | "));
+  await page.screenshot({ path: `${SHOTS}${dev}-mpr-sheet.png` });
+  if (dev !== "desktop") await layoutChecks(page, `${label} angle and slab sheet`, dev);
+  await page.click("#plane-reset");
+  await page.waitForFunction(() => !/tilted|average/.test(document.querySelector("#hud-tl").textContent), null, { timeout: 30000 });
+  await page.click("#sheet-plane [data-close]");
+  await page.selectOption("#view-plane", "");
+  await page.waitForFunction(() => !window.__viewHooks.current().mpr);
+  const hud3 = await page.textContent("#hud-tl");
+  check(`${label}: "As acquired" shows the stored images, unlabelled`, !/Reformatted/.test(hud3), hud3.replace(/\n/g, " | "));
+  // A scanner's own reformat series is stored images: no label.
+  const sag = page.locator(".series-btn", { hasText: "SAGITTAL REFORMATS" });
+  if (await sag.count()) {
+    await sag.click();
+    await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 60000 });
+    const h = await page.textContent("#hud-tl");
+    check(`${label}: the scanner's reformat series is not labelled as ours`, !/Reformatted in the viewer/.test(h), h.replace(/\n/g, " | "));
+  }
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
+// The same file looks the same everywhere: each series' strip thumbnail against the main view's
+// rendering of that image, shrunk to the thumbnail's size (series of one image: the radiographs).
+async function flowAgreement(dev) {
+  const label = `agreement/${dev}`;
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  const n = await page.locator(".study-open").count();
+  let compared = 0;
+  for (let si = 0; si < n; si++) {
+    if (si) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    await page.locator(".study-open").nth(si).click();
+    await page.waitForSelector(".series-btn");
+    if (await page.evaluate(() => document.body.classList.contains("slide-mode"))) continue;
+    const k = await page.locator(".series-btn").count();
+    for (let i = 0; i < k; i++) {
+      const one = await page.locator(`.series-btn[data-series="${i}"] .s-count`).textContent();
+      if (!/^1 image$/.test(one)) continue;
+      await page.locator(`.series-btn[data-series="${i}"]`).click();
+      await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+      await page.waitForFunction((i) => document.querySelector(`.series-btn[data-series="${i}"] canvas`)?.dataset.drawn, i, { timeout: 120000 });
+      await page.waitForTimeout(300);
+      const r = await page.evaluate((i) => {
+        const c = document.querySelector(`.series-btn[data-series="${i}"] canvas`);
+        const t = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        const shownNow = window.__viewHooks.renderShown(c.width, c.height);
+        // Colour images have no VOI transform to disagree on.
+        if (!shownNow || shownNow.colour) return null;
+        const v = shownNow.grey;
+        // Compare 8 × 8 block means: a thumbnail is a reduced decode (box-averaged), the view a
+        // sampled full-size image; fine detail differs, the display transform must not.
+        const W = c.width, H = c.height, B = 8;
+        let d = 0, ta = 0, va = 0, n = 0;
+        for (let by = 0; by + B <= H; by += B)
+          for (let bx = 0; bx + B <= W; bx += B) {
+            let a = 0, b = 0;
+            for (let y = by; y < by + B; y++)
+              for (let x = bx; x < bx + B; x++) {
+                a += t[(y * W + x) * 4];
+                b += v[y * W + x];
+              }
+            a /= B * B;
+            b /= B * B;
+            d += Math.abs(a - b);
+            ta += a;
+            va += b;
+            n++;
+          }
+        return { mean: d / n, thumb: ta / n, view: va / n, name: document.querySelector(`.series-btn[data-series="${i}"] .s-name`).textContent };
+      }, i);
+      if (!r) continue;
+      compared++;
+      const title = (await page.textContent("#top-title")).trim();
+      // A thumbnail is a reduced decode (box-averaged), the view a sampled full image: fine detail
+      // differs; a different window, LUT or inversion moves the whole image.
+      check(`${label} ${title} · ${r.name}: thumbnail and main view agree`, r.mean < 10 && Math.abs(r.thumb - r.view) < 6, `block mean |Δ| ${r.mean.toFixed(1)}; mean grey ${r.thumb.toFixed(0)} vs ${r.view.toFixed(0)}`);
+    }
+  }
+  check(`${label}: grayscale images compared`, compared >= 11, String(compared));
   check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
   await context.close();
 }
@@ -689,6 +962,12 @@ const flows = {
   reports: () => Promise.all(["desktop", "phone390"].map(flowReports)),
   "sample-reports": () => Promise.all(["desktop", "phone390"].map(flowSampleReports)),
   pages: () => Promise.all(["desktop", "phone390", "landscape"].map(flowPages)),
+  thumbs: () => Promise.all(["desktop", "phone390"].map(flowThumbs)),
+  dark: () => Promise.all(["desktop", "phone390"].map(flowDark)),
+  "mpr-ui": () => Promise.all(["desktop", "phone390"].map(flowMprUi)),
+  agreement: async () => {
+    for (const dev of ["desktop", "phone390"]) await flowAgreement(dev);
+  },
   downloads: async () => {
     for (const dev of ["desktop", "phone390"]) await flowDownloads(dev);
   },

@@ -11,8 +11,7 @@ Two entry points:
 ```ts
 import { openShare, pickInitialSeries, PasscodeError, LinkError } from "../core/index";
 import { getDecoderPool, ImageStore, PoolDecryptor, Priority } from "../core/images";
-import { Viewport, drawThumbnail } from "../core/render";
-import { autoWindow } from "../core/wl";
+import { Viewport, showImage } from "../core/render";
 
 const pool = getDecoderPool();                     // start early: compiles the decoder wasm, starts workers
 const share = await openShare(location.hash, { passcode, recipient: "My page", decryptor: new PoolDecryptor(pool) });
@@ -20,10 +19,9 @@ const share = await openShare(location.hash, { passcode, recipient: "My page", d
 const images = new ImageStore(share.loader, await pool);
 const study = share.index.studies[0];
 const series = study.series[pickInitialSeries(study)];
-const img = await images.get(series, 0, { priority: Priority.Visible });
+const img = await images.get(series, 0, { priority: Priority.Visible });   // decoded with its header
 const vp = new Viewport(document.getElementById("stage")!);
-const w = autoWindow(img);
-vp.show(img, 0, { windowCenter: w.center, windowWidth: w.width });
+const plan = showImage(vp, img);           // the display transform the file's maker chose (displayPlan)
 vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); // uniforms only
 ```
 
@@ -41,7 +39,7 @@ vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); /
 | `hasFlag(payload, "L" \| "P" \| "U")` | Tests a flag. |
 | `new LinkResolver(link, { recipient?, onRequest?, fetch? })` | One link. Properties: `payload`, `label`, `expires`, `needsPasscode`, `isDirect`, `isLongLived`, `base`. |
 | `resolver.open(passcode?)` | U mode: GETs the file. Manifest mode: POSTs `{recipient, passcode}`, then GETs `files[0].location`. Decrypts the JWE and returns `{ bundleBytes, baseUrl, manifest }`. Checks `exp` before any request. |
-| `resolver.fetchRange(plan, signal?)` | One Range read of `{fileId}.bin` against the base URL, with `?recipient=`. In manifest mode a 404 re-resolves the manifest once, with the remembered passcode, for a fresh `/cap/` prefix, then retries. Checks the byte count. A 200 answer is sliced locally. |
+| `resolver.fetchRange(plan, signal?, onProgress?)` | One Range read of `{fileId}.bin` against the base URL, with `?recipient=`; `onProgress` gets the bytes received so far. In manifest mode a 404 re-resolves the manifest once, with the remembered passcode, for a fresh `/cap/` prefix, then retries. Checks the byte count. A 200 answer is sliced locally. |
 | `resolver.fileUrl(fileId)` | The URL it reads from. |
 | `onRequest(e: RequestEvent)` | Called for every exchange: `{ method, url, range, status, bytes, ms, purpose: "manifest" \| "bundle" \| "file" }`. Use it for network panels. |
 | `decryptJwe(compact, key)` / `encryptJwe(bytes, key)` | Compact JWE: `dir`, `A256GCM`, `zip: DEF`. Uses WebCrypto and `(De)CompressionStream("deflate-raw")`. |
@@ -116,7 +114,7 @@ Options:
 - `onBytes(n)`.
 
 Methods:
-- `ciphertext(series, i, { priority, signal })` returns `{ plan, bytes }`: instance i's records, in a fresh buffer the caller may transfer. Requests for the same instance are deduplicated. Asking again with a lower `priority` number moves a queued request up. Aborting removes a queued request once it has no other waiters.
+- `ciphertext(series, i, { priority, signal, onProgress })` returns `{ plan, bytes }`: instance i's records, in a fresh buffer the caller may transfer. Requests for the same instance are deduplicated, and every caller's `onProgress` hears the bytes received. Asking again with a lower `priority` number moves a queued request up. Aborting removes a queued request once it has no other waiters.
 - `instance(series, i, o)` returns one verified, decrypted Part 10 file (through the decryptor).
 - `run(series, plan, o)` returns the instances of a multi-instance plan from one Range read, verified and decrypted. It is used by downloads and is not cached.
 - `report(plan, state)` records a verify outcome from a decryptor running elsewhere (ImageStore's worker jobs).
@@ -139,16 +137,14 @@ Methods:
 ### Rendering: `render.ts`, `wl.ts` (browser)
 
 **`new Viewport(container, { forceCpu?, allowSoftwareGl?, maxDpr? })`** creates a canvas that fills the container and resizes with it. It uses viewer-kit's `createRenderer`: WebGL2, or the CPU renderer when WebGL2 is missing or is SwiftShader.
-- `show(img, frame, view)` uploads a frame.
+- `show(img, frame, view, displayFrame?)` uploads a frame; `showImage(vp, img, frame?, choice?)` shows it through `displayPlan`, which every view of an image uses.
 - `setView({ windowCenter, windowWidth, zoom, panX, panY, invert, interpolation })` changes uniforms only, and redraws on the next animation frame.
 - An image larger than the GPU's maximum texture size switches to the CPU renderer on a fresh canvas.
 - Other members: `scale` (canvas pixels per CSS pixel, for pointer maths), `image`, `kind` and `onDraw(ms)`.
 
-**Thumbnails.** `drawThumbnail(canvas2d, img, frame?)` draws with the CPU renderer, so thumbnails never create WebGL contexts. Float images are drawn as `floatFrame` makes them (below).
+**Thumbnails.** `drawThumbnail(canvas2d, img, frame?, header?)` draws with the CPU renderer (no WebGL context per thumbnail), through `displayPlan` with the image's own header (`headerOf(img)` when it was decoded with `header: true`), so a thumbnail looks like the image in the viewer.
 
-**Windows.** `wl.ts` provides:
-- `presetsFor(modality)`: CT gets Auto, Soft tissue, Lung, Bone and Brain; every other modality gets Auto only;
-- `autoWindow(img, frame, realWorld?)`: the file's own Window Center and Width, else the 1st–99th percentile of the frame's values. For float images, in real values: the file's window, else the range the Real World Value Mapping covers, else the data range.
+**Window presets.** `wl.ts` `presetsFor(modality, model)`: Auto, the header's windows and VOI LUTs, and for CT Soft tissue, Lung, Bone and Brain.
 
 ### DICOM objects and display: `dicom.ts`, `objects.ts`, `reports.ts`, `sr.ts`, `derived.ts`, `waveform.ts`, `mesh.ts`, `geometry.ts`, `display.ts`, `overlays.ts`, `volume.ts`
 
@@ -168,24 +164,28 @@ Methods:
 
 **Geometry.** `geometryOf(ds, frame?)`: position, orientation and pixel spacing, from per-frame and shared functional groups for enhanced images; the spacing's source (`Pixel Spacing`, `Imager Pixel Spacing`, magnification-corrected, ultrasound region, none) for measurements (`spacingSourceText`). `patientToPixel`, `pixelToPatient`.
 
-**Display pipeline.** `displayModel(ds, frame)`: Modality LUT Sequence, VOI LUT Sequence, VOI LUT Function, Presentation LUT Shape and every header window with its explanation. `applyModalityLut`, `applyVoiLut`, `applySigmoid` make frames for the renderer; `linearWindow` turns LINEAR_EXACT into a LINEAR window. `wl.ts` `presetsFor(modality, model)` lists the choices.
+**Display pipeline.** One function, `displayPlan(img, frame, header, choice)`, turns an image into what the renderer draws: Modality LUT (or the header's Rescale), then the VOI (a window with its function, LINEAR, LINEAR_EXACT or SIGMOID, or a VOI LUT), then Presentation LUT Shape; the renderer inverts MONOCHROME1. `choice` is "auto" (the file's first window, else its first VOI LUT, else the 1st–99th percentile), a window, one of the file's windows or LUTs, or the full range. The viewer (GL and CPU), thumbnails, /share previews and How all draw through it. `displayModel(ds, frame)` reads what the header asks for; the Modality LUT Sequence of XA and XRF images is not applied for display (it describes the pixel intensity relationship), as dcmtk does.
+
+**LUT depth.** `lutOutputBits(declared, max)`: the descriptor's third value is the bits per entry (PS3.3 C.11.1.1.1, C.11.2.1.1.1). Data wider than declared take the bits their maximum needs; a declaration two or more bits wider than the data (CR VOI LUTs declared 16 bits with entries 0–4095) takes the smallest of 8, 10, 12, 14 and 16 bits that holds the maximum. Descriptor entries 0 mean 65536; the first mapped value is signed when the LUT's input is. `web/checks/display-conformance.ts` and `.py` hold the pipeline to dcmtk and pydicom over every grayscale file in the corpus, and to expected renderings of each LUT edge (`display-synthetic.py`).
 
 **Float pixel data and real-world values.** `realWorldOf(ds, frame)` reads the Real World Value Mapping (per-frame, shared, top level) with its label, UCUM units and the stored range it covers; `imageRealWorld(img)` is the decoder's copy, for before the header is read. `realValue` applies it (else Rescale). The renderers take integer samples, so `floatFrame(frame, realWorld, floatRange(img, realWorld))` spreads the real values over 16-bit stored values whose rescale gives them back, to 1/65534 of the range; NaN becomes black. Float images are windowed in real values with the LINEAR_EXACT formula, so any width above 0 works. `formatValue` and `unitText` print values and units for the cursor readout and legends. ICC profiles: the shared `icc.ts` (`iccToSrgb`).
 
 **Overlays.** `readOverlays(ds)`: 60xx planes from Overlay Data; `overlayBitsFromPixels` fills planes stored in the pixel data's high bits from the raw native pixel data.
 
-**Volumes.** `buildVolume(slices)` stacks parallel, evenly spaced, equally sized slices (or enhanced frames) in patient space; `reformat(volume, plane, index)` cuts sagittal, coronal or axial planes with square pixels, superior up. Float slices are spread over one real-value range shared by the whole volume.
+**Volumes and reformats.** `buildVolume(slices)` stacks parallel, equally sized, evenly spaced slices (or enhanced frames) as a lattice in patient space: the step from one slice to the next may lean (gantry tilt up to 45°), and slice positions that do not follow one direction are refused with the reason. `planeGrid(volume, { plane, turn, tilt })` lays out true axial, sagittal or coronal planes (optionally turned and tilted) over the volume; `reformat(volume, grid, index, slab?)` samples one with trilinear interpolation, with ITK's edge rules, and combines a slab's planes (maximum, minimum or mean). `GpuReformatter` (`volume-gl.ts`) does the same with the volume in one integer 3D texture; `finishPlane` makes both paths' frames. display-checks.mjs holds both to SimpleITK (`objects/mpr-ref.py`).
+
+**Thumbnails before the image.** `readIcon(head)` (`icon.ts`) reads the Icon Image Sequence from a file's first bytes (8-bit grey, RGB or palette).
 
 ### Downloads: `export.ts`, `zip.ts`, `dicomdir.ts`, `dicom-header.ts`, `save.ts`
 
-**ZIPs.** `exportZip({ kind: "study" | "series", … }, loader, sink, onProgress?, signal?)` writes a stored ZIP:
-- `DICOM/ST000001/SE000001/IM000001`… are the shared files, byte for byte;
+**ZIPs.** `exportZip({ kind: "all" | "study" | "series", … }, loader, sink, onProgress?, signal?)` writes a stored ZIP:
+- `DICOM/ST000001/SE000001/IM000001`… are the shared files, byte for byte (one ST folder per study);
 - `DICOMDIR` holds PATIENT → STUDY → SERIES → IMAGE records.
 
 Series are read in runs of up to 8 MiB, so memory stays bounded. ZIP64 records are added past 4 GiB.
 
 **Other exports:**
-- `exportInstance(loader, series, i)` returns one instance's bytes;
+- `exportInstance(loader, series, i, onProgress?)` returns one instance's bytes;
 - `exportSize(scope)` and `exportBaseName(study, series?)` give the size and a file name;
 - `readDicomHeader(bytes)` reads the DICOMDIR attributes from a Part 10 header;
 - `buildDicomdir(entries)` builds the DICOMDIR;

@@ -18,6 +18,14 @@
               the CT's resolution, values 0–100 % (Real World Value Mapping range 0–100), a
               missing-value corner; frame 1 names its source image, the others match by position.
 
+  mpr-josh-ct, mpr-oblique-mr  Series of the Josh Example sample (data/samples, as extracted by
+              sample-originals.py): the CT's 5 mm axial series (anisotropic: 0.83 mm pixels) and the
+              MRI's FLAIR COR (an oblique acquisition, about 4.8° off coronal).
+
+  mpr-tilt    The five-slice-spaced middle of case volume-ct with a 15° gantry tilt: each slice's
+              position moved along its column direction by k·Δz·tan 15° (pixels unchanged), and
+              Gantry/Detector Tilt set.
+
 Adds the case to samples.json (replacing an earlier entry of the same id)."""
 import hashlib, io, json
 from pathlib import Path
@@ -208,7 +216,7 @@ add_case("synthetic-objects", "Encapsulated CDA, Basic Voice Audio waveform, Enc
 
 # ----------------------------------------------------------------------------- float pixel data
 
-import shutil
+import shutil, math
 from floatref import float_real, float_window
 
 corpus = HERE.parents[2] / "codec-corpus" / "formats" / "uncompressed" / "samples"
@@ -300,5 +308,53 @@ add_case("pmap-overlay", "Float Parametric Map over CT slices (synthetic map, CT
          "Map: 5 frames at half the CT's resolution, 0–100 % with the Real World Value Mapping range 0–100, NaN in the top-left 8x8; frame 1 has a Derivation Image source, frames 2–5 match by position")
 man["cases"][-1]["licence"] = ["CC BY 4.0 (IDC collection pancreatic_ct_cbct_seg) for the CT", "CC0 (synthetic) for the map"]
 
+
+# ----------------------------------------------------------------------------- reformats
+
+import glob
+sample = Path("/media/barracuda/shlink-sample-orig")
+def sample_series(archive, description):
+    files = sorted(glob.glob(str(sample / "*" / archive / "*" / "*.dcm")))
+    out = [f for f in files if str(pydicom.dcmread(f, stop_before_pixels=True).get("SeriesDescription", "")) == description]
+    if not out:
+        raise SystemExit(f"{archive}: no series {description!r} (run web/checks/sample-originals.py first)")
+    return out
+
+for cid, archive, desc, feature in [
+    ("mpr-josh-ct", "ct-abdomen-pelvis-2012", "ABD/PEL", "Josh Example CT, 5 mm axial (anisotropic), for reformats"),
+    ("mpr-oblique-mr", "mri-brain-2020", "FLAIR COR", "Josh Example MRI FLAIR COR, an oblique acquisition, for reformats"),
+]:
+    d = root / cid
+    d.mkdir(parents=True, exist_ok=True)
+    names = []
+    for f in sample_series(archive, desc):
+        names.append(Path(f).name)
+        shutil.copyfile(f, d / Path(f).name)
+    add_case(cid, feature, names, "copied from the Josh Example sample (public, de-identified)")
+    man["cases"][-1]["licence"] = "Josh Example sample: published by Josh Mandel for testing"
+
+vt = root / "mpr-tilt"
+vt.mkdir(parents=True, exist_ok=True)
+tilt = math.radians(15)
+cts = sorted((pydicom.dcmread(root / "volume-ct" / f) for f in next(c for c in man["cases"] if c["id"] == "volume-ct")["files"]), key=lambda d: float(d.ImagePositionPatient[2]))
+names = []
+for k, d in enumerate(cts):
+    row = np.array([float(x) for x in d.ImageOrientationPatient[:3]]); colv = np.array([float(x) for x in d.ImageOrientationPatient[3:]])
+    nrm = np.cross(row, colv)
+    p0 = np.array([float(x) for x in cts[0].ImagePositionPatient])
+    dz = float(np.dot(np.array([float(x) for x in d.ImagePositionPatient]) - p0, nrm))
+    pos = np.array([float(x) for x in d.ImagePositionPatient]) + colv * dz * math.tan(tilt)
+    d.ImagePositionPatient = [f"{x:.6f}" for x in pos]
+    d.GantryDetectorTilt = "15"
+    d.SeriesInstanceUID = generate_uid(entropy_srcs=["mpr-tilt series"])
+    d.SOPInstanceUID = d.file_meta.MediaStorageSOPInstanceUID = generate_uid(entropy_srcs=[f"mpr-tilt {k}"])
+    d.SeriesDescription = "Synthetic 15 degree gantry tilt"
+    n = f"tilt-{k:03d}.dcm"
+    d.save_as(vt / n)
+    names.append(n)
+add_case("mpr-tilt", "CT with a 15° gantry tilt (synthetic: volume-ct with sheared slice positions), for reformats", names,
+         "Positions moved along the column direction by k·Δz·tan 15°; pixel data unchanged")
+man["cases"][-1]["licence"] = ["CC BY 4.0 (IDC collection pancreatic_ct_cbct_seg)"]
+
 (HERE / "samples.json").write_text(json.dumps(man, indent=1) + "\n")
-print("synthetic-objects, float-maps and pmap-overlay written")
+print("synthetic-objects, float-maps and pmap-overlay, mpr cases written")

@@ -108,7 +108,7 @@ export function shareScene(): Scene {
       const plan = planInstances(series, S.slice);
       const ct = await res.fetchRange(plan);
       const pool = await S.pool!;
-      const img = await pool.decode(ct, { encrypted: await decryptParams(series, plan) });
+      const img = await pool.decode(ct, { encrypted: await decryptParams(series, plan), header: true });
       const cv = h("canvas", { width: 160, height: 160, style: "width:160px;height:160px;border-radius:8px;background:#000" });
       drawThumbnail(cv, img);
       status.className = "big-status good";
