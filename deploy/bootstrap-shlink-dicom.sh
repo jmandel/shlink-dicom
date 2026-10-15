@@ -34,9 +34,10 @@ echo "== bootstrap-shlink-dicom $(date -Is)"
 
 need=""
 for c in git curl unzip cc pkg-config; do command -v "$c" >/dev/null || need="$need $c"; done
+dpkg -s libsqlite3-dev >/dev/null 2>&1 || need="$need libsqlite3-dev"
 if [ -n "$need" ]; then
   $SUDO apt-get update -qq
-  $SUDO apt-get install -y -qq git curl unzip build-essential pkg-config
+  $SUDO apt-get install -y -qq git curl unzip build-essential pkg-config libsqlite3-dev
 fi
 
 $SUDO mkdir -p "$DIR" "$BUN_INSTALL" /opt/rust
