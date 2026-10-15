@@ -375,3 +375,16 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
   - **Other attributes:** Bits Stored, Samples per Pixel and Photometric, plus dimensions and bit depth from the JPEG or JPEG 2000 header.
   - **Deliberately still refused:** truncated pixel data, possibly-packed 12-bit native data, and ambiguous layouts.
   - **Effect on the corpus:** three formerly "must refuse" GDCM quirk files now decode, matching DCMTK, GDCM and OpenJPEG on repaired copies. The coordinator recorded them as repaired-copy rulings. One gotcha: a repair case's oracle must be built before the original that points at it. The corpus went to 935/935.
+
+- **HTJ2K speed, round 2.** The agent switched to option B: HT block decoding now runs inside the vendored hayro pipeline, porting the MIT/BSD-licensed `ndic-htj2k` and OpenJPH decoders, with oxideav as the fallback for MIXED streams. Patches to hayro's wavelet and memory copies helped both formats.
+  - **HTJ2K:** 22–27× OpenJPH became about 2–3× natively. A 2048² lossless frame went from 384 to 41 ms natively, and from 458 to 71 ms in wasm.
+  - **JPEG 2000:** averages 1.20× OpenJPEG.
+  - **Measurement under load:** the machine sat at load 13–27, so the agent timed our decoder and the C library alternately on the same frame, so both ran under the same load. Benchmarking around other agents became a skill of its own.
+- **exe.dev SSH outage (about 16:30).** SSH into every VM on Josh's account, old ones included, dropped right after authentication, and the lobby relay failed with "handshake failed: EOF", so the sandbox deploy stalled. The coordinator showed it wasn't project-specific by trying an untouched VM, and set up a background poll every 10 minutes.
+
+- **Deploying around a broken SSH path (15 Oct, afternoon).** The coordinator first ruled out its own side: both account keys, OpenSSH 10.6 and paramiko, and a VM restart all failed the same way. exe.dev's HTTPS `/exec` API failed too, with the lobby's own connection to the VM reset, so the fault sat inside exe.dev's network. The fix was to stop depending on SSH: two bootstrap scripts that build everything from the public repo with only `curl`, runnable from the web terminal or as a first-boot setup script.
+  - **Testing in a container caught three bugs before any VM saw the scripts.** The container ran exe.dev's own published image, with a small `systemctl` stand-in.
+    - `main` didn't build: a two-line wasm fix had stayed uncommitted while an agent kept working.
+    - The `/how` page baked its numbers from a gitignored corpus report.
+    - The server needed `libsqlite3-dev`.
+  - **The lesson:** "it builds on my machine" had been hiding gaps between the working tree and git for a day.

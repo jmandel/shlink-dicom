@@ -1,7 +1,8 @@
 // Scripted Chromium checks for the whole-slide view (web/view/wsi-view.ts).
 //   bun web/view/wsi-tools/wsi-fixtures.ts brca-jpeg=<dir> ov-j2k=<dir>   (writes /tmp/wsi-fixtures.json)
 //   node web/checks/wsi-checks.mjs [--only=<fixture>] [--skip-walk]
-// For each slide: a desktop session over the link with the Bundle frame index and one without
+// For each slide: a desktop session over the link packed with offset tables added and one packed
+// as the files are
 // (zoom to full resolution on tissue, six pans, zoom out), tile pixels against a reference decode
 // (web/view/wsi-tools/ref_tiles.py), keyboard, label sheet, then phone touch gestures.
 // Screenshots go to docs/shots/wsi/, numbers to docs/shots/wsi/results.json.
@@ -87,7 +88,7 @@ const tissuePoint = (page) =>
 
 /** A typical session: fit → full resolution on tissue → six half-screen pans → zoom out to fit. */
 async function session(page, name, kind, shots) {
-  const tNav = await openSlide(page, F[name][kind === "index" ? "indexLink" : "plainLink"]);
+  const tNav = await openSlide(page, F[name][kind === "tables" ? "tablesLink" : "plainLink"]);
   const s0 = await stats(page);
   const marks = await page.evaluate(() => ({ view: window.__view.marks, wsi: window.__wsi.marks() }));
   const out = {
@@ -136,18 +137,18 @@ async function session(page, name, kind, shots) {
 
 for (const name of Object.keys(F)) {
   if (only && name !== only) continue;
-  numbers[name] = { totalBytes: F[name].totalBytes, ciphertextBytes: F[name].ciphertextBytes, frameIndex: F[name].frameIndex };
+  numbers[name] = { totalBytes: F[name].totalBytes, ciphertextBytes: F[name].ciphertextBytes, withTables: F[name].withTables };
 
-  // ---------------------------------------------------------------- desktop, with the frame index
+  // ---------------------------------------------------------------- desktop, offset tables added by the packer
   {
     const { context, page, errors } = await newPage("desktop");
-    const r = await session(page, name, "index", true);
-    numbers[name].index = r;
-    check(`${name} index: first tile shown`, r.firstTileMs > 0, `${r.firstTileMs} ms from first request; ${r.firstTileSinceNavigationMs} ms since navigation`);
-    check(`${name} index: full resolution reached`, r.deepest.bytes > r.fit.bytes, `${r.deepest.firstTileMs} ms to first tile, ${r.deepest.screenMs} ms to full screen`);
-    check(`${name} index: no walking`, r.session.byPurpose.walk.bytes === 0, JSON.stringify(r.session.byPurpose.walk));
-    check(`${name} index: session fetched under 5% of the slide`, r.session.fraction < 0.05, `${(r.session.bytes / 1e6).toFixed(2)} MB of ${(r.totalBytes / 1e6).toFixed(1)} MB = ${(r.session.fraction * 100).toFixed(2)}%`);
-    check(`${name} index: back at a coarse level after zooming out`, r.session.level >= 2, `level index ${r.session.level}`);
+    const r = await session(page, name, "tables", true);
+    numbers[name].tables = r;
+    check(`${name} tables: first tile shown`, r.firstTileMs > 0, `${r.firstTileMs} ms from first request; ${r.firstTileSinceNavigationMs} ms since navigation`);
+    check(`${name} tables: full resolution reached`, r.deepest.bytes > r.fit.bytes, `${r.deepest.firstTileMs} ms to first tile, ${r.deepest.screenMs} ms to full screen`);
+    check(`${name} tables: no walking`, r.session.byPurpose.walk.bytes === 0, JSON.stringify(r.session.byPurpose.walk));
+    check(`${name} tables: session fetched under 5% of the slide`, r.session.fraction < 0.05, `${(r.session.bytes / 1e6).toFixed(2)} MB of ${(r.totalBytes / 1e6).toFixed(1)} MB = ${(r.session.fraction * 100).toFixed(2)}%`);
+    check(`${name} tables: back at a coarse level after zooming out`, r.session.level >= 2, `level index ${r.session.level}`);
     const lt = Math.max(0, ...r.longTasks);
     check(`${name}: main thread stays responsive (longest task < 250 ms)`, lt < 250, `long tasks: ${r.longTasks.slice(0, 12).join(", ") || "none"}`);
 
@@ -208,7 +209,7 @@ for (const name of Object.keys(F)) {
     await context.close();
   }
 
-  // ---------------------------------------------------------------- desktop, without the frame index
+  // ---------------------------------------------------------------- desktop, files as they are (walking)
   if (!skipWalk) {
     const { context, page, errors } = await newPage("desktop");
     const r = await session(page, name, "plain", false);
@@ -222,7 +223,7 @@ for (const name of Object.keys(F)) {
   {
     const { context, page, errors } = await newPage("phone");
     const cdp = await context.newCDPSession(page);
-    await openSlide(page, F[name].indexLink);
+    await openSlide(page, F[name].tablesLink);
     await page.waitForTimeout(250);
     await page.screenshot({ path: `${SHOTS}${name}-phone-fit.png` });
     const box = await page.locator(".wsi-canvas").boundingBox();
@@ -288,7 +289,7 @@ for (const name of Object.keys(F)) {
   }
   {
     const { context, page, errors } = await newPage("landscape");
-    await openSlide(page, F[name].indexLink);
+    await openSlide(page, F[name].tablesLink);
     await page.screenshot({ path: `${SHOTS}${name}-landscape-fit.png` });
     check(`${name} landscape: opens without errors`, errors.length === 0, errors.slice(0, 5).join(" | "));
     await context.close();

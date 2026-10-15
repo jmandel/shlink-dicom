@@ -1,14 +1,14 @@
 use shl_dicom_core::{
-    crypto::{b64url_encode, decode_key_32, random_bytes},
-    jwe::{decrypt_bundle_jwe, encrypt_bundle_jwe},
+    crypto::{decode_key_32, random_bytes},
+    jwe::encrypt_bundle_jwe,
+    offset_tables::{offset_table_patch, OffsetTableKind},
     packer::{build_link_bundle, IngestSession, PackedSeriesFile},
-    shl::{decode_shlink_uri, encode_shlink_uri, ShlPayload},
+    shl::{encode_shlink_uri, ShlPayload},
 };
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct WasmPackedOutput {
-    owner_key_b64: String,
     owner_jwe: String,
     owner_bundle_json: String,
     index_json: String,
@@ -17,11 +17,6 @@ pub struct WasmPackedOutput {
 
 #[wasm_bindgen]
 impl WasmPackedOutput {
-    #[wasm_bindgen(getter)]
-    pub fn owner_key(&self) -> String {
-        self.owner_key_b64.clone()
-    }
-
     #[wasm_bindgen(getter)]
     pub fn owner_jwe(&self) -> String {
         self.owner_jwe.clone()
@@ -60,7 +55,6 @@ impl WasmPackedOutput {
 #[wasm_bindgen]
 pub struct WasmPacker {
     inner: Option<IngestSession>,
-    existing_owner_key: Option<[u8; 32]>,
 }
 
 #[wasm_bindgen]
@@ -69,22 +63,7 @@ impl WasmPacker {
     pub fn new() -> Self {
         Self {
             inner: Some(IngestSession::new()),
-            existing_owner_key: None,
         }
-    }
-
-    pub fn from_owner_jwe(owner_key_b64: &str, owner_jwe: &str) -> Result<WasmPacker, JsError> {
-        let owner_key = decode_key_32(owner_key_b64).map_err(|e| JsError::new(&e.to_string()))?;
-        let bundle_bytes = decrypt_bundle_jwe(owner_jwe, &owner_key)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        let bundle_json = String::from_utf8(bundle_bytes)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        let session = IngestSession::from_owner_bundle_json(&bundle_json)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(WasmPacker {
-            inner: Some(session),
-            existing_owner_key: Some(owner_key),
-        })
     }
 
     pub fn add_tgz(&mut self, bytes: &[u8]) -> Result<usize, JsError> {
@@ -97,14 +76,13 @@ impl WasmPacker {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    pub fn add_zip(&mut self, bytes: &[u8]) -> Result<usize, JsError> {
-        let session = self
-            .inner
+    /// Fill in missing frame offset tables when packing (see shl_dicom_core::offset_tables).
+    pub fn set_add_offset_tables(&mut self, on: bool) -> Result<(), JsError> {
+        self.inner
             .as_mut()
-            .ok_or_else(|| JsError::new("packer already finalized"))?;
-        session
-            .ingest_zip(bytes)
-            .map_err(|e| JsError::new(&e.to_string()))
+            .ok_or_else(|| JsError::new("packer already finalized"))?
+            .set_add_offset_tables(on);
+        Ok(())
     }
 
     pub fn add_dicom_file(&mut self, name: &str, bytes: &[u8]) -> Result<bool, JsError> {
@@ -128,10 +106,7 @@ impl WasmPacker {
             .ok_or_else(|| JsError::new("packer already finalized"))?;
         let owner_key = match owner_key_b64 {
             Some(ref s) => decode_key_32(s).map_err(|e| JsError::new(&e.to_string()))?,
-            None => match self.existing_owner_key {
-                Some(k) => k,
-                None => random_bytes::<32>().map_err(|e| JsError::new(&e.to_string()))?,
-            },
+            None => random_bytes::<32>().map_err(|e| JsError::new(&e.to_string()))?,
         };
 
         let packed = session
@@ -143,7 +118,6 @@ impl WasmPacker {
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         Ok(WasmPackedOutput {
-            owner_key_b64: b64url_encode(&owner_key),
             owner_jwe,
             owner_bundle_json: packed.owner_bundle_json,
             index_json,
@@ -171,25 +145,6 @@ pub fn build_link_bundle_wasm(
 }
 
 #[wasm_bindgen]
-pub fn decrypt_jwe_wasm(jwe_compact: &str, key_b64: &str) -> Result<String, JsError> {
-    let key = decode_key_32(key_b64).map_err(|e| JsError::new(&e.to_string()))?;
-    let bytes = decrypt_bundle_jwe(jwe_compact, &key).map_err(|e| JsError::new(&e.to_string()))?;
-    String::from_utf8(bytes).map_err(|e| JsError::new(&e.to_string()))
-}
-
-#[wasm_bindgen]
-pub fn encrypt_jwe_wasm(bundle_json: &str, key_b64: &str) -> Result<String, JsError> {
-    let key = decode_key_32(key_b64).map_err(|e| JsError::new(&e.to_string()))?;
-    encrypt_bundle_jwe(bundle_json.as_bytes(), &key).map_err(|e| JsError::new(&e.to_string()))
-}
-
-#[wasm_bindgen]
-pub fn generate_key_b64_wasm() -> Result<String, JsError> {
-    let key = random_bytes::<32>().map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(b64url_encode(&key))
-}
-
-#[wasm_bindgen]
 pub fn encode_shlink_wasm(
     payload_json: &str,
     viewer_prefix: Option<String>,
@@ -199,8 +154,45 @@ pub fn encode_shlink_wasm(
     encode_shlink_uri(&payload, viewer_prefix.as_deref()).map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// The rewrite that adds a frame offset table to one Part 10 instance: the new file is
+/// `head` followed by the original bytes from `resume_at`. Fragment bytes are unchanged.
 #[wasm_bindgen]
-pub fn decode_shlink_wasm(uri: &str) -> Result<String, JsError> {
-    let payload = decode_shlink_uri(uri).map_err(|e| JsError::new(&e.to_string()))?;
-    serde_json::to_string(&payload).map_err(|e| JsError::new(&e.to_string()))
+pub struct WasmOffsetTablePatch {
+    head: Vec<u8>,
+    resume_at: usize,
+    frames: usize,
+    extended: bool,
 }
+
+#[wasm_bindgen]
+impl WasmOffsetTablePatch {
+    #[wasm_bindgen(getter)]
+    pub fn head(&self) -> Vec<u8> {
+        self.head.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn resume_at(&self) -> usize {
+        self.resume_at
+    }
+    #[wasm_bindgen(getter)]
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+    /// True for an Extended Offset Table (offsets past 4 GiB); false for a Basic Offset Table.
+    #[wasm_bindgen(getter)]
+    pub fn extended(&self) -> bool {
+        self.extended
+    }
+}
+
+/// `undefined` when the instance needs no table or its frames can't be located unambiguously.
+#[wasm_bindgen]
+pub fn offset_table_patch_wasm(bytes: &[u8]) -> Option<WasmOffsetTablePatch> {
+    offset_table_patch(bytes).map(|p| WasmOffsetTablePatch {
+        frames: p.frames,
+        extended: p.kind == OffsetTableKind::Extended,
+        resume_at: p.resume_at,
+        head: p.head,
+    })
+}
+

@@ -164,7 +164,9 @@ export class ShareApi {
         }
       };
       x.onerror = () => reject(new ApiError(0, "The upload was interrupted."));
-      x.send(bytes as unknown as XMLHttpRequestBodyInit);
+      // A Blob body: the browser streams it from its blob store, and devtools protocol clients
+      // don't get the whole file inlined in their network events.
+      x.send(new Blob([bytes as BlobPart], { type: "application/octet-stream" }));
     });
   }
 }

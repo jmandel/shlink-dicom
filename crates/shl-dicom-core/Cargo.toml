@@ -9,10 +9,8 @@ base64 = "0.22"
 dicom-core = "0.7"
 dicom-dictionary-std = "0.7"
 dicom-object = "0.7"
-shl-dicom-decode = { path = "../../codecs/shl-dicom-decode" }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 getrandom = { version = "0.2", features = ["js"] }
-jpeg-decoder = { version = "0.3", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

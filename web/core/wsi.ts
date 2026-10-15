@@ -1,5 +1,5 @@
 // Whole-slide microscopy (VL Whole Slide Microscopy Image, modality SM): header parsing, the
-// pyramid, tile → frame → byte mapping, and the optional Bundle frame index (PROPOSAL.md §15 q4).
+// pyramid, and tile → frame → byte mapping.
 //
 // Pure TypeScript with no DOM: runs in browsers, workers and Bun. The network side (record cache,
 // walking fragment headers) is in wsi-source.ts.
@@ -535,7 +535,7 @@ export class FragmentWalker {
 
 /** Where each frame's bytes are, when known without walking. */
 export interface FrameTable {
-  source: "extended-offset-table" | "basic-offset-table" | "bundle" | "native" | "walk";
+  source: "extended-offset-table" | "basic-offset-table" | "native" | "walk";
   /** Instance byte range [a, b) of frame k (items included for encapsulated data). */
   range(k: number): [number, number] | null;
 }
@@ -659,122 +659,4 @@ export function singleFrameFile(h: SlideHeader, frame: Uint8Array): Uint8Array<A
     o += p.byteLength;
   }
   return out;
-}
-
-// ------------------------------------------------------------------------------------- Bundle frame index (prototype)
-
-/**
- * Prototype extension on ImagingStudy.series.instance (PROPOSAL.md §15, open question 4):
- *
- *   { "url": EXT_FRAMES, "extension": [
- *       { "url": "start",   "valueDecimal": <instance offset of frame 0's first item header> },
- *       { "url": "lengths", "valueBase64Binary": <deflate-raw of one unsigned LEB128 per frame:
- *                                                 the frame's bytes, item headers included> } ] }
- *
- * Frame k is instance bytes [start + Σ lengths[0..k), + lengths[k]). Frames are contiguous, so
- * lengths alone place them. A receiver that does not know the extension ignores it.
- */
-export const EXT_FRAMES = "https://example.org/shl-dicom/frames";
-
-function leb128(values: ArrayLike<number>): Uint8Array {
-  const out: number[] = [];
-  for (let i = 0; i < values.length; i++) {
-    let v = values[i];
-    while (v >= 0x80) {
-      out.push((v % 0x80) | 0x80);
-      v = Math.floor(v / 0x80);
-    }
-    out.push(v);
-  }
-  return Uint8Array.from(out);
-}
-
-function unleb128(b: Uint8Array, n: number): number[] {
-  const out: number[] = [];
-  let p = 0;
-  while (out.length < n && p < b.length) {
-    let v = 0, mul = 1, byte: number;
-    do {
-      byte = b[p++];
-      v += (byte & 0x7f) * mul;
-      mul *= 0x80;
-    } while (byte & 0x80 && p < b.length);
-    out.push(v);
-  }
-  return out;
-}
-
-async function pipe(bytes: Uint8Array, t: CompressionStream | DecompressionStream): Promise<Uint8Array> {
-  const s = new Blob([bytes as BlobPart]).stream().pipeThrough(t as any);
-  return new Uint8Array(await new Response(s).arrayBuffer());
-}
-
-const b64 = (b: Uint8Array) => {
-  let s = "";
-  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
-  return btoa(s);
-};
-const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-
-/** Computes the frame index of a whole Part 10 instance (the sharer has every byte). Null if not encapsulated multi-frame. */
-export function computeFrameIndex(instance: Uint8Array): { start: number; lengths: number[] } | null {
-  let h: SlideHeader;
-  try {
-    h = parseSlideHeader(instance);
-  } catch {
-    return null;
-  }
-  if (!h.encapsulated || h.numberOfFrames < 2) return null;
-  const w = new FragmentWalker(h, instance.byteLength);
-  w.feed(instance, 0);
-  if (!w.done && w.pos < instance.byteLength) return null;
-  w.done = true;
-  if (w.starts.length !== h.numberOfFrames) return null;
-  const lengths = w.starts.map((s, k) => (k + 1 < w.starts.length ? w.starts[k + 1] : w.lastItemEnd) - s);
-  return { start: w.starts[0], lengths };
-}
-
-/** The extension object for an instance's frame index. */
-export async function frameIndexExtension(fi: { start: number; lengths: number[] }): Promise<any> {
-  const packed = await pipe(leb128(fi.lengths), new CompressionStream("deflate-raw"));
-  return {
-    url: EXT_FRAMES,
-    extension: [
-      { url: "start", valueDecimal: fi.start },
-      { url: "lengths", valueBase64Binary: b64(packed) },
-    ],
-  };
-}
-
-/** Reads the frame index extension of an instance; null when absent or malformed. */
-export async function parseFrameIndexExtension(instanceJson: any, frames: number): Promise<FrameTable | null> {
-  const ext = (instanceJson?.extension ?? []).find((e: any) => e?.url === EXT_FRAMES);
-  if (!ext) return null;
-  const sub = (n: string) => (ext.extension ?? []).find((e: any) => e?.url === n);
-  const start = Number(sub("start")?.valueDecimal);
-  const data = sub("lengths")?.valueBase64Binary;
-  if (!Number.isSafeInteger(start) || typeof data !== "string") return null;
-  try {
-    const lengths = unleb128(await pipe(unb64(data), new DecompressionStream("deflate-raw")), frames);
-    if (lengths.length !== frames) return null;
-    const starts = new Float64Array(frames + 1);
-    starts[0] = start;
-    for (let k = 0; k < frames; k++) starts[k + 1] = starts[k] + lengths[k];
-    return { source: "bundle", range: (k) => (k < frames ? [starts[k], starts[k + 1]] : null) };
-  } catch {
-    return null;
-  }
-}
-
-/** The raw Bundle JSON of an instance (to read extensions core's index does not keep). */
-export function instanceJson(bundle: any, seriesUid: string, instanceUid: string): any | null {
-  for (const e of bundle?.entry ?? []) {
-    const r = e?.resource;
-    if (r?.resourceType !== "ImagingStudy") continue;
-    for (const s of r.series ?? []) {
-      if (s?.uid !== seriesUid) continue;
-      for (const i of s.instance ?? []) if (i?.uid === instanceUid) return i;
-    }
-  }
-  return null;
 }

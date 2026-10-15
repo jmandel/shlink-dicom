@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use shl_dicom_core::{
     bundle::{parse_study_index, PROFILE_URL},
     crypto::{b64url_decode, decode_key_32, decrypt_range, encrypt_series},
-    dicom_io::{decode_dicom_slice, extract_dicom_from_tar_gz},
+    dicom_io::extract_dicom_from_tar_gz,
     export::{build_uncompressed_zip, split_series_instances},
     jwe::{decrypt_bundle_jwe, encrypt_bundle_jwe},
     packer::{build_link_bundle, IngestSession},
@@ -298,14 +298,6 @@ fn test_pack_and_lossless_roundtrip_mri_and_wrist() {
                 &sha256_hex(&mid_dcm),
                 original_hashes.get(&mid_inst.uid).unwrap()
             );
-
-            // Verify pixel decoding produces valid RGBA8 pixels
-            let decoded = decode_dicom_slice(&mid_dcm, None, None).unwrap();
-            assert!(decoded.width > 0 && decoded.height > 0);
-            assert_eq!(
-                decoded.rgba.len(),
-                (decoded.width * decoded.height * 4) as usize
-            );
         }
     }
 
@@ -349,62 +341,3 @@ fn test_pack_and_lossless_roundtrip_mri_and_wrist() {
     assert!(zip_bytes.len() > wrist_pt.len());
 }
 
-#[test]
-fn test_jpeg12_against_dcmtk_dcmdjpeg() {
-    let wrist_tgz = std::fs::read("../../data/samples/wrist-low-res.tgz").unwrap();
-    let wrist_instances = extract_dicom_from_tar_gz(&wrist_tgz).unwrap();
-    assert_eq!(wrist_instances.len(), 3);
-
-    for (idx, inst) in wrist_instances.iter().enumerate() {
-        let tmp_in = std::env::temp_dir().join(format!("shl_dicom_wrist_in_{idx}.dcm"));
-        let tmp_out = std::env::temp_dir().join(format!("shl_dicom_wrist_out_{idx}.dcm"));
-        std::fs::write(&tmp_in, &inst.bytes).unwrap();
-
-        let status = std::process::Command::new("dcmdjpeg")
-            .arg(&tmp_in)
-            .arg(&tmp_out)
-            .status()
-            .expect("dcmdjpeg must run");
-        assert!(status.success(), "dcmdjpeg failed on {}", inst.source_name);
-
-        let dcmtk_uncompressed_bytes = std::fs::read(&tmp_out).unwrap();
-        let _ = std::fs::remove_file(&tmp_in);
-        let _ = std::fs::remove_file(&tmp_out);
-
-        // Decode with our pure-Rust 12-bit JPEG decoder vs DCMTK's uncompressed output
-        let ours = decode_dicom_slice(&inst.bytes, None, None).unwrap();
-        let truth = decode_dicom_slice(&dcmtk_uncompressed_bytes, None, None).unwrap();
-
-        assert_eq!(ours.width, truth.width);
-        assert_eq!(ours.height, truth.height);
-        assert_eq!(ours.rgba.len(), truth.rgba.len());
-
-        // Compare every pixel's 8-bit windowed grayscale value (R channel)
-        let num_pixels = (ours.width * ours.height) as usize;
-        let mut total_diff = 0u64;
-        let mut max_diff = 0u8;
-        for px in 0..num_pixels {
-            let a = ours.rgba[px * 4];
-            let b = truth.rgba[px * 4];
-            let diff = a.abs_diff(b);
-            total_diff += diff as u64;
-            max_diff = max_diff.max(diff);
-        }
-        let mad = total_diff as f64 / num_pixels as f64;
-        println!(
-            "{}: {}x{}, min={}..max={} (truth {}..{}), MAD={:.4}, max_diff={}",
-            inst.source_name,
-            ours.width,
-            ours.height,
-            ours.min_pixel,
-            ours.max_pixel,
-            truth.min_pixel,
-            truth.max_pixel,
-            mad,
-            max_diff
-        );
-        // IDCT float vs integer rounding across 12-bit -> 8-bit windowing should have MAD < 0.2 and max_diff <= 1
-        assert!(mad < 0.2, "MAD too high: {mad}");
-        assert!(max_diff <= 1, "max_diff too high: {max_diff}");
-    }
-}

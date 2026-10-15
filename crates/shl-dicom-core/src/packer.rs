@@ -9,6 +9,7 @@ use crate::{
     crypto::{b64url_encode, encrypt_series, random_bytes},
     dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance},
     jwe::encrypt_bundle_jwe,
+    offset_tables::{add_offset_table, offset_table_status, OffsetTableStatus},
     Error, Result,
 };
 
@@ -26,6 +27,8 @@ pub struct PackedSeriesFile {
 
 #[derive(Debug, Clone)]
 pub struct PackedStudySet {
+    /// Instances that got a frame offset table (with `set_add_offset_tables(true)`).
+    pub offset_tables_added: usize,
     pub owner_bundle_json: String,
     pub index: StudyIndex,
     pub series_files: Vec<PackedSeriesFile>,
@@ -43,6 +46,7 @@ pub struct LinkBundleOutput {
 pub struct IngestSession {
     existing_bundle: Option<Value>,
     instances: Vec<ParsedDicomInstance>,
+    add_offset_tables: bool,
 }
 
 impl Default for IngestSession {
@@ -56,6 +60,7 @@ impl IngestSession {
         Self {
             existing_bundle: None,
             instances: Vec::new(),
+            add_offset_tables: false,
         }
     }
 
@@ -66,7 +71,23 @@ impl IngestSession {
         Ok(Self {
             existing_bundle: Some(val),
             instances: Vec::new(),
+            add_offset_tables: false,
         })
+    }
+
+    /// When on, `pack` gives each encapsulated multi-frame instance that has an empty Basic Offset
+    /// Table and no Extended Offset Table a filled-in table (see `offset_tables`). Fragment bytes
+    /// are unchanged; the instance's length in the Bundle is its new length. Off by default.
+    pub fn set_add_offset_tables(&mut self, on: bool) {
+        self.add_offset_tables = on;
+    }
+
+    /// Ingested instances that are multi-frame, encapsulated and lack an offset table.
+    pub fn instances_missing_offset_tables(&self) -> usize {
+        self.instances
+            .iter()
+            .filter(|i| matches!(offset_table_status(&i.bytes), OffsetTableStatus::Missing { .. }))
+            .count()
     }
 
     pub fn ingest_dicom_bytes(&mut self, source_name: &str, raw_bytes: Vec<u8>) -> Result<bool> {
@@ -133,6 +154,8 @@ impl IngestSession {
 
         let mut study_inputs = Vec::new();
         let mut series_files = Vec::new();
+        let add_tables = self.add_offset_tables;
+        let mut offset_tables_added = 0usize;
 
         for (study_idx, (study_uid, series_map)) in studies_map.into_iter().enumerate() {
             let mut study_desc = None;
@@ -149,6 +172,13 @@ impl IngestSession {
                     num_cmp.then_with(|| a.sop_instance_uid.cmp(&b.sop_instance_uid))
                 });
                 insts.dedup_by(|a, b| a.sop_instance_uid == b.sop_instance_uid);
+                if add_tables {
+                    for inst in insts.iter_mut() {
+                        let (bytes, changed) = add_offset_table(std::mem::take(&mut inst.bytes));
+                        inst.bytes = bytes;
+                        offset_tables_added += changed as usize;
+                    }
+                }
 
                 let first = &insts[0];
                 if study_desc.is_none() {
@@ -248,6 +278,7 @@ impl IngestSession {
         let index = parse_study_index(owner_bundle_json.as_bytes())?;
 
         Ok(PackedStudySet {
+            offset_tables_added,
             owner_bundle_json,
             index,
             series_files,
@@ -311,4 +342,38 @@ pub fn build_link_bundle(
         bundle_jwe,
         allowed_files,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::decrypt_range;
+    use crate::offset_tables::{frames_of, offset_table_status, tests::synthetic, OffsetTableStatus};
+
+    fn pack_one(add: bool) -> (Vec<u8>, PackedStudySet) {
+        let src = synthetic(9, &[1, 2], false);
+        let mut s = IngestSession::new();
+        assert!(s.ingest_dicom_bytes("slide.dcm", src.clone()).unwrap());
+        assert_eq!(s.instances_missing_offset_tables(), 1);
+        s.set_add_offset_tables(add);
+        (src, s.pack("2026-10-15T00:00:00Z").unwrap())
+    }
+
+    #[test]
+    fn pack_adds_offset_tables_when_asked() {
+        let (src, off) = pack_one(false);
+        assert_eq!(off.offset_tables_added, 0);
+        assert_eq!(off.index.studies[0].series[0].instances[0].length, src.len() as u64);
+
+        let (_, on) = pack_one(true);
+        assert_eq!(on.offset_tables_added, 1);
+        let sf = &on.series_files[0];
+        let inst = &on.index.studies[0].series[0].instances[0];
+        assert_eq!(inst.length, src.len() as u64 + 4 * 9);
+        assert_eq!(sf.plaintext_len, inst.length);
+        let key = crate::crypto::decode_key_32(&sf.key_b64).unwrap();
+        let plain = decrypt_range(&sf.ciphertext, 0, sf.plaintext_len, sf.plaintext_len, &key).unwrap();
+        assert_eq!(offset_table_status(&plain), OffsetTableStatus::HasTable);
+        assert_eq!(frames_of(&plain).unwrap(), frames_of(&src).unwrap());
+    }
 }

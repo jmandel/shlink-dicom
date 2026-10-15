@@ -7,9 +7,10 @@
 //
 // Reads go through SeriesReader: a cache of verified, decrypted 64 KiB records (PROPOSAL.md §9.3)
 // with a byte budget, and a priority queue that merges adjacent missing records into one Range
-// request. A frame is located from, in order: the Bundle frame index (prototype extension, see
-// wsi.ts), the Extended Offset Table, the Basic Offset Table, native frame arithmetic, or by
-// walking the fragment item headers from the start of Pixel Data (sequential; what it learns is kept).
+// request. A frame is located from, in order: the Extended Offset Table, the Basic Offset Table,
+// native frame arithmetic, or by walking the fragment item headers from the start of Pixel Data
+// (sequential; what it learns is kept). A sharer can add the tables when packing
+// (crates/shl-dicom-core/src/offset_tables.rs).
 import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
 import { planBytes, RECORD_PLAINTEXT } from "./range";
@@ -19,8 +20,6 @@ import {
   buildPyramid,
   FragmentWalker,
   frameTableFromHeader,
-  instanceJson,
-  parseFrameIndexExtension,
   parseSlideHeader,
   singleFrameFile,
   type FrameTable,
@@ -274,8 +273,6 @@ export interface SlideShare {
 }
 
 export interface SlideSourceOptions {
-  /** Use the Bundle frame index when the instance carries one (default true). */
-  useBundleFrameIndex?: boolean;
   /** Record cache budget (default 64 MiB). */
   budgetBytes?: number;
   onRecords?: (fileId: string, first: number, last: number, s: RecordState) => void;
@@ -344,27 +341,19 @@ export class SlideSource {
 
   private async loadHeader(i: number) {
     const inst = this.series.instances[i];
-    const json = this.opts.useBundleFrameIndex === false ? null : instanceJson(this.share.index.bundle, this.series.uid, inst.uid);
     const sig = { priority: 0, signal: this.opts.signal, purpose: "header" as const };
-    // With a Bundle frame index, the first record is enough (the attributes before the optical
-    // path sequence); otherwise read up to the Basic Offset Table.
+    // Read up to the end of the Basic Offset Table (a filled BOT is 4 bytes per frame).
     let n = RECORD_PLAINTEXT - (inst.offset % RECORD_PLAINTEXT);
     if (n < 16384) n += RECORD_PLAINTEXT;
     n = Math.min(inst.length, n);
     let h: SlideHeader | null = null;
-    let table: FrameTable | null = null;
     for (;;) {
       const bytes = await this.reader.read(inst.offset, inst.offset + n, sig);
       h = parseSlideHeader(bytes, { partial: true });
-      if (h.complete && !json) break;
+      if (h.complete) break;
       // Label, overview and thumbnail images are read whole when shown, so their attributes are
       // enough here; Pixel Data's position is not needed.
       if (["LABEL", "OVERVIEW", "THUMBNAIL"].includes(h.flavor) && h.rows && h.columns && h.transferSyntax) break;
-      if (json && h.totalColumns && h.rows && h.photometric && h.transferSyntax) {
-        if (!h.complete) h.encapsulated = true;
-        table = await parseFrameIndexExtension(json, h.numberOfFrames);
-        if (table || h.complete) break;
-      } else if (h.complete) break;
       if (n >= inst.length) break;
       // Read on, to the end of the record holding the byte needed, growing by at least 2.5× so a
       // long header (an ICC profile, say) takes two or three reads rather than one per record.
@@ -372,7 +361,7 @@ export class SlideSource {
       n = Math.min(inst.length, (Math.floor(want / RECORD_PLAINTEXT) + 1) * RECORD_PLAINTEXT - inst.offset);
     }
     this.headers[i] = h;
-    this.tables[i] = table ?? (h && h.complete ? frameTableFromHeader(h, inst.length) : null);
+    this.tables[i] = h && h.complete ? frameTableFromHeader(h, inst.length) : null;
   }
 
   /** The header-only frame table source of an instance, or "walk". */

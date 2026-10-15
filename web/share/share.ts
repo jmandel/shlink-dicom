@@ -14,6 +14,7 @@ import {
   Collection, encodingSummary, plainStudyTitle, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
 import { buildBundle, encryptSeries, planSeriesFiles, subsetBundle, type PackedSeries } from "./lib/pack";
+import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, lacksOffsetTable } from "./lib/offset-tables";
 import {
   ApiError, ShareApi, manageUrl, publishLinkBundle, saveShare, savedShares, shlinkFor, type LinkResource,
 } from "./lib/api";
@@ -316,8 +317,15 @@ function renderReview() {
     col.duplicates ? `${plural(col.duplicates, "duplicate image")} left out` : "",
   ].filter(Boolean).join(" · ");
   updateTotal();
+  // Multi-frame files without an offset table: offer to add one (on by default).
+  const lacking = studies.some((st) => st.series.some((se) => se.instances.some(lacksOffsetTable)));
+  $("rv-offsets-row").classList.toggle("hidden", !lacking);
+  if (lacking && !offsetsTouched) $<HTMLInputElement>("rv-offsets").checked = ADD_OFFSET_TABLES_DEFAULT;
   drawThumbs(studies, ++thumbGen);
 }
+
+let offsetsTouched = false;
+$("rv-offsets").addEventListener("change", () => (offsetsTouched = true));
 
 function studyCard(st: StudyModel): HTMLElement {
   const c = studyCounts(st);
@@ -418,6 +426,11 @@ async function upload() {
   const allowUpdates = $<HTMLInputElement>("in-updates").checked;
   const exp = expiryFrom(form, "expiry");
   const studies = col.list().filter((s) => s.include);
+  if (!$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked) {
+    await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
+      $("up-tech").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
+    });
+  }
   const packed = planSeriesFiles(studies);
   const totalCt = packed.reduce((a, p) => a + p.plaintextLength + 16 * p.records, 0);
   const totalRecords = packed.reduce((a, p) => a + p.records, 0);

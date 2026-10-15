@@ -3,7 +3,6 @@ use serde::Serialize;
 use shl_dicom_core::{
     bundle::{parse_study_index, InstanceSummary, SeriesSummary, StudyIndex},
     crypto::{decrypt_record, decode_key_32},
-    dicom_io::{decode_dicom_raw_frame, DecodedRawFrame},
     export::{build_uncompressed_zip, split_series_instances},
     jwe::decrypt_bundle_jwe,
     range::{ciphertext_range, record_count, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG_LEN},
@@ -12,55 +11,6 @@ use shl_dicom_core::{
 use wasm_bindgen::prelude::*;
 
 const DEFAULT_MAX_CACHED_RECORDS: usize = 1024; // 64 MiB max
-const MAX_CACHED_DECODED_FRAMES: usize = 24;
-
-#[wasm_bindgen]
-pub struct WasmRenderedSlice {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-    window_center: f64,
-    window_width: f64,
-    min_pixel: f64,
-    max_pixel: f64,
-}
-
-#[wasm_bindgen]
-impl WasmRenderedSlice {
-    #[wasm_bindgen(getter)]
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn window_center(&self) -> f64 {
-        self.window_center
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn window_width(&self) -> f64 {
-        self.window_width
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn min_pixel(&self) -> f64 {
-        self.min_pixel
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn max_pixel(&self) -> f64 {
-        self.max_pixel
-    }
-
-    pub fn rgba_bytes(&self) -> Vec<u8> {
-        self.rgba.clone()
-    }
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,15 +33,12 @@ struct IngestResultJson {
 
 #[wasm_bindgen]
 pub struct WasmShlSession {
-    bundle_json: String,
     index: StudyIndex,
     series_by_file_id: HashMap<String, SeriesSummary>,
     records: HashMap<(String, u32), Vec<u8>>,
     lru_order: VecDeque<(String, u32)>,
     max_cached_records: usize,
     cached_bytes: usize,
-    frame_cache: HashMap<(usize, usize, usize), DecodedRawFrame>,
-    frame_lru: VecDeque<(usize, usize, usize)>,
 }
 
 #[wasm_bindgen]
@@ -112,8 +59,6 @@ impl WasmShlSession {
     }
 
     fn from_bundle_bytes(bundle_bytes: &[u8]) -> Result<WasmShlSession, JsError> {
-        let bundle_json = String::from_utf8(bundle_bytes.to_vec())
-            .map_err(|e| JsError::new(&e.to_string()))?;
         let index = parse_study_index(bundle_bytes).map_err(|e| JsError::new(&e.to_string()))?;
 
         let mut series_by_file_id = HashMap::new();
@@ -124,15 +69,12 @@ impl WasmShlSession {
         }
 
         Ok(WasmShlSession {
-            bundle_json,
             index,
             series_by_file_id,
             records: HashMap::new(),
             lru_order: VecDeque::new(),
             max_cached_records: DEFAULT_MAX_CACHED_RECORDS,
             cached_bytes: 0,
-            frame_cache: HashMap::new(),
-            frame_lru: VecDeque::new(),
         })
     }
 
@@ -141,30 +83,12 @@ impl WasmShlSession {
         self.evict_if_needed();
     }
 
-    pub fn bundle_json(&self) -> String {
-        self.bundle_json.clone()
-    }
-
     pub fn index_json(&self) -> String {
         serde_json::to_string(&self.index).unwrap_or_else(|_| "{}".to_string())
     }
 
     pub fn cached_record_count(&self) -> usize {
         self.records.len()
-    }
-
-    pub fn cached_bytes(&self) -> usize {
-        self.cached_bytes
-    }
-
-    pub fn cached_records_for_series(&self, file_id: &str) -> Vec<u32> {
-        let mut out: Vec<u32> = self
-            .records
-            .keys()
-            .filter_map(|(fid, idx)| (fid == file_id).then_some(*idx))
-            .collect();
-        out.sort_unstable();
-        out
     }
 
     pub fn plan_instance_range(
@@ -288,44 +212,6 @@ impl WasmShlSession {
             return Err(JsError::new("instance bounds exceed decrypted records"));
         }
         Ok(joined[skip..skip + length].to_vec())
-    }
-
-    pub fn render_instance_rgba(
-        &mut self,
-        study_idx: usize,
-        series_idx: usize,
-        instance_idx: usize,
-        wc: Option<f64>,
-        ww: Option<f64>,
-    ) -> Result<WasmRenderedSlice, JsError> {
-        let fkey = (study_idx, series_idx, instance_idx);
-        if !self.frame_cache.contains_key(&fkey) {
-            let dcm_bytes = self.get_instance_dicom(study_idx, series_idx, instance_idx)?;
-            let raw = decode_dicom_raw_frame(&dcm_bytes)
-                .map_err(|e| JsError::new(&e.to_string()))?;
-            if self.frame_cache.len() >= MAX_CACHED_DECODED_FRAMES {
-                if let Some(old) = self.frame_lru.pop_front() {
-                    self.frame_cache.remove(&old);
-                }
-            }
-            self.frame_lru.push_back(fkey);
-            self.frame_cache.insert(fkey, raw);
-        } else {
-            self.frame_lru.retain(|k| k != &fkey);
-            self.frame_lru.push_back(fkey);
-        }
-
-        let raw = self.frame_cache.get(&fkey).unwrap();
-        let decoded = raw.to_rgba(wc, ww);
-        Ok(WasmRenderedSlice {
-            width: decoded.width,
-            height: decoded.height,
-            rgba: decoded.rgba,
-            window_center: decoded.window_center,
-            window_width: decoded.window_width,
-            min_pixel: decoded.min_pixel,
-            max_pixel: decoded.max_pixel,
-        })
     }
 
     pub fn export_series_zip(

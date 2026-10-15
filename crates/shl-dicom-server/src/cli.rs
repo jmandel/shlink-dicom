@@ -14,11 +14,14 @@ pub fn run_pack_cli(
     out_dir: &Path,
     base_url: Option<&str>,
     label: Option<&str>,
+    add_offset_tables: bool,
 ) -> Result<(), String> {
     let mut session = IngestSession::new();
     for path in inputs {
         ingest_path(&mut session, path)?;
     }
+    let missing = session.instances_missing_offset_tables();
+    session.set_add_offset_tables(add_offset_tables);
 
     let now_iso = Utc::now().to_rfc3339();
     let packed = session.pack(&now_iso).map_err(|e| e.to_string())?;
@@ -64,6 +67,11 @@ pub fn run_pack_cli(
     .map_err(|e| e.to_string())?;
 
     println!("Packed {} study/studies into {:?}:", packed.index.studies.len(), out_dir);
+    if add_offset_tables {
+        println!("  Added frame offset tables to {} of {} multi-frame instance(s) that lacked one", packed.offset_tables_added, missing);
+    } else if missing > 0 {
+        println!("  {missing} multi-frame instance(s) have no frame offset table; --add-offset-tables adds one");
+    }
     for st in &packed.index.studies {
         println!(
             "  Study {} ({}): {} series, {} instances",

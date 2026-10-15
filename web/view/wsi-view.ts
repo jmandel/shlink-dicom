@@ -226,11 +226,11 @@ async function toBitmap(img: DecodedImage): Promise<ImageBitmap> {
 const sessions = new Map<string, Promise<SlideSession>>();
 
 /** The slide session of a series, created once per page (headers are read once). */
-export function slideSession(share: OpenShare, series: SeriesEntry, pool: DecoderPool, o: { useBundleFrameIndex?: boolean; onRecords?: OpenShareRecords } = {}): Promise<SlideSession> {
+export function slideSession(share: OpenShare, series: SeriesEntry, pool: DecoderPool, o: { onRecords?: OpenShareRecords } = {}): Promise<SlideSession> {
   let s = sessions.get(series.fileId);
   if (!s) {
     const t0 = performance.now();
-    s = SlideSource.open(share, series, { useBundleFrameIndex: o.useBundleFrameIndex, onRecords: o.onRecords }).then((src) => {
+    s = SlideSource.open(share, series, { onRecords: o.onRecords }).then((src) => {
       const ss = new SlideSession(src, pool);
       ss.metrics.marks.sessionStart = t0;
       ss.metrics.marks.headers = performance.now();
@@ -658,13 +658,11 @@ export class SlideView {
     const s = this.stats();
     if (!s) return;
     const pct = s.fraction * 100;
-    const offsets = s.frameSources.includes("bundle")
-      ? "Frame offsets from the link's index"
-      : s.frameSources.includes("walk")
-        ? s.walk
-          ? `Finding frames: ${s.walk.known.toLocaleString()} of ${s.walk.frames.toLocaleString()} located`
-          : "Frame offsets: read from fragment headers"
-        : `Frame offsets from the file's offset table`;
+    const offsets = s.frameSources.includes("walk")
+      ? s.walk
+        ? `Finding frames: ${s.walk.known.toLocaleString()} of ${s.walk.frames.toLocaleString()} located`
+        : "Frame offsets: read from fragment headers"
+      : "Frame offsets from the file's offset table";
     const lines = [
       `Downloaded ${formatBytes(s.bytes)} of ${formatBytes(s.totalBytes)} (${pct < 10 ? pct.toFixed(2) : pct.toFixed(1)}%)`,
       `${s.tilesDecoded.toLocaleString()} tiles · ${s.requests.toLocaleString()} requests${s.loading ? ` · ${s.loading} loading` : ""}`,

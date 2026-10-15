@@ -1,5 +1,6 @@
 // Scripted headless-Chromium checks for /share and /share/manage.
-//   node web/checks/share-checks.mjs [--only=files|portal|reshare|manage] [--dev=desktop|phone390]
+//   node web/checks/share-checks.mjs [--only=files|portal|reshare|manage|slide] [--dev=desktop|phone390]
+// The slide flow needs the CPTAC-LUAD slide (web/view/WSI.md) in SLIDE_DIR; it is skipped without it.
 // Needs the server on :3333 and the imaging sandbox on :3334 started with
 //   SHARE_REDIRECT_URIS=http://localhost:3333/share/smart-callback/ bun src/server.ts
 // Screenshots go to docs/shots/share/. Exits non-zero if any check fails. Deletes the shares it makes.
@@ -12,6 +13,8 @@ const ROOT = new URL("../../", import.meta.url).pathname;
 const SHOTS = `${ROOT}docs/shots/share/`;
 mkdirSync(SHOTS, { recursive: true });
 const SAMPLES = [`${ROOT}data/samples/mri-brain-2020.tgz`, `${ROOT}data/samples/wrist-low-res.tgz`];
+// A whole slide without offset tables: CPTAC-LUAD C3N-02231, all but its 1 GB base level (152 MB).
+const SLIDE_DIR = process.env.SLIDE_DIR ?? "/media/barracuda/shlink-dicom-slides/dl/4a6b5ed5-a7e8-450d-9af6-e739b1807bac";
 const args = process.argv.slice(2);
 const only = args.find((a) => a.startsWith("--only="))?.slice(7);
 const onlyDev = args.find((a) => a.startsWith("--dev="))?.slice(6);
@@ -156,6 +159,7 @@ async function flowFiles(dev) {
   check(`${P}: plain study names`, titles.join("|") === "Brain MRI|Upper extremity X-ray", titles.join("|"));
   const drawn = await page.locator("canvas.drawn").count();
   check(`${P}: 17 series thumbnails drawn`, drawn === 17, `${drawn}`);
+  check(`${P}: no offset-table option for single-frame files`, await page.locator("#rv-offsets-row.hidden").count() === 1);
   const tech = await page.locator(".study .tech").first().textContent();
   check(`${P}: technical line`, /14 series · 263 images · 41 MB · uncompressed/.test(tech), tech);
   await layout(page, `${P} review`, dev);
@@ -302,6 +306,56 @@ async function flowManage(dev, files) {
   await context.close();
 }
 
+async function flowSlide(dev) {
+  const P = `slide/${dev}`;
+  const { readdirSync, statSync } = await import("node:fs");
+  let files = [];
+  try {
+    files = readdirSync(SLIDE_DIR).map((f) => `${SLIDE_DIR}/${f}`).filter((f) => f.endsWith(".dcm") && statSync(f).size < 500e6);
+  } catch {}
+  if (!files.length) {
+    console.log(`SKIP ${P}: no slide in ${SLIDE_DIR}`);
+    return;
+  }
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(`${BASE}/share`);
+  await page.click("[data-src=files]");
+  await page.setInputFiles("#in-files", files);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+  const row = await page.evaluate(() => ({ shown: !document.getElementById("rv-offsets-row").classList.contains("hidden"), checked: document.getElementById("rv-offsets").checked, text: document.getElementById("rv-offsets-row").textContent.trim() }));
+  check(`${P}: offset-table option shown and on`, row.shown && row.checked, JSON.stringify(row));
+  await page.locator("#rv-offsets-row").scrollIntoViewIfNeeded();
+  // SLIDE_OFFSETS=off: untick the box, for a comparison run (the viewer then walks fragment headers).
+  const off = process.env.SLIDE_OFFSETS === "off";
+  if (off) await page.click("#rv-offsets-row");
+  await layout(page, `${P} review`, dev);
+  await page.screenshot({ path: `${SHOTS}${dev}-2-review-slide.png` });
+  const r = await finish(page, dev, P, { recipient: "Pathology" });
+  const v = verify(r.shlink);
+  check(`${P}: link opens with the slide's ${files.length} instances`, v.instances === files.length, `${v.instances}`);
+  // In /view: every level has a Basic Offset Table, and full resolution needs no walking.
+  const { context: vc, page: vp, errors: verr } = await newPage(dev);
+  await vp.goto(r.shlink);
+  await vp.waitForSelector("#screen-overview:not(.hidden)", { timeout: 30000 });
+  await vp.locator(".study-open").first().click();
+  await vp.waitForFunction(() => window.__wsi?.active() && window.__wsi.idle(), null, { timeout: 120000, polling: 50 });
+  const pyr = await vp.evaluate(() => window.__wsi.pyramid());
+  if (!off) check(`${P}: /view reads the added Basic Offset Tables`, pyr.levels.every((l) => l.source === "basic-offset-table"), pyr.levels.map((l) => l.source).join(", "));
+  await vp.evaluate(() => {
+    const p = window.__wsi.pyramid();
+    window.__wsi.setView(p.width * 0.5, p.height * 0.5, window.__wsi.view().dpr);
+  });
+  await vp.waitForFunction(() => window.__wsi.idle() && window.__wsi.view().level === 0, null, { timeout: 120000, polling: 50 });
+  const st = await vp.evaluate(() => window.__wsi.stats());
+  check(`${P}: finest level on screen ${off ? "by walking (box unticked)" : "with no walking"}`, off ? st.byPurpose.walk.bytes > 0 : st.byPurpose.walk.bytes === 0, `${(st.bytes / 1e6).toFixed(2)} MB of ${(st.totalBytes / 1e6).toFixed(1)} MB (${(st.fraction * 100).toFixed(2)}%), ${st.requests} requests`);
+  await vp.waitForTimeout(250);
+  await vp.screenshot({ path: `${SHOTS}${dev}-slide-viewer.png` });
+  await noErrors(`${P} /view`, verr);
+  await vc.close();
+  await noErrors(P, errors);
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 for (const dev of Object.keys(DEVICES)) {
@@ -312,6 +366,7 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "portal") await flowPortal(dev);
     if (!only || only === "reshare") await flowReshare(dev);
     if (files && (!only || only === "manage")) await flowManage(dev, files);
+    if (!only || only === "slide") await flowSlide(dev);
   } catch (e) {
     check(`${dev}: flow ran to the end`, false, String(e.stack ?? e).split("\n").slice(0, 3).join(" "));
   }

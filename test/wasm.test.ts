@@ -7,7 +7,7 @@ import init, {
   WasmShlSession,
 } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
-test("Stage 3: WasmPacker, WasmShlSession, bounded LRU cache, RGBA render & DICOM/ZIP export", async () => {
+test("Stage 3: WasmPacker, WasmShlSession, bounded LRU cache, DICOM/ZIP export", async () => {
   const wasmBytes = readFileSync("crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm");
   await init({ module_or_path: wasmBytes });
 
@@ -65,22 +65,16 @@ test("Stage 3: WasmPacker, WasmShlSession, bounded LRU cache, RGBA render & DICO
   expect(ingestRes.verifiedRecords.length).toBe(plan.lastRecord - plan.firstRecord + 1);
   expect(session.has_instance(0, 0, 0)).toBe(true);
 
-  // 5. Render instance to RGBA8 in WASM
-  const rendered = session.render_instance_rgba(0, 0, 0, undefined, undefined);
-  expect(rendered.width).toBeGreaterThan(1000);
-  expect(rendered.height).toBeGreaterThan(1000);
-  expect(rendered.rgba_bytes().length).toBe(rendered.width * rendered.height * 4);
-
-  // 6. Extract exact Part 10 DICOM slice bytes
+  // 5. Extract exact Part 10 DICOM slice bytes
   const dcmSlice = session.get_instance_dicom(0, 0, 0);
   expect(dcmSlice.length).toBe(index.studies[0].series[0].instances[0].length);
   expect(new TextDecoder().decode(dcmSlice.subarray(128, 132))).toBe("DICM");
 
-  // 7. Export uncompressed ZIP
+  // 6. Export uncompressed ZIP
   const zipBytes = session.export_series_zip(0, 0);
   expect(zipBytes.length).toBeGreaterThan(dcmSlice.length);
 
-  // 8. Verify bounded LRU record cache eviction
+  // 7. Verify bounded LRU record cache eviction
   expect(session.cached_record_count()).toBeGreaterThan(10);
   session.set_max_cached_records(5);
   expect(session.cached_record_count()).toBe(5);

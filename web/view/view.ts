@@ -104,8 +104,6 @@ let studyAbort = new AbortController();
 let shownKey = "";
 /** Whole-slide (SM) series are shown by a tiled deep-zoom view instead of the slice viewer. */
 let slideView: SlideView | null = null;
-/** ?frameindex=0 ignores the Bundle's frame index (prototype extension), for measurements. */
-const useFrameIndex = new URLSearchParams(location.search).get("frameindex") !== "0";
 
 const study = (): StudyEntry => share!.index.studies[studyIdx];
 const series = (): SeriesEntry => study().series[seriesIdx];
@@ -114,7 +112,6 @@ const series = (): SeriesEntry => study().series[seriesIdx];
 
 function slideFor(se: SeriesEntry): Promise<SlideSession> {
   return slideSession(share!, se, images!.pool, {
-    useBundleFrameIndex: useFrameIndex,
     onRecords: (_f, a, b, state) => {
       if (state === "verified") verifiedRecords += b - a + 1;
       if (state === "failed") failedRecords += b - a + 1;

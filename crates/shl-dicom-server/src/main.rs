@@ -30,6 +30,10 @@ enum Commands {
         /// SHL label
         #[arg(long)]
         label: Option<String>,
+        /// Fill in the frame offset table of multi-frame files that lack one (Basic Offset Table, or
+        /// Extended Offset Table past 4 GiB). Fragment bytes are unchanged.
+        #[arg(long)]
+        add_offset_tables: bool,
     },
     /// Inspect an shlink:/ URI and verify a single-instance HTTP 206 Range read
     Inspect {
@@ -62,8 +66,9 @@ async fn main() {
             out,
             base_url,
             label,
+            add_offset_tables,
         } => {
-            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref()) {
+            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref(), add_offset_tables) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }

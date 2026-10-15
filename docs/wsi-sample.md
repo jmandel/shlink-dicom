@@ -53,7 +53,17 @@ Besides Patient Name, Patient ID and the dates, these attributes also carry the 
 - Image Comments (0020,4000) holds the Aperio description, with the scan date and time, scanner ID and an original file name.
 - Private group 0009 carries PixelMed's own attributes.
 
-Keep every Study, Series, SOP Instance, Frame of Reference and Pyramid UID consistent across the kept instances, and keep the pixel attributes and Pixel Data byte for byte. Rewriting the header changes its length, which is fine. The frame offsets, and the prototype Bundle frame index if the coordinator adopts it, are computed at share time from the rewritten files.
+Keep every Study, Series, SOP Instance, Frame of Reference and Pyramid UID consistent across the kept instances. Keep the pixel attributes and the fragments of Pixel Data byte for byte. Rewriting the header changes its length, which is fine.
+
+## Offset tables
+
+None of the slide's instances has a frame offset table: each Basic Offset Table is empty and there is no Extended Offset Table. Without one, a viewer has to download every tile before the one it wants ([web/view/WSI.md, Offset tables](../web/view/WSI.md#offset-tables)). So the sample should carry a Basic Offset Table in each of the three tiled levels.
+
+Either of two routes gives the same result, because both use `crates/shl-dicom-core/src/offset_tables.rs`:
+- write the BOT into the sample files at build time;
+- pack them with the offset-table option on.
+
+The tables add 4 bytes per frame: 16 KB for the 3,773 + 260 + 70 tiles kept here. Fragment bytes are unchanged.
 
 ## Attribution text
 

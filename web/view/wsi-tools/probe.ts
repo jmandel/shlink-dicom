@@ -1,7 +1,7 @@
 // Parses each instance of a slide folder with web/core/wsi.ts and reports the pyramid and the
-// frame-index sizes.   bun web/view/wsi-tools/probe.ts <folder>
+// offset tables they carry.   bun web/view/wsi-tools/probe.ts <folder>
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { buildPyramid, computeFrameIndex, frameIndexExtension, parseSlideHeader, NeedMoreBytes } from "../../core/wsi";
+import { buildPyramid, parseSlideHeader, NeedMoreBytes } from "../../core/wsi";
 const dir = process.argv[2];
 const files = readdirSync(dir).filter((f) => f.endsWith(".dcm")).sort();
 const headers = [];
@@ -14,15 +14,7 @@ for (const f of files) {
   }
   const part = parseSlideHeader(new Uint8Array(await fd.slice(0, 65520).arrayBuffer()), { partial: true });
   headers.push(h);
-  const t0 = performance.now();
-  const all = new Uint8Array(await fd.arrayBuffer());
-  const fi = computeFrameIndex(all);
-  let ext = "";
-  if (fi) {
-    const e = await frameIndexExtension(fi);
-    const json = JSON.stringify(e);
-    ext = `frames ${fi.lengths.length} start ${fi.start} ext ${json.length} B (${(json.length / fi.lengths.length).toFixed(2)} B/frame) in ${(performance.now() - t0).toFixed(0)} ms`;
-  }
+  const ext = h.basicOffsets ? `BOT ${h.basicOffsets.length}` : h.extendedOffsets ? `EOT ${h.extendedOffsets.length}` : h.encapsulated && h.numberOfFrames > 1 ? "no offset table" : "";
   console.log(f.slice(0, 8), statSync(`${dir}/${f}`).size, h.flavor, h.transferSyntax, `${h.totalColumns}x${h.totalRows}`, `tile ${h.columns}x${h.rows}`, h.numberOfFrames, h.dimensionOrganization, `header read ${n}`, `partial@64K: tpm=${part.totalColumns} complete=${part.complete} spacing=${part.pixelSpacing}`, `first item ${h.firstFragmentOffset}`, ext);
 }
 const p = buildPyramid(headers);
