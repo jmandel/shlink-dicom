@@ -7,7 +7,11 @@ A small server that plays every actor in the Argonaut [SMART Imaging Access](htt
 - an **Imaging FHIR Server** with `ImagingStudy` search and WADO-RS `Endpoint`s;
 - a **DICOMweb server** for WADO-RS retrieval, which accepts the same access token.
 
-All four run in one Bun process. The patient is fictional, **Morgan Rivera**; the images are real. They are Josh Mandel's published sample studies (a brain MRI and wrist radiographs from [jmandel/my-health-data](https://github.com/jmandel/my-health-data)), with the fictional identity written into their DICOM headers by a reproducible build. How each IG requirement is met is in [CONFORMANCE.md](CONFORMANCE.md).
+All four run in one Bun process. The patient is fictional, **Morgan Rivera**; the images are real:
+- Josh Mandel's published sample studies, a brain MRI and wrist radiographs from [jmandel/my-health-data](https://github.com/jmandel/my-health-data);
+- a whole-slide microscopy image (an H&E lung slide) from the NCI Imaging Data Commons, under CC BY 4.0. See [the slide's attribution](#slide-attribution).
+
+A reproducible build writes the fictional identity into the DICOM headers. How each IG requirement is met is in [CONFORMANCE.md](CONFORMANCE.md).
 
 Deployed (private for now) at **https://smart-imaging-sandbox.exe.xyz**: see [Deploying](#deploying).
 
@@ -28,7 +32,7 @@ On startup the server prints its URLs, the number of studies and instances it lo
 `scripts/build-data.ts` builds everything the server serves into `build/dataset/` (gitignored), using only committed inputs:
 
 - **`data/studies.json`:**
-  - the source archives, each pinned by commit URL and SHA-256 (a local copy with the right hash, in `build/sources/` or `../data/samples/`, is used instead of downloading);
+  - the sources, each pinned by URL and SHA-256: the two my-health-data archives (by commit) and five instances of the IDC slide series (public S3 URLs). Downloads are kept in `build/sources/`. A local copy with the right hash, in `build/sources/`, `../data/samples/`, or a directory in `SOURCE_CACHE` (colon-separated), is used instead of downloading;
   - each study's date, time, UTC offset and accession number;
   - the report content.
 - **`data/patient.json`:** the fictional patient (name, birth date, MRN). The sources carry no sex, so none is set.
@@ -41,28 +45,51 @@ The build rewrites these DICOM headers:
 | Attribute | Value |
 |---|---|
 | PatientName, PatientID, PatientBirthDate | `RIVERA^MORGAN`, `SBX4417302`, `19790314` |
-| StudyDate, StudyTime, ContentDate, ContentTime, AccessionNumber | from `data/studies.json`. The brain MRI keeps 29 Jul 2020 (from its description `BRAIN 7/29/20`). The wrist study uses 24 Jul 2011, the date in its Instance Creation Date. |
-| Study, Series, SOP Instance, Frame of Reference and referenced instance UIDs | new UIDs under `2.25`, minted deterministically from `uidNamespace` and the original UID |
+| StudyDate, StudyTime, ContentDate, ContentTime, AccessionNumber | from `data/studies.json`. The brain MRI keeps 29 Jul 2020 (from its description `BRAIN 7/29/20`). The wrist study uses 24 Jul 2011, the date in its Instance Creation Date. The slide is dated 17 Apr 2023. |
+| Study, Series, SOP Instance, Frame of Reference and referenced instance UIDs; for the slide also Pyramid, Acquisition, Dimension Organization and Specimen UIDs | new UIDs under `2.25`, minted deterministically from `uidNamespace` and the original UID. Coding-scheme, SOP Class and implementation UIDs are kept. |
 | Patient Identity Removed (0012,0062) | removed, since the headers now carry an identity |
+| Slide only: the series, acquisition and timezone dates and times, Study ID, Container Identifier, and the specimen identifiers inside the Specimen Description Sequence | fictional values from the study's `header` block in `data/studies.json` |
+| Slide only: the Clinical Trial attributes (0012,0010–0040), Image Comments (Aperio scan description with the original file name), and private groups 0009 (PixelMed) and 0013 (CTP) | removed |
 
 The UIDs are replaced because the original files are public in my-health-data and seeded as the project's public sample share under their own UIDs. Keeping those UIDs would make two different patients claim the same instances.
 
 What is left alone:
 - **Pixel Data.** Its element is copied byte for byte, encapsulated JPEG fragments included.
-- **Transfer syntaxes.** The brain MRI stays Explicit VR Little Endian and the wrist radiographs stay JPEG Baseline.
+- **Transfer syntaxes.** The brain MRI stays Explicit VR Little Endian and the wrist radiographs stay JPEG Baseline. The slide keeps JPEG Baseline for its pyramid levels and Explicit VR Little Endian for its overview and thumbnail.
 - **Everything else.** Every other element is copied verbatim; only changed elements, and the sequences and group lengths around them, are re-encoded.
 
-The build stops if any of these checks fails, and `test/data-check.ts` checks them again against the sources.
+The build stops if any of these checks fails, and `test/data-check.ts` checks them again against the sources. It also checks that no header still contains the source subject, specimen, collection or file names.
+
+### The slide
+
+The whole-slide study is the CPTAC-LUAD C3N-02231 H&E slide recommended in [`docs/wsi-sample.md`](../docs/wsi-sample.md) (IDC series `4a6b5ed5-a7e8-450d-9af6-e739b1807bac`, Leica Aperio at 20×). It is one series of five instances, sharing one Pyramid UID and Frame of Reference:
+
+| Instance | Content | Size |
+|---|---|---|
+| VOLUME 18,425 × 11,712, 3,773 tiles of 240 × 240 (JPEG Baseline) | the finest level kept, about 2 µm per pixel | 132.1 MB |
+| VOLUME 4,606 × 2,928, 260 tiles | | 11.0 MB |
+| VOLUME 2,303 × 1,464, 70 tiles | | 3.6 MB |
+| OVERVIEW 1,600 × 629 | a photo of the glass slide, with the label end dark | 3.3 MB |
+| THUMBNAIL 1,024 × 650 | | 2.3 MB |
+
+Two instances of the source series are not used. The full-resolution level (1.05 GB) is too large for a sample. The label image shows the CPTAC subject ID, which would contradict the fictional patient.
+
+#### Slide attribution
+
+> Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; the label image and the full-resolution level were removed.
+
+The same text is in the slide's ImagingStudy (`note`), in its sample pathology report, in `build/dataset/manifest.json`, and in `out/index.json`.
 
 ### Reports
 
 Each study gets one sample report, as a PDF and as plain text with the same content:
-- **Structure:** patient, exam, date, equipment, technique listing the actual series from the headers, findings and impression.
+- **Kinds:** radiology reports for the MRI and the wrist (category `RAD`; LOINC 24590-2 and 37550-1), and a pathology report for the slide (category `SP`; LOINC 11529-5 "Surgical pathology study"). The slide's report adds an image-source section with the attribution.
+- **Structure:** patient, exam, date, equipment, technique listing the actual series (or, for the slide, the pyramid levels) from the headers, findings and impression.
 - **Marking:** every PDF page carries **SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION.** at the top and bottom, and the text file starts and ends with it.
 - **Content:** the indication, findings and impression are generic and labelled illustrative; the report says no one produced them by reading the images.
 - **PDF format:** written by a small hand-made PDF writer (`scripts/lib/pdf.ts`). It passes `qpdf --check`, and PDF.js extracts the same text as the text file.
 
-The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file.
+The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The dataset is 201.7 MB (192 MiB), 152.2 MB of it the slide. `deploy/bootstrap-sandbox.sh` checks the digest of `SHA256SUMS` (`EXPECTED_SUMS`) after building on the VM.
 
 ### Plain export for other consumers
 
@@ -74,7 +101,7 @@ out/dicom/<study>/S<series number>-<description>/IM<instance number>-<uid tail>.
 out/reports/<study>.pdf, out/reports/<study>.txt
 ```
 
-`<study>` is `mri-brain-2020` or `wrist-low-res`. The DICOM files are byte-identical to what WADO-RS serves, and the export is as deterministic as the dataset; `test/data-check.ts` checks both. `--export DIR` writes it elsewhere, and `--export none` skips it.
+`<study>` is `mri-brain-2020`, `wrist-low-res` or `slide-lung-2023`. The DICOM files are byte-identical to what WADO-RS serves, and the export is as deterministic as the dataset; `test/data-check.ts` checks both. `--export DIR` writes it elsewhere, and `--export none` skips it.
 
 ## Endpoints
 
@@ -137,8 +164,9 @@ A request with an expired or revoked access token is refused with `401` before t
 
 The authorize endpoint shows a sign-in page with two demo patients and no passwords:
 
-- **Morgan Rivera** (`Patient/morgan-rivera`, born 1979-03-14, MRN SBX4417302) is fictional and owns both studies:
+- **Morgan Rivera** (`Patient/morgan-rivera`, born 1979-03-14, MRN SBX4417302) is fictional and owns three studies:
   - MRI Brain, 29 Jul 2020: 14 series, 263 images;
+  - a whole-slide image of lung tissue, H&E, 17 Apr 2023: 1 series, 5 instances (three pyramid levels, the overview and a thumbnail);
   - XR wrist, left, 3 views, 24 Jul 2011: 3 images.
 - **Robin Example** (`Patient/robin-example`) is synthetic and has no imaging.
 
@@ -163,7 +191,7 @@ The Share flow should run a standard SMART standalone launch:
 3. **Token.** On the callback, check `state`, then POST `application/x-www-form-urlencoded` to `token_endpoint` with `grant_type=authorization_code`, `code`, `redirect_uri`, `client_id` and `code_verifier`. The response has `access_token`, `token_type`, `expires_in` (3600 s), `scope`, `patient`, and `refresh_token` if `offline_access` or `online_access` was granted.
 4. **Find studies and reports.**
    - `GET <imaging base>/ImagingStudy?patient=<patient>&_include=ImagingStudy:endpoint`. Resolve each `ImagingStudy.endpoint` within the Bundle: it may be a contained `#id`, an included `Endpoint/…`, or a `urn:uuid:` entry, and the client must handle all three. Use `Endpoint.address` as the WADO-RS base.
-   - `GET <clinical base>/DiagnosticReport?patient=<patient>&category=RAD`. Reports link to studies through `imagingStudy` (reference and Study Instance UID). Fetch `presentedForm[].url` with the token.
+   - `GET <clinical base>/DiagnosticReport?patient=<patient>` (or with `category=RAD` for radiology only; the slide's report is `SP`). Reports link to studies through `imagingStudy` (reference and Study Instance UID). Fetch `presentedForm[].url` with the token.
 5. **Retrieve.** `GET <address>/studies/<uid>/series/<uid>` (or the whole study) with the same Bearer token and `Accept: multipart/related; type="application/dicom"; transfer-syntax=*`.
 
 `test/client.ts` does these steps using only `fetch` and WebCrypto, and the e2e test runs it in Chromium. The Share app can copy it.
@@ -204,7 +232,7 @@ bun test/e2e.ts --base URL      # against a running sandbox
 bun test/validate.ts            # HL7 FHIR validator against the IG package
 ```
 
-**`test/data-check.ts`** builds the dataset twice and compares every file's hash. It extracts the pinned sources with the system `tar` and checks that, for all 266 instances:
+**`test/data-check.ts`** builds the dataset twice and compares every file's hash. It extracts the pinned sources with the system `tar` and checks that, for all 271 instances:
 - the Pixel Data element is byte-identical;
 - the transfer syntax is unchanged;
 - every other non-UID top-level element is byte-identical.

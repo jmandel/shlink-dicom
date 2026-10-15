@@ -19,7 +19,7 @@ PORT="${PORT:-8000}"
 BASE_URL="${BASE_URL:-https://smart-imaging-sandbox.exe.xyz}"
 SHARE_ORIGIN="${SHARE_ORIGIN:-https://shlink-dicom.exe.xyz}"
 BUN_VERSION="1.4.3"
-EXPECTED_SUMS="${EXPECTED_SUMS:-ecb029838a8d67ed10f198f7c96419f44d0eebcd3bdc28c4714c9725d58c46b6}"
+EXPECTED_SUMS="${EXPECTED_SUMS:-91da98b8a4138e7f9fb95e6047729c514c87512b1af9f5cf51753dd5768364cf}"
 export BUN_INSTALL=/opt/bun
 BUN="$BUN_INSTALL/bin/bun"
 

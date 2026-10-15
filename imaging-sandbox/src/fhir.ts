@@ -16,7 +16,7 @@ const DCM = "http://dicom.nema.org/resources/ontology/DCM";
 const MODALITY: Record<string, string> = {
   CR: "Computed Radiography", CT: "Computed Tomography", DX: "Digital Radiography", MG: "Mammography",
   MR: "Magnetic Resonance", NM: "Nuclear Medicine", OT: "Other", PT: "Positron emission tomography",
-  US: "Ultrasound", XA: "X-Ray Angiography", SR: "SR Document", SC: "Secondary Capture",
+  US: "Ultrasound", XA: "X-Ray Angiography", SR: "SR Document", SC: "Secondary Capture", SM: "Slide Microscopy",
 };
 
 export interface Urls {
@@ -243,7 +243,7 @@ export function diagnosticReport(cfg: Config, st: Study): Record<string, unknown
     },
     identifier: [accessionIdentifier(cfg, st)],
     status: "final",
-    category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0074", code: "RAD", display: "Radiology" }] }],
+    category: [{ coding: [rep.category] }],
     code: { coding: [rep.code], text: rep.title },
     subject: { reference: `Patient/${st.patientId}` },
   };
@@ -308,6 +308,7 @@ export function imagingStudy(cfg: Config, st: Study, endpointRef: string, contai
     numberOfInstances: seriesCount(st),
   });
   if (st.description) r.description = st.description;
+  if (st.attribution) r.note = [{ text: st.attribution }];
   r.series = st.series.map((s) => {
     const out: Record<string, unknown> = { uid: s.uid };
     if (s.number !== undefined) out.number = s.number;

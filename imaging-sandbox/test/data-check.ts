@@ -59,23 +59,38 @@ const studiesCfg = JSON.parse(readFileSync(join(ROOT, "data/studies.json"), "utf
 const patient = manifest.patient;
 
 console.log("\nPixel data and untouched elements");
-const REWRITTEN = new Set([0x00080020, 0x00080023, 0x00080030, 0x00080033, 0x00080050, 0x00100010, 0x00100020, 0x00100030, 0x00120062]);
+const BASE_REWRITTEN = [0x00080020, 0x00080023, 0x00080030, 0x00080033, 0x00080050, 0x00100010, 0x00100020, 0x00100030, 0x00120062];
+const ID_UID_TAGS = [0x00080017, 0x00080018, 0x00080019, 0x0020000d, 0x0020000e, 0x00200052, 0x00209164, 0x00400554];
 const allOriginalUids = new Set<string>();
+const cacheDirs = (process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean);
+const findLocal = (name: string) => [join(ROOT, "build/sources", name), join(ROOT, "../data/samples", name), ...cacheDirs.map((d) => join(d, name))].find(existsSync)!;
+const walk = (d: string): string[] => readdirSync(d).flatMap((n) => { const f = join(d, n); return statSync(f).isDirectory() ? walk(f) : [f]; });
+const collectUids = (els: any[]) => { for (const e of els) { if (e.items) e.items.forEach(collectUids); else if (ID_UID_TAGS.includes(e.tag)) { const v = str([e], e.tag); if (v) allOriginalUids.add(v); } } };
 let compared = 0, pixelSame = 0, tsSame = 0, othersSame = 0;
 for (const st of manifest.studies) {
-  const src = studiesCfg.sources.find((s: any) => s.archive === st.archive);
-  const local = [join(ROOT, "build/sources", st.archive), join(ROOT, "../data/samples", st.archive)].find(existsSync)!;
-  const dir = join(WORK, "src", st.archive);
-  mkdirSync(dir, { recursive: true });
-  check(`${st.archive}: source matches the pinned SHA-256`, new Bun.CryptoHasher("sha256").update(readFileSync(local)).digest("hex") === src.sha256);
-  Bun.spawnSync(["tar", "-xzf", local, "-C", dir]);
-  const walk = (d: string): string[] => readdirSync(d).flatMap((n) => { const f = join(d, n); return statSync(f).isDirectory() ? walk(f) : [f]; });
+  const cfgStudy = studiesCfg.studies.find((x: any) => x.id === st.id);
+  const h = cfgStudy.header ?? {};
+  const rewritten = new Set([...BASE_REWRITTEN, ...Object.keys(h.set ?? {}).map((t) => parseInt(t, 16)), ...(h.remove ?? []).map((t: string) => parseInt(t, 16))]);
+  const removedGroups = new Set((h.removeGroups ?? []).map((g: string) => parseInt(g, 16)));
+  const names: string[] = st.archive ? [st.archive] : st.sources;
+  const sourceFiles: string[] = [];
+  for (const name of names) {
+    const src = studiesCfg.sources.find((s: any) => s.archive === name);
+    const local = findLocal(name);
+    check(`${name}: source matches the pinned SHA-256`, new Bun.CryptoHasher("sha256").update(readFileSync(local)).digest("hex") === src.sha256);
+    if (name.endsWith(".tgz")) {
+      const dir = join(WORK, "src", name);
+      mkdirSync(dir, { recursive: true });
+      Bun.spawnSync(["tar", "-xzf", local, "-C", dir]);
+      sourceFiles.push(...walk(dir).filter((x) => x.endsWith(".dcm")));
+    } else sourceFiles.push(local);
+  }
   const byOrig = new Map<string, any>(st.files.map((f: any) => [f.originalSopInstanceUID, f]));
-  for (const f of walk(dir).filter((x) => x.endsWith(".dcm"))) {
+  for (const f of sourceFiles) {
     const before = new Uint8Array(readFileSync(f));
     const pb = parseDicom(before, { stopAtPixelData: false });
     const sop = str(pb.dataset, 0x00080018)!;
-    for (const t of [0x00080018, 0x0020000d, 0x0020000e, 0x00200052]) { const v = str(pb.dataset, t); if (v) allOriginalUids.add(v); }
+    collectUids(pb.dataset);
     const built = byOrig.get(sop);
     if (!built) { check(`${f}: present in the build`, false); continue; }
     const after = new Uint8Array(readFileSync(join(DS, built.path)));
@@ -83,14 +98,18 @@ for (const st of manifest.studies) {
     compared++;
     if (Buffer.compare(pixelDataElement(before), pixelDataElement(after)) === 0) pixelSame++;
     if (pa.transferSyntaxUID === pb.transferSyntaxUID) tsSame++;
-    const same = pb.dataset.filter((e) => !REWRITTEN.has(e.tag) && e.vr !== "UI" && !e.items).every((e) => {
-      const a = pa.dataset.find((x) => x.tag === e.tag);
-      return a && Buffer.compare(before.subarray(e.start, e.end), after.subarray(a.start, a.end)) === 0;
-    });
+    const replaced = new Set(Object.keys(h.replaceStrings ?? {}));
+    const same = pb.dataset
+      .filter((e) => !rewritten.has(e.tag) && !removedGroups.has(e.tag >>> 16) && e.vr !== "UI" && !e.items && !replaced.has(str([e], e.tag) ?? "\0"))
+      .every((e) => {
+        const a = pa.dataset.find((x) => x.tag === e.tag);
+        return a && Buffer.compare(before.subarray(e.start, e.end), after.subarray(a.start, a.end)) === 0;
+      });
     if (same) othersSame++;
   }
 }
-check(`Pixel Data element byte-identical for ${pixelSame}/${compared} instances`, compared === 266 && pixelSame === compared);
+const expectedInstances = manifest.studies.reduce((n: number, st: any) => n + st.files.length, 0);
+check(`Pixel Data element byte-identical for ${pixelSame}/${compared} instances`, compared === expectedInstances && pixelSame === compared);
 check(`transfer syntax unchanged for ${tsSame}/${compared} instances`, tsSame === compared);
 check(`every other non-UID top-level element byte-identical for ${othersSame}/${compared} instances`, othersSame === compared);
 
@@ -114,12 +133,24 @@ for (const st of manifest.studies) {
       str(d, 0x00080018) === f.sopInstanceUID &&
       !d.some((e) => e.tag === 0x00120062);
     if (ok) headerOk++;
-    const text = latin1(bytes);
+    const pix = parseDicom(bytes, { stopAtPixelData: false }).dataset.find((e) => e.tag === 0x7fe00010)!;
+    const text = latin1(bytes.subarray(0, pix.start)); // UIDs live in the header
     for (const u of allOriginalUids) if (text.includes(u)) { leaked++; break; }
   }
 }
 check(`patient, dates, accession and UIDs set in ${headerOk}/${total} files (sex left empty, as in the source)`, headerOk === total);
-check("no original Study, Series, SOP Instance or Frame of Reference UID appears in any built file", leaked === 0, leaked);
+check(`none of the ${allOriginalUids.size} original instance-identifying UIDs (Study, Series, SOP Instance, Frame of Reference, Pyramid, Acquisition, Dimension Organization, Specimen) appears in any built file`, leaked === 0, leaked);
+{
+  // Source identifiers of the slide (CPTAC subject and specimen) must be gone from every header.
+  let found = 0;
+  for (const st of manifest.studies) for (const f of st.files) {
+    const b = new Uint8Array(readFileSync(join(DS, f.path)));
+    const pe = parseDicom(b, { stopAtPixelData: false }).dataset.find((e) => e.tag === 0x7fe00010)!;
+    const hdr = latin1(b.subarray(0, pe.start));
+    if (["C3N-02231", "CPTAC", "LUAD", ".svs", "Anonymized"].some((w) => hdr.includes(w))) found++;
+  }
+  check("no source subject, specimen, collection or file names left in any header", found === 0, found);
+}
 check("brain MRI keeps its 29 Jul 2020 date", manifest.studies.find((s: any) => s.id === "mri-brain-2020").studyDate === "2020-07-29");
 
 console.log("\nReports");

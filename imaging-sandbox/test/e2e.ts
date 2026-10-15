@@ -162,7 +162,7 @@ async function browserFlow(base: string) {
     await page.locator(`input[name=patient][value=${PATIENT}]`).check();
     await page.getByRole("button", { name: "Continue" }).click();
     await page.waitForSelector("text=Allow access?");
-    check("consent page lists both studies", (await page.locator("input[name=study]").count()) === 2);
+    check(`consent page lists all ${manifest.studies.length} studies`, (await page.locator("input[name=study]").count()) === manifest.studies.length);
     await Promise.all([page.waitForURL(`${REDIRECT}**`), page.getByRole("button", { name: "Allow" }).click()]);
 
     // 3. Back in the app: token exchange and all fetches, cross-origin.
@@ -199,7 +199,7 @@ async function browserFlow(base: string) {
     check("DiagnosticReport search (category=RAD): one report per study", out.reports === 2, out.reports);
     check("report PDF fetched cross-origin with the token", out.pdfFetch.status === 200 && out.pdfFetch.type === "application/pdf" && out.pdfFetch.size === out.pdfFetch.expected && out.pdfFetch.head === "%PDF-", out.pdfFetch);
     check("token response has token_type Bearer and scope", out.token.token_type === "Bearer" && typeof out.token.scope === "string");
-    check("ImagingStudy search: 2 studies + 1 included Endpoint", out.total === 2 && out.entries === 3, { total: out.total, entries: out.entries });
+    check(`ImagingStudy search: ${manifest.studies.length} studies + 1 included Endpoint`, out.total === manifest.studies.length && out.entries === manifest.studies.length + 1, { total: out.total, entries: out.entries });
     const allTruth = [...truthBySop.values()];
     let ok = 0;
     for (const r of out.retrieved) {
@@ -222,6 +222,9 @@ async function main() {
   if (remoteBase) CLIENT_ID = "imaging-sandbox-e2e"; // open registration; loopback redirect
   const brain = studyUIDById.get("mri-brain-2020")!;
   const wrist = studyUIDById.get("wrist-low-res")!;
+  const slide = studyUIDById.get("slide-lung-2023")!;
+  const ALL = [...studyUIDById.values()];
+  const N = ALL.length;
   console.log(`ground truth: ${truthBySop.size} instances in ${truthBySeries.size} series from ${DATASET}`);
 
   const bases: Record<Mode, string> = remoteBase
@@ -241,7 +244,7 @@ async function main() {
   const d = await C.discover(`${base}/fhir`);
   const at = browserToken.access_token as string;
   const { studies } = await C.searchStudies(d.imagingBase, PATIENT, at);
-  await retrieveAndCompare("external Endpoint", studies, at, [brain, wrist]);
+  await retrieveAndCompare("external Endpoint", studies, at, ALL);
   {
     const r = await fetch(`${studies[0].wadoBase}/studies/${brain}`, { headers: { authorization: `Bearer ${at}`, accept: C.DICOM_ACCEPT, "accept-encoding": "gzip, br" } });
     const body = new Uint8Array(await r.arrayBuffer());
@@ -274,11 +277,25 @@ async function main() {
   const future = await C.searchStudies(d.imagingBase, PATIENT, at, `&_lastUpdated=gt2099-01-01T00:00:00Z`);
   check("_lastUpdated=gt2099 returns no studies", future.bundle.total === 0);
   const past = await C.searchStudies(d.imagingBase, PATIENT, at, `&_lastUpdated=gt2000-01-01`);
-  check("_lastUpdated=gt2000-01-01 returns both studies", past.bundle.total === 2);
+  check("_lastUpdated=gt2000-01-01 returns every study", past.bundle.total === N);
   const viaRef = await C.fhirGet(`${d.imagingBase}/ImagingStudy?patient=Patient/${PATIENT}`, at);
-  check("patient=Patient/{id} accepted", viaRef.total === 2);
+  check("patient=Patient/{id} accepted", viaRef.total === N);
   const noInclude = await C.fhirGet(`${d.imagingBase}/ImagingStudy?patient=${PATIENT}`, at);
   check("external mode without _include: no Endpoint entries", noInclude.entry.every((e: any) => e.resource.resourceType === "ImagingStudy"));
+
+  section("Whole-slide (SM) study");
+  {
+    const slideStudy = studies.find((x) => x.studyUID === slide)!;
+    const is = slideStudy.study;
+    check("slide ImagingStudy: modality SM, 1 series, 5 instances", is.modality?.[0]?.code === "SM" && is.numberOfSeries === 1 && is.numberOfInstances === 5);
+    check("slide ImagingStudy carries the CC BY attribution as a note", /CC BY 4\.0/.test(is.note?.[0]?.text ?? "") && /C3N-02231/.test(is.note[0].text));
+    const meta = await C.wadoGet(`${slideStudy.wadoBase}/studies/${slide}/metadata`, at, "application/dicom+json");
+    const types = (meta.json ?? []).map((m: any) => m["00080008"]?.Value?.[2]).sort();
+    check("slide metadata: three VOLUME levels, OVERVIEW and THUMBNAIL", JSON.stringify(types) === JSON.stringify(["OVERVIEW", "THUMBNAIL", "VOLUME", "VOLUME", "VOLUME"]), types);
+    const pyramid = new Set((meta.json ?? []).map((m: any) => m["00080019"]?.Value?.[0]));
+    check("slide instances share one Pyramid UID", pyramid.size === 1 && ![...pyramid][0]?.startsWith("1.3.6.1.4.1.5962"));
+    check("slide headers name the fictional patient", (meta.json ?? []).every((m: any) => m["00100010"]?.Value?.[0]?.Alphabetic === "RIVERA^MORGAN" && m["00400512"]?.Value?.[0] === "SBX23-S0417-A1"));
+  }
 
   section("Refresh and introspection");
   const refreshed = await C.refresh(d, { refreshToken: browserToken.refresh_token, clientId: CLIENT_ID });
@@ -310,7 +327,7 @@ async function main() {
     const request = (await r.text()).match(/name="request" value="([^"]+)"/)![1];
     const form = new URLSearchParams({ request, patient: PATIENT, decision: "allow" });
     for (const sc of FULL_SCOPE.split(" ")) form.append("scope", sc);
-    for (const u of [brain, wrist]) form.append("study", u);
+    for (const u of ALL) form.append("study", u);
     r = await fetch(`${base}/auth/consent`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form, redirect: "manual" });
     const tk = await C.exchangeCode(d, { code: new URL(r.headers.get("location")!).searchParams.get("code")!, verifier, clientId: CLIENT_ID, redirectUri: REDIRECT });
     check("aud=imaging base: token works at clinical, imaging and WADO-RS", (await status(`${base}/fhir/Patient/${PATIENT}`, tk.access_token)) === 200 && (await status(`${d.imagingBase}/ImagingStudy?patient=${PATIENT}`, tk.access_token)) === 200 && (await status(`${base}/wado-rs/studies/${wrist}`, tk.access_token)) === 200);
@@ -322,13 +339,17 @@ async function main() {
   check("category=LAB: 0 reports", (await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=LAB`, at)).total === 0);
   const byCode = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&code=${encodeURIComponent("http://loinc.org|37550-1")}`, at);
   check("code=http://loinc.org|37550-1: the wrist report only", byCode.total === 1 && byCode.entry[0].resource.id === "report-wrist-low-res");
-  for (const e of rad.entry) {
+  const sp = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}&category=SP`, at);
+  check("category=SP: the slide's pathology report only", sp.total === 1 && sp.entry[0].resource.id === "report-slide-lung-2023" && sp.entry[0].resource.code.coding[0].code === "11529-5");
+  const allReports = await C.fhirGet(`${base}/fhir/DiagnosticReport?patient=${PATIENT}`, at);
+  check(`all reports: one per study (${N})`, allReports.total === N);
+  for (const e of allReports.entry) {
     const r = e.resource;
     const studyId = r.id.replace(/^report-/, "");
     check(`${r.id}: read by id`, (await C.fhirGet(`${base}/fhir/DiagnosticReport/${r.id}`, at)).id === r.id);
     const ref = r.imagingStudy?.[0];
     check(`${r.id}: imagingStudy links its ImagingStudy by reference and Study Instance UID`, ref?.reference === `${d.imagingBase}/ImagingStudy/${studyId}` && ref?.identifier?.value === `urn:oid:${studyUIDById.get(studyId)}`);
-    check(`${r.id}: category RAD, LOINC code, conclusion with the banner`, r.category[0].coding[0].code === "RAD" && r.code.coding[0].system === "http://loinc.org" && r.conclusion.startsWith("SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION."));
+    check(`${r.id}: category ${r.category[0].coding[0].code}, LOINC code, conclusion with the banner`, ["RAD", "SP"].includes(r.category[0].coding[0].code) && r.code.coding[0].system === "http://loinc.org" && r.conclusion.startsWith("SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRETATION."));
     const pdfA = r.presentedForm.find((a: any) => a.contentType === "application/pdf");
     const txtA = r.presentedForm.find((a: any) => a.contentType.startsWith("text/plain"));
     const get = async (u: string) => { const res = await fetch(u, { headers: { authorization: `Bearer ${at}` } }); return { status: res.status, type: res.headers.get("content-type"), bytes: new Uint8Array(await res.arrayBuffer()) }; };
@@ -343,7 +364,7 @@ async function main() {
     const pdfBody = pages.flatMap((p) => p.filter((l) => !l.includes(BANNER))).join("\n");
     const lines = text.split("\n");
     check(`${r.id}: PDF parses with PDF.js, every page has the banner, and its text matches the text attachment`, pages.length > 0 && pages.every((p) => p[0] === BANNER) && norm(pdfBody) === norm(lines.slice(2, lines.lastIndexOf(BANNER) - 1).join("\n")));
-    check(`${r.id}: text names the fictional patient and the exam's series`, text.includes("RIVERA, MORGAN") && text.includes("Series "));
+    check(`${r.id}: text names the fictional patient and lists the study's series or instances`, text.includes("RIVERA, MORGAN") && norm(text).includes("from the DICOM headers:"));
     const bin = await fetch(pdfA.url, { headers: { authorization: `Bearer ${at}`, accept: "application/fhir+json" } }).then((x) => x.json());
     check(`${r.id}: Binary as FHIR JSON when asked`, bin.resourceType === "Binary" && bin.contentType === "application/pdf" && Buffer.from(bin.data, "base64").byteLength === pdfA.size);
   }
@@ -464,10 +485,10 @@ async function main() {
         check("ImagingStudy.endpoint references a contained Endpoint", res.bundle.entry.every((e: any) => e.resource.endpoint?.[0]?.reference === "#wado" && e.resource.contained?.[0]?.resourceType === "Endpoint"));
       } else {
         const noInc = await C.fhirGet(`${dm.imagingBase}/ImagingStudy?patient=${PATIENT}`, L.token.access_token);
-        check("capability Endpoints are urn:uuid entries, present even without _include", noInc.entry.filter((e: any) => e.fullUrl.startsWith("urn:uuid:") && e.resource.resourceType === "Endpoint").length === 2);
-        check("capability addresses are distinct per study", new Set(res.studies.map((s) => s.wadoBase)).size === 2 && res.studies.every((s) => s.wadoBase.includes("/wado-rs/cap/")));
+        check("capability Endpoints are urn:uuid entries, present even without _include", noInc.entry.filter((e: any) => e.fullUrl.startsWith("urn:uuid:") && e.resource.resourceType === "Endpoint").length === N);
+        check("capability addresses are distinct per study", new Set(res.studies.map((s) => s.wadoBase)).size === N && res.studies.every((s) => s.wadoBase.includes("/wado-rs/cap/")));
       }
-      await retrieveAndCompare(mode, res.studies, L.token.access_token, [brain, wrist]);
+      await retrieveAndCompare(mode, res.studies, L.token.access_token, ALL);
       if (mode === "capability") {
         const other2 = await httpLaunch(bases[mode]);
         check("capability URL with a different (valid) token: 403", (await status(`${st.wadoBase}/studies/${wrist}`, other2.token.access_token)) === 403);

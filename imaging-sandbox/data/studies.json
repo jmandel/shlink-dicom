@@ -11,11 +11,43 @@
       "archive": "wrist-low-res.tgz",
       "url": "https://raw.githubusercontent.com/jmandel/my-health-data/c23fade48fc6a7ab9ec22a5fce56cb58df550ba8/wrist-low-res.tgz",
       "sha256": "a2c4dffa8ec93ef658fce1e5ea4803df91e1be0da8df52ae5fa17dc9dc067f8e"
+    },
+    {
+      "archive": "8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
+      "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
+      "sha256": "f2738454f281ff5db55a0dcfa116a35fd0c8c4cd63e751622e34c3a909cf44cb",
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 18425 x 11712, 3773 tiles"
+    },
+    {
+      "archive": "7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
+      "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
+      "sha256": "3e0ebddd42b6736c0b0d67b017c7b25882627e987003104daa3c3069ab086bfa",
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 4606 x 2928, 260 tiles"
+    },
+    {
+      "archive": "709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
+      "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
+      "sha256": "cf72e87d5442e8b21eaebd6660d6cf0937e11b9caf0eee9e0fecbf4068308524",
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 2303 x 1464, 70 tiles"
+    },
+    {
+      "archive": "4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
+      "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
+      "sha256": "0b3f9aaffb7229b0db19853b46d1b7776d506315783ab38edcb1704c4112f7ac",
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: OVERVIEW"
+    },
+    {
+      "archive": "dc7c0527-9e55-49a2-946c-17471edb63aa.dcm",
+      "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/dc7c0527-9e55-49a2-946c-17471edb63aa.dcm",
+      "sha256": "7b50284096b876593071b473146c1e55d36b12dffc7ed00543eebd386e06130c",
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: THUMBNAIL"
     }
   ],
   "removeTags": {
     "_note": "Patient Identity Removed (0012,0062) is dropped: the headers now carry a (fictional) identity.",
-    "tags": ["00120062"]
+    "tags": [
+      "00120062"
+    ]
   },
   "studies": [
     {
@@ -27,7 +59,11 @@
       "studyTime": "07:42:15",
       "utcOffset": "-04:00",
       "report": {
-        "code": { "system": "http://loinc.org", "code": "24590-2", "display": "MR Brain" },
+        "code": {
+          "system": "http://loinc.org",
+          "code": "24590-2",
+          "display": "MR Brain"
+        },
         "title": "MRI BRAIN",
         "indication": "Headache.",
         "comparison": "None.",
@@ -39,7 +75,9 @@
           "Vessels: Normal major intracranial flow voids.",
           "Other: The visualized paranasal sinuses and mastoid air cells are clear."
         ],
-        "impression": ["No acute intracranial abnormality."]
+        "impression": [
+          "No acute intracranial abnormality."
+        ]
       }
     },
     {
@@ -51,7 +89,11 @@
       "studyTime": "21:41:30",
       "utcOffset": "-04:00",
       "report": {
-        "code": { "system": "http://loinc.org", "code": "37550-1", "display": "XR Wrist - left PA and Lateral and Oblique" },
+        "code": {
+          "system": "http://loinc.org",
+          "code": "37550-1",
+          "display": "XR Wrist - left PA and Lateral and Oblique"
+        },
         "title": "XR WRIST LEFT, 3 VIEWS",
         "indication": "Left wrist pain after a fall.",
         "comparison": "None.",
@@ -62,7 +104,103 @@
           "Joints: Joint spaces are preserved.",
           "Soft tissues: Unremarkable."
         ],
-        "impression": ["No acute osseous abnormality of the left wrist."]
+        "impression": [
+          "No acute osseous abnormality of the left wrist."
+        ]
+      }
+    },
+    {
+      "id": "slide-lung-2023",
+      "_source": "docs/wsi-sample.md: the full-resolution VOLUME level (6dc953bc, 1.05 GB) and the LABEL (5633c6eb, shows the CPTAC subject ID) are not used.",
+      "files": [
+        "8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
+        "7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
+        "709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
+        "4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
+        "dc7c0527-9e55-49a2-946c-17471edb63aa.dcm"
+      ],
+      "accession": "SBX20230417-0211",
+      "studyDate": "2023-04-17",
+      "studyTime": "13:05:00",
+      "utcOffset": "-04:00",
+      "attribution": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; the label image and the full-resolution level were removed.",
+      "header": {
+        "_note": "Applied to every instance besides the common patient, date and accession attributes. Values in replaceStrings are replaced wherever they occur, including inside sequences (Container Identifier, Specimen Identifier, the specimen's text items).",
+        "set": {
+          "00080021": [
+            "DA",
+            "20230417"
+          ],
+          "00080022": [
+            "DA",
+            "20230417"
+          ],
+          "0008002A": [
+            "DT",
+            "20230417130500"
+          ],
+          "00080031": [
+            "TM",
+            "130500"
+          ],
+          "00080032": [
+            "TM",
+            "130500"
+          ],
+          "00080201": [
+            "SH",
+            "-0400"
+          ],
+          "00200010": [
+            "SH",
+            "SBX-0211"
+          ],
+          "00400512": [
+            "LO",
+            "SBX23-S0417-A1"
+          ]
+        },
+        "remove": [
+          "00120010",
+          "00120020",
+          "00120021",
+          "00120030",
+          "00120031",
+          "00120040",
+          "00204000"
+        ],
+        "removeGroups": [
+          "0009",
+          "0013"
+        ],
+        "replaceStrings": {
+          "C3N-02231-21": "SBX23-S0417-A1",
+          "C3N-02231": "SBX4417302"
+        }
+      },
+      "report": {
+        "kind": "pathology",
+        "category": {
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+          "code": "SP",
+          "display": "Surgical Pathology"
+        },
+        "code": {
+          "system": "http://loinc.org",
+          "code": "11529-5",
+          "display": "Surgical pathology study"
+        },
+        "title": "DIGITAL SLIDE, LUNG, H&E",
+        "indication": "Lung mass.",
+        "comparison": "None.",
+        "techniqueIntro": "One H&E-stained slide of lung tissue, scanned and stored as a tiled multi-resolution image.",
+        "findings": [
+          "Microscopic description: Sections show lung parenchyma with an infiltrating gland-forming carcinoma. Adjacent alveolar parenchyma is preserved."
+        ],
+        "impression": [
+          "Lung: invasive adenocarcinoma."
+        ],
+        "imageSource": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; the label image and the full-resolution level were removed."
       }
     }
   ]

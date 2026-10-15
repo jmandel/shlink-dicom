@@ -7,6 +7,7 @@ export const BANNER = "SAMPLE REPORT FOR DEMONSTRATION. NOT A CLINICAL INTERPRET
 export const WIDTH = 84; // Courier 10 pt across a 504 pt text column
 
 export interface ReportInput {
+  kind?: "radiology" | "pathology"; // default radiology
   title: string;
   code: { system: string; code: string; display: string };
   indication: string;
@@ -14,6 +15,7 @@ export interface ReportInput {
   techniqueIntro: string;
   findings: string[];
   impression: string[];
+  imageSource?: string; // attribution for images from a public collection
 }
 
 export interface ReportContext {
@@ -23,7 +25,7 @@ export interface ReportContext {
   accession: string;
   examDateTime: string; // "2020-07-29 07:42"
   equipment: string;
-  series: { number?: number; description: string; images: number }[];
+  series: { number?: number; description: string; images: number; unit?: [string, string] }[];
 }
 
 function wrap(text: string, width = WIDTH, indent = ""): string[] {
@@ -44,7 +46,7 @@ export function reportLines(r: ReportInput, c: ReportContext): PdfLine[] {
   const heading = (t: string) => { body(""); L.push({ text: t, style: "heading" }); };
   const kv = (k: string, v: string) => wrap(v, WIDTH - 16).forEach((t, i) => body(`${(i ? "" : k + ":").padEnd(16)}${t}`));
 
-  L.push({ text: `RADIOLOGY REPORT: ${r.title}`, style: "title" });
+  L.push({ text: `${r.kind === "pathology" ? "PATHOLOGY" : "RADIOLOGY"} REPORT: ${r.title}`, style: "title" });
   body("Imaging sandbox, demonstration data");
   body("");
   kv("Patient", c.patientName);
@@ -59,10 +61,12 @@ export function reportLines(r: ReportInput, c: ReportContext): PdfLine[] {
   wrap(r.indication).forEach(body);
 
   heading("TECHNIQUE");
-  wrap(`${r.techniqueIntro} Series in this study, from the DICOM headers:`).forEach(body);
+  const perInstance = c.series.some((x) => x.unit);
+  wrap(`${r.techniqueIntro} ${perInstance ? "Instances" : "Series"} in this study, from the DICOM headers:`).forEach(body);
   for (const s of c.series) {
     const n = s.number === undefined ? "" : String(s.number);
-    body(`  Series ${n.padEnd(4)}${s.description.padEnd(28)}${s.images} ${s.images === 1 ? "image" : "images"}`);
+    const [one, many] = s.unit ?? ["image", "images"];
+    body(`  ${s.unit ? "Instance" : "Series"} ${n.padEnd(4)}${s.description.padEnd(28)}${s.images} ${s.images === 1 ? one : many}`);
   }
 
   heading("COMPARISON");
@@ -73,6 +77,11 @@ export function reportLines(r: ReportInput, c: ReportContext): PdfLine[] {
 
   heading("IMPRESSION (illustrative)");
   r.impression.forEach((t, i) => wrap(`${i + 1}. ${t}`, WIDTH - 3).forEach((l, j) => body(j ? `   ${l}` : l)));
+
+  if (r.imageSource) {
+    heading("IMAGE SOURCE");
+    wrap(r.imageSource).forEach(body);
+  }
 
   body("");
   wrap(

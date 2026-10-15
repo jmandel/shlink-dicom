@@ -46,7 +46,14 @@ interface StudyConfig {
   studyDate: string;
   studyTime: string;
   utcOffset: string;
-  report: ReportInput;
+  attribution?: string;
+  header?: {
+    set?: Record<string, [string, string]>;
+    remove?: string[];
+    removeGroups?: string[];
+    replaceStrings?: Record<string, string>;
+  };
+  report: ReportInput & { category?: { system: string; code: string; display: string } };
 }
 
 const patient = JSON.parse(await Bun.file(join(ROOT, "data/patient.json")).text());
@@ -63,7 +70,10 @@ const sha1b64 = (b: Uint8Array) => Buffer.from(new Bun.CryptoHasher("sha1").upda
 async function source(archive: string): Promise<Uint8Array> {
   const s = cfg.sources.find((x) => x.archive === archive);
   if (!s) throw new Error(`no source for ${archive}`);
-  for (const candidate of [join(SOURCES, archive), join(ROOT, "../data/samples", archive)]) {
+  // SOURCE_CACHE: extra directories (colon-separated) searched by file name
+  // before downloading; a file is used only if its SHA-256 matches the pin.
+  const cache = (process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean).map((d) => join(d, archive));
+  for (const candidate of [join(SOURCES, archive), join(ROOT, "../data/samples", archive), ...cache]) {
     if (existsSync(candidate)) {
       const b = new Uint8Array(await Bun.file(candidate).arrayBuffer());
       if (sha256(b) === s.sha256) { log(`source ${archive}: ${relative(process.cwd(), candidate)} (hash ok)`); return b; }
@@ -111,13 +121,19 @@ for (const st of cfg.studies) {
     [0x00100020, { vr: "LO", value: patient.mrn }],
     [0x00100030, { vr: "DA", value: compact(patient.birthDate) }],
   ]);
+  for (const [tag, [vr, value]] of Object.entries(st.header?.set ?? {})) set.set(parseInt(tag, 16), { vr, value });
+  const remove = new Set([...removeTags, ...(st.header?.remove ?? []).map((t) => parseInt(t, 16))]);
+  const removeGroups = new Set((st.header?.removeGroups ?? []).map((g) => parseInt(g, 16)));
+  const replaceStrings = new Map(Object.entries(st.header?.replaceStrings ?? {}));
 
   const files: { path: string; size: number; sha256: string; sopInstanceUID: string; originalSopInstanceUID: string; seriesInstanceUID: string }[] = [];
-  const series = new Map<string, { number?: number; description: string; images: number }>();
+  const series = new Map<string, { number?: number; description: string; images: number; unit?: [string, string] }>();
+  const seriesUIDs = new Set<string>();
+  let magnification = "";
   let studyUID = "", originalStudyUID = "", manufacturer = "", model = "", field = "";
   for (const e of entries) {
     const before = parseDicom(e.bytes, { stopAtPixelData: false });
-    const out = rewriteDicom(e.bytes, { set, remove: removeTags, mapUid });
+    const out = rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid });
     const after = parseDicom(out, { stopAtPixelData: false });
     // Checks: pixel data and transfer syntax untouched, values applied.
     if (Buffer.compare(pixelDataElement(e.bytes), pixelDataElement(out)) !== 0) throw new Error(`${e.path}: Pixel Data changed`);
@@ -133,9 +149,29 @@ for (const st of cfg.studies) {
     manufacturer = str(d, 0x00080070) ?? manufacturer;
     model = str(d, 0x00081090) ?? model;
     field = str(d, 0x00180087) ?? field;
-    const s = series.get(seriesUID) ?? { number: int(d, 0x00200011), description: str(d, 0x0008103e) ?? "", images: 0 };
-    s.images++;
-    series.set(seriesUID, s);
+    if (str(d, 0x00080060) === "SM") {
+      // Slide microscopy: one technique line per instance (pyramid level).
+      const type = (str(d, 0x00080008) ?? "").split("\\")[2] ?? "IMAGE";
+      const frames = int(d, 0x00280008) ?? 1;
+      const u32 = (tag: number) => { const el = d.find((x) => x.tag === tag); return el ? new DataView(el.value.buffer, el.value.byteOffset).getUint32(0, true) : undefined; };
+      const w = u32(0x00480006), h = u32(0x00480007);
+      series.set(sop, {
+        number: int(d, 0x00200013),
+        description: `${type}${w && h ? ` ${w} x ${h}` : ""}`,
+        images: type === "VOLUME" ? frames : 1,
+        unit: type === "VOLUME" ? ["tile", "tiles"] : ["image", "images"],
+      });
+      seriesUIDs.add(seriesUID);
+    } else {
+      const s = series.get(seriesUID) ?? { number: int(d, 0x00200011), description: str(d, 0x0008103e) ?? "", images: 0 };
+      s.images++;
+      series.set(seriesUID, s);
+      seriesUIDs.add(seriesUID);
+    }
+    if (str(d, 0x00080060) === "SM") {
+      const op = d.find((x) => x.tag === 0x00480105)?.items?.[0]?.find((x) => x.tag === 0x00480112);
+      if (op) magnification = `${Number(str([op], 0x00480112))}x objective`;
+    }
     const rel = `dicom/${st.id}/${seriesUID}/${sop}.dcm`;
     write(rel, out);
     const seriesNo = String(int(d, 0x00200011) ?? 0).padStart(3, "0");
@@ -145,7 +181,7 @@ for (const st of cfg.studies) {
   }
 
   // Report.
-  const equipment = [manufacturer, model].filter(Boolean).join(" ") + (field ? `, ${Number(field)} T` : "");
+  const equipment = [manufacturer, model].filter(Boolean).join(" ") + (field ? `, ${Number(field)} T` : "") + (magnification ? `, ${magnification}` : "");
   const lines = reportLines(st.report, {
     patientName: `${patient.family.toUpperCase()}, ${patient.given.join(" ").toUpperCase()}`,
     birthDate: patient.birthDate,
@@ -164,17 +200,18 @@ for (const st of cfg.studies) {
 
   manifestStudies.push({
     id: st.id,
-    archive: st.archive,
+    ...(st.archive ? { archive: st.archive } : { sources: st.files }),
+    ...(st.attribution ? { attribution: st.attribution } : {}),
     studyInstanceUID: studyUID,
     originalStudyInstanceUID: originalStudyUID,
     accession: st.accession,
     studyDate: st.studyDate,
     studyTime: st.studyTime,
     utcOffset: st.utcOffset,
-    report: { code: st.report.code, title: st.report.title, conclusion: conclusion(st.report), attachments: [pdfAtt, txtAtt] },
+    report: { ...(st.report.category ? { category: st.report.category } : {}), code: st.report.code, title: st.report.title, conclusion: conclusion(st.report), attachments: [pdfAtt, txtAtt] },
     files,
   });
-  log(`study ${st.id}: ${files.length} instances in ${series.size} series, Study Instance UID ${studyUID}`);
+  log(`study ${st.id}: ${files.length} instances in ${seriesUIDs.size} series, Study Instance UID ${studyUID}`);
 }
 
 const manifest = {
@@ -207,6 +244,7 @@ if (EXPORT) {
       studyDate: m.studyDate,
       dir: `dicom/${m.id}`,
       instances: m.files.length,
+      ...(m.attribution ? { attribution: m.attribution } : {}),
       reports: { pdf: `reports/${m.id}.pdf`, text: `reports/${m.id}.txt`, conclusion: m.report.conclusion, code: m.report.code },
     })),
   };

@@ -37,6 +37,7 @@ export interface Attachment {
 
 export interface Report {
   id: string;
+  category: { system: string; code: string; display: string };
   code: { system: string; code: string; display: string };
   title: string;
   conclusion: string;
@@ -55,6 +56,7 @@ export interface Study {
   lastUpdated: string;
   bytes: number;
   report: Report;
+  attribution?: string; // image source and license, for studies from public collections
 }
 
 export interface DemoPatient {
@@ -103,7 +105,11 @@ export async function loadStore(datasetDir: string, testPatientsFile: string): P
       series: [],
       lastUpdated: DATA_LAST_UPDATED,
       bytes: 0,
-      report: { id: `report-${m.id}`, code: m.report.code, title: m.report.title, conclusion: m.report.conclusion, attachments: [] },
+      attribution: m.attribution,
+      report: {
+        id: `report-${m.id}`,
+        category: m.report.category ?? { system: "http://terminology.hl7.org/CodeSystem/v2-0074", code: "RAD", display: "Radiology" },
+        code: m.report.code, title: m.report.title, conclusion: m.report.conclusion, attachments: [] },
     };
     for (const f of m.files) {
       const bytes = new Uint8Array(await Bun.file(join(datasetDir, f.path)).arrayBuffer());

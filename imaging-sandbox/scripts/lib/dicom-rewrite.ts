@@ -17,8 +17,28 @@ export interface HeaderSet {
 export interface RewriteOptions {
   set: Map<number, HeaderSet>; // top-level attributes to set (inserted if absent)
   remove: Set<number>; // top-level attributes to drop
-  mapUid: (uid: string) => string; // applied to every non-registry UID
+  removeGroups?: Set<number>; // top-level groups to drop entirely (e.g. private groups)
+  replaceStrings?: Map<string, string>; // exact string values replaced at any depth
+  mapUid: (uid: string) => string; // applied to the instance-identifying UID attributes below
 }
+
+// UID attributes that identify this data (and so are remapped). Coding
+// scheme UIDs, SOP Class UIDs, transfer syntaxes and implementation or
+// creator UIDs are left alone.
+export const INSTANCE_UID_TAGS = new Set([
+  0x00080017, // Acquisition UID
+  0x00080018, // SOP Instance UID
+  0x00080019, // Pyramid UID
+  0x00081155, // Referenced SOP Instance UID
+  0x0020000d, // Study Instance UID
+  0x0020000e, // Series Instance UID
+  0x00200052, // Frame of Reference UID
+  0x00200200, // Synchronization Frame of Reference UID
+  0x00209164, // Dimension Organization UID
+  0x0040a124, // UID (content item)
+  0x00400554, // Specimen UID
+]);
+const STRING_VRS = new Set(["AE", "AS", "CS", "DA", "DS", "DT", "IS", "LO", "LT", "PN", "SH", "ST", "TM", "UC", "UT"]);
 
 const EXPLICIT_LONG = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
 const REGISTRY = "1.2.840.10008.";
@@ -60,13 +80,18 @@ function encodeLevel(src: Uint8Array, els: DicomElement[], explicit: boolean, to
   const seen = new Set<number>();
   for (const e of els) {
     seen.add(e.tag);
-    if (top && o.remove.has(e.tag)) continue;
+    if (top && (o.remove.has(e.tag) || o.removeGroups?.has(e.tag >>> 16))) continue;
     if (top && o.set.has(e.tag)) {
       const s = o.set.get(e.tag)!;
       out.push({ tag: e.tag, bytes: element(e.tag, s.vr, padded(s.vr, s.value), explicit), dirty: true });
       continue;
     }
-    if (e.vr === "UI" && !e.items) {
+    if (o.replaceStrings && STRING_VRS.has(e.vr) && !e.items) {
+      const v = str([e], e.tag);
+      const r = v !== undefined ? o.replaceStrings.get(v) : undefined;
+      if (r !== undefined) { out.push({ tag: e.tag, bytes: element(e.tag, e.vr, padded(e.vr, r), explicit), dirty: true }); continue; }
+    }
+    if (e.vr === "UI" && !e.items && INSTANCE_UID_TAGS.has(e.tag)) {
       const v = str([e], e.tag);
       if (v && !v.startsWith(REGISTRY)) {
         const m = v.split("\\").map((u) => (u.startsWith(REGISTRY) ? u : o.mapUid(u))).join("\\");
