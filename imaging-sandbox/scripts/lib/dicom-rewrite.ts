@@ -20,6 +20,64 @@ export interface RewriteOptions {
   removeGroups?: Set<number>; // top-level groups to drop entirely (e.g. private groups)
   replaceStrings?: Map<string, string>; // exact string values replaced at any depth
   mapUid: (uid: string) => string; // applied to the instance-identifying UID attributes below
+  fillBasicOffsetTable?: boolean; // fill an empty Basic Offset Table in multi-frame encapsulated Pixel Data
+}
+
+// ---- Encapsulated Pixel Data ----
+
+export interface PixelItem { start: number; valueStart: number; end: number; } // absolute offsets in the file
+
+export interface Encapsulated {
+  headerEnd: number; // just past the Pixel Data element header
+  bot: PixelItem; // the Basic Offset Table item
+  fragments: PixelItem[];
+  delimiterStart: number;
+}
+
+export function readEncapsulated(src: Uint8Array, e: DicomElement): Encapsulated {
+  const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);
+  let pos = e.start + 12; // tag, VR, reserved, length (explicit VR) ...
+  if (dv.getUint32(e.start + 4, true) === 0xffffffff) pos = e.start + 8; // ... or implicit VR
+  const headerEnd = pos;
+  const items: PixelItem[] = [];
+  while (pos + 8 <= e.end) {
+    const tag = ((dv.getUint16(pos, true) << 16) | dv.getUint16(pos + 2, true)) >>> 0;
+    const len = dv.getUint32(pos + 4, true);
+    if (tag === 0xfffee0dd) return { headerEnd, bot: items[0], fragments: items.slice(1), delimiterStart: pos };
+    if (tag !== 0xfffee000) throw new Error(`unexpected tag ${tag.toString(16)} in encapsulated Pixel Data`);
+    items.push({ start: pos, valueStart: pos + 8, end: pos + 8 + len });
+    pos += 8 + len;
+  }
+  throw new Error("encapsulated Pixel Data has no sequence delimiter");
+}
+
+// Index of the first fragment of each frame. One fragment per frame when
+// the counts match; otherwise a JPEG-family frame starts at a fragment
+// that begins with an SOI marker (FF D8).
+export function frameStarts(src: Uint8Array, enc: Encapsulated, frames: number): number[] {
+  if (enc.fragments.length === frames) return enc.fragments.map((_, i) => i);
+  const starts = enc.fragments.flatMap((f, i) => (src[f.valueStart] === 0xff && src[f.valueStart + 1] === 0xd8 ? [i] : []));
+  if (starts.length !== frames || starts[0] !== 0) throw new Error(`cannot map ${enc.fragments.length} fragments to ${frames} frames`);
+  return starts;
+}
+
+// Pixel Data element with a filled Basic Offset Table, or null to leave
+// it as it is (native data, a single frame, or a table already present).
+function withBasicOffsetTable(src: Uint8Array, e: DicomElement, frames: number): Uint8Array | null {
+  if (!e.undefinedLength || frames < 2) return null;
+  const enc = readEncapsulated(src, e);
+  if (enc.bot.end > enc.bot.valueStart) return null;
+  const firstItem = enc.fragments[0].start;
+  const offsets = frameStarts(src, enc, frames).map((i) => enc.fragments[i].start - firstItem);
+  if (offsets[offsets.length - 1] > 0xffffffff) throw new Error("offsets exceed 32 bits");
+  const table = new Uint8Array(4 * frames);
+  const tv = new DataView(table.buffer);
+  offsets.forEach((o, i) => tv.setUint32(4 * i, o, true));
+  return concat([
+    src.subarray(e.start, enc.headerEnd),
+    tagBytes(0xfffee000), u32(table.byteLength), table,
+    src.subarray(firstItem, e.end), // fragments and the delimiter, verbatim
+  ]);
 }
 
 // UID attributes that identify this data (and so are remapped). Coding
@@ -98,6 +156,12 @@ function encodeLevel(src: Uint8Array, els: DicomElement[], explicit: boolean, to
         if (m !== v) { out.push({ tag: e.tag, bytes: element(e.tag, "UI", padded("UI", m), explicit), dirty: true }); continue; }
       }
     }
+    if (top && o.fillBasicOffsetTable && e.tag === 0x7fe00010) {
+      const frames = Number(str(els, 0x00280008) ?? "1");
+      if (els.some((x) => x.tag === 0x7fe00001)) throw new Error("Extended Offset Table present; not adding a Basic Offset Table");
+      const filled = withBasicOffsetTable(src, e, frames);
+      if (filled) { out.push({ tag: e.tag, bytes: filled, dirty: true }); continue; }
+    }
     if (e.items) {
       const itemExplicit = explicit && !e.fromUN;
       const items = e.items.map((it) => encodeLevel(src, it, itemExplicit, false, o));
@@ -168,4 +232,47 @@ export function mintUid(namespace: string, original: string): string {
   let n = 0n;
   for (const x of b) n = (n << 8n) | BigInt(x);
   return `2.25.${n.toString()}`;
+}
+
+function pixelElement(bytes: Uint8Array) {
+  const p = parseDicom(bytes, { stopAtPixelData: false });
+  const e = p.dataset.find((x) => x.tag === 0x7fe00010);
+  if (!e) throw new Error("no Pixel Data element");
+  return { e, frames: Number(str(p.dataset, 0x00280008) ?? "1") };
+}
+
+// The Basic Offset Table entries, or [] when the table is empty.
+export function basicOffsets(bytes: Uint8Array): number[] {
+  const { e } = pixelElement(bytes);
+  const enc = readEncapsulated(bytes, e);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset + enc.bot.valueStart, enc.bot.end - enc.bot.valueStart);
+  return Array.from({ length: dv.byteLength / 4 }, (_, i) => dv.getUint32(4 * i, true));
+}
+
+// True when the BOT has one entry per frame, each pointing exactly at the
+// item tag of that frame's first fragment (offsets counted from the first
+// fragment's item tag).
+export function basicOffsetTableValid(bytes: Uint8Array): boolean {
+  const { e, frames } = pixelElement(bytes);
+  const enc = readEncapsulated(bytes, e);
+  const offsets = basicOffsets(bytes);
+  const first = enc.fragments[0].start;
+  const expected = frameStarts(bytes, enc, frames).map((i) => enc.fragments[i].start - first);
+  return offsets.length === frames && offsets.every((o, i) => o === expected[i]);
+}
+
+// Frame data unchanged: either the whole Pixel Data element is identical,
+// or both are encapsulated with identical fragment items (headers and
+// bytes, in order) and the only change is a Basic Offset Table filled
+// where the source had an empty one.
+export function samePixelFrames(before: Uint8Array, after: Uint8Array): boolean {
+  if (Buffer.compare(pixelDataElement(before), pixelDataElement(after)) === 0) return true;
+  const a = pixelElement(before), b = pixelElement(after);
+  if (!a.e.undefinedLength || !b.e.undefinedLength) return false;
+  const ea = readEncapsulated(before, a.e), eb = readEncapsulated(after, b.e);
+  if (ea.bot.end !== ea.bot.valueStart) return false; // the source table was not empty
+  if (ea.fragments.length !== eb.fragments.length) return false;
+  const fa = before.subarray(ea.fragments[0].start, ea.delimiterStart);
+  const fb = after.subarray(eb.fragments[0].start, eb.delimiterStart);
+  return Buffer.compare(fa, fb) === 0 && basicOffsetTableValid(after);
 }

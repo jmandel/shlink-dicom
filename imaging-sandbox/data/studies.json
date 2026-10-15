@@ -123,7 +123,7 @@
       "studyDate": "2023-04-17",
       "studyTime": "13:05:00",
       "utcOffset": "-04:00",
-      "attribution": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; the label image and the full-resolution level were removed.",
+      "attribution": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed.",
       "header": {
         "_note": "Applied to every instance besides the common patient, date and accession attributes. Values in replaceStrings are replaced wherever they occur, including inside sequences (Container Identifier, Specimen Identifier, the specimen's text items).",
         "set": {
@@ -200,7 +200,7 @@
         "impression": [
           "Lung: invasive adenocarcinoma."
         ],
-        "imageSource": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; the label image and the full-resolution level were removed."
+        "imageSource": "Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed."
       }
     }
   ]

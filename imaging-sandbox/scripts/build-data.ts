@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, rmSync, renameSync, writeFileSync, readdirSync, 
 import { join, resolve, relative, dirname } from "node:path";
 import { readTgz } from "../src/tar.ts";
 import { parseDicom, str, int } from "../src/dicom.ts";
-import { rewriteDicom, pixelDataElement, mintUid, type HeaderSet } from "./lib/dicom-rewrite.ts";
+import { rewriteDicom, samePixelFrames, mintUid, type HeaderSet } from "./lib/dicom-rewrite.ts";
 import { reportLines, reportText, conclusion, BANNER, type ReportInput } from "./lib/report.ts";
 import { buildPdf } from "./lib/pdf.ts";
 
@@ -133,10 +133,10 @@ for (const st of cfg.studies) {
   let studyUID = "", originalStudyUID = "", manufacturer = "", model = "", field = "";
   for (const e of entries) {
     const before = parseDicom(e.bytes, { stopAtPixelData: false });
-    const out = rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid });
+    const out = rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid, fillBasicOffsetTable: true });
     const after = parseDicom(out, { stopAtPixelData: false });
     // Checks: pixel data and transfer syntax untouched, values applied.
-    if (Buffer.compare(pixelDataElement(e.bytes), pixelDataElement(out)) !== 0) throw new Error(`${e.path}: Pixel Data changed`);
+    if (!samePixelFrames(e.bytes, out)) throw new Error(`${e.path}: Pixel Data frames changed`);
     if (after.transferSyntaxUID !== before.transferSyntaxUID) throw new Error(`${e.path}: transfer syntax changed`);
     const d = after.dataset;
     if (str(d, 0x00100010) !== patient.dicomName || str(d, 0x00080050) !== st.accession) throw new Error(`${e.path}: header rewrite not applied`);

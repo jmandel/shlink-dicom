@@ -50,15 +50,21 @@ The build rewrites these DICOM headers:
 | Patient Identity Removed (0012,0062) | removed, since the headers now carry an identity |
 | Slide only: the series, acquisition and timezone dates and times, Study ID, Container Identifier, and the specimen identifiers inside the Specimen Description Sequence | fictional values from the study's `header` block in `data/studies.json` |
 | Slide only: the Clinical Trial attributes (0012,0010–0040), Image Comments (Aperio scan description with the original file name), and private groups 0009 (PixelMed) and 0013 (CTP) | removed |
+| Slide only: the empty Basic Offset Table of each multi-frame (tiled) level | filled with 32-bit offsets, one per frame, pointing at each frame's first fragment item. The source has no Extended Offset Table, and none is added. |
 
 The UIDs are replaced because the original files are public in my-health-data and seeded as the project's public sample share under their own UIDs. Keeping those UIDs would make two different patients claim the same instances.
 
 What is left alone:
-- **Pixel Data.** Its element is copied byte for byte, encapsulated JPEG fragments included.
+- **Pixel Data.** The element is copied byte for byte, except in the slide's three tiled levels, where only the empty Basic Offset Table is filled in. Every fragment (item header and bytes) stays identical and in order, so each frame's compressed data is unchanged. Single-frame and native images (the MRI, the wrist radiographs, the slide's overview and thumbnail) are untouched.
 - **Transfer syntaxes.** The brain MRI stays Explicit VR Little Endian and the wrist radiographs stay JPEG Baseline. The slide keeps JPEG Baseline for its pyramid levels and Explicit VR Little Endian for its overview and thumbnail.
 - **Everything else.** Every other element is copied verbatim; only changed elements, and the sequences and group lengths around them, are re-encoded.
 
-The build stops if any of these checks fails, and `test/data-check.ts` checks them again against the sources. It also checks that no header still contains the source subject, specimen, collection or file names.
+The build stops if any of these checks fails, and `test/data-check.ts` checks them again against the sources. It also checks that no header still contains the source subject, specimen, collection or file names. For each tiled level it also checks that:
+- the offsets point exactly at each frame's first fragment;
+- dcmdump reads the pixel items;
+- pydicom's `get_frame` reads every frame through the table and gets the source's frame. Set `PYDICOM_PYTHON` to a Python with pydicom (3.0.1 tested);
+- dcmtk (`dcmj2pnm`) decodes sample frames identically from the source and the rewritten file;
+- `shl-dicom-decode` decodes the two smaller levels identically.
 
 ### The slide
 
@@ -76,7 +82,7 @@ Two instances of the source series are not used. The full-resolution level (1.05
 
 #### Slide attribution
 
-> Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; the label image and the full-resolution level were removed.
+> Slide image: CPTAC-LUAD, subject C3N-02231, from the National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), distributed by the NCI Imaging Data Commons (https://imaging.datacommons.cancer.gov), DOI 10.5281/zenodo.12666813. Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Changed: patient and specimen attributes replaced with a fictional patient; Basic Offset Tables added to the tiled levels; the label image and the full-resolution level were removed.
 
 The same text is in the slide's ImagingStudy (`note`), in its sample pathology report, in `build/dataset/manifest.json`, and in `out/index.json`.
 

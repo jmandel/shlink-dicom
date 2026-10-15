@@ -17,7 +17,7 @@
 import { mkdirSync, rmSync, readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseDicom, str } from "../src/dicom.ts";
-import { pixelDataElement } from "../scripts/lib/dicom-rewrite.ts";
+import { pixelDataElement, samePixelFrames, basicOffsets, basicOffsetTableValid } from "../scripts/lib/dicom-rewrite.ts";
 import { pdfPages } from "./pdf-text.ts";
 import { BANNER } from "../scripts/lib/report.ts";
 
@@ -66,7 +66,8 @@ const cacheDirs = (process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean);
 const findLocal = (name: string) => [join(ROOT, "build/sources", name), join(ROOT, "../data/samples", name), ...cacheDirs.map((d) => join(d, name))].find(existsSync)!;
 const walk = (d: string): string[] => readdirSync(d).flatMap((n) => { const f = join(d, n); return statSync(f).isDirectory() ? walk(f) : [f]; });
 const collectUids = (els: any[]) => { for (const e of els) { if (e.items) e.items.forEach(collectUids); else if (ID_UID_TAGS.includes(e.tag)) { const v = str([e], e.tag); if (v) allOriginalUids.add(v); } } };
-let compared = 0, pixelSame = 0, tsSame = 0, othersSame = 0;
+let compared = 0, pixelSame = 0, pixelBot = 0, tsSame = 0, othersSame = 0;
+const botPairs: { before: string; after: string; frames: number }[] = [];
 for (const st of manifest.studies) {
   const cfgStudy = studiesCfg.studies.find((x: any) => x.id === st.id);
   const h = cfgStudy.header ?? {};
@@ -97,10 +98,14 @@ for (const st of manifest.studies) {
     const pa = parseDicom(after, { stopAtPixelData: false });
     compared++;
     if (Buffer.compare(pixelDataElement(before), pixelDataElement(after)) === 0) pixelSame++;
+    else if (samePixelFrames(before, after)) {
+      pixelBot++;
+      botPairs.push({ before: f, after: join(DS, built.path), frames: Number(str(pa.dataset, 0x00280008)) });
+    }
     if (pa.transferSyntaxUID === pb.transferSyntaxUID) tsSame++;
     const replaced = new Set(Object.keys(h.replaceStrings ?? {}));
     const same = pb.dataset
-      .filter((e) => !rewritten.has(e.tag) && !removedGroups.has(e.tag >>> 16) && e.vr !== "UI" && !e.items && !replaced.has(str([e], e.tag) ?? "\0"))
+      .filter((e) => e.tag !== 0x7fe00010 && !rewritten.has(e.tag) && !removedGroups.has(e.tag >>> 16) && e.vr !== "UI" && !e.items && !replaced.has(str([e], e.tag) ?? "\0"))
       .every((e) => {
         const a = pa.dataset.find((x) => x.tag === e.tag);
         return a && Buffer.compare(before.subarray(e.start, e.end), after.subarray(a.start, a.end)) === 0;
@@ -109,9 +114,51 @@ for (const st of manifest.studies) {
   }
 }
 const expectedInstances = manifest.studies.reduce((n: number, st: any) => n + st.files.length, 0);
-check(`Pixel Data element byte-identical for ${pixelSame}/${compared} instances`, compared === expectedInstances && pixelSame === compared);
+check(`Pixel Data: element byte-identical for ${pixelSame} instances, fragments identical with a filled Basic Offset Table for ${pixelBot}; ${pixelSame + pixelBot}/${compared} in all`, compared === expectedInstances && pixelSame + pixelBot === compared);
+check("Basic Offset Table filled exactly for the multi-frame slide levels (3), nowhere else", pixelBot === 3 && botPairs.every((b) => b.after.includes("/slide-lung-2023/") && b.frames > 1));
 check(`transfer syntax unchanged for ${tsSame}/${compared} instances`, tsSame === compared);
 check(`every other non-UID top-level element byte-identical for ${othersSame}/${compared} instances`, othersSame === compared);
+
+console.log("\nOffset tables");
+{
+  const has = (cmd: string) => Bun.spawnSync(["sh", "-c", `command -v ${cmd}`]).exitCode === 0;
+  const py = process.env.PYDICOM_PYTHON ?? "python3";
+  const pydicomOk = Bun.spawnSync([py, "-I", "-c", "import pydicom"]).exitCode === 0;
+  const decoder = process.env.SHL_DICOM_DECODE ?? join(ROOT, "../codecs/target/coord/release/shl-dicom-decode");
+  for (const b of botPairs) {
+    const label = `${b.frames}-frame level`;
+    const after = new Uint8Array(readFileSync(b.after));
+    const offs = basicOffsets(after);
+    check(`${label}: BOT has ${offs.length} 32-bit entries, each pointing at its frame's first fragment item`, offs.length === b.frames && basicOffsetTableValid(after));
+    check(`${label}: no Extended Offset Table`, !parseDicom(after, { stopAtPixelData: false }).dataset.some((e) => e.tag === 0x7fe00001));
+    if (has("dcmdump")) {
+      const out = Bun.spawnSync(["dcmdump", "-q", b.after]);
+      const items = [...out.stdout.toString().matchAll(/^\s+\(fffe,e000\) pi .*#\s*(\d+),/gm)].map((m) => Number(m[1]));
+      check(`${label}: dcmdump reads the pixel items (BOT of ${4 * b.frames} bytes + ${b.frames} fragments)`, out.exitCode === 0 && items.length === b.frames + 1 && items[0] === 4 * b.frames, { exit: out.exitCode, n: items.length, bot: items[0] });
+    }
+    if (pydicomOk) {
+      const r = Bun.spawnSync([py, "-I", join(import.meta.dir, "check-frames.py"), b.after, b.before]);
+      const j = JSON.parse(r.stdout.toString() || "{}");
+      check(`${label}: pydicom get_frame through the BOT reads every frame, equal to the source (${j.equal}/${j.frames})`, r.exitCode === 0 && j.bot === b.frames && j.equal === b.frames && j.source_frames === b.frames, r.stderr.toString().slice(-300));
+    } else console.log("  skip pydicom checks (set PYDICOM_PYTHON to a Python with pydicom)");
+    if (has("dcmj2pnm")) {
+      const picks = [0, 1, Math.floor(b.frames / 2), b.frames - 1].map((i) => i + 1);
+      let same = 0;
+      for (const k of picks) {
+        const run = (f: string, o: string) => Bun.spawnSync(["dcmj2pnm", "-q", "--frame", String(k), "--write-raw-pnm", f, o]).exitCode;
+        const oa = join(WORK, "a.pnm"), ob = join(WORK, "b.pnm");
+        if (run(b.before, ob) === 0 && run(b.after, oa) === 0 && Buffer.compare(readFileSync(oa), readFileSync(ob)) === 0) same++;
+      }
+      check(`${label}: dcmtk decodes frames ${picks.join(", ")} identically from the source and the rewritten file`, same === picks.length, same);
+    }
+    if (existsSync(decoder) && b.frames <= 300) {
+      const oa = join(WORK, "a.raw"), ob = join(WORK, "b.raw");
+      const ra = Bun.spawnSync([decoder, b.after, oa]), rb = Bun.spawnSync([decoder, b.before, ob]);
+      const h = (f: string) => new Bun.CryptoHasher("sha256").update(readFileSync(f)).digest("hex");
+      check(`${label}: shl-dicom-decode output of all frames identical for the source and the rewritten file`, ra.exitCode === 0 && rb.exitCode === 0 && h(oa) === h(ob), (ra.stderr.toString() + rb.stderr.toString()).slice(-300));
+    }
+  }
+}
 
 console.log("\nHeaders");
 let headerOk = 0, total = 0, leaked = 0;
