@@ -10,7 +10,7 @@
 //    MPEG-2 loads it). HEVC shows a message naming the format when the browser has no HEVC decoder. Notes for audio left out and for stereo/3D views are checked.
 // Screenshots go to docs/shots/video/, numbers to docs/shots/video/results.json. The share is
 // deleted at the end (--keep keeps it).
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -74,7 +74,7 @@ const DEVICES = {
   phone: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 },
 };
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium", args: ["--autoplay-policy=no-user-gesture-required"] });
+const browser = await launchBrowser({ args: ["--autoplay-policy=no-user-gesture-required"] });
 
 async function newPage(dev) {
   const context = await browser.newContext(DEVICES[dev]);
@@ -298,6 +298,7 @@ await runDevice("desktop");
 await runDevice("phone");
 await runCine("desktop");
 await runCine("phone");
+pageErrorCheck(browser, check);
 await browser.close();
 
 if (!keep) {

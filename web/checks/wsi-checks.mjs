@@ -6,7 +6,7 @@
 // (zoom to full resolution on tissue, six pans, zoom out), tile pixels against a reference decode
 // (web/view/wsi-tools/ref_tiles.py), keyboard, label sheet, then phone touch gestures.
 // Screenshots go to docs/shots/wsi/, numbers to docs/shots/wsi/results.json.
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
@@ -32,7 +32,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 };
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const browser = await launchBrowser();
 
 async function newPage(dev) {
   const context = await browser.newContext(DEVICES[dev]);
@@ -723,6 +723,8 @@ for (const dev of ["desktop", "phone"]) {
   check(`${P}: no console errors`, errors.length === 0, errors.slice(0, 5).join(" | "));
   await context.close();
 }
+
+pageErrorCheck(browser, check);
 
 await browser.close();
 writeFileSync(`${SHOTS}results.json`, JSON.stringify({ when: new Date().toISOString(), numbers, results }, null, 2));

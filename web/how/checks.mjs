@@ -2,7 +2,7 @@
 // serving a fresh `bun web/build.ts`.
 //   node web/how/checks.mjs [--only=desktop|phone390]
 // Screenshots go to docs/shots/how/. Exits non-zero if any check fails.
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "../checks/browser.mjs";
 import { mkdirSync } from "node:fs";
 
 const BASE = process.env.BASE ?? "http://localhost:3333";
@@ -21,7 +21,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 };
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const browser = await launchBrowser();
 
 /** Requests that are meant to fail: the sandbox's left-out series and everything after revocation. */
 const expected404 = (url) => /\/(shl|cap)\//.test(url);
@@ -260,6 +260,7 @@ for (const dev of Object.keys(DEVICES)) {
     check(`${dev}: run completed`, false, e.message.split("\n")[0]);
   }
 }
+pageErrorCheck(browser, check);
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

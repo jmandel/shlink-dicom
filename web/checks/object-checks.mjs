@@ -5,11 +5,14 @@
 //   BASE=http://localhost:3350 node web/checks/object-checks.mjs [--only=case]
 // Expected values come from pydicom (expect.py), not from the viewer's own parser.
 // Screenshots go to docs/shots/objects/.
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "./browser.mjs";
+import { downloadMatrix } from "./download-matrix.mjs";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const BASE = process.env.BASE ?? "http://localhost:3350";
 const SHOTS = new URL("../../docs/shots/objects/", import.meta.url).pathname;
+const ROOT = new URL("../../", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
 const F = JSON.parse(readFileSync("/tmp/objects-fixtures.json", "utf8"));
 const E = JSON.parse(readFileSync("/tmp/objects-expect.json", "utf8"));
@@ -24,14 +27,16 @@ const check = (name, ok, detail = "") => {
 const bySop = new Map(Object.values(E).map((e) => [e.sopInstance, e]));
 const bySeries = (uid) => Object.values(E).filter((e) => e.series === uid);
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const browser = await launchBrowser();
 const DEV = {
   desktop: { viewport: { width: 1440, height: 900 } },
   phone: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
 };
 
 async function open(caseId, dev = "desktop") {
-  const context = await browser.newContext(DEV[dev]);
+  const context = await browser.newContext({ ...DEV[dev], acceptDownloads: true });
+  // Downloads go through the Blob path so the checks can capture them.
+  await context.addInitScript(() => delete window.showSaveFilePicker);
   const page = await context.newPage();
   const errors = [];
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
@@ -329,9 +334,58 @@ async function pmapOverlay() {
   await context.close();
 }
 
+/** Originals of a share's files (sample-originals.py), cached per name. */
+function originals(name, files) {
+  const out = `/tmp/originals-${name}.json`;
+  if (!existsSync(out)) writeFileSync(out, execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "python", `${ROOT}web/checks/sample-originals.py`, ...files], { maxBuffer: 1 << 26 }));
+  return JSON.parse(readFileSync(out, "utf8"));
+}
+
+/** The download menu on object views (report, PDF, waveform, others) and on video, desktop and phone. */
+async function objectDownloads() {
+  for (const dev of ["desktop", "phone"]) {
+    for (const c of ["sr-dose", "pdf", "waveform-ecg", "synthetic-objects", "enhanced-mf", "cine-mf"]) {
+      const cs = M.cases.find((x) => x.id === c);
+      const skipped = new Set((F[c].skipped ?? []).map((x) => x.name));
+      const O = originals(c, cs.files.filter((f) => !skipped.has(f)).map((f) => `${M.dataRoot}/${c}/${f}`));
+      const { context, page, errors } = await open(c, DEV[dev] ? dev : "desktop");
+      await page.locator(".study-open").first().click();
+      await page.waitForSelector(".series-btn");
+      const n = await page.locator(".series-btn").count();
+      for (let k = 0; k < (dev === "desktop" ? n : 1); k++) {
+        await page.locator(`.series-btn[data-series="${k}"]`).click();
+        await waitObject(page).catch(() => {});
+        await downloadMatrix(page, `downloads/${dev} ${c} series ${k + 1}`, O, check, { image: true, series: dev === "desktop" });
+      }
+      check(`downloads/${dev} ${c}: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
+      await context.close();
+    }
+    // Video: the first video study of the video fixtures.
+    const vf = process.env.VIDEO_FIXTURES_JSON ?? "/tmp/video-fixtures.json";
+    if (!existsSync(vf)) {
+      check(`downloads/${dev} video: fixture`, false, "run web/checks/video-fixtures.ts");
+      continue;
+    }
+    const V = JSON.parse(readFileSync(vf, "utf8"));
+    const O = originals(`video-${vf.replace(/\W+/g, "-")}`, V.cases.map((x) => x.file));
+    const base = new URL(JSON.parse(Buffer.from(V.link.slice(V.link.indexOf("/") + 1), "base64url").toString()).url).origin;
+    const context = await browser.newContext({ ...DEV[dev], acceptDownloads: true });
+    await context.addInitScript(() => delete window.showSaveFilePicker);
+    const page = await context.newPage();
+    await page.goto(`${base}/view#${V.link}`);
+    await page.waitForSelector(".study-open");
+    await page.locator(".study-open").first().click();
+    await page.waitForSelector(".series-btn");
+    await page.waitForTimeout(3000);
+    await downloadMatrix(page, `downloads/${dev} video`, O, check, { image: true });
+    await context.close();
+  }
+}
+
 const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap"];
 try {
   for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "downloads") await objectDownloads().catch((e) => check("downloads: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "pmap-overlay") await pmapOverlay().catch((e) => check("pmap overlay: flow threw", false, String(e).slice(0, 300)));
   if (!only || only === "video-labels") await videoLabels().catch((e) => check("video labels: flow threw", false, String(e).slice(0, 300)));
   if (!only || only === "slide-layers") await slideLayers().catch((e) => check("slide layers: flow threw", false, String(e).slice(0, 300)));
@@ -339,6 +393,7 @@ try {
     for (const [c, k] of [["sr-dose", "report"], ["waveform-ecg", "waveform"], ["pdf", "PDF"], ["kos", "key image"], ["model-stl", "3D"]])
       await phoneCase(c, k).catch((e) => check(`phone/${c}: flow threw`, false, String(e).slice(0, 300)));
 } finally {
+  pageErrorCheck(browser, check);
   await browser.close();
 }
 const failed = results.filter((r) => !r.ok);

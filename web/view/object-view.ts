@@ -38,6 +38,8 @@ export class ObjectView {
   private abort = new AbortController();
   private model: ModelView | null = null;
   series: SeriesEntry | null = null;
+  /** The instance shown, within `series`. */
+  index = 0;
 
   constructor(stage: HTMLElement, private ctx: ObjectContext) {
     this.box = el("div", "object-view hidden");
@@ -68,6 +70,7 @@ export class ObjectView {
     this.abort = new AbortController();
     const signal = this.abort.signal;
     this.series = se;
+    this.index = index;
     this.box.classList.remove("hidden");
     this.box.dataset.kind = kind;
     this.box.scrollTop = 0;

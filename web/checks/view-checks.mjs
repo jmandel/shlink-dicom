@@ -2,7 +2,8 @@
 //   node web/checks/view-checks.mjs [--only=name] [--perf]
 // Each run makes fresh test links first (web/checks/fixtures.ts) and deletes them at the end.
 // Screenshots go to docs/shots/view/. Exits non-zero if any check fails.
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "./browser.mjs";
+import { downloadMatrix } from "./download-matrix.mjs";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
@@ -28,7 +29,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 };
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const browser = await launchBrowser();
 
 async function newPage(dev, opts = {}) {
   const context = await browser.newContext({ ...DEVICES[dev], acceptDownloads: true });
@@ -185,15 +186,15 @@ async function flowPublic(dev) {
     // The page still scrolls when a drag starts outside the image (overview).
   }
 
-  // Download sheet.
-  await page.click("#btn-download");
+  // Download menu.
+  await page.click("#btn-download-menu");
   await page.waitForSelector("#sheet-download:not(.hidden)");
   await page.waitForTimeout(250);
   await page.screenshot({ path: `${SHOTS}${dev}-download-sheet.png` });
   if (dev !== "desktop") await layoutChecks(page, `${label} download sheet`, dev);
   if (dev === "desktop" || dev === "phone390") {
     const dl = page.waitForEvent("download", { timeout: 60000 });
-    await page.locator(".dl-option").nth(1).click(); // This series
+    await page.click('.dl-option[data-choice="series"]');
     const d = await dl;
     const path = `/tmp/view-${dev}-${d.suggestedFilename()}`;
     await d.saveAs(path);
@@ -637,6 +638,46 @@ async function perf() {
   console.log(JSON.stringify(out, null, 2));
 }
 
+// The download menu in every view state of every study in the sample, against the original
+// files (web/checks/sample-originals.py over the sample archives).
+async function flowDownloads(dev) {
+  const label = `downloads/${dev}`;
+  const O = JSON.parse(readFileSync(process.env.SAMPLE_ORIGINALS ?? "/tmp/sample-originals.json", "utf8"));
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  const n = await page.locator(".study-open").count();
+  const idle = () => page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 180000 });
+  for (let si = 0; si < n; si++) {
+    if (si) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    await page.locator(".study-open").nth(si).click();
+    await page.waitForSelector("#screen-viewer:not(.hidden)");
+    await idle();
+    await page.waitForTimeout(500);
+    const name = (await page.textContent("#top-title")).trim();
+    const slide = await page.evaluate(() => document.body.classList.contains("slide-mode"));
+    await downloadMatrix(page, `${label} ${name} ${slide ? "slide" : "acquired"}`, O, check, { image: true, series: true, study: dev === "desktop" });
+    if (await page.isVisible("#view-plane")) {
+      for (const plane of ["sagittal", "coronal"]) {
+        await page.evaluate((p) => window.__viewHooks.enterMpr(p), plane);
+        await idle();
+        const cur = await page.evaluate(() => window.__viewHooks.current());
+        if (cur.mpr !== plane) {
+          check(`${label} ${name} ${plane}: reformat shown`, false, (await page.textContent("#stage-msg")).slice(0, 120));
+          continue;
+        }
+        await downloadMatrix(page, `${label} ${name} ${plane}`, O, check);
+      }
+      await page.evaluate(() => window.__viewHooks.enterMpr(""));
+    }
+  }
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 const flows = {
@@ -648,6 +689,9 @@ const flows = {
   reports: () => Promise.all(["desktop", "phone390"].map(flowReports)),
   "sample-reports": () => Promise.all(["desktop", "phone390"].map(flowSampleReports)),
   pages: () => Promise.all(["desktop", "phone390", "landscape"].map(flowPages)),
+  downloads: async () => {
+    for (const dev of ["desktop", "phone390"]) await flowDownloads(dev);
+  },
 };
 try {
   for (const [name, f] of Object.entries(flows)) {
@@ -660,6 +704,7 @@ try {
   }
   if (wantPerf) await perf();
 } finally {
+  pageErrorCheck(browser, check);
   await browser.close();
   for (const sh of F.shares) {
     await fetch(`${BASE}/api/shares/${sh.sid}`, { method: "DELETE", headers: { Authorization: `Bearer ${sh.token}` } }).catch(() => {});

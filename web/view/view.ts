@@ -78,7 +78,8 @@ function show(screen: Screen) {
   const inViewer = screen === "viewer";
   document.body.classList.toggle("in-viewer", inViewer);
   $("btn-back").classList.toggle("hidden", !inViewer);
-  $("btn-download").classList.toggle("hidden", !(inViewer && share));
+  $("dl-split").classList.toggle("hidden", !(inViewer && share));
+  if (inViewer && share) updateDownloadButton();
   $("btn-report").classList.toggle("hidden", !(inViewer && share && studyReports().length > 0));
   if (!inViewer) closeReports();
   $("btn-trust").classList.toggle("hidden", !(share && (screen === "overview" || inViewer)));
@@ -962,6 +963,8 @@ function openStudy(si: number, push = true) {
   document.body.classList.remove("scrolling");
   window.scrollTo(0, 0);
   studyIdx = si;
+  seriesIdx = -1;
+  mpr = null;
   studyAbort.abort();
   studyAbort = new AbortController();
   show("viewer");
@@ -1046,8 +1049,12 @@ function selectSeries(k: number) {
   seriesAbort.abort();
   seriesAbort = new AbortController();
   const prevFile = seriesIdx >= 0 ? study()?.series[seriesIdx]?.fileId : undefined;
+  if (!study()?.series[k]) return;
   seriesIdx = k;
   const se = series();
+  updateDownloadButton();
+  // Reformats are for image series (set again below when this is one).
+  $("view-plane").classList.add("hidden");
   if (prevFile && prevFile !== se.fileId) {
     share!.loader.cancelQueued((fid, p) => fid === prevFile && p >= FetchPriority.Prefetch);
   }
@@ -1806,40 +1813,100 @@ function closeSheet() {
   openSheetId = null;
 }
 
-function openDownloadSheet(scope: ExportScope, withImage: boolean) {
+interface DownloadChoice {
+  id: "image" | "series" | "study" | "all";
+  title: string;
+  detail: string;
+  bytes: number;
+  /** Why the choice is not available here (shown greyed out). */
+  disabled?: string;
+  run: () => void;
+}
+
+/** The stored instance on screen, or why there is none (a reformat, a slide). Null with no series open. */
+function instanceOnScreen(): { se: SeriesEntry; i: number } | { reason: string } | null {
+  const se = studyIdx >= 0 && seriesIdx >= 0 ? study()?.series[seriesIdx] : undefined;
+  if (!se) return null;
+  if (objectView?.active && objectView.series === se) return { se, i: objectView.index };
+  if (mpr) return { reason: "Reformatted in the viewer; not a stored image." };
+  if (isSlideSeries(se)) return { reason: "A slide is stored as several files, one per magnification; the series has them all." };
+  const { inst } = sliceTarget(sliceIdx);
+  return inst >= 0 && inst < se.instances.length ? { se, i: inst } : null;
+}
+
+/**
+ * What can be downloaded from the view on screen, with sizes: this study (the default), this
+ * series, this image, everything shared. Only stored files: a view made in the viewer offers its
+ * source series and study, and "This image" greyed out with the reason. Defined for every view state.
+ */
+function downloadChoices(): { choices: DownloadChoice[]; def: DownloadChoice | null } {
+  const choices: DownloadChoice[] = [];
+  const st = share && studyIdx >= 0 ? study() : undefined;
+  if (st && st.series.length) {
+    const n = exportSize({ kind: "study", study: st });
+    choices.push({ id: "study", title: "This study", detail: `${studyTitle(st)} · ${plural(n.files, "file")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, bytes: n.bytes, run: () => void runZip({ kind: "study", study: st }) });
+  }
+  const se = st && seriesIdx >= 0 ? st.series[seriesIdx] : undefined;
+  if (st && se) {
+    const n = exportSize({ kind: "series", study: st, series: se });
+    choices.push({ id: "series", title: "This series", detail: `${se.description ?? modalityName(se.modality)} · ${plural(n.files, "file")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, bytes: n.bytes, run: () => void runZip({ kind: "series", study: st, series: se }) });
+  }
+  const on = instanceOnScreen();
+  if (on && "reason" in on) choices.push({ id: "image", title: "This image", detail: on.reason, bytes: 0, disabled: on.reason, run: () => {} });
+  else if (on) {
+    const inst = on.se.instances[on.i];
+    const kind = kindOf(on.se);
+    const what = kind === "image" || kind === "pmap" ? "This image" : kind === "video" ? "This video" : "This file";
+    choices.push({ id: "image", title: what, detail: `One DICOM file (.dcm) · ${formatBytes(inst.length)}`, bytes: inst.length, run: () => void runOne(on.se, on.i) });
+  }
+  const studies = share ? share.index.studies.filter((x) => x.series.length) : [];
+  if (studies.length) {
+    const n = exportSize({ kind: "all", studies });
+    choices.push({ id: "all", title: "Everything shared", detail: `${plural(studies.length, "study", "studies")} · ${plural(n.files, "file")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, bytes: n.bytes, run: () => void runZip({ kind: "all", studies }) });
+  }
+  return { choices, def: choices.find((c) => c.id === "study") ?? choices.find((c) => c.id === "all") ?? null };
+}
+
+/** The split button: its main part saves the default choice (the study) and shows its size. */
+function updateDownloadButton() {
+  const { def } = downloadChoices();
+  const word = def?.id === "study" ? "study" : "all";
+  $("dl-text").textContent = def ? `Download ${word}` : "Download";
+  $("dl-size").textContent = def ? formatBytes(def.bytes) : "";
+  $("btn-download").setAttribute("aria-label", def ? `Download ${word === "all" ? "everything shared" : "this study"}, ${formatBytes(def.bytes)}` : "Download");
+  ($("btn-download") as HTMLButtonElement).disabled = !def;
+}
+
+function downloadDefault() {
+  const { def } = downloadChoices();
+  if (!def) return;
+  openDownloadSheet(false);
+  def.run();
+}
+
+/** The download menu: every choice with its size. `list` false opens it straight on the progress of a choice. */
+function openDownloadSheet(list = true) {
   const opts = $("dl-options");
   opts.textContent = "";
   $("dl-progress").classList.add("hidden");
-  opts.classList.remove("hidden");
-  const st = scope.study;
-  const add = (title: string, detail: string, run: () => void) => {
+  opts.classList.toggle("hidden", !list);
+  for (const c of downloadChoices().choices) {
     const b = el("button", "dl-option");
     b.type = "button";
-    b.append(el("strong", undefined, title), el("span", undefined, detail));
-    b.addEventListener("click", run);
+    b.dataset.choice = c.id;
+    if (c.disabled) {
+      b.disabled = true;
+      b.dataset.reason = c.disabled;
+    } else b.dataset.bytes = String(c.bytes);
+    b.append(el("strong", undefined, c.title), el("span", undefined, c.detail));
+    b.addEventListener("click", c.run);
     opts.append(b);
-  };
-  const studySize = exportSize({ kind: "study", study: st });
-  add("This study", `${studyTitle(st)} · ${plural(studySize.files, "file")} · ${formatBytes(studySize.bytes)} · ZIP with DICOMDIR`, () =>
-    void runZip({ kind: "study", study: st }),
-  );
-  if (scope.kind === "series" || withImage) {
-    const se = scope.kind === "series" ? scope.series : series();
-    const s = exportSize({ kind: "series", study: st, series: se });
-    add("This series", `${se.description ?? modalityName(se.modality)} · ${plural(s.files, "file")} · ${formatBytes(s.bytes)} · ZIP with DICOMDIR`, () =>
-      void runZip({ kind: "series", study: st, series: se }),
-    );
-  }
-  if (withImage) {
-    const se = series();
-    const { inst } = sliceTarget(sliceIdx);
-    add("This image", `One DICOM file (.dcm) · ${formatBytes(se.instances[inst].length)}`, () => void runOne(se, inst));
   }
   openSheet("sheet-download");
 }
 
 async function runZip(scope: ExportScope) {
-  const name = exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined) + ".zip";
+  const name = (scope.kind === "all" ? "shared-imaging" : exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined)) + ".zip";
   // Ask for the file first, while the click still counts as a user gesture.
   const target = await openSaveTarget(name, "application/zip", ".zip");
   if (!target) return;
@@ -1966,7 +2033,8 @@ function wireStatic() {
   });
   $("btn-reset").addEventListener("click", () => (slideView?.active ? slideView.fit() : resetView()));
   $("btn-label").addEventListener("click", () => void openLabelSheet());
-  $("btn-download").addEventListener("click", () => openDownloadSheet({ kind: "series", study: study(), series: series() }, !isSlideSeries(series())));
+  $("btn-download").addEventListener("click", downloadDefault);
+  $("btn-download-menu").addEventListener("click", () => openDownloadSheet());
   $("btn-trust").addEventListener("click", openTrustSheet);
   $("btn-report").addEventListener("click", () => ($("report-panel").classList.contains("hidden") ? openReports(studyReports()) : closeReports()));
   $("btn-report-close").addEventListener("click", closeReports);
@@ -2076,6 +2144,16 @@ function closeSheetForce() {
   valueAt,
   /** Image pixel under a client point. */
   pixelAtClient,
+  /** What is open, for the download checks: study and series UIDs, and the stored instance on screen (or why there is none). */
+  current: () => {
+    const on = instanceOnScreen();
+    return {
+      study: studyIdx >= 0 ? study()?.studyInstanceUid ?? null : null,
+      series: studyIdx >= 0 && seriesIdx >= 0 ? study()?.series[seriesIdx]?.uid ?? null : null,
+      onScreen: on && "reason" in on ? { reason: on.reason } : on ? { uid: on.se.instances[on.i].uid } : null,
+      mpr: mpr?.plane ?? null,
+    };
+  },
   /** Client point at the centre of image pixel (x, y). */
   clientAt: (x: number, y: number) => {
     if (!viewport || !shown) return null;

@@ -1,5 +1,5 @@
-// "Download originals": the shared DICOM files, byte for byte, as a ZIP with a DICOMDIR (a study
-// or a series), or one .dcm file. Series are read in runs of a few MB, so memory stays bounded and
+// "Download originals": the shared DICOM files, byte for byte, as a ZIP with a DICOMDIR (a series,
+// a study or every study shared), or one .dcm file. Series are read in runs of a few MB, so memory stays bounded and
 // bytes reach the save target as they are verified.
 import type { SeriesEntry, StudyEntry } from "./bundle";
 import { buildDicomdir, type DicomdirEntry } from "./dicomdir";
@@ -16,14 +16,20 @@ export interface ExportProgress {
 }
 
 export type ExportScope =
+  | { kind: "all"; studies: StudyEntry[] }
   | { kind: "study"; study: StudyEntry }
   | { kind: "series"; study: StudyEntry; series: SeriesEntry };
+
+/** The studies of a scope, each with the series it includes. */
+function scopeStudies(scope: ExportScope): SeriesEntry[][] {
+  return scope.kind === "all" ? scope.studies.map((st) => st.series) : scope.kind === "study" ? [scope.study.series] : [[scope.series]];
+}
 
 const pad = (n: number) => String(n).padStart(6, "0");
 
 /** Bytes and file count an export will contain (before the DICOMDIR). */
 export function exportSize(scope: ExportScope): { files: number; bytes: number } {
-  const list = scope.kind === "study" ? scope.study.series : [scope.series];
+  const list = scopeStudies(scope).flat();
   return {
     files: list.reduce((a, s) => a + s.instances.length, 0),
     bytes: list.reduce((a, s) => a + s.plaintextLength, 0),
@@ -42,30 +48,32 @@ export async function exportZip(
   onProgress?: (p: ExportProgress) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const seriesList = scope.kind === "study" ? scope.study.series : [scope.series];
   const total = exportSize(scope);
   const zip = new ZipWriter(sink);
   const dir: DicomdirEntry[] = [];
   const progress: ExportProgress = { files: 0, totalFiles: total.files, bytes: 0, totalBytes: total.bytes };
   onProgress?.(progress);
   try {
-    for (let s = 0; s < seriesList.length; s++) {
-      const series = seriesList[s];
-      for (const plan of planRuns(series)) {
-        if (signal?.aborted) throw new DOMException("export cancelled", "AbortError");
-        const files = await loader.run(series, plan, { priority: FetchPriority.Background, signal });
-        for (let k = 0; k < files.length; k++) {
-          const i = plan.firstInstance + k;
-          const id = ["DICOM", "ST000001", `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
-          await zip.add(id.join("/"), files[k]);
-          try {
-            dir.push({ fileId: id, header: readDicomHeader(files[k]) });
-          } catch {
-            // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
+    const studies = scopeStudies(scope);
+    for (let t = 0; t < studies.length; t++) {
+      for (let s = 0; s < studies[t].length; s++) {
+        const series = studies[t][s];
+        for (const plan of planRuns(series)) {
+          if (signal?.aborted) throw new DOMException("export cancelled", "AbortError");
+          const files = await loader.run(series, plan, { priority: FetchPriority.Background, signal });
+          for (let k = 0; k < files.length; k++) {
+            const i = plan.firstInstance + k;
+            const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
+            await zip.add(id.join("/"), files[k]);
+            try {
+              dir.push({ fileId: id, header: readDicomHeader(files[k]) });
+            } catch {
+              // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
+            }
+            progress.files++;
+            progress.bytes += files[k].byteLength;
+            onProgress?.(progress);
           }
-          progress.files++;
-          progress.bytes += files[k].byteLength;
-          onProgress?.(progress);
         }
       }
     }

@@ -29,10 +29,16 @@
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10.5A.5.5 0 0 1 6.5 20V4a.5.5 0 0 1 .5-.5zM14 3.5V8h4M9.5 12h5M9.5 15.5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
       <span class="rep-text">Report</span>
     </button>
-    <button id="btn-download" class="btn btn-ghost hidden" type="button" aria-haspopup="dialog" aria-label="Download originals">
-      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <span class="dl-text">Download</span>
-    </button>
+    <div id="dl-split" class="dl-split hidden">
+      <button id="btn-download" class="btn btn-ghost dl-main" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="dl-text" class="dl-text">Download</span>
+        <span id="dl-size" class="dl-size"></span>
+      </button>
+      <button id="btn-download-menu" class="btn btn-ghost dl-more" type="button" aria-haspopup="dialog" aria-label="Download choices">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
   </header>
 
   <main id="main">
@@ -129,7 +135,7 @@
   <div id="sheet-backdrop" class="sheet-backdrop hidden"></div>
   <section id="sheet-download" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="dl-title">
     <div class="sheet-grip" aria-hidden="true"></div>
-    <h2 id="dl-title">Download originals</h2>
+    <h2 id="dl-title">Download</h2>
     <p class="muted small">The DICOM files exactly as they were shared. Each ZIP includes a DICOMDIR index, as on an imaging CD.</p>
     <div id="dl-options" class="dl-options"></div>
     <div id="dl-progress" class="dl-progress hidden" aria-live="polite">

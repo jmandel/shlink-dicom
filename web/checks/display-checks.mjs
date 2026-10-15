@@ -13,7 +13,7 @@
 //   uv run --project codec-corpus python web/checks/objects/expect.py > /tmp/objects-expect.json
 //   bun web/checks/objects-fixtures.ts http://localhost:3350
 //   BASE=http://localhost:3350 node web/checks/display-checks.mjs [--only=case]
-import { chromium } from "playwright-core";
+import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -44,7 +44,7 @@ function dcmtk(caseId, f, opts, tag) {
 }
 const dataUrl = (p) => `data:image/png;base64,${readFileSync(p).toString("base64")}`;
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/chromium" });
+const browser = await launchBrowser();
 
 /** Opens a case and shows the image of file `f` (frame `frame`, 0-based). */
 async function show(caseId, f, frame = 0, dev = { viewport: { width: 1280, height: 860 } }) {
@@ -317,6 +317,7 @@ try {
   await icc();
   await geometry();
 } finally {
+  pageErrorCheck(browser, check);
   await browser.close();
 }
 const failed = results.filter((r) => !r.ok);
