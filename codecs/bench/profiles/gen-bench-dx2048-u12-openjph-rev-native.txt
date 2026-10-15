@@ -1,0 +1,22 @@
+htj2k/gen-bench-dx2048-u12-openjph-rev (DX 2048² u12 lossless (synthetic)) — native (perf record, 4s loop)
+
+self time by crate
+   56.4%  hayro_jpeg2000
+   17.9%  other
+   12.3%  shl_codec_jpeg2000
+    5.9%  fearless_simd
+    4.6%  libc/alloc
+    0.4%  shl_dicom_decode
+
+self time by function (top 25)
+   27.6%  hayro_jpeg2000::j2c::decode::decode_component_tile_bit_planes
+   23.1%  hayro_jpeg2000::j2c::idwt::filter_2d
+   17.9%  floorf
+   12.3%  shl_codec_jpeg2000::prep::write_rows::<2, shl_codec_jpeg2000::decode::{closure#6}>
+    4.6%  (libc.so.6)
+    4.2%  <hayro_jpeg2000::j2c::ht::streams::FwdReader<255>>::read
+    2.5%  <fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd>::vectorize::vectorize_avx2::<hayro_jpeg2000::j2c::idwt::filter...
+    2.3%  <fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd>::vectorize::vectorize_avx2::<hayro_jpeg2000::j2c::idwt::interl...
+    1.4%  <hayro_jpeg2000::j2c::ht::streams::RevReader>::read
+    1.1%  <fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd>::vectorize::vectorize_avx2::<hayro_jpeg2000::j2c::decode::appl...
+    0.4%  shl_dicom_decode::pixel::fix_unused_bits

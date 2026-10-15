@@ -1,0 +1,25 @@
+[package]
+name = "decrypt-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: not a member of the repository workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "bench-native"
+path = "src/main.rs"
+
+[dependencies]
+# Same versions as the repository Cargo.lock (aes-gcm 0.10.3, aes 0.8.4, ghash 0.5.1, polyval 0.6.2).
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

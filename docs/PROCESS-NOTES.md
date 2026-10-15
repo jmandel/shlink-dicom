@@ -1,0 +1,292 @@
+# Process notes: how shlink-dicom was designed and built
+
+A running journal of how this project happened: the questions, the turns, the mistakes, the checks we built to keep ourselves honest, and how several AI agents were coordinated. It is written for a later blog post, so it keeps the process, not just the outcomes. The coordinator (Claude, Opus 5.5, running in Claude Code) keeps it up to date. Times are local (US Central) and approximate unless quoted from a log.
+
+Cast:
+- **Josh**, the project owner. He is also an author of the SMART Health Links specification.
+- **Coordinator.** The Claude Code session this journal comes from. It designs, reviews, runs checks itself, and dispatches subagents.
+- **Subagents.** Claude agents launched by the coordinator for focused jobs; listed per phase below.
+- **pi.** A separate coding agent (the `pi` CLI running Google Gemini, "gemini-4-argon") working in the same repository in a tmux pane. It did the authoring and app work: PLAN.md, the Rust server, WASM and web UI. The coordinator monitored and steered it through tmux.
+
+---
+
+## 1. Origin: a side quest from another project
+
+- **Where it started.** The session began on a different project (FOLIO, an experiment in signed native record items with AI-written mappers). Josh then asked: "are you familiar with smart health links? Read the spec."
+- **First reading.** The coordinator fetched the current HL7 *SMART Health Cards and Links* IG page (continuous build) and read it in full rather than relying on memory. It first tried to connect SHL to FOLIO.
+- **The redirect.** Josh redirected: "This side quest is about shl, not folio." Lesson for the post: the human set the scope in one line, and everything after was SHL.
+- **Early critique.** The coordinator gave a short critique of the spec:
+  - `U` mode puts `recipient` in a GET query string, so it ends up in logs;
+  - polling with the `L` flag re-downloads the whole manifest;
+  - `exp` is only a hint;
+  - a handful of typos.
+
+## 2. Design by dialogue: Josh asks, the coordinator proposes, Josh pushes back
+
+The protocol design came from a long run of short, pointed questions from Josh. Almost every important simplification came from Josh questioning something the coordinator had proposed. The sequence, as it happened:
+
+1. **"Open question: how to share full DICOM data via shl (may require extension, cleverness, new ideas)."** The coordinator laid out three options:
+   1. each instance as a FHIR `Binary` (works today, Plain, small studies only);
+   2. an `smart-api-access` token to the source's DICOMweb, with SMART Imaging Access;
+   3. patient-held studies on a host that can't read them: encrypted blobs in RFC 8188-style records, a Service Worker DICOMweb shim, OHIF in the browser.
+2. **"Let's focus on U mode… variation on option 2? or hash links from imaging study in bundle to full DICOM encrypted with same key?"** Josh also proposed **tying the image files' lifetime to the U-mode link's lifetime**, instead of the SHL spec's one-hour rule for file locations. Both ideas went into the design.
+3. **"Does U mode work with passcode?"** No: the spec forbids `U` with `P`. The consequence: in passcode mode, image files must sit under a fresh, unguessable prefix per manifest response, or anyone holding the link without the passcode could fetch the files directly. They hold the key anyway, because the key is in the link.
+4. **"I wasn't saying option 3 was too much, I totally wanted to explore it."** The coordinator had misread a garbled line as rejection. It then expanded option 3: records you can decrypt at any position, HTTP Range access, a Service Worker presenting the files as DICOMweb.
+5. **"Why 128 not 256?"** RFC 8188 is AES-128 because it was built for Web Push. The coordinator recommended an AES-256 variant to match the A256GCM the SHL spec already uses.
+6. **"Clean way to download full study or series, or expose instance level?"** One object per study with Range access; a ZIP container was proposed at this point.
+7. **"Does GH pages support ranges?"** Tested rather than guessed, with `curl`:
+   - `206` responses work;
+   - text types are gzipped, so a byte range applies to the gzipped bytes;
+   - PNG is not gzipped;
+   - `Access-Control-Allow-Origin: *` is sent, but `OPTIONS` returns 405.
+8. **"How do ranges help when we're trying to access records in enc(zip(data))?"** This exposed that compression would break random access. Answer: a stored (uncompressed) ZIP plus fixed-size encrypted records, so offsets are simple arithmetic.
+9. **"Don't we need compression?"**, then **"compatible with lots of DICOM sources; forcing user to re-encode not ideal"**, then **"I don't want to overfit on a few examples. What about cut points at series level"**, then **"What's the zip buying us"**, then **"I don't love new segment concept, broken addressing"**. Each answer removed a layer:
+   - re-encoding became optional;
+   - "segments" were invented and then dropped;
+   - the ZIP was dropped;
+   - one file per series was adopted.
+10. **"How big would ImagingStudy FHIR be if we list every instance explicitly? I'm looking for simple."** Measured by script, not guessed: about 470 KB of JSON for 2,000 instances, about 61 KB after the DEFLATE the SHL file already applies. So list every instance in `ImagingStudy`, with just a byte-length extension each.
+11. **"Do DICOM always organize data into series?"** Yes: Series Instance UID is Type 1. Also "study, series or instance as the primary retrieval unit?" The series.
+12. **"…stay uncompressed --??"** Josh caught confusing wording: the coordinator had used "compressed" for two different things (compression inside the DICOM files, and our own deflate step). Then **"I don't love optionality here, how does a client even know what's deflated."** Result: never deflate. One code path; any compression lives inside DICOM, where the transfer syntax already describes it.
+13. **"Sketch what the ImagingStudy would look like and the contract for fetching the data."**
+14. **"Final record delimiter… why is that needed? Doesn't ending at that point also accomplish the same?"** Josh spotted that the authenticated Bundle already fixes the length. Result: no end marker and no file header, with the key and length taken from the Bundle. The format became a plain counter-nonce scheme (essentially STREAM) with the length known in advance.
+15. **Proposal write-up.** "Write up a full proposal for a naive reader who may not have heard of SHLinks but knows FHIR, self-contained, in a new ~/hobby/shlink-dicom folder." The coordinator wrote:
+    - PROPOSAL.md;
+    - a small TypeScript reference implementation;
+    - a test vector, **independently reproduced in Python** before it went into the document.
+
+## 3. Two agents on one repo: proposal and plan reviews
+
+- **Two authors from here on.** Josh and pi (Gemini) edited PROPOSAL.md and wrote PLAN.md: a Rust core plus WASM plus an Axum server plus a web UI. The coordinator became the reviewer.
+- **Review 1 (Josh: "review updates to proposal and plan").**
+  - **Proposal.** pi had dropped the `Endpoint` resource: series files became `{fileId}.bin`, resolved relative to the Bundle's URL. The coordinator checked `new URL()` behaviour by running it:
+    - a base URL ending in an id (no trailing slash) loses its last path segment;
+    - query-signed URLs (S3 `?X-Amz-Signature=…`) lose their signature.
+
+    Both became MUST rules.
+  - **Plan.**
+    - the demo endpoint exposed the `controlToken`;
+    - uploads were open to anyone;
+    - the plain-text passcode was stored;
+    - no protection against compression middleware;
+    - a risky plan to decode JPEG 2000 in Rust/WASM through C libraries;
+    - unbounded memory, against wasm32's 4 GB limit.
+  - **Secrets.** An untracked `.env` holding an OpenRouter API key, and no `.gitignore`. The coordinator added `.gitignore` before anything was committed.
+- **Review 2.** pi fixed nearly everything. The coordinator flagged that the sample studies were described as "de-identified" when they were Josh's own studies, published by choice. The wording was changed.
+- **"Is the plan clear enough… what can be parallelized, what is the dependency tree?"** The coordinator drew the dependency graph and introduced "F0": a golden test share produced by the reference code, so the server and web work could start without waiting for the Rust core.
+- **Management API rounds:**
+  - **"What about API shapes exposed by our server for managing shlinks."** The coordinator split the model into a **Share** (the files) and a **Link** (an access policy), so that changing a passcode can't revive an old link;
+  - **"How do I add more DICOMs to a link or remove them"**;
+  - **"can a user manage a share with 10 DICOMs and only include 3 in a link"**;
+  - Josh: **"it'd be nice if we aren't exposing keys in links beyond what they can access… maybe your separation is overwrought anyway."** This was the key change: **a random key per series, carried inside each link's own Bundle**. A link's key opens its Bundle, and the Bundle holds keys only for the series that link includes;
+  - **"Why use HKDF at that point?"** It was no longer needed. Key derivation was dropped, leaving a random 32-byte key per file and nonce = record index;
+  - **"What other protocol adjustments should we consider given these patterns of usage?"** Immutable `fileId`s for caching, cheap change detection (ETag and `lastUpdated`), treating the decrypted Bundle as secret, marking partial studies, a declared profile, static-host trade-offs, correlation between recipients, and signing as an explicit non-goal.
+- **Server storage:**
+  - **"where will the data live… how do we ensure it can't nav to paths outside of itself"**;
+  - then **"should the server manage everything in sqlite?"**, **"why not put series in db"**, **"one sqlite per user or something"**.
+
+  The result was a design note, `docs/storage.md`: a `catalog.db` for routing, plus **one SQLite file per share**, with series stored as 64 KiB record rows, so no filesystem path is ever built from request text. The coordinator ran the schema's SQL in SQLite 3.54 before handing it over, checking the foreign-key 409 and the atomic passcode-counter statement.
+
+## 4. "How much progress could we make with pure Rust?": the codec program
+
+- **The trigger.** Reviewing pi's implementation, the coordinator found that the viewer was a custom WASM renderer (not Cornerstone), with a hand-written 12-bit JPEG decoder, no JPEG 2000 support, and a bug on multi-frame JPEG.
+- **Josh's question.** "How much progress could we make with pure rust / zero deps, with a frontier agent and a pile of examples to test against known-good decoders?" He clarified that "zero deps" meant "only cargo Rust deps". The coordinator surveyed crates.io live (`cargo search`, the crates.io API for download counts) rather than relying on memory.
+- **The instructions that started the build** (each sent while the coordinator was mid-task):
+  - "prepare a subdir with a clean structure of formats and oracular content and scripts we can use for processing / checking our work";
+  - "then prepare an AGENTS.md… such that we can do subagent work in parallel on the different subdirs, with strong enough patterns / guidance that for the non-dependent codecs we can work in parallel, and you can think through the path to working out the serial dependencies";
+  - "if you need any tools we don't have, just let me know";
+  - "once you write this up, organize subagents to implement and test :)";
+  - "I would enjoy being able to say that we can process an estimated 98% of real world studies or something like that."
+
+### What the coordinator built before any agent wrote code
+
+- **`codec-corpus/`** (Python, uv).
+  - **Reference decoders, from different code families:**
+    - pydicom with the pylibjpeg (libjpeg/OpenJPEG), GDCM and pyjpegls (CharLS) plugins;
+    - DCMTK command-line tools;
+    - OpenJPEG `opj_decompress`;
+    - OpenJPH `ojph_expand`.
+
+    All of these were already installed on Josh's machine.
+  - **Scripts:**
+    - `discover.py`: pydicom's test data and the local studies;
+    - `generate.py`: deterministic **synthetic seed images** (8/12/16-bit, signed, RGB, odd sizes, multi-frame, 1×1) encoded by pydicom, DCMTK and OpenJPH;
+    - `oracle.py`;
+    - `check.py`;
+    - `ref_decode.py`.
+  - **Key idea: for lossless encodings of our own seeds, the seed pixels are the truth.** No decoder needs to be trusted for those cases. Elsewhere the oracle comes from the references. Agreement is counted **per implementation family**, so GDCM and pylibjpeg both wrapping OpenJPEG count as one witness. Cases where references disagree on lossless data are marked *disputed*; those with only one family behind them are marked *weak*.
+  - **The checker was tested before anything relied on it,** by running a reference decoder through it as if it were a candidate.
+  - **`CONTRACT.md`:** the decoder command, its exit codes (0, 2 refused, 3 unsupported, anything else a crash) and the exact canonical pixel format.
+  - **`AGENTS.md`:**
+    - ownership rules: each agent writes only in its own crate and format directory; shared files belong to the coordinator;
+    - separate `CARGO_TARGET_DIR`s;
+    - phases and their dependencies;
+    - rules for adopting a crate versus building our own;
+    - what "done" means: corpus 100%, clippy, a wasm32 build, fuzzing, and a write-up in FORMAT.md.
+  - **`FORMAT.md` per format:** the known traps for that codec, written up front for its agent.
+- **`codecs/`:** a separate Cargo workspace. The coordinator wrote the shared types and **a stub crate for every codec**, so the dispatch table was complete on day one and format agents never needed to touch shared files.
+- **`extract_frames.py`:** dumps each case's per-frame codestreams, so codec agents could test before the command-line decoder existed.
+- **Mistake caught by the coordinator's own checks.** Four valid JPEG-LS files had been marked "should fail" because they lack the DICOM Part 10 header. Fixed by reading with `force=True`.
+
+### Phase 0/1 in parallel: six agents
+
+- **The agents:** the foundation (CLI and DICOM parsing), RLE, JPEG (DCT plus lossless), JPEG-LS, a JPEG 2000/HTJ2K crate survey, and prevalence.
+- **About 30 minutes of wall-clock time later,** every format except JPEG 2000/HTJ2K passed the whole corpus. Josh: "So all the work up to this point has been completed in about 30 clock minutes. Is there any reason not to take on the jpeg 2000 and htj2k formats?"
+- **The foundation agent went against its brief and said why.** It wrote its own small DICOM reader instead of using dicom-rs, because dicom-rs allocates whatever length a field declares (an abort in wasm), loses raw bytes in its OW handling, and doesn't handle files without the Part 10 header.
+- **JPEG and JPEG-LS were built from scratch** after the candidate crates were tested and fell short:
+  - `jpeg-decoder` couldn't do 12-bit;
+  - `pure_jpegls` couldn't do colour, and choked on a fill byte that DCMTK writes before the end marker.
+
+  The JPEG decoder reproduces libjpeg's integer IDCT and upsampling bit for bit.
+- **The JPEG 2000 survey tested 12 crates on every corpus frame,** with fuzzing. Decision: adopt `hayro-jpeg2000` for JPEG 2000 and `oxideav-jpeg2000` for HTJ2K. It also found that **the three "disputed" oracle cases were a bug in the coordinator's reference wrapper** (sign handling); a later fix found the wrapper was also reading the SIZ marker 2 bytes off.
+
+## 5. Coverage: power laws, BigQuery and a census
+
+- **"Tell me more about this bigquery dataset… you should be able to run that using my existing gcloud tools."** The coordinator queried the NCI Imaging Data Commons' public `dicom_all` table through the BigQuery REST API (`bq` wasn't installed): **58,784,975 instances, 11.9 GB scanned, a few cents**. Result: 99.3% of IDC images are uncompressed, a reminder that a research archive is not clinical reality. A second query gave the set of profiles per study, for study-level coverage.
+- **"Exhaustive listing of all file formats… followed by web research."** A census agent covered every transfer syntax in DICOM PS3.6 (including retired ones), pixel-level variations, and 15 kinds of non-conforming file. It assigned tiers and estimated clinical coverage at about 97–99.5% for tier 1 and about 99–99.8% for tiers 1 and 2, clearly marked as a guess.
+- **Josh pushed back twice:**
+  - **"I'm not sure what having real CDs would make a difference about…"** Answer: real files don't add formats; they add frequency weights and encoder quirks. IDC can supply real files more cheaply.
+  - **"you mentioned that CDs can only be used with uncompressed content, what are you talking about, whose rule is that?"** The coordinator corrected an overstatement: the rule is the DICOM General Purpose CD-R profile (STD-GEN-CD) and IHE PDI, which bind only discs that claim them. Other CD profiles allow compression.
+- **Coverage measured by `coverage.py`:** IDC studies went from 67% (exact match) to 94% after the IDC sampler added 296 real files from 64 collections. Profiles with no test case fell from 46 to 5.
+- **Josh's own patient exports** (two zip files that pi had found in `~/Downloads`): 737 instances, all uncompressed (matching STD-GEN-CD), and **all 737 decode exactly**. Profiled locally; only counts were kept.
+
+## 6. Quirks, rulings and the oracle as a living thing
+
+- **"Close gaps against that corpus and formats, and look for files that exercise quirks."** Two agents:
+  - an **IDC sampler**: one real file per profile, plus up to 3 per make and model for compressed formats;
+  - a **quirk hunter**: GDCM's gdcmData, pylibjpeg-data, Orthanc, cornerstone3D, fo-dicom, dcm4che, and files attached to 25 GitHub issues, with licences recorded.
+- **Rulings became first-class.** Several failures were the oracle's fault, not ours:
+  - pydicom applies Planar Configuration to JPEG and JPEG 2000 output (PS3.5 says it doesn't apply), which scrambles colour;
+  - pylibjpeg and GDCM colour-convert lossless JPEG that has a JFIF marker;
+  - OpenJPEG treats subsampled 3-component JPEG 2000 as sYCC, and pydicom then converts a second time (magenta slides).
+
+  The coordinator added ruling fields to `cases.json` (`expect_override`, `oracle_ref`, `oracle_case`), plus a `repairs.py` that builds **repaired copies** of broken files. A repaired copy is registered as its own case, and its oracle serves the quirky original. Every ruling carries its evidence in that format's FORMAT.md.
+- **Notable files:**
+  - a Cornell-encoder 16-bit lossless bug file: first ruled "must be refused"; then the JPEG agent implemented DCMTK's Cornell workaround, and the ruling was reversed to "decode";
+  - a lossless JPEG labelled YBR but holding RGB (R = G = B on 97.8% of pixels);
+  - a file with a second header group in its data set;
+  - OsiriX 10-bit data labelled 8-bit;
+  - a Leica slide where one tile in 110 tripped a hayro bug, which was patched in a vendored copy.
+- **Concurrency bugs in our own tooling,** found and fixed as several agents shared one corpus:
+  - `oracle.py` rewrote a whole `cases.json`, which once wiped another agent's new expectations. Fixed with a locked, merge-by-id `save_cases` that only saves the cases it rebuilt;
+  - a non-idempotent repair script blanked two oracles;
+  - two benchmark runs rebuilding one shared binary at the same time (ETXTBSY), fixed with a build lock.
+- **Running total:** about 920 corpus cases, all passing.
+
+## 7. Performance: measure, then argue
+
+- **"re: speed, are these good? how do we compare?"** The coordinator timed our decoder against DCMTK, pylibjpeg, GDCM and libjpeg-turbo on the same files. 12-bit and lossless JPEG were on par with IJG libjpeg; 8-bit colour was 2.7× slower than libjpeg-turbo.
+- **"please do spikes on perf including simd if you think relevant, and def build a wasm perf infra that'll be easy for us to understand and improve browser perf from."**
+  - **The JPEG SIMD spike:** 5.6× natively, with every step checked for byte-identical output across all JPEG files, and a test that the SIMD path equals the scalar path on all 2,806 frames.
+  - **HTJ2K:** oxideav was 4× over budget. Two patches made it about 21× faster: a block-wide scan run per coefficient, and a linear table search per bit. A 512² image now decodes in 30 ms in the browser.
+  - **The benchmark setup** (`codecs/bench/`) covers native, Node, a Chromium worker and the Chromium main thread, plus the reference C libraries.
+    - **Every result is checked against the oracle,** so a fast result can never be a wrong one.
+    - **Builds run interleaved per case,** after load from other agents made SIMD falsely look slower.
+    - **Native was run with glibc keeping freed memory,** as WebAssembly effectively does, to make the two comparable.
+    - **Profiles carry readable names,** for both V8 and `perf`.
+    - **An HTML report** compares each run against a saved baseline.
+- **Josh caught an unfair comparison:** "When you compare us to the C library… do you mean you ran the C library in the browser… It's strange to me that the sign flips." The report had compared our wasm in the browser with the C libraries run natively. The fix in progress: run Cornerstone's C-compiled-to-wasm codecs in the same browser, and label the columns so the two comparisons are never mixed.
+- **"Is browser able to take advantage of GPU here?"** Answer: yes for display (WebGL2 window/level in a shader); only partly for decoding (the transforms, not the entropy coding). Multiple CPU cores through a Worker pool come first. Josh: "Oh gpu yes 1/2", and a viewer-kit agent is building both.
+- **"Any more performance optimization available to us now that we have benchmark results."** Next up:
+  - decryption: WebCrypto's hardware AES versus software AES in WebAssembly, possibly the real bottleneck;
+  - reduced-resolution decoding for thumbnails;
+  - `wasm-opt` (Josh: "Install dep for (4)"; binaryen 133 was installed into `~/.local` without sudo);
+  - the fetch strategy.
+- **Post-decode processing** in the CLI: 3–13× faster, with an exhaustive 2^24-input test that the YBR→RGB conversion still equals pydicom's float32 formula.
+
+## 8. Working with pi (Gemini) through tmux
+
+- **"I also have tmux available where you can monitor the other agent's work or communicate via pi cli harness."** The coordinator found pi's pane with `tmux capture-pane` and sent it messages with `tmux send-keys`, which pi queues as "steering" messages.
+- **"monitor it every 10min or so and if it seems broken like api 429 errors you can give it a quick nudge; if it runs out of dollars by hitting $32 total you can take over its work with your own subagents."** The coordinator wrote a watcher script, `~/.local/share/pi-watch/watch.sh`. It polls the pane every 10 minutes, reads the cost from pi's status bar, and wakes the coordinator on errors, on two idle polls in a row, or at $32.
+- **What happened:**
+  - **Repeated "Upstream idle timeout exceeded".** pi's spend stayed flat, so nothing was getting through. The coordinator ran `/compact` (context went from 343k tokens to about 4%) and nudged it to work in smaller steps.
+  - **It timed out again with a small context.** The coordinator diagnosed single very long responses (rewriting a 960-line `web/main.ts` in one go) and asked for edits under about 150 lines, or new modules. That worked.
+  - **What pi built meanwhile:**
+    - wired our `shl-dicom-decode` into its Rust core and WASM;
+    - added a cache of decoded frames (window/level under 1 ms);
+    - seeded Josh's Downloads studies as demos.
+- **"Work with pi on clean demo UX, review and guide it."** Five review rounds, each a markdown file in `docs/ux-review-N.md`, each verified by the coordinator with headless Chromium scripts (Playwright), not taken on pi's word:
+  1. **Privacy first.** The demo had opened on Josh's unpublished CT with his real name and birth date. Fixed to the public dataset, with "Demo Patient" shown. Also: mislabelled buttons, no intro, a "Zero-Knowledge" tagline (inaccurate jargon), and a broken phone layout.
+  2. Scroll-on-load, window/level defaults, the default series, how the intro band behaves, and wording.
+  3. The sharing story: a QR code per link, opening in a new tab while the host log updates live, links with a subset of studies, revoke and offline states, passcode attempt counts. Verified with a scripted end-to-end flow: create a link, open it, watch the log, revoke it, see the viewer's message.
+  4. The recipient's view, and failure panels.
+  5. **Phone ("Work on phone UX too"):** the image handled only the mouse wheel, so the coordinator asked for Pointer Events gestures. Also 44 px touch targets, `100dvh` and safe-area insets, landscape, and showing the passcode prompt in the passcode demo. Verified with touch emulation: a one-finger vertical drag synthesised through CDP moved slice 10 to 18; no control under 40 px; no overflow at 390, 360 or 844 px wide.
+- **pi's spend at the time of writing: $19.52.**
+
+## 9. Long tail
+
+- **"Do you take a stratified sample of all the complex stuff from bigquery to ensure we handle it correctly"**, then **"Long tail stratification via metadata clues."** A sweep agent:
+  - chooses clue columns: the writing toolkit and its version, manufacturer, model and software version, SOP class, high-bit oddities, compression history, padding, LUTs, offset tables, file-size outliers;
+  - selects files greedily so every rare (clue, value) pair appears at least once, plus a random control of about 1,000 files for an unbiased pass rate with a confidence interval;
+  - downloads, decodes with us and with the references, compares, and deletes, keeping only failures as new corpus cases.
+- **"Do we have disk space here or on external 4TB drive?"**
+  - internal: 111 GB free;
+  - `/media/barracuda` (1.8 TB, 991 GB free) is mounted and is used for sweep temp files, since `/tmp` is RAM-backed;
+  - no 4 TB drive is attached at the moment.
+
+---
+
+## Themes worth writing about
+
+- **Socratic protocol design.** The human's short "why?" questions removed most of the complexity: the end delimiter, optional compression, segments, the ZIP, key derivation, shared keys across subsets. The agent generated options quickly; the human chose and cut.
+- **Verify claims by running something.** GitHub Pages Range behaviour (`curl`), URL resolution (`new URL`), JSON size (a generated `ImagingStudy`), SQLite schemas (executed), test vectors (cross-checked in Python), BigQuery cost (dry runs first).
+- **Oracle-first engineering.** Truth from seeds where possible; independent reference families; disputed and weak flags; rulings with evidence; repaired copies as oracles. The test data, not the code, was the main product of the first hour.
+- **Parallel agents need ownership rules.** One directory per agent, shared files owned by the coordinator, stubs so no one blocks, separate build directories, locks on shared manifests. The concurrency bugs that did happen were all in shared tooling.
+- **The coordinator's own mistakes, caught by its checks or by Josh:**
+  - misreading "option 3";
+  - overstating the CD rule;
+  - two reference-wrapper bugs (sign handling, SIZ offsets);
+  - the unfair native-versus-browser comparison;
+  - a non-canonical base64 key in a golden fixture (caught in review);
+  - an oracle-overwrite race.
+- **Multi-model collaboration.** Claude coordinating Claude subagents plus a Gemini agent through tmux, with budgets, a watcher, nudges and review files, and verification by screenshot and script instead of trusting summaries.
+- **From "side quest" to a measured claim.** In about a day the project went from reading a spec, to a protocol proposal, to a pure-Rust decoder for every common DICOM pixel encoding, checked on about 920 cases and on IDC data, with a browser benchmark setup and a polished demo.
+
+## Artefacts (where to look)
+
+- **The protocol and implementation plan:**
+  - `PROPOSAL.md`;
+  - `PLAN.md`;
+  - `reference/`;
+  - `docs/storage.md`.
+- **The decoder corpus and its agent instructions:**
+  - `codec-corpus/` (README, CONTRACT, AGENTS, `formats/*/FORMAT.md`, `scripts/`);
+  - `prevalence/` (SOURCES, CENSUS, IDC_SAMPLES, QUIRKS, LONGTAIL).
+- **Code and performance:**
+  - `codecs/`: the decoder workspace, plus `bench/` and the vendored hayro and oxideav with their patches;
+  - `formats/*/PERF.md`;
+  - `codecs/bench/report.html`;
+  - `viewer-kit/` and `perf-spikes/`.
+- **The UX work with pi:** `docs/ux-review-1..5.md`.
+- **Monitoring pi:** `~/.local/share/pi-watch/` (the watcher script and its log).
+
+---
+
+## Addendum (15 Oct): Josh's parallel thread with pi, recovered from pi's session log
+
+pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-dicom--/`). The tmux scrollback (2,000 lines; pi redraws the screen) had none of this. Josh's 65 messages to pi show a second design conversation running alongside the one with the coordinator:
+
+- **20:16–20:33, design questions to pi on PROPOSAL.md:**
+  - "I am interested in what we could remove in endpoint, please brainstorm with me"; this is where `{fileId}.bin` relative to the Bundle came from;
+  - "at what point do we get to 'trust' that a server hasn't messed with our bytes", on authenticating range reads;
+  - "help me with the math" on record offsets;
+  - "64k seems a bit arbitrary, how to pick wisely" and "what about 1MB ciphertext records?";
+  - "we have to worry about IVs not just in the chunks but in our manifest too, yes?".
+- **20:37–20:50, planning:**
+  - "a rust lang reference implementation + a browser-side bridge that can resolve this and do cool streaming stuff that shows off the nimbleness", using images from `jmandel/my-health-data`;
+  - a server you can post DICOM to, with a control capability for passcodes, online/offline and expiry;
+  - code that compiles to wasm;
+  - export of the originals;
+  - "a Cornerstone or OHIF option soon after";
+  - multi-study bundles;
+  - then the API design, test plan, file layout and crate boundaries.
+- **Josh as a human bridge between agents.** Before the tmux channel existed, Josh pasted the coordinator's reviews into pi verbatim ("here is an outside review: … what do you think?"), then argued the points with pi: signed URLs, why presigned URLs are only needed in manifest mode, prefix-scoped tokens in U mode, and "I don't like custom semantics on carryover … this is getting too complex". The same relay carried the Share/Link split, the per-series key options ("maybe option 2? what do you think"; "what about 3 extensions and the key is optional … or do we KISS"; "let's do a."), and the protocol-adjustment list.
+- **21:40, a question that foreshadowed the codec program:** "if you're writing your own decoders do you have ability to compare against source of truth to be sure they're right."
+- **20:03–20:15 local (01:03–01:15 UTC), the UX turning point:**
+  - "this viewer will be usable as a https://viewer#shlink:/ viewer prefix";
+  - "make the ui less idiosyncratic and vomited on the page, and build in more affordances for explaining / subtly showing how the spec works; also do perf testing with chrome";
+  - "don't make me pick series by series, just do at study level by default. and seriously this UI is a dumpster fire";
+  - "it's vomiting huge complexity on the screen, think more about showing people flows/paths that they can understand, and don't do full-on multistep workflows crammed into a little sidebar";
+  - the pointer to the two identified studies in ~/Downloads for performance testing. This is how they ended up in the demo, and why the coordinator's review 1 led with privacy.
+- **After that:** a run of "proceed"s from Josh, then the coordinator's tmux messages took over steering pi.
+- **15 Oct, reframing:** with the UX "a lot better" after five review rounds, Josh said the job to be done still wasn't settled. He asked to factor the work into three experiences: consumer sharing, a viewer for recipients, and a technology demo with insight for developers. A brainstorm began (see the chat; a design document is planned).

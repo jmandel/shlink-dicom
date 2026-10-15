@@ -1,0 +1,40 @@
+rle/gen-bench-cine-rgb8-640x480x30-pydicom-rle (RGB cine 640×480×30 (synthetic)) — wasm-simd in Chromium 154.0.8037.97, 147 decodes in 4s (27.21 ms each), 24269 samples
+
+self time by crate
+   75.0%  shl_dicom_decode
+   22.2%  shl_codec_rle
+    1.9%  other
+    0.8%  __rustc
+    0.1%  dlmalloc
+    0.0%  shl_dicom_wasm_bench
+    0.0%  (anonymous)
+    0.0%  alloc
+    0.0%  shl_codec_common
+    0.0%  core
+
+self time by function (top 25)
+   67.5%  shl_dicom_decode::pixel::interleave
+   21.5%  shl_codec_rle::unpack_bits_partial
+    7.5%  shl_dicom_decode::decode_encapsulated
+    1.4%  measure
+    0.8%  __rustc::__rdl_alloc_zeroed
+    0.7%  shl_codec_rle::decode_frame
+    0.2%  bench_now
+    0.1%  now
+    0.0%  (anonymous)
+    0.0%  <dlmalloc::dlmalloc::Dlmalloc<dlmalloc::sys::System>>::malloc
+    0.0%  wasm-to-js
+    0.0%  shl_codec_rle::parse_header
+    0.0%  shl_dicom_wasm_bench::timed_codec
+    0.0%  shl_dicom_wasm_bench::decode_timed
+    0.0%  shl_dicom_decode::parse::read_header
+    0.0%  shl_dicom_decode::parse::read_encapsulated
+    0.0%  evaluate
+    0.0%  __rustc::__rust_dealloc
+    0.0%  js-to-wasm:i:d
+    0.0%  decode
+    0.0%  <alloc::string::String as core::clone::Clone>::clone
+    0.0%  shl_dicom_decode::encaps::split_frames
+    0.0%  <shl_codec_common::Photometric>::parse
+    0.0%  <dlmalloc::dlmalloc::Dlmalloc<dlmalloc::sys::System>>::insert_large_chunk
+    0.0%  <dlmalloc::dlmalloc::Dlmalloc<dlmalloc::sys::System>>::free

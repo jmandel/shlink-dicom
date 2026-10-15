@@ -1,0 +1,25 @@
+jpeg-dct/gen-bench-photo-rgb8-2048-ijg-baseline (RGB 2048² baseline 4:2:2 (synthetic)) — wasm-simd in Chromium 154.0.8037.97, 131 decodes in 4s (30.53 ms each), 25511 samples
+
+self time by crate
+   94.4%  shl_codec_jpeg
+    4.2%  shl_dicom_decode
+    1.3%  other
+    0.1%  (anonymous)
+    0.0%  dlmalloc
+    0.0%  shl_codec_common
+    0.0%  shl_dicom_wasm_bench
+    0.0%  alloc
+
+self time by function (top 12)
+   36.5%  <shl_codec_jpeg::dct::DctDecoder<u8>>::idct_into
+   27.3%  <shl_codec_jpeg::dct::DctDecoder<u8>>::finish
+   22.3%  shl_codec_jpeg::dct::decode_block
+    4.9%  <shl_codec_jpeg::dct::DctDecoder<u8>>::decode_scan
+    4.1%  shl_dicom_decode::decode_encapsulated
+    3.1%  shl_codec_jpeg::markers::decode
+    1.2%  measure
+    0.1%  <shl_codec_jpeg::bits::BitReader>::refill_slow
+    0.1%  <shl_codec_jpeg::huffman::HuffTable>::new
+    0.1%  <shl_codec_jpeg::bits::Bits>::huff_long
+    0.1%  (anonymous)
+    0.0%  bench_now

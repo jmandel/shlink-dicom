@@ -1,0 +1,2763 @@
+{
+  "date": "2026-10-15T11:58:26.127Z",
+  "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+  "logicalCpus": 12,
+  "loadavg": [
+    12.26,
+    7.39,
+    4.68
+  ],
+  "chromium": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+  "crossOriginIsolated": true,
+  "note": "MB/s = ciphertext bytes / 1e6 / seconds; median of runs. Each wasm call copies records in (1 MiB batches) and plaintext out; WebCrypto copies each result into one output buffer.",
+  "native": {
+    "native (AES-NI + PCLMULQDQ)": [
+      {
+        "mb": 1,
+        "bytes": 1048576,
+        "records": 16,
+        "asis_MBps": 1163.7,
+        "tuned_MBps": 1207.3
+      },
+      {
+        "mb": 50,
+        "bytes": 50003968,
+        "records": 763,
+        "asis_MBps": 1054.5,
+        "tuned_MBps": 1190.8
+      },
+      {
+        "mb": 400,
+        "bytes": 400031744,
+        "records": 6104,
+        "asis_MBps": 1039.7,
+        "tuned_MBps": 1183.8
+      }
+    ],
+    "native (software AES, forced)": [
+      {
+        "mb": 1,
+        "bytes": 1048576,
+        "records": 16,
+        "asis_MBps": 116.8,
+        "tuned_MBps": 118.2
+      },
+      {
+        "mb": 50,
+        "bytes": 50003968,
+        "records": 763,
+        "asis_MBps": 116,
+        "tuned_MBps": 117.9
+      },
+      {
+        "mb": 400,
+        "bytes": 400031744,
+        "records": 6104,
+        "asis_MBps": 114.5,
+        "tuned_MBps": 115.2
+      }
+    ]
+  },
+  "worker": {
+    "correctness": [
+      {
+        "path": "wasm-base tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-base as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto sequential",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto K=4",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto K=16",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto K=64",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      }
+    ],
+    "timings": [
+      {
+        "path": "wasm-base tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 24.22499990463257,
+        "MBps": 43.2848711714331,
+        "runs": 30,
+        "minMs": 23.759999752044678,
+        "maxMs": 28.55500030517578
+      },
+      {
+        "path": "wasm-base tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1185.5899996757507,
+        "MBps": 42.176442120527064,
+        "runs": 3,
+        "minMs": 1181.8150000572205,
+        "maxMs": 1189.9900002479553
+      },
+      {
+        "path": "wasm-base tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 9413.224999904633,
+        "MBps": 42.49677915953914,
+        "runs": 2,
+        "minMs": 9295.21499967575,
+        "maxMs": 9413.224999904633
+      },
+      {
+        "path": "wasm-base as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 24.164999961853027,
+        "MBps": 43.39234436810621,
+        "runs": 30,
+        "minMs": 23.850000381469727,
+        "maxMs": 25.25
+      },
+      {
+        "path": "wasm-base as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1197.0300002098083,
+        "MBps": 41.773362397964625,
+        "runs": 3,
+        "minMs": 1152.3550000190735,
+        "maxMs": 1209.5099997520447
+      },
+      {
+        "path": "wasm-base as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 10962.219999790192,
+        "MBps": 36.49185511763642,
+        "runs": 2,
+        "minMs": 10683.779999732971,
+        "maxMs": 10962.219999790192
+      },
+      {
+        "path": "wasm-simd tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 20.324999809265137,
+        "MBps": 51.59045558868873,
+        "runs": 30,
+        "minMs": 19.94000005722046,
+        "maxMs": 23.799999713897705
+      },
+      {
+        "path": "wasm-simd tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1027.0299997329712,
+        "MBps": 48.68793317916816,
+        "runs": 3,
+        "minMs": 977.585000038147,
+        "maxMs": 1188.8150000572205
+      },
+      {
+        "path": "wasm-simd tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 7840.485000133514,
+        "MBps": 51.021300849780076,
+        "runs": 2,
+        "minMs": 7635.534999847412,
+        "maxMs": 7840.485000133514
+      },
+      {
+        "path": "wasm-simd as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 20.024999618530273,
+        "MBps": 52.36334681523253,
+        "runs": 30,
+        "minMs": 19.760000228881836,
+        "maxMs": 29.769999980926514
+      },
+      {
+        "path": "wasm-simd as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 962.2750000953674,
+        "MBps": 51.96432204416024,
+        "runs": 3,
+        "minMs": 930.4049997329712,
+        "maxMs": 987.1300001144409
+      },
+      {
+        "path": "wasm-simd as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 7798.955000400543,
+        "MBps": 51.29299296885993,
+        "runs": 2,
+        "minMs": 7717.900000095367,
+        "maxMs": 7798.955000400543
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 25.615000247955322,
+        "MBps": 40.93601365800107,
+        "runs": 30,
+        "minMs": 25.089999675750732,
+        "maxMs": 26.15499973297119
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1232.1999998092651,
+        "MBps": 40.58104853736424,
+        "runs": 3,
+        "minMs": 1211.204999923706,
+        "maxMs": 1296.5
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 12549.68499994278,
+        "MBps": 31.87583943356538,
+        "runs": 2,
+        "minMs": 10461.525000095367,
+        "maxMs": 12549.68499994278
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 26.355000019073486,
+        "MBps": 39.786605928329756,
+        "runs": 30,
+        "minMs": 25.789999961853027,
+        "maxMs": 30.46500015258789
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1282.090000152588,
+        "MBps": 39.00191717745929,
+        "runs": 3,
+        "minMs": 1268.255000114441,
+        "maxMs": 1296.534999847412
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 10176.33999967575,
+        "MBps": 39.309982175590264,
+        "runs": 2,
+        "minMs": 9860.619999885559,
+        "maxMs": 10176.33999967575
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 20.21999979019165,
+        "MBps": 51.85835859942218,
+        "runs": 30,
+        "minMs": 20.02999973297119,
+        "maxMs": 21.09999990463257
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 969.0750002861023,
+        "MBps": 51.59968834737994,
+        "runs": 3,
+        "minMs": 967.3099999427795,
+        "maxMs": 972.710000038147
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 7709.159999847412,
+        "MBps": 51.89044513383013,
+        "runs": 2,
+        "minMs": 7689.4349999427795,
+        "maxMs": 7709.159999847412
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 21.21999979019165,
+        "MBps": 49.414515097435334,
+        "runs": 30,
+        "minMs": 20.53000020980835,
+        "maxMs": 29.320000171661377
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1072.75,
+        "MBps": 46.61288091353996,
+        "runs": 3,
+        "minMs": 1005.1549997329712,
+        "maxMs": 1135.5650000572205
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 8884.620000362396,
+        "MBps": 45.02519454784594,
+        "runs": 2,
+        "minMs": 8644.090000152588,
+        "maxMs": 8884.620000362396
+      },
+      {
+        "path": "webcrypto sequential",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.429999828338623,
+        "MBps": 733.2700180938048,
+        "runs": 30,
+        "minMs": 1.3149995803833008,
+        "maxMs": 3.174999713897705
+      },
+      {
+        "path": "webcrypto sequential",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 59.21000003814697,
+        "MBps": 844.5189658467178,
+        "runs": 3,
+        "minMs": 57.32000017166138,
+        "maxMs": 59.91499996185303
+      },
+      {
+        "path": "webcrypto sequential",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 481.25,
+        "MBps": 831.2347927272727,
+        "runs": 2,
+        "minMs": 452.085000038147,
+        "maxMs": 481.25
+      },
+      {
+        "path": "webcrypto K=4",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.364999771118164,
+        "MBps": 768.1876745964873,
+        "runs": 30,
+        "minMs": 1.2400002479553223,
+        "maxMs": 12.650000095367432
+      },
+      {
+        "path": "webcrypto K=4",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 66.78499984741211,
+        "MBps": 748.7305250317768,
+        "runs": 3,
+        "minMs": 58.46999979019165,
+        "maxMs": 75.21999979019165
+      },
+      {
+        "path": "webcrypto K=4",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 493.6599998474121,
+        "MBps": 810.3385814602112,
+        "runs": 2,
+        "minMs": 480.76000022888184,
+        "maxMs": 493.6599998474121
+      },
+      {
+        "path": "webcrypto K=16",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.4050002098083496,
+        "MBps": 746.3173262750132,
+        "runs": 30,
+        "minMs": 1.1999998092651367,
+        "maxMs": 7.279999732971191
+      },
+      {
+        "path": "webcrypto K=16",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 66.49499988555908,
+        "MBps": 751.9959107610963,
+        "runs": 3,
+        "minMs": 65.26999998092651,
+        "maxMs": 67.86999988555908
+      },
+      {
+        "path": "webcrypto K=16",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 493.5649995803833,
+        "MBps": 810.4945535848309,
+        "runs": 2,
+        "minMs": 473.3500003814697,
+        "maxMs": 493.5649995803833
+      },
+      {
+        "path": "webcrypto K=64",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.4000000953674316,
+        "MBps": 748.9828061224524,
+        "runs": 30,
+        "minMs": 1.2699999809265137,
+        "maxMs": 2.7200002670288086
+      },
+      {
+        "path": "webcrypto K=64",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 65.20500040054321,
+        "MBps": 766.8732105334582,
+        "runs": 3,
+        "minMs": 61.18499994277954,
+        "maxMs": 76.19500017166138
+      },
+      {
+        "path": "webcrypto K=64",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 491,
+        "MBps": 814.7286028513239,
+        "runs": 2,
+        "minMs": 476.72499990463257,
+        "maxMs": 491
+      }
+    ],
+    "overhead": {
+      "tinySequentialUs": 7.455000082651774,
+      "tinyK16Us": 5.618333339691162,
+      "tinyK64Us": 5.066666603088379,
+      "oneBigCallMBps": 1380.274102049113
+    }
+  },
+  "main": {
+    "correctness": [
+      {
+        "path": "wasm-base tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-base as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto sequential",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto K=4",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto K=16",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      },
+      {
+        "path": "webcrypto K=64",
+        "ok": true,
+        "results": [
+          {
+            "check": "vector: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "vector: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: whole file sha256",
+            "ok": true
+          },
+          {
+            "check": "wrist: records 1..end",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped ciphertext bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: flipped tag bit rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: swapped records rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong record index rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: truncated final record rejected",
+            "ok": true
+          },
+          {
+            "check": "wrist: wrong key rejected",
+            "ok": true
+          },
+          {
+            "check": "vector: record tags match Appendix B",
+            "ok": true
+          }
+        ]
+      }
+    ],
+    "timings": [
+      {
+        "path": "wasm-base tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 24.25,
+        "MBps": 43.24024742268041,
+        "runs": 30,
+        "minMs": 23.885000228881836,
+        "maxMs": 30.890000343322754
+      },
+      {
+        "path": "wasm-base tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1306.7699999809265,
+        "MBps": 38.26531677397694,
+        "runs": 3,
+        "minMs": 1168.5,
+        "maxMs": 1641.4749999046326
+      },
+      {
+        "path": "wasm-base tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 9368.005000114441,
+        "MBps": 42.701914014255244,
+        "runs": 2,
+        "minMs": 9282.789999961853,
+        "maxMs": 9368.005000114441
+      },
+      {
+        "path": "wasm-base as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 24.049999713897705,
+        "MBps": 43.59983419850364,
+        "runs": 30,
+        "minMs": 23.889999866485596,
+        "maxMs": 29.71500015258789
+      },
+      {
+        "path": "wasm-base as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1148.994999885559,
+        "MBps": 43.51974378041718,
+        "runs": 3,
+        "minMs": 1145.4499998092651,
+        "maxMs": 1157.1050000190735
+      },
+      {
+        "path": "wasm-base as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 11081.695000171661,
+        "MBps": 36.09842573665881,
+        "runs": 2,
+        "minMs": 10919.345000267029,
+        "maxMs": 11081.695000171661
+      },
+      {
+        "path": "wasm-simd tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 20.97499990463257,
+        "MBps": 49.99170463731015,
+        "runs": 30,
+        "minMs": 20.114999771118164,
+        "maxMs": 22.6899995803833
+      },
+      {
+        "path": "wasm-simd tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1477.0099997520447,
+        "MBps": 33.85486083939479,
+        "runs": 3,
+        "minMs": 1227.039999961853,
+        "maxMs": 1564.4400000572205
+      },
+      {
+        "path": "wasm-simd tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 9119.954999923706,
+        "MBps": 43.86334625591316,
+        "runs": 2,
+        "minMs": 8304.135000228882,
+        "maxMs": 9119.954999923706
+      },
+      {
+        "path": "wasm-simd as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 28.69000005722046,
+        "MBps": 36.548483719368384,
+        "runs": 30,
+        "minMs": 20.27999973297119,
+        "maxMs": 62.49499988555908
+      },
+      {
+        "path": "wasm-simd as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1389.6800003051758,
+        "MBps": 35.982361399040826,
+        "runs": 3,
+        "minMs": 1304.1400003433228,
+        "maxMs": 1460.6100001335144
+      },
+      {
+        "path": "wasm-simd as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 8796.514999866486,
+        "MBps": 45.47616232179127,
+        "runs": 2,
+        "minMs": 7714.0199999809265,
+        "maxMs": 8796.514999866486
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 25.800000190734863,
+        "MBps": 40.64248031969233,
+        "runs": 30,
+        "minMs": 25.494999885559082,
+        "maxMs": 28
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1288.1449999809265,
+        "MBps": 38.81858641747661,
+        "runs": 3,
+        "minMs": 1216.630000114441,
+        "maxMs": 1316.9299998283386
+      },
+      {
+        "path": "wasm-base-opt tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 10745.379999637604,
+        "MBps": 37.22825474887732,
+        "runs": 2,
+        "minMs": 10252.43499994278,
+        "maxMs": 10745.379999637604
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 26.744999885559082,
+        "MBps": 39.20643127638137,
+        "runs": 30,
+        "minMs": 26.014999866485596,
+        "maxMs": 38.28499984741211
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1343.2699999809265,
+        "MBps": 37.22555257000456,
+        "runs": 3,
+        "minMs": 1252.244999885559,
+        "maxMs": 1447.1900000572205
+      },
+      {
+        "path": "wasm-base-opt as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 11369.699999809265,
+        "MBps": 35.1840192799028,
+        "runs": 2,
+        "minMs": 10570.30999994278,
+        "maxMs": 11369.699999809265
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 22.93499994277954,
+        "MBps": 45.719468175979465,
+        "runs": 30,
+        "minMs": 20.519999980926514,
+        "maxMs": 29.425000190734863
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1113.920000076294,
+        "MBps": 44.89008905179471,
+        "runs": 3,
+        "minMs": 1060.9800000190735,
+        "maxMs": 1135.965000152588
+      },
+      {
+        "path": "wasm-simd-opt tuned",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 8066.489999771118,
+        "MBps": 49.591798168887664,
+        "runs": 2,
+        "minMs": 7868.304999828339,
+        "maxMs": 8066.489999771118
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 20.085000038146973,
+        "MBps": 52.20692048834772,
+        "runs": 30,
+        "minMs": 19.96500015258789,
+        "maxMs": 21.199999809265137
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 1020.914999961853,
+        "MBps": 48.97956049413362,
+        "runs": 3,
+        "minMs": 978.2450003623962,
+        "maxMs": 1191.255000114441
+      },
+      {
+        "path": "wasm-simd-opt as-is",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 7840.070000171661,
+        "MBps": 51.02400157029735,
+        "runs": 2,
+        "minMs": 7797.069999694824,
+        "maxMs": 7840.070000171661
+      },
+      {
+        "path": "webcrypto sequential",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.4250001907348633,
+        "MBps": 735.8427085257134,
+        "runs": 30,
+        "minMs": 1.2899999618530273,
+        "maxMs": 5.210000038146973
+      },
+      {
+        "path": "webcrypto sequential",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 55.68499994277954,
+        "MBps": 897.9791335437332,
+        "runs": 3,
+        "minMs": 55.014999866485596,
+        "maxMs": 63.985000133514404
+      },
+      {
+        "path": "webcrypto sequential",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 434.6000003814697,
+        "MBps": 920.4596034258457,
+        "runs": 2,
+        "minMs": 430.3199996948242,
+        "maxMs": 434.6000003814697
+      },
+      {
+        "path": "webcrypto K=4",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.320000171661377,
+        "MBps": 794.3756542699858,
+        "runs": 30,
+        "minMs": 1.265000343322754,
+        "maxMs": 6.605000019073486
+      },
+      {
+        "path": "webcrypto K=4",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 58.77500009536743,
+        "MBps": 850.769339325637,
+        "runs": 3,
+        "minMs": 56.56500005722046,
+        "maxMs": 68.5499997138977
+      },
+      {
+        "path": "webcrypto K=4",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 448.31500005722046,
+        "MBps": 892.3006010259352,
+        "runs": 2,
+        "minMs": 437.7599997520447,
+        "maxMs": 448.31500005722046
+      },
+      {
+        "path": "webcrypto K=16",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.320000171661377,
+        "MBps": 794.3756542699858,
+        "runs": 30,
+        "minMs": 1.2400002479553223,
+        "maxMs": 7.690000057220459
+      },
+      {
+        "path": "webcrypto K=16",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 54.84000015258789,
+        "MBps": 911.8156065074394,
+        "runs": 3,
+        "minMs": 54.360000133514404,
+        "maxMs": 60.28999996185303
+      },
+      {
+        "path": "webcrypto K=16",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 446.69999980926514,
+        "MBps": 895.5266267535442,
+        "runs": 2,
+        "minMs": 438.95499992370605,
+        "maxMs": 446.69999980926514
+      },
+      {
+        "path": "webcrypto K=64",
+        "size": "1 MB",
+        "bytes": 1048576,
+        "ms": 1.2950000762939453,
+        "MBps": 809.7111492076771,
+        "runs": 30,
+        "minMs": 1.2049999237060547,
+        "maxMs": 8.569999694824219
+      },
+      {
+        "path": "webcrypto K=64",
+        "size": "50 MB",
+        "bytes": 50003968,
+        "ms": 62.21999979019165,
+        "MBps": 803.6639049922114,
+        "runs": 3,
+        "minMs": 54.144999980926514,
+        "maxMs": 66.17000007629395
+      },
+      {
+        "path": "webcrypto K=64",
+        "size": "400 MB",
+        "bytes": 400031744,
+        "ms": 471.0299997329712,
+        "MBps": 849.2702040778286,
+        "runs": 2,
+        "minMs": 447.69000005722046,
+        "maxMs": 471.0299997329712
+      }
+    ],
+    "overhead": {
+      "tinySequentialUs": 12.940000057220459,
+      "tinyK16Us": 4.798333326975505,
+      "tinyK64Us": 4.980000019073486,
+      "oneBigCallMBps": 1357.3812151108461
+    }
+  },
+  "pools": [
+    {
+      "path": "webcrypto K=16 × 1 workers",
+      "size": "50 MB",
+      "workers": 1,
+      "bytes": 50003968,
+      "ms": 55.980000019073486,
+      "MBps": 893.2470164873645,
+      "runs": 3
+    },
+    {
+      "path": "webcrypto K=16 × 2 workers",
+      "size": "50 MB",
+      "workers": 2,
+      "bytes": 50003968,
+      "ms": 45.11500024795532,
+      "MBps": 1108.3667898742003,
+      "runs": 3
+    },
+    {
+      "path": "webcrypto K=16 × 4 workers",
+      "size": "50 MB",
+      "workers": 4,
+      "bytes": 50003968,
+      "ms": 23.425000190734863,
+      "MBps": 2134.64109254427,
+      "runs": 3
+    },
+    {
+      "path": "webcrypto K=16 × 6 workers",
+      "size": "50 MB",
+      "workers": 6,
+      "bytes": 50003968,
+      "ms": 17.18499994277954,
+      "MBps": 2909.745019871804,
+      "runs": 3
+    },
+    {
+      "path": "webcrypto K=16 × 12 workers",
+      "size": "50 MB",
+      "workers": 12,
+      "bytes": 50003968,
+      "ms": 16.489999771118164,
+      "MBps": 3032.381364102912,
+      "runs": 3
+    },
+    {
+      "path": "webcrypto K=16 × 1 workers",
+      "size": "400 MB",
+      "workers": 1,
+      "bytes": 400031744,
+      "ms": 463.289999961853,
+      "MBps": 863.4586199420197,
+      "runs": 2
+    },
+    {
+      "path": "webcrypto K=16 × 2 workers",
+      "size": "400 MB",
+      "workers": 2,
+      "bytes": 400031744,
+      "ms": 310.5950002670288,
+      "MBps": 1287.952940826734,
+      "runs": 2
+    },
+    {
+      "path": "webcrypto K=16 × 4 workers",
+      "size": "400 MB",
+      "workers": 4,
+      "bytes": 400031744,
+      "ms": 251.4850001335144,
+      "MBps": 1590.6783457765735,
+      "runs": 2
+    },
+    {
+      "path": "webcrypto K=16 × 6 workers",
+      "size": "400 MB",
+      "workers": 6,
+      "bytes": 400031744,
+      "ms": 208.62000036239624,
+      "MBps": 1917.5138687810381,
+      "runs": 2
+    },
+    {
+      "path": "webcrypto K=16 × 12 workers",
+      "size": "400 MB",
+      "workers": 12,
+      "bytes": 400031744,
+      "ms": 218.7300000190735,
+      "MBps": 1828.8837560696604,
+      "runs": 2
+    },
+    {
+      "path": "wasm-simd-opt tuned × 1 workers",
+      "size": "50 MB",
+      "workers": 1,
+      "bytes": 50003968,
+      "ms": 1130.6299996376038,
+      "MBps": 44.22664179796005,
+      "runs": 3
+    },
+    {
+      "path": "wasm-simd-opt tuned × 2 workers",
+      "size": "50 MB",
+      "workers": 2,
+      "bytes": 50003968,
+      "ms": 550.5349998474121,
+      "MBps": 90.8279546511289,
+      "runs": 3
+    },
+    {
+      "path": "wasm-simd-opt tuned × 4 workers",
+      "size": "50 MB",
+      "workers": 4,
+      "bytes": 50003968,
+      "ms": 247.44000005722046,
+      "MBps": 202.0852246542054,
+      "runs": 3
+    },
+    {
+      "path": "wasm-simd-opt tuned × 6 workers",
+      "size": "50 MB",
+      "workers": 6,
+      "bytes": 50003968,
+      "ms": 232.3899998664856,
+      "MBps": 215.17263233671264,
+      "runs": 3
+    },
+    {
+      "path": "wasm-simd-opt tuned × 12 workers",
+      "size": "50 MB",
+      "workers": 12,
+      "bytes": 50003968,
+      "ms": 198.13499975204468,
+      "MBps": 252.37322059493417,
+      "runs": 3
+    },
+    {
+      "path": "wasm-simd-opt tuned × 1 workers",
+      "size": "400 MB",
+      "workers": 1,
+      "bytes": 400031744,
+      "ms": 10123.164999961853,
+      "MBps": 39.51646979986076,
+      "runs": 2
+    },
+    {
+      "path": "wasm-simd-opt tuned × 2 workers",
+      "size": "400 MB",
+      "workers": 2,
+      "bytes": 400031744,
+      "ms": 8548.025000095367,
+      "MBps": 46.798148577658225,
+      "runs": 2
+    },
+    {
+      "path": "wasm-simd-opt tuned × 4 workers",
+      "size": "400 MB",
+      "workers": 4,
+      "bytes": 400031744,
+      "ms": 3955.295000076294,
+      "MBps": 101.13828273043698,
+      "runs": 2
+    },
+    {
+      "path": "wasm-simd-opt tuned × 6 workers",
+      "size": "400 MB",
+      "workers": 6,
+      "bytes": 400031744,
+      "ms": 2681.289999961853,
+      "MBps": 149.19376270589578,
+      "runs": 2
+    },
+    {
+      "path": "wasm-simd-opt tuned × 12 workers",
+      "size": "400 MB",
+      "workers": 12,
+      "bytes": 400031744,
+      "ms": 2109.284999847412,
+      "MBps": 189.65277050229756,
+      "runs": 2
+    }
+  ]
+}

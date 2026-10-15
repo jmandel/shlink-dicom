@@ -1,0 +1,415 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="326" onload="init(evt)" viewBox="0 0 1200 326" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+            if (!isEdge) {
+                svg.removeAttribute("viewBox");
+            }
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="326" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">Flame Graph</text><text id="details" x="10" y="309.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1190" y="24.00">Search</text><text id="matched" x="1190" y="309.00"> </text><svg id="frames" x="10" width="1180" total_samples="12250"><g><title>&lt;core::slice::iter::ChunksExactMut&lt;f32&gt; as core::iter::traits::iterator::Iterator&gt;::next (3 samples, 0.02%)</title><rect x="0.0082%" y="213" width="0.0245%" height="15" fill="rgb(227,0,7)" fg:x="1" fg:w="3"/><text x="0.2582%" y="223.50"></text></g><g><title>&lt;[f32]&gt;::split_at_mut_checked (3 samples, 0.02%)</title><rect x="0.0082%" y="197" width="0.0245%" height="15" fill="rgb(217,0,24)" fg:x="1" fg:w="3"/><text x="0.2582%" y="207.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Add&gt;::add (9 samples, 0.07%)</title><rect x="0.0327%" y="213" width="0.0735%" height="15" fill="rgb(221,193,54)" fg:x="4" fg:w="9"/><text x="0.2827%" y="223.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Add&gt;::add (9 samples, 0.07%)</title><rect x="0.0327%" y="197" width="0.0735%" height="15" fill="rgb(248,212,6)" fg:x="4" fg:w="9"/><text x="0.2827%" y="207.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8 (9 samples, 0.07%)</title><rect x="0.0327%" y="181" width="0.0735%" height="15" fill="rgb(208,68,35)" fg:x="4" fg:w="9"/><text x="0.2827%" y="191.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8::kernel (9 samples, 0.07%)</title><rect x="0.0327%" y="165" width="0.0735%" height="15" fill="rgb(232,128,0)" fg:x="4" fg:w="9"/><text x="0.2827%" y="175.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8::kernel::__fearless_simd_kernel (9 samples, 0.07%)</title><rect x="0.0327%" y="149" width="0.0735%" height="15" fill="rgb(207,160,47)" fg:x="4" fg:w="9"/><text x="0.2827%" y="159.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_add_ps (9 samples, 0.07%)</title><rect x="0.0327%" y="133" width="0.0735%" height="15" fill="rgb(228,23,34)" fg:x="4" fg:w="9"/><text x="0.2827%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::vectorize::vectorize_avx2::&lt;hayro_jpeg2000::j2c::decode::apply_sign_shift::{closure#2}, ()&gt; (135 samples, 1.10%)</title><rect x="0.0082%" y="245" width="1.1020%" height="15" fill="rgb(218,30,26)" fg:x="1" fg:w="135"/><text x="0.2582%" y="255.50"></text></g><g><title>hayro_jpeg2000::j2c::decode::apply_sign_shift::{closure#2} (135 samples, 1.10%)</title><rect x="0.0082%" y="229" width="1.1020%" height="15" fill="rgb(220,122,19)" fg:x="1" fg:w="135"/><text x="0.2582%" y="239.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store (123 samples, 1.00%)</title><rect x="0.1061%" y="213" width="1.0041%" height="15" fill="rgb(250,228,42)" fg:x="13" fg:w="123"/><text x="0.3561%" y="223.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_slice (123 samples, 1.00%)</title><rect x="0.1061%" y="197" width="1.0041%" height="15" fill="rgb(240,193,28)" fg:x="13" fg:w="123"/><text x="0.3561%" y="207.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_array (123 samples, 1.00%)</title><rect x="0.1061%" y="181" width="1.0041%" height="15" fill="rgb(216,20,37)" fg:x="13" fg:w="123"/><text x="0.3561%" y="191.50"></text></g><g><title>&lt;[f32] as core::ops::index::Index&lt;core::ops::range::Range&lt;usize&gt;&gt;&gt;::index (2 samples, 0.02%)</title><rect x="1.9673%" y="165" width="0.0163%" height="15" fill="rgb(206,188,39)" fg:x="241" fg:w="2"/><text x="2.2173%" y="175.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (2 samples, 0.02%)</title><rect x="1.9673%" y="149" width="0.0163%" height="15" fill="rgb(217,207,13)" fg:x="241" fg:w="2"/><text x="2.2173%" y="159.50"></text></g><g><title>&lt;[f32] as core::ops::index::IndexMut&lt;core::ops::range::RangeFrom&lt;usize&gt;&gt;&gt;::index_mut (16 samples, 0.13%)</title><rect x="1.9837%" y="165" width="0.1306%" height="15" fill="rgb(231,73,38)" fg:x="243" fg:w="16"/><text x="2.2337%" y="175.50"></text></g><g><title>&lt;core::ops::range::RangeFrom&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index_mut (16 samples, 0.13%)</title><rect x="1.9837%" y="149" width="0.1306%" height="15" fill="rgb(225,20,46)" fg:x="243" fg:w="16"/><text x="2.2337%" y="159.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::iter::traits::iterator::Iterator&gt;::next (19 samples, 0.16%)</title><rect x="2.1143%" y="165" width="0.1551%" height="15" fill="rgb(210,31,41)" fg:x="259" fg:w="19"/><text x="2.3643%" y="175.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::iter::range::RangeIteratorImpl&gt;::spec_next (19 samples, 0.16%)</title><rect x="2.1143%" y="149" width="0.1551%" height="15" fill="rgb(221,200,47)" fg:x="259" fg:w="19"/><text x="2.3643%" y="159.50"></text></g><g><title>&lt;usize as core::cmp::PartialOrd&gt;::lt (10 samples, 0.08%)</title><rect x="2.1878%" y="133" width="0.0816%" height="15" fill="rgb(226,26,5)" fg:x="268" fg:w="10"/><text x="2.4378%" y="143.50"></text></g><g><title>&lt;[f32] as core::ops::index::IndexMut&lt;core::ops::range::RangeTo&lt;usize&gt;&gt;&gt;::index_mut (18 samples, 0.15%)</title><rect x="2.2694%" y="149" width="0.1469%" height="15" fill="rgb(249,33,26)" fg:x="278" fg:w="18"/><text x="2.5194%" y="159.50"></text></g><g><title>&lt;core::ops::range::RangeTo&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index_mut (18 samples, 0.15%)</title><rect x="2.2694%" y="133" width="0.1469%" height="15" fill="rgb(235,183,28)" fg:x="278" fg:w="18"/><text x="2.5194%" y="143.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index_mut (18 samples, 0.15%)</title><rect x="2.2694%" y="117" width="0.1469%" height="15" fill="rgb(221,5,38)" fg:x="278" fg:w="18"/><text x="2.5194%" y="127.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store (126 samples, 1.03%)</title><rect x="2.2694%" y="165" width="1.0286%" height="15" fill="rgb(247,18,42)" fg:x="278" fg:w="126"/><text x="2.5194%" y="175.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_slice (108 samples, 0.88%)</title><rect x="2.4163%" y="149" width="0.8816%" height="15" fill="rgb(241,131,45)" fg:x="296" fg:w="108"/><text x="2.6663%" y="159.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_array (108 samples, 0.88%)</title><rect x="2.4163%" y="133" width="0.8816%" height="15" fill="rgb(249,31,29)" fg:x="296" fg:w="108"/><text x="2.6663%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::vectorize::vectorize_avx2::&lt;hayro_jpeg2000::j2c::idwt::interleave_samples::{closure#2}, ()&gt; (283 samples, 2.31%)</title><rect x="1.1102%" y="245" width="2.3102%" height="15" fill="rgb(225,111,53)" fg:x="136" fg:w="283"/><text x="1.3602%" y="255.50">&lt;..</text></g><g><title>hayro_jpeg2000::j2c::idwt::interleave_samples::{closure#2} (283 samples, 2.31%)</title><rect x="1.1102%" y="229" width="2.3102%" height="15" fill="rgb(238,160,17)" fg:x="136" fg:w="283"/><text x="1.3602%" y="239.50">h..</text></g><g><title>hayro_jpeg2000::j2c::idwt::interleave_samples_inner::&lt;fearless_simd::generated::avx2::Avx2&gt; (283 samples, 2.31%)</title><rect x="1.1102%" y="213" width="2.3102%" height="15" fill="rgb(214,148,48)" fg:x="136" fg:w="283"/><text x="1.3602%" y="223.50">h..</text></g><g><title>hayro_jpeg2000::j2c::idwt::interleave_rows::&lt;fearless_simd::generated::avx2::Avx2&gt; (283 samples, 2.31%)</title><rect x="1.1102%" y="197" width="2.3102%" height="15" fill="rgb(232,36,49)" fg:x="136" fg:w="283"/><text x="1.3602%" y="207.50">h..</text></g><g><title>hayro_jpeg2000::j2c::idwt::interleave_row::&lt;fearless_simd::generated::avx2::Avx2&gt; (279 samples, 2.28%)</title><rect x="1.1429%" y="181" width="2.2776%" height="15" fill="rgb(209,103,24)" fg:x="140" fg:w="279"/><text x="1.3929%" y="191.50">h..</text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::zip_high (15 samples, 0.12%)</title><rect x="3.2980%" y="165" width="0.1224%" height="15" fill="rgb(229,88,8)" fg:x="404" fg:w="15"/><text x="3.5480%" y="175.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::zip_high::&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt; (15 samples, 0.12%)</title><rect x="3.2980%" y="149" width="0.1224%" height="15" fill="rgb(213,181,19)" fg:x="404" fg:w="15"/><text x="3.5480%" y="159.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::zip_high_f32x8 (15 samples, 0.12%)</title><rect x="3.2980%" y="133" width="0.1224%" height="15" fill="rgb(254,191,54)" fg:x="404" fg:w="15"/><text x="3.5480%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::zip_high_f32x8::kernel (15 samples, 0.12%)</title><rect x="3.2980%" y="117" width="0.1224%" height="15" fill="rgb(241,83,37)" fg:x="404" fg:w="15"/><text x="3.5480%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::zip_high_f32x8::kernel::__fearless_simd_kernel (15 samples, 0.12%)</title><rect x="3.2980%" y="101" width="0.1224%" height="15" fill="rgb(233,36,39)" fg:x="404" fg:w="15"/><text x="3.5480%" y="111.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_permute2f128_ps::&lt;49&gt; (15 samples, 0.12%)</title><rect x="3.2980%" y="85" width="0.1224%" height="15" fill="rgb(226,3,54)" fg:x="404" fg:w="15"/><text x="3.5480%" y="95.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_permute2f128_si256::&lt;49&gt; (15 samples, 0.12%)</title><rect x="3.2980%" y="69" width="0.1224%" height="15" fill="rgb(245,192,40)" fg:x="404" fg:w="15"/><text x="3.5480%" y="79.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::mel::MelDecoder&gt;::get_run (13 samples, 0.11%)</title><rect x="3.4204%" y="245" width="0.1061%" height="15" fill="rgb(238,167,29)" fg:x="419" fg:w="13"/><text x="3.6704%" y="255.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::mel::MelDecoder&gt;::decode (8 samples, 0.07%)</title><rect x="3.4612%" y="229" width="0.0653%" height="15" fill="rgb(232,182,51)" fg:x="424" fg:w="8"/><text x="3.7112%" y="239.50"></text></g><g><title>&lt;usize as core::cmp::Ord&gt;::min (2 samples, 0.02%)</title><rect x="3.5102%" y="213" width="0.0163%" height="15" fill="rgb(231,60,39)" fg:x="430" fg:w="2"/><text x="3.7602%" y="223.50"></text></g><g><title>&lt;u32&gt;::from_le_bytes (35 samples, 0.29%)</title><rect x="7.4286%" y="229" width="0.2857%" height="15" fill="rgb(208,69,12)" fg:x="910" fg:w="35"/><text x="7.6786%" y="239.50"></text></g><g><title>&lt;u32&gt;::from_ne_bytes (35 samples, 0.29%)</title><rect x="7.4286%" y="213" width="0.2857%" height="15" fill="rgb(235,93,37)" fg:x="910" fg:w="35"/><text x="7.6786%" y="223.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::FwdReader&lt;255&gt;&gt;::read (514 samples, 4.20%)</title><rect x="3.5265%" y="245" width="4.1959%" height="15" fill="rgb(213,116,39)" fg:x="432" fg:w="514"/><text x="3.7765%" y="255.50">&lt;hayr..</text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::RevReader&gt;::read (172 samples, 1.40%)</title><rect x="7.7224%" y="245" width="1.4041%" height="15" fill="rgb(222,207,29)" fg:x="946" fg:w="172"/><text x="7.9724%" y="255.50"></text></g><g><title>&lt;u32&gt;::from_le_bytes (6 samples, 0.05%)</title><rect x="9.0776%" y="229" width="0.0490%" height="15" fill="rgb(206,96,30)" fg:x="1112" fg:w="6"/><text x="9.3276%" y="239.50"></text></g><g><title>&lt;u32&gt;::from_ne_bytes (6 samples, 0.05%)</title><rect x="9.0776%" y="213" width="0.0490%" height="15" fill="rgb(218,138,4)" fg:x="1112" fg:w="6"/><text x="9.3276%" y="223.50"></text></g><g><title>&lt;alloc::vec::Vec&lt;hayro_jpeg2000::j2c::tag_tree::TagNode&gt;&gt;::len (4 samples, 0.03%)</title><rect x="9.1347%" y="213" width="0.0327%" height="15" fill="rgb(250,191,14)" fg:x="1119" fg:w="4"/><text x="9.3847%" y="223.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::tag_tree::TagNode&gt;::build (6 samples, 0.05%)</title><rect x="9.1265%" y="245" width="0.0490%" height="15" fill="rgb(239,60,40)" fg:x="1118" fg:w="6"/><text x="9.3765%" y="255.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::tag_tree::TagNode&gt;::build::{closure#0} (5 samples, 0.04%)</title><rect x="9.1347%" y="229" width="0.0408%" height="15" fill="rgb(206,27,48)" fg:x="1119" fg:w="5"/><text x="9.3847%" y="239.50"></text></g><g><title>[ld-linux-x86-64.so.2] (2 samples, 0.02%)</title><rect x="9.2082%" y="181" width="0.0163%" height="15" fill="rgb(225,35,8)" fg:x="1128" fg:w="2"/><text x="9.4582%" y="191.50"></text></g><g><title>[ld-linux-x86-64.so.2] (4 samples, 0.03%)</title><rect x="9.2000%" y="213" width="0.0327%" height="15" fill="rgb(250,213,24)" fg:x="1127" fg:w="4"/><text x="9.4500%" y="223.50"></text></g><g><title>[ld-linux-x86-64.so.2] (4 samples, 0.03%)</title><rect x="9.2000%" y="197" width="0.0327%" height="15" fill="rgb(247,123,22)" fg:x="1127" fg:w="4"/><text x="9.4500%" y="207.50"></text></g><g><title>[ld-linux-x86-64.so.2] (9 samples, 0.07%)</title><rect x="9.2000%" y="229" width="0.0735%" height="15" fill="rgb(231,138,38)" fg:x="1127" fg:w="9"/><text x="9.4500%" y="239.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="213" width="0.0408%" height="15" fill="rgb(231,145,46)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="223.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="197" width="0.0408%" height="15" fill="rgb(251,118,11)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="207.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="181" width="0.0408%" height="15" fill="rgb(217,147,25)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="191.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="165" width="0.0408%" height="15" fill="rgb(247,81,37)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="175.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="149" width="0.0408%" height="15" fill="rgb(209,12,38)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="159.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="133" width="0.0408%" height="15" fill="rgb(227,1,9)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="143.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="117" width="0.0408%" height="15" fill="rgb(248,47,43)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="127.50"></text></g><g><title>[unknown] (5 samples, 0.04%)</title><rect x="9.2327%" y="101" width="0.0408%" height="15" fill="rgb(221,10,30)" fg:x="1131" fg:w="5"/><text x="9.4827%" y="111.50"></text></g><g><title>[unknown] (4 samples, 0.03%)</title><rect x="9.2408%" y="85" width="0.0327%" height="15" fill="rgb(210,229,1)" fg:x="1132" fg:w="4"/><text x="9.4908%" y="95.50"></text></g><g><title>[unknown] (3 samples, 0.02%)</title><rect x="9.2490%" y="69" width="0.0245%" height="15" fill="rgb(222,148,37)" fg:x="1133" fg:w="3"/><text x="9.4990%" y="79.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="9.2571%" y="53" width="0.0163%" height="15" fill="rgb(234,67,33)" fg:x="1134" fg:w="2"/><text x="9.5071%" y="63.50"></text></g><g><title>[ld-linux-x86-64.so.2] (10 samples, 0.08%)</title><rect x="9.2000%" y="245" width="0.0816%" height="15" fill="rgb(247,98,35)" fg:x="1127" fg:w="10"/><text x="9.4500%" y="255.50"></text></g><g><title>[libc.so.6] (673 samples, 5.49%)</title><rect x="9.2816%" y="245" width="5.4939%" height="15" fill="rgb(247,138,52)" fg:x="1137" fg:w="673"/><text x="9.5316%" y="255.50">[libc.s..</text></g><g><title>&lt;[f32] as core::ops::index::Index&lt;core::ops::range::RangeFrom&lt;usize&gt;&gt;&gt;::index (6 samples, 0.05%)</title><rect x="15.6163%" y="149" width="0.0490%" height="15" fill="rgb(213,79,30)" fg:x="1913" fg:w="6"/><text x="15.8663%" y="159.50"></text></g><g><title>&lt;core::ops::range::RangeFrom&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (6 samples, 0.05%)</title><rect x="15.6163%" y="133" width="0.0490%" height="15" fill="rgb(246,177,23)" fg:x="1913" fg:w="6"/><text x="15.8663%" y="143.50"></text></g><g><title>&lt;[f32] as core::ops::index::Index&lt;core::ops::range::RangeTo&lt;usize&gt;&gt;&gt;::index (10 samples, 0.08%)</title><rect x="15.6653%" y="149" width="0.0816%" height="15" fill="rgb(230,62,27)" fg:x="1919" fg:w="10"/><text x="15.9153%" y="159.50"></text></g><g><title>&lt;core::ops::range::RangeTo&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (10 samples, 0.08%)</title><rect x="15.6653%" y="133" width="0.0816%" height="15" fill="rgb(216,154,8)" fg:x="1919" fg:w="10"/><text x="15.9153%" y="143.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (10 samples, 0.08%)</title><rect x="15.6653%" y="117" width="0.0816%" height="15" fill="rgb(244,35,45)" fg:x="1919" fg:w="10"/><text x="15.9153%" y="127.50"></text></g><g><title>&lt;core::iter::adapters::step_by::StepBy&lt;core::ops::range::Range&lt;usize&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (5 samples, 0.04%)</title><rect x="15.7469%" y="149" width="0.0408%" height="15" fill="rgb(251,115,12)" fg:x="1929" fg:w="5"/><text x="15.9969%" y="159.50"></text></g><g><title>&lt;core::iter::adapters::step_by::StepBy&lt;core::ops::range::Range&lt;usize&gt;&gt; as core::iter::adapters::step_by::StepByImpl&lt;core::ops::range::Range&lt;usize&gt;&gt;&gt;::spec_next (5 samples, 0.04%)</title><rect x="15.7469%" y="133" width="0.0408%" height="15" fill="rgb(240,54,50)" fg:x="1929" fg:w="5"/><text x="15.9969%" y="143.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store (8 samples, 0.07%)</title><rect x="15.7878%" y="149" width="0.0653%" height="15" fill="rgb(233,84,52)" fg:x="1934" fg:w="8"/><text x="16.0378%" y="159.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_slice (8 samples, 0.07%)</title><rect x="15.7878%" y="133" width="0.0653%" height="15" fill="rgb(207,117,47)" fg:x="1934" fg:w="8"/><text x="16.0378%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_array (8 samples, 0.07%)</title><rect x="15.7878%" y="117" width="0.0653%" height="15" fill="rgb(249,43,39)" fg:x="1934" fg:w="8"/><text x="16.0378%" y="127.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Add&lt;f32&gt;&gt;::add (14 samples, 0.11%)</title><rect x="15.8531%" y="133" width="0.1143%" height="15" fill="rgb(209,38,44)" fg:x="1942" fg:w="14"/><text x="16.1031%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Add&lt;f32&gt;&gt;::add (14 samples, 0.11%)</title><rect x="15.8531%" y="117" width="0.1143%" height="15" fill="rgb(236,212,23)" fg:x="1942" fg:w="14"/><text x="16.1031%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8 (14 samples, 0.11%)</title><rect x="15.8531%" y="101" width="0.1143%" height="15" fill="rgb(242,79,21)" fg:x="1942" fg:w="14"/><text x="16.1031%" y="111.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8::kernel (14 samples, 0.11%)</title><rect x="15.8531%" y="85" width="0.1143%" height="15" fill="rgb(211,96,35)" fg:x="1942" fg:w="14"/><text x="16.1031%" y="95.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8::kernel::__fearless_simd_kernel (14 samples, 0.11%)</title><rect x="15.8531%" y="69" width="0.1143%" height="15" fill="rgb(253,215,40)" fg:x="1942" fg:w="14"/><text x="16.1031%" y="79.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_add_ps (14 samples, 0.11%)</title><rect x="15.8531%" y="53" width="0.1143%" height="15" fill="rgb(211,81,21)" fg:x="1942" fg:w="14"/><text x="16.1031%" y="63.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Mul&lt;f32&gt;&gt;::mul (5 samples, 0.04%)</title><rect x="15.9755%" y="133" width="0.0408%" height="15" fill="rgb(208,190,38)" fg:x="1957" fg:w="5"/><text x="16.2255%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Mul&lt;f32&gt;&gt;::mul (5 samples, 0.04%)</title><rect x="15.9755%" y="117" width="0.0408%" height="15" fill="rgb(235,213,38)" fg:x="1957" fg:w="5"/><text x="16.2255%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::mul_f32x8 (5 samples, 0.04%)</title><rect x="15.9755%" y="101" width="0.0408%" height="15" fill="rgb(237,122,38)" fg:x="1957" fg:w="5"/><text x="16.2255%" y="111.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::mul_f32x8::kernel (5 samples, 0.04%)</title><rect x="15.9755%" y="85" width="0.0408%" height="15" fill="rgb(244,218,35)" fg:x="1957" fg:w="5"/><text x="16.2255%" y="95.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::mul_f32x8::kernel::__fearless_simd_kernel (5 samples, 0.04%)</title><rect x="15.9755%" y="69" width="0.0408%" height="15" fill="rgb(240,68,47)" fg:x="1957" fg:w="5"/><text x="16.2255%" y="79.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_mul_ps (5 samples, 0.04%)</title><rect x="15.9755%" y="53" width="0.0408%" height="15" fill="rgb(210,16,53)" fg:x="1957" fg:w="5"/><text x="16.2255%" y="63.50"></text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_step_vertical::&lt;fearless_simd::generated::avx2::Avx2, hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd&lt;fearless_simd::generated::avx2::Avx2&gt;::{closure#0}, hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd&lt;fearless_simd::generated::avx2::Avx2&gt;::{closure#1}&gt; (161 samples, 1.31%)</title><rect x="14.7755%" y="165" width="1.3143%" height="15" fill="rgb(235,124,12)" fg:x="1810" fg:w="161"/><text x="15.0255%" y="175.50"></text></g><g><title>hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd::&lt;fearless_simd::generated::avx2::Avx2&gt;::{closure#0} (29 samples, 0.24%)</title><rect x="15.8531%" y="149" width="0.2367%" height="15" fill="rgb(224,169,11)" fg:x="1942" fg:w="29"/><text x="16.1031%" y="159.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::floor (9 samples, 0.07%)</title><rect x="16.0163%" y="133" width="0.0735%" height="15" fill="rgb(250,166,2)" fg:x="1962" fg:w="9"/><text x="16.2663%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdFloat&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::floor (9 samples, 0.07%)</title><rect x="16.0163%" y="117" width="0.0735%" height="15" fill="rgb(242,216,29)" fg:x="1962" fg:w="9"/><text x="16.2663%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::floor_f32x8 (9 samples, 0.07%)</title><rect x="16.0163%" y="101" width="0.0735%" height="15" fill="rgb(230,116,27)" fg:x="1962" fg:w="9"/><text x="16.2663%" y="111.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::floor_f32x8::kernel (9 samples, 0.07%)</title><rect x="16.0163%" y="85" width="0.0735%" height="15" fill="rgb(228,99,48)" fg:x="1962" fg:w="9"/><text x="16.2663%" y="95.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::floor_f32x8::kernel::__fearless_simd_kernel (9 samples, 0.07%)</title><rect x="16.0163%" y="69" width="0.0735%" height="15" fill="rgb(253,11,6)" fg:x="1962" fg:w="9"/><text x="16.2663%" y="79.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_round_ps::&lt;9&gt; (9 samples, 0.07%)</title><rect x="16.0163%" y="53" width="0.0735%" height="15" fill="rgb(247,143,39)" fg:x="1962" fg:w="9"/><text x="16.2663%" y="63.50"></text></g><g><title>&lt;[f32] as core::ops::index::Index&lt;core::ops::range::RangeFrom&lt;usize&gt;&gt;&gt;::index (2 samples, 0.02%)</title><rect x="16.2367%" y="149" width="0.0163%" height="15" fill="rgb(236,97,10)" fg:x="1989" fg:w="2"/><text x="16.4867%" y="159.50"></text></g><g><title>&lt;core::ops::range::RangeFrom&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (2 samples, 0.02%)</title><rect x="16.2367%" y="133" width="0.0163%" height="15" fill="rgb(233,208,19)" fg:x="1989" fg:w="2"/><text x="16.4867%" y="143.50"></text></g><g><title>&lt;[f32] as core::ops::index::Index&lt;core::ops::range::RangeTo&lt;usize&gt;&gt;&gt;::index (13 samples, 0.11%)</title><rect x="16.2531%" y="149" width="0.1061%" height="15" fill="rgb(216,164,2)" fg:x="1991" fg:w="13"/><text x="16.5031%" y="159.50"></text></g><g><title>&lt;core::ops::range::RangeTo&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (13 samples, 0.11%)</title><rect x="16.2531%" y="133" width="0.1061%" height="15" fill="rgb(220,129,5)" fg:x="1991" fg:w="13"/><text x="16.5031%" y="143.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::slice::index::SliceIndex&lt;[f32]&gt;&gt;::index (13 samples, 0.11%)</title><rect x="16.2531%" y="117" width="0.1061%" height="15" fill="rgb(242,17,10)" fg:x="1991" fg:w="13"/><text x="16.5031%" y="127.50"></text></g><g><title>&lt;core::iter::adapters::step_by::StepBy&lt;core::ops::range::Range&lt;usize&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (6 samples, 0.05%)</title><rect x="16.3592%" y="149" width="0.0490%" height="15" fill="rgb(242,107,0)" fg:x="2004" fg:w="6"/><text x="16.6092%" y="159.50"></text></g><g><title>&lt;core::iter::adapters::step_by::StepBy&lt;core::ops::range::Range&lt;usize&gt;&gt; as core::iter::adapters::step_by::StepByImpl&lt;core::ops::range::Range&lt;usize&gt;&gt;&gt;::spec_next (6 samples, 0.05%)</title><rect x="16.3592%" y="133" width="0.0490%" height="15" fill="rgb(251,28,31)" fg:x="2004" fg:w="6"/><text x="16.6092%" y="143.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store (20 samples, 0.16%)</title><rect x="16.4082%" y="149" width="0.1633%" height="15" fill="rgb(233,223,10)" fg:x="2010" fg:w="20"/><text x="16.6582%" y="159.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_slice (20 samples, 0.16%)</title><rect x="16.4082%" y="133" width="0.1633%" height="15" fill="rgb(215,21,27)" fg:x="2010" fg:w="20"/><text x="16.6582%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdBase&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::store_array (20 samples, 0.16%)</title><rect x="16.4082%" y="117" width="0.1633%" height="15" fill="rgb(232,23,21)" fg:x="2010" fg:w="20"/><text x="16.6582%" y="127.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Add&gt;::add (3 samples, 0.02%)</title><rect x="16.5714%" y="133" width="0.0245%" height="15" fill="rgb(244,5,23)" fg:x="2030" fg:w="3"/><text x="16.8214%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Add&gt;::add (3 samples, 0.02%)</title><rect x="16.5714%" y="117" width="0.0245%" height="15" fill="rgb(226,81,46)" fg:x="2030" fg:w="3"/><text x="16.8214%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8 (3 samples, 0.02%)</title><rect x="16.5714%" y="101" width="0.0245%" height="15" fill="rgb(247,70,30)" fg:x="2030" fg:w="3"/><text x="16.8214%" y="111.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8::kernel (3 samples, 0.02%)</title><rect x="16.5714%" y="85" width="0.0245%" height="15" fill="rgb(212,68,19)" fg:x="2030" fg:w="3"/><text x="16.8214%" y="95.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::add_f32x8::kernel::__fearless_simd_kernel (3 samples, 0.02%)</title><rect x="16.5714%" y="69" width="0.0245%" height="15" fill="rgb(240,187,13)" fg:x="2030" fg:w="3"/><text x="16.8214%" y="79.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_add_ps (3 samples, 0.02%)</title><rect x="16.5714%" y="53" width="0.0245%" height="15" fill="rgb(223,113,26)" fg:x="2030" fg:w="3"/><text x="16.8214%" y="63.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Mul&lt;f32&gt;&gt;::mul (69 samples, 0.56%)</title><rect x="16.5959%" y="133" width="0.5633%" height="15" fill="rgb(206,192,2)" fg:x="2033" fg:w="69"/><text x="16.8459%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as core::ops::arith::Mul&lt;f32&gt;&gt;::mul (69 samples, 0.56%)</title><rect x="16.5959%" y="117" width="0.5633%" height="15" fill="rgb(241,108,4)" fg:x="2033" fg:w="69"/><text x="16.8459%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::mul_f32x8 (69 samples, 0.56%)</title><rect x="16.5959%" y="101" width="0.5633%" height="15" fill="rgb(247,173,49)" fg:x="2033" fg:w="69"/><text x="16.8459%" y="111.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::mul_f32x8::kernel (69 samples, 0.56%)</title><rect x="16.5959%" y="85" width="0.5633%" height="15" fill="rgb(224,114,35)" fg:x="2033" fg:w="69"/><text x="16.8459%" y="95.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::mul_f32x8::kernel::__fearless_simd_kernel (69 samples, 0.56%)</title><rect x="16.5959%" y="69" width="0.5633%" height="15" fill="rgb(245,159,27)" fg:x="2033" fg:w="69"/><text x="16.8459%" y="79.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_mul_ps (69 samples, 0.56%)</title><rect x="16.5959%" y="53" width="0.5633%" height="15" fill="rgb(245,172,44)" fg:x="2033" fg:w="69"/><text x="16.8459%" y="63.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::vectorize::vectorize_avx2::&lt;hayro_jpeg2000::j2c::idwt::filter_vertical::{closure#2}, ()&gt; (300 samples, 2.45%)</title><rect x="14.7755%" y="229" width="2.4490%" height="15" fill="rgb(236,23,11)" fg:x="1810" fg:w="300"/><text x="15.0255%" y="239.50">&lt;f..</text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_vertical::{closure#2} (300 samples, 2.45%)</title><rect x="14.7755%" y="213" width="2.4490%" height="15" fill="rgb(205,117,38)" fg:x="1810" fg:w="300"/><text x="15.0255%" y="223.50">ha..</text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_vertical_impl::&lt;fearless_simd::generated::avx2::Avx2&gt; (300 samples, 2.45%)</title><rect x="14.7755%" y="197" width="2.4490%" height="15" fill="rgb(237,72,25)" fg:x="1810" fg:w="300"/><text x="15.0255%" y="207.50">ha..</text></g><g><title>hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd::&lt;fearless_simd::generated::avx2::Avx2&gt; (300 samples, 2.45%)</title><rect x="14.7755%" y="181" width="2.4490%" height="15" fill="rgb(244,70,9)" fg:x="1810" fg:w="300"/><text x="15.0255%" y="191.50">ha..</text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_step_vertical::&lt;fearless_simd::generated::avx2::Avx2, hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd&lt;fearless_simd::generated::avx2::Avx2&gt;::{closure#2}, hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd&lt;fearless_simd::generated::avx2::Avx2&gt;::{closure#3}&gt; (139 samples, 1.13%)</title><rect x="16.0898%" y="165" width="1.1347%" height="15" fill="rgb(217,125,39)" fg:x="1971" fg:w="139"/><text x="16.3398%" y="175.50"></text></g><g><title>hayro_jpeg2000::j2c::idwt::reversible_filter_53r_simd::&lt;fearless_simd::generated::avx2::Avx2&gt;::{closure#2} (80 samples, 0.65%)</title><rect x="16.5714%" y="149" width="0.6531%" height="15" fill="rgb(235,36,10)" fg:x="2030" fg:w="80"/><text x="16.8214%" y="159.50"></text></g><g><title>&lt;hayro_jpeg2000::math::inner::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::floor (8 samples, 0.07%)</title><rect x="17.1592%" y="133" width="0.0653%" height="15" fill="rgb(251,123,47)" fg:x="2102" fg:w="8"/><text x="17.4092%" y="143.50"></text></g><g><title>&lt;fearless_simd::generated::simd_types::f32x8&lt;fearless_simd::generated::avx2::Avx2&gt; as fearless_simd::generated::simd_trait::SimdFloat&lt;fearless_simd::generated::avx2::Avx2&gt;&gt;::floor (8 samples, 0.07%)</title><rect x="17.1592%" y="117" width="0.0653%" height="15" fill="rgb(221,13,13)" fg:x="2102" fg:w="8"/><text x="17.4092%" y="127.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::floor_f32x8 (8 samples, 0.07%)</title><rect x="17.1592%" y="101" width="0.0653%" height="15" fill="rgb(238,131,9)" fg:x="2102" fg:w="8"/><text x="17.4092%" y="111.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::floor_f32x8::kernel (8 samples, 0.07%)</title><rect x="17.1592%" y="85" width="0.0653%" height="15" fill="rgb(211,50,8)" fg:x="2102" fg:w="8"/><text x="17.4092%" y="95.50"></text></g><g><title>&lt;fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd&gt;::floor_f32x8::kernel::__fearless_simd_kernel (8 samples, 0.07%)</title><rect x="17.1592%" y="69" width="0.0653%" height="15" fill="rgb(245,182,24)" fg:x="2102" fg:w="8"/><text x="17.4092%" y="79.50"></text></g><g><title>core::core_arch::x86::avx::_mm256_round_ps::&lt;9&gt; (8 samples, 0.07%)</title><rect x="17.1592%" y="53" width="0.0653%" height="15" fill="rgb(242,14,37)" fg:x="2102" fg:w="8"/><text x="17.4092%" y="63.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::RevReader&gt;::read (2 samples, 0.02%)</title><rect x="17.2408%" y="229" width="0.0163%" height="15" fill="rgb(246,228,12)" fg:x="2112" fg:w="2"/><text x="17.4908%" y="239.50"></text></g><g><title>[libc.so.6] (134 samples, 1.09%)</title><rect x="17.2571%" y="229" width="1.0939%" height="15" fill="rgb(213,55,15)" fg:x="2114" fg:w="134"/><text x="17.5071%" y="239.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::peak_bits_with_stuffing (4 samples, 0.03%)</title><rect x="18.3837%" y="149" width="0.0327%" height="15" fill="rgb(209,9,3)" fg:x="2252" fg:w="4"/><text x="18.6337%" y="159.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::read_bits_with_stuffing (4 samples, 0.03%)</title><rect x="18.3837%" y="133" width="0.0327%" height="15" fill="rgb(230,59,30)" fg:x="2252" fg:w="4"/><text x="18.6337%" y="143.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::read_bit (3 samples, 0.02%)</title><rect x="18.3918%" y="117" width="0.0245%" height="15" fill="rgb(209,121,21)" fg:x="2253" fg:w="3"/><text x="18.6418%" y="127.50"></text></g><g><title>hayro_jpeg2000::j2c::decode::decode_tile (12 samples, 0.10%)</title><rect x="18.3510%" y="213" width="0.0980%" height="15" fill="rgb(220,109,13)" fg:x="2248" fg:w="12"/><text x="18.6010%" y="223.50"></text></g><g><title>hayro_jpeg2000::j2c::segment::parse (12 samples, 0.10%)</title><rect x="18.3510%" y="197" width="0.0980%" height="15" fill="rgb(232,18,1)" fg:x="2248" fg:w="12"/><text x="18.6010%" y="207.50"></text></g><g><title>hayro_jpeg2000::j2c::segment::parse_inner (12 samples, 0.10%)</title><rect x="18.3510%" y="181" width="0.0980%" height="15" fill="rgb(215,41,42)" fg:x="2248" fg:w="12"/><text x="18.6010%" y="191.50"></text></g><g><title>hayro_jpeg2000::j2c::segment::resolve_segments (10 samples, 0.08%)</title><rect x="18.3673%" y="165" width="0.0816%" height="15" fill="rgb(224,123,36)" fg:x="2250" fg:w="10"/><text x="18.6173%" y="175.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::read_bits_with_stuffing (4 samples, 0.03%)</title><rect x="18.4163%" y="149" width="0.0327%" height="15" fill="rgb(240,125,3)" fg:x="2256" fg:w="4"/><text x="18.6663%" y="159.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::read_bit (3 samples, 0.02%)</title><rect x="18.4245%" y="133" width="0.0245%" height="15" fill="rgb(205,98,50)" fg:x="2257" fg:w="3"/><text x="18.6745%" y="143.50"></text></g><g><title>[unknown] (24 samples, 0.20%)</title><rect x="18.3510%" y="229" width="0.1959%" height="15" fill="rgb(205,185,37)" fg:x="2248" fg:w="24"/><text x="18.6010%" y="239.50"></text></g><g><title>hayro_jpeg2000::j2c::tag_tree::read_tag_node (12 samples, 0.10%)</title><rect x="18.4490%" y="213" width="0.0980%" height="15" fill="rgb(238,207,15)" fg:x="2260" fg:w="12"/><text x="18.6990%" y="223.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::read_bits_with_stuffing (2 samples, 0.02%)</title><rect x="18.5306%" y="197" width="0.0163%" height="15" fill="rgb(213,199,42)" fg:x="2270" fg:w="2"/><text x="18.7806%" y="207.50"></text></g><g><title>&lt;[u32]&gt;::chunks_exact (2 samples, 0.02%)</title><rect x="20.3510%" y="181" width="0.0163%" height="15" fill="rgb(235,201,11)" fg:x="2493" fg:w="2"/><text x="20.6010%" y="191.50"></text></g><g><title>&lt;core::slice::iter::ChunksExact&lt;u32&gt;&gt;::new (2 samples, 0.02%)</title><rect x="20.3510%" y="165" width="0.0163%" height="15" fill="rgb(207,46,11)" fg:x="2493" fg:w="2"/><text x="20.6010%" y="175.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::iter::adapters::map::Map&lt;core::iter::adapters::take::Take&lt;core::slice::iter::ChunksMut&lt;f32&gt;&gt;, hayro_jpeg2000::j2c::decode::decode_ht_sub_band::{closure#2}&gt;, core::slice::iter::ChunksExact&lt;u32&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (17 samples, 0.14%)</title><rect x="20.3673%" y="181" width="0.1388%" height="15" fill="rgb(241,35,35)" fg:x="2495" fg:w="17"/><text x="20.6173%" y="191.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::iter::adapters::map::Map&lt;core::iter::adapters::take::Take&lt;core::slice::iter::ChunksMut&lt;f32&gt;&gt;, hayro_jpeg2000::j2c::decode::decode_ht_sub_band::{closure#2}&gt;, core::slice::iter::ChunksExact&lt;u32&gt;&gt; as core::iter::adapters::zip::ZipImpl&lt;core::iter::adapters::map::Map&lt;core::iter::adapters::take::Take&lt;core::slice::iter::ChunksMut&lt;f32&gt;&gt;, hayro_jpeg2000::j2c::decode::decode_ht_sub_band::{closure#2}&gt;, core::slice::iter::ChunksExact&lt;u32&gt;&gt;&gt;::next (17 samples, 0.14%)</title><rect x="20.3673%" y="165" width="0.1388%" height="15" fill="rgb(243,32,47)" fg:x="2495" fg:w="17"/><text x="20.6173%" y="175.50"></text></g><g><title>&lt;core::iter::adapters::map::Map&lt;core::iter::adapters::take::Take&lt;core::slice::iter::ChunksMut&lt;f32&gt;&gt;, hayro_jpeg2000::j2c::decode::decode_ht_sub_band::{closure#2}&gt; as core::iter::traits::iterator::Iterator&gt;::next (7 samples, 0.06%)</title><rect x="20.4490%" y="149" width="0.0571%" height="15" fill="rgb(247,202,23)" fg:x="2505" fg:w="7"/><text x="20.6990%" y="159.50"></text></g><g><title>&lt;core::iter::adapters::take::Take&lt;core::slice::iter::ChunksMut&lt;f32&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (7 samples, 0.06%)</title><rect x="20.4490%" y="133" width="0.0571%" height="15" fill="rgb(219,102,11)" fg:x="2505" fg:w="7"/><text x="20.6990%" y="143.50"></text></g><g><title>&lt;core::slice::iter::ChunksMut&lt;f32&gt; as core::iter::traits::iterator::Iterator&gt;::next (5 samples, 0.04%)</title><rect x="20.4653%" y="117" width="0.0408%" height="15" fill="rgb(243,110,44)" fg:x="2507" fg:w="5"/><text x="20.7153%" y="127.50"></text></g><g><title>core::cmp::min::&lt;usize&gt; (5 samples, 0.04%)</title><rect x="20.4653%" y="101" width="0.0408%" height="15" fill="rgb(222,74,54)" fg:x="2507" fg:w="5"/><text x="20.7153%" y="111.50"></text></g><g><title>&lt;usize as core::cmp::Ord&gt;::min (5 samples, 0.04%)</title><rect x="20.4653%" y="85" width="0.0408%" height="15" fill="rgb(216,99,12)" fg:x="2507" fg:w="5"/><text x="20.7153%" y="95.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::slice::iter::IterMut&lt;f32&gt;, core::slice::iter::Iter&lt;u32&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (35 samples, 0.29%)</title><rect x="20.5061%" y="181" width="0.2857%" height="15" fill="rgb(226,22,26)" fg:x="2512" fg:w="35"/><text x="20.7561%" y="191.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::slice::iter::IterMut&lt;f32&gt;, core::slice::iter::Iter&lt;u32&gt;&gt; as core::iter::adapters::zip::ZipImpl&lt;core::slice::iter::IterMut&lt;f32&gt;, core::slice::iter::Iter&lt;u32&gt;&gt;&gt;::next (35 samples, 0.29%)</title><rect x="20.5061%" y="165" width="0.2857%" height="15" fill="rgb(217,163,10)" fg:x="2512" fg:w="35"/><text x="20.7561%" y="175.50"></text></g><g><title>&lt;core::ops::range::Range&lt;usize&gt; as core::clone::Clone&gt;::clone (2 samples, 0.02%)</title><rect x="20.7918%" y="181" width="0.0163%" height="15" fill="rgb(213,25,53)" fg:x="2547" fg:w="2"/><text x="21.0418%" y="191.50"></text></g><g><title>&lt;usize as core::clone::Clone&gt;::clone (2 samples, 0.02%)</title><rect x="20.7918%" y="165" width="0.0163%" height="15" fill="rgb(252,105,26)" fg:x="2547" fg:w="2"/><text x="21.0418%" y="175.50"></text></g><g><title>hayro_jpeg2000::j2c::decode::decode_component_tile_bit_planes (308 samples, 2.51%)</title><rect x="18.5551%" y="229" width="2.5143%" height="15" fill="rgb(220,39,43)" fg:x="2273" fg:w="308"/><text x="18.8051%" y="239.50">ha..</text></g><g><title>hayro_jpeg2000::j2c::decode::decode_sub_band_bitplanes (308 samples, 2.51%)</title><rect x="18.5551%" y="213" width="2.5143%" height="15" fill="rgb(229,68,48)" fg:x="2273" fg:w="308"/><text x="18.8051%" y="223.50">ha..</text></g><g><title>hayro_jpeg2000::j2c::decode::decode_ht_sub_band (308 samples, 2.51%)</title><rect x="18.5551%" y="197" width="2.5143%" height="15" fill="rgb(252,8,32)" fg:x="2273" fg:w="308"/><text x="18.8051%" y="207.50">ha..</text></g><g><title>hayro_jpeg2000::j2c::ht::decode::decode_block (30 samples, 0.24%)</title><rect x="20.8245%" y="181" width="0.2449%" height="15" fill="rgb(223,20,43)" fg:x="2551" fg:w="30"/><text x="21.0745%" y="191.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::RevReader&gt;::fetch (2 samples, 0.02%)</title><rect x="21.0531%" y="165" width="0.0163%" height="15" fill="rgb(229,81,49)" fg:x="2579" fg:w="2"/><text x="21.3031%" y="175.50"></text></g><g><title>&lt;[u8]&gt;::copy_from_slice (27 samples, 0.22%)</title><rect x="21.2245%" y="213" width="0.2204%" height="15" fill="rgb(236,28,36)" fg:x="2600" fg:w="27"/><text x="21.4745%" y="223.50"></text></g><g><title>core::slice::copy_from_slice_impl::&lt;u8&gt; (27 samples, 0.22%)</title><rect x="21.2245%" y="197" width="0.2204%" height="15" fill="rgb(249,185,26)" fg:x="2600" fg:w="27"/><text x="21.4745%" y="207.50"></text></g><g><title>core::ptr::copy_nonoverlapping::&lt;u8&gt; (27 samples, 0.22%)</title><rect x="21.2245%" y="181" width="0.2204%" height="15" fill="rgb(249,174,33)" fg:x="2600" fg:w="27"/><text x="21.4745%" y="191.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::slice::iter::ChunksExactMut&lt;u8&gt;, core::slice::iter::Iter&lt;i32&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (35 samples, 0.29%)</title><rect x="21.4449%" y="213" width="0.2857%" height="15" fill="rgb(233,201,37)" fg:x="2627" fg:w="35"/><text x="21.6949%" y="223.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::slice::iter::ChunksExactMut&lt;u8&gt;, core::slice::iter::Iter&lt;i32&gt;&gt; as core::iter::adapters::zip::ZipImpl&lt;core::slice::iter::ChunksExactMut&lt;u8&gt;, core::slice::iter::Iter&lt;i32&gt;&gt;&gt;::next (35 samples, 0.29%)</title><rect x="21.4449%" y="197" width="0.2857%" height="15" fill="rgb(221,78,26)" fg:x="2627" fg:w="35"/><text x="21.6949%" y="207.50"></text></g><g><title>&lt;core::slice::iter::IterMut&lt;i32&gt; as core::iter::traits::iterator::Iterator&gt;::next (238 samples, 1.94%)</title><rect x="21.7306%" y="213" width="1.9429%" height="15" fill="rgb(250,127,30)" fg:x="2662" fg:w="238"/><text x="21.9806%" y="223.50">&lt;..</text></g><g><title>&lt;core::ptr::non_null::NonNull&lt;i32&gt; as core::cmp::PartialEq&gt;::eq (235 samples, 1.92%)</title><rect x="21.7551%" y="197" width="1.9184%" height="15" fill="rgb(230,49,44)" fg:x="2665" fg:w="235"/><text x="22.0051%" y="207.50">&lt;..</text></g><g><title>&lt;i32 as core::cmp::Ord&gt;::clamp (219 samples, 1.79%)</title><rect x="23.6735%" y="213" width="1.7878%" height="15" fill="rgb(229,67,23)" fg:x="2900" fg:w="219"/><text x="23.9235%" y="223.50">&lt;..</text></g><g><title>&lt;i32&gt;::to_le_bytes (19 samples, 0.16%)</title><rect x="25.4612%" y="213" width="0.1551%" height="15" fill="rgb(249,83,47)" fg:x="3119" fg:w="19"/><text x="25.7112%" y="223.50"></text></g><g><title>&lt;i32&gt;::to_ne_bytes (19 samples, 0.16%)</title><rect x="25.4612%" y="197" width="0.1551%" height="15" fill="rgb(215,43,3)" fg:x="3119" fg:w="19"/><text x="25.7112%" y="207.50"></text></g><g><title>[unknown] (1,329 samples, 10.85%)</title><rect x="14.7755%" y="245" width="10.8490%" height="15" fill="rgb(238,154,13)" fg:x="1810" fg:w="1329"/><text x="15.0255%" y="255.50">[unknown]</text></g><g><title>shl_codec_jpeg2000::prep::write_rows::&lt;2, shl_codec_jpeg2000::decode::{closure#6}&gt; (558 samples, 4.56%)</title><rect x="21.0694%" y="229" width="4.5551%" height="15" fill="rgb(219,56,2)" fg:x="2581" fg:w="558"/><text x="21.3194%" y="239.50">shl_c..</text></g><g><title>&lt;f32 as compiler_builtins::math::libm_math::support::float_traits::Float&gt;::exp_unbiased (160 samples, 1.31%)</title><rect x="37.0694%" y="181" width="1.3061%" height="15" fill="rgb(233,0,4)" fg:x="4541" fg:w="160"/><text x="37.3194%" y="191.50"></text></g><g><title>&lt;f32 as compiler_builtins::math::libm_math::support::float_traits::Float&gt;::ex (160 samples, 1.31%)</title><rect x="37.0694%" y="165" width="1.3061%" height="15" fill="rgb(235,30,7)" fg:x="4541" fg:w="160"/><text x="37.3194%" y="175.50"></text></g><g><title>&lt;u32 as core::ops::bit::Shr&gt;::shr (100 samples, 0.82%)</title><rect x="37.5592%" y="149" width="0.8163%" height="15" fill="rgb(250,79,13)" fg:x="4601" fg:w="100"/><text x="37.8092%" y="159.50"></text></g><g><title>&lt;f32 as compiler_builtins::math::libm_math::support::float_traits::Float&gt;::from_bits (194 samples, 1.58%)</title><rect x="38.3755%" y="181" width="1.5837%" height="15" fill="rgb(211,146,34)" fg:x="4701" fg:w="194"/><text x="38.6255%" y="191.50"></text></g><g><title>&lt;f32&gt;::from_bits (194 samples, 1.58%)</title><rect x="38.3755%" y="165" width="1.5837%" height="15" fill="rgb(228,22,38)" fg:x="4701" fg:w="194"/><text x="38.6255%" y="175.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="39.9429%" y="149" width="0.0163%" height="15" fill="rgb(235,168,5)" fg:x="4893" fg:w="2"/><text x="40.1929%" y="159.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="39.9429%" y="133" width="0.0163%" height="15" fill="rgb(221,155,16)" fg:x="4893" fg:w="2"/><text x="40.1929%" y="143.50"></text></g><g><title>&lt;f32 as compiler_builtins::math::libm_math::support::float_traits::Float&gt;::is_sign_positive (23 samples, 0.19%)</title><rect x="39.9592%" y="181" width="0.1878%" height="15" fill="rgb(215,215,53)" fg:x="4895" fg:w="23"/><text x="40.2092%" y="191.50"></text></g><g><title>&lt;f32 as compiler_builtins::math::libm_math::support::float_traits::Float&gt;::is_sign_negative (23 samples, 0.19%)</title><rect x="39.9592%" y="165" width="0.1878%" height="15" fill="rgb(223,4,10)" fg:x="4895" fg:w="23"/><text x="40.2092%" y="175.50"></text></g><g><title>&lt;f32&gt;::is_sign_negative (23 samples, 0.19%)</title><rect x="39.9592%" y="149" width="0.1878%" height="15" fill="rgb(234,103,6)" fg:x="4895" fg:w="23"/><text x="40.2092%" y="159.50"></text></g><g><title>&lt;f32 as compiler_builtins::math::libm_math::support::float_traits::Float&gt;::to_bits (27 samples, 0.22%)</title><rect x="40.1469%" y="181" width="0.2204%" height="15" fill="rgb(227,97,0)" fg:x="4918" fg:w="27"/><text x="40.3969%" y="191.50"></text></g><g><title>&lt;f32&gt;::to_bits (27 samples, 0.22%)</title><rect x="40.1469%" y="165" width="0.2204%" height="15" fill="rgb(234,150,53)" fg:x="4918" fg:w="27"/><text x="40.3969%" y="175.50"></text></g><g><title>&lt;u32 as core::cmp::PartialEq&gt;::eq (328 samples, 2.68%)</title><rect x="40.3673%" y="181" width="2.6776%" height="15" fill="rgb(228,201,54)" fg:x="4945" fg:w="328"/><text x="40.6173%" y="191.50">&lt;u..</text></g><g><title>&lt;u32 as core::ops::bit::BitAndAssign&gt;::bitand_assign (26 samples, 0.21%)</title><rect x="43.0449%" y="181" width="0.2122%" height="15" fill="rgb(222,22,37)" fg:x="5273" fg:w="26"/><text x="43.2949%" y="191.50"></text></g><g><title>&lt;u32 as core::ops::bit::Not&gt;::not (38 samples, 0.31%)</title><rect x="43.2571%" y="181" width="0.3102%" height="15" fill="rgb(237,53,32)" fg:x="5299" fg:w="38"/><text x="43.5071%" y="191.50"></text></g><g><title>floorf (2,199 samples, 17.95%)</title><rect x="25.6245%" y="245" width="17.9510%" height="15" fill="rgb(233,25,53)" fg:x="3139" fg:w="2199"/><text x="25.8745%" y="255.50">floorf</text></g><g><title>compiler_builtins::math::full_availability::floorf (1,993 samples, 16.27%)</title><rect x="27.3061%" y="229" width="16.2694%" height="15" fill="rgb(210,40,34)" fg:x="3345" fg:w="1993"/><text x="27.5561%" y="239.50">compiler_builtins::math::..</text></g><g><title>compiler_builtins::math::libm_math::floor::floorf (1,993 samples, 16.27%)</title><rect x="27.3061%" y="213" width="16.2694%" height="15" fill="rgb(241,220,44)" fg:x="3345" fg:w="1993"/><text x="27.5561%" y="223.50">compiler_builtins::math::..</text></g><g><title>compiler_builtins::math::libm_math::generic::floor::floor_status::&lt;f32&gt; (1,993 samples, 16.27%)</title><rect x="27.3061%" y="197" width="16.2694%" height="15" fill="rgb(235,28,35)" fg:x="3345" fg:w="1993"/><text x="27.5561%" y="207.50">compiler_builtins::math::..</text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::RevReader&gt;::advance (50 samples, 0.41%)</title><rect x="56.7184%" y="181" width="0.4082%" height="15" fill="rgb(210,56,17)" fg:x="6948" fg:w="50"/><text x="56.9684%" y="191.50"></text></g><g><title>&lt;u32&gt;::saturating_sub (40 samples, 0.33%)</title><rect x="56.8000%" y="165" width="0.3265%" height="15" fill="rgb(224,130,29)" fg:x="6958" fg:w="40"/><text x="57.0500%" y="175.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::RevReader&gt;::fetch (61 samples, 0.50%)</title><rect x="57.1265%" y="181" width="0.4980%" height="15" fill="rgb(235,212,8)" fg:x="6998" fg:w="61"/><text x="57.3765%" y="191.50"></text></g><g><title>&lt;u32&gt;::wrapping_sub (43 samples, 0.35%)</title><rect x="57.6245%" y="181" width="0.3510%" height="15" fill="rgb(223,33,50)" fg:x="7059" fg:w="43"/><text x="57.8745%" y="191.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::FwdReader&lt;255&gt;&gt;::advance (137 samples, 1.12%)</title><rect x="62.9633%" y="165" width="1.1184%" height="15" fill="rgb(219,149,13)" fg:x="7713" fg:w="137"/><text x="63.2133%" y="175.50"></text></g><g><title>&lt;u32&gt;::saturating_sub (85 samples, 0.69%)</title><rect x="63.3878%" y="149" width="0.6939%" height="15" fill="rgb(250,156,29)" fg:x="7765" fg:w="85"/><text x="63.6378%" y="159.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::ht::streams::FwdReader&lt;255&gt;&gt;::fetch (430 samples, 3.51%)</title><rect x="64.0816%" y="165" width="3.5102%" height="15" fill="rgb(216,193,19)" fg:x="7850" fg:w="430"/><text x="64.3316%" y="175.50">&lt;ha..</text></g><g><title>&lt;u32&gt;::wrapping_add (109 samples, 0.89%)</title><rect x="67.5918%" y="165" width="0.8898%" height="15" fill="rgb(216,135,14)" fg:x="8280" fg:w="109"/><text x="67.8418%" y="175.50"></text></g><g><title>&lt;u32&gt;::wrapping_shl (18 samples, 0.15%)</title><rect x="68.4816%" y="165" width="0.1469%" height="15" fill="rgb(241,47,5)" fg:x="8389" fg:w="18"/><text x="68.7316%" y="175.50"></text></g><g><title>&lt;u32&gt;::unchecked_shl (18 samples, 0.15%)</title><rect x="68.4816%" y="149" width="0.1469%" height="15" fill="rgb(233,42,35)" fg:x="8389" fg:w="18"/><text x="68.7316%" y="159.50"></text></g><g><title>hayro_jpeg2000::j2c::ht::decode::decode_block::{closure#0} (1,306 samples, 10.66%)</title><rect x="57.9837%" y="181" width="10.6612%" height="15" fill="rgb(231,13,6)" fg:x="7103" fg:w="1306"/><text x="58.2337%" y="191.50">hayro_jpeg2000::..</text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="68.6286%" y="165" width="0.0163%" height="15" fill="rgb(207,181,40)" fg:x="8407" fg:w="2"/><text x="68.8786%" y="175.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="68.6286%" y="149" width="0.0163%" height="15" fill="rgb(254,173,49)" fg:x="8407" fg:w="2"/><text x="68.8786%" y="159.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="68.6286%" y="133" width="0.0163%" height="15" fill="rgb(221,1,38)" fg:x="8407" fg:w="2"/><text x="68.8786%" y="143.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="68.6286%" y="117" width="0.0163%" height="15" fill="rgb(206,124,46)" fg:x="8407" fg:w="2"/><text x="68.8786%" y="127.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="68.6286%" y="101" width="0.0163%" height="15" fill="rgb(249,21,11)" fg:x="8407" fg:w="2"/><text x="68.8786%" y="111.50"></text></g><g><title>hayro_jpeg2000::j2c::decode::decode_component_tile_bit_planes (3,072 samples, 25.08%)</title><rect x="43.5837%" y="245" width="25.0776%" height="15" fill="rgb(222,201,40)" fg:x="5339" fg:w="3072"/><text x="43.8337%" y="255.50">hayro_jpeg2000::j2c::decode::decode_comp..</text></g><g><title>hayro_jpeg2000::j2c::decode::decode_sub_band_bitplanes (3,072 samples, 25.08%)</title><rect x="43.5837%" y="229" width="25.0776%" height="15" fill="rgb(235,61,29)" fg:x="5339" fg:w="3072"/><text x="43.8337%" y="239.50">hayro_jpeg2000::j2c::decode::decode_sub_..</text></g><g><title>hayro_jpeg2000::j2c::decode::decode_ht_sub_band (3,072 samples, 25.08%)</title><rect x="43.5837%" y="213" width="25.0776%" height="15" fill="rgb(219,207,3)" fg:x="5339" fg:w="3072"/><text x="43.8337%" y="223.50">hayro_jpeg2000::j2c::decode::decode_ht_s..</text></g><g><title>hayro_jpeg2000::j2c::ht::decode::decode_block (3,071 samples, 25.07%)</title><rect x="43.5918%" y="197" width="25.0694%" height="15" fill="rgb(222,56,46)" fg:x="5340" fg:w="3071"/><text x="43.8418%" y="207.50">hayro_jpeg2000::j2c::ht::decode::decode_..</text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="71.2163%" y="149" width="0.0163%" height="15" fill="rgb(239,76,54)" fg:x="8724" fg:w="2"/><text x="71.4663%" y="159.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="71.2163%" y="133" width="0.0163%" height="15" fill="rgb(231,124,27)" fg:x="8724" fg:w="2"/><text x="71.4663%" y="143.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="71.2163%" y="117" width="0.0163%" height="15" fill="rgb(249,195,6)" fg:x="8724" fg:w="2"/><text x="71.4663%" y="127.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="71.2163%" y="101" width="0.0163%" height="15" fill="rgb(237,174,47)" fg:x="8724" fg:w="2"/><text x="71.4663%" y="111.50"></text></g><g><title>hayro_jpeg2000::math::floor_f32 (1,058 samples, 8.64%)</title><rect x="71.2327%" y="149" width="8.6367%" height="15" fill="rgb(206,201,31)" fg:x="8726" fg:w="1058"/><text x="71.4827%" y="159.50">hayro_jpeg20..</text></g><g><title>&lt;f32&gt;::floor (1,058 samples, 8.64%)</title><rect x="71.2327%" y="133" width="8.6367%" height="15" fill="rgb(231,57,52)" fg:x="8726" fg:w="1058"/><text x="71.4827%" y="143.50">&lt;f32&gt;::floor</text></g><g><title>core::f32::math::floor (1,058 samples, 8.64%)</title><rect x="71.2327%" y="117" width="8.6367%" height="15" fill="rgb(248,177,22)" fg:x="8726" fg:w="1058"/><text x="71.4827%" y="127.50">core::f32::m..</text></g><g><title>[unknown] (4 samples, 0.03%)</title><rect x="79.8367%" y="101" width="0.0327%" height="15" fill="rgb(215,211,37)" fg:x="9780" fg:w="4"/><text x="80.0867%" y="111.50"></text></g><g><title>[unknown] (3 samples, 0.02%)</title><rect x="79.8449%" y="85" width="0.0245%" height="15" fill="rgb(241,128,51)" fg:x="9781" fg:w="3"/><text x="80.0949%" y="95.50"></text></g><g><title>[unknown] (3 samples, 0.02%)</title><rect x="79.8449%" y="69" width="0.0245%" height="15" fill="rgb(227,165,31)" fg:x="9781" fg:w="3"/><text x="80.0949%" y="79.50"></text></g><g><title>[unknown] (3 samples, 0.02%)</title><rect x="79.8449%" y="53" width="0.0245%" height="15" fill="rgb(228,167,24)" fg:x="9781" fg:w="3"/><text x="80.0949%" y="63.50"></text></g><g><title>[unknown] (3 samples, 0.02%)</title><rect x="79.8449%" y="37" width="0.0245%" height="15" fill="rgb(228,143,12)" fg:x="9781" fg:w="3"/><text x="80.0949%" y="47.50"></text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_step_horizontal::&lt;hayro_jpeg2000::j2c::idwt::reversible_filter_53r::{closure#0}&gt; (1,413 samples, 11.53%)</title><rect x="68.6612%" y="181" width="11.5347%" height="15" fill="rgb(249,149,8)" fg:x="8411" fg:w="1413"/><text x="68.9112%" y="191.50">hayro_jpeg2000::j..</text></g><g><title>hayro_jpeg2000::j2c::idwt::reversible_filter_53r::{closure#0} (1,294 samples, 10.56%)</title><rect x="69.6327%" y="165" width="10.5633%" height="15" fill="rgb(243,35,44)" fg:x="8530" fg:w="1294"/><text x="69.8827%" y="175.50">hayro_jpeg2000:..</text></g><g><title>hayro_jpeg2000::math::mul_add (40 samples, 0.33%)</title><rect x="79.8694%" y="149" width="0.3265%" height="15" fill="rgb(246,89,9)" fg:x="9784" fg:w="40"/><text x="80.1194%" y="159.50"></text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_2d (2,830 samples, 23.10%)</title><rect x="68.6612%" y="245" width="23.1020%" height="15" fill="rgb(233,213,13)" fg:x="8411" fg:w="2830"/><text x="68.9112%" y="255.50">hayro_jpeg2000::j2c::idwt::filter_2d</text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_horizontal (2,830 samples, 23.10%)</title><rect x="68.6612%" y="229" width="23.1020%" height="15" fill="rgb(233,141,41)" fg:x="8411" fg:w="2830"/><text x="68.9112%" y="239.50">hayro_jpeg2000::j2c::idwt::filter_hor..</text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_row (2,830 samples, 23.10%)</title><rect x="68.6612%" y="213" width="23.1020%" height="15" fill="rgb(239,167,4)" fg:x="8411" fg:w="2830"/><text x="68.9112%" y="223.50">hayro_jpeg2000::j2c::idwt::filter_row</text></g><g><title>hayro_jpeg2000::j2c::idwt::reversible_filter_53r (2,830 samples, 23.10%)</title><rect x="68.6612%" y="197" width="23.1020%" height="15" fill="rgb(209,217,16)" fg:x="8411" fg:w="2830"/><text x="68.9112%" y="207.50">hayro_jpeg2000::j2c::idwt::reversible..</text></g><g><title>hayro_jpeg2000::j2c::idwt::filter_step_horizontal::&lt;hayro_jpeg2000::j2c::idwt::reversible_filter_53r::{closure#1}&gt; (1,417 samples, 11.57%)</title><rect x="80.1959%" y="181" width="11.5673%" height="15" fill="rgb(219,88,35)" fg:x="9824" fg:w="1417"/><text x="80.4459%" y="191.50">hayro_jpeg2000::j..</text></g><g><title>hayro_jpeg2000::j2c::idwt::reversible_filter_53r::{closure#1} (1,289 samples, 10.52%)</title><rect x="81.2408%" y="165" width="10.5224%" height="15" fill="rgb(220,193,23)" fg:x="9952" fg:w="1289"/><text x="81.4908%" y="175.50">hayro_jpeg2000:..</text></g><g><title>hayro_jpeg2000::math::floor_f32 (1,045 samples, 8.53%)</title><rect x="83.2327%" y="149" width="8.5306%" height="15" fill="rgb(230,90,52)" fg:x="10196" fg:w="1045"/><text x="83.4827%" y="159.50">hayro_jpeg20..</text></g><g><title>&lt;f32&gt;::floor (1,045 samples, 8.53%)</title><rect x="83.2327%" y="133" width="8.5306%" height="15" fill="rgb(252,106,19)" fg:x="10196" fg:w="1045"/><text x="83.4827%" y="143.50">&lt;f32&gt;::floor</text></g><g><title>core::f32::math::floor (1,045 samples, 8.53%)</title><rect x="83.2327%" y="117" width="8.5306%" height="15" fill="rgb(206,74,20)" fg:x="10196" fg:w="1045"/><text x="83.4827%" y="127.50">core::f32::m..</text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="91.7469%" y="101" width="0.0163%" height="15" fill="rgb(230,138,44)" fg:x="11239" fg:w="2"/><text x="91.9969%" y="111.50"></text></g><g><title>[unknown] (2 samples, 0.02%)</title><rect x="91.7469%" y="85" width="0.0163%" height="15" fill="rgb(235,182,43)" fg:x="11239" fg:w="2"/><text x="91.9969%" y="95.50"></text></g><g><title>hayro_jpeg2000::j2c::segment::resolve_segments::{closure#1} (3 samples, 0.02%)</title><rect x="91.7633%" y="245" width="0.0245%" height="15" fill="rgb(242,16,51)" fg:x="11241" fg:w="3"/><text x="92.0133%" y="255.50"></text></g><g><title>&lt;hayro_jpeg2000::reader::BitReader&gt;::read_bits_with_stuffing (2 samples, 0.02%)</title><rect x="91.7714%" y="229" width="0.0163%" height="15" fill="rgb(248,9,4)" fg:x="11242" fg:w="2"/><text x="92.0214%" y="239.50"></text></g><g><title>&lt;core::ops::range::Range&lt;u8&gt; as core::iter::traits::iterator::Iterator&gt;::next (2 samples, 0.02%)</title><rect x="91.7714%" y="213" width="0.0163%" height="15" fill="rgb(210,31,22)" fg:x="11242" fg:w="2"/><text x="92.0214%" y="223.50"></text></g><g><title>&lt;core::ops::range::Range&lt;u8&gt; as core::iter::range::RangeIteratorImpl&gt;::spec_next (2 samples, 0.02%)</title><rect x="91.7714%" y="197" width="0.0163%" height="15" fill="rgb(239,54,39)" fg:x="11242" fg:w="2"/><text x="92.0214%" y="207.50"></text></g><g><title>&lt;u8 as core::cmp::PartialOrd&gt;::lt (2 samples, 0.02%)</title><rect x="91.7714%" y="181" width="0.0163%" height="15" fill="rgb(230,99,41)" fg:x="11242" fg:w="2"/><text x="92.0214%" y="191.50"></text></g><g><title>hayro_jpeg2000::j2c::tag_tree::read_tag_node (6 samples, 0.05%)</title><rect x="91.7878%" y="245" width="0.0490%" height="15" fill="rgb(253,106,12)" fg:x="11244" fg:w="6"/><text x="92.0378%" y="255.50"></text></g><g><title>&lt;hayro_jpeg2000::j2c::tag_tree::TagNode&gt;::top_left_width (2 samples, 0.02%)</title><rect x="91.8204%" y="229" width="0.0163%" height="15" fill="rgb(213,46,41)" fg:x="11248" fg:w="2"/><text x="92.0704%" y="239.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::slice::iter::IterMut&lt;i32&gt;, core::slice::iter::Iter&lt;f32&gt;&gt; as core::iter::traits::iterator::Iterator&gt;::next (76 samples, 0.62%)</title><rect x="92.1878%" y="213" width="0.6204%" height="15" fill="rgb(215,133,35)" fg:x="11293" fg:w="76"/><text x="92.4378%" y="223.50"></text></g><g><title>&lt;core::iter::adapters::zip::Zip&lt;core::slice::iter::IterMut&lt;i32&gt;, core::slice::iter::Iter&lt;f32&gt;&gt; as core::iter::adapters::zip::ZipImpl&lt;core::slice::iter::IterMut&lt;i32&gt;, core::slice::iter::Iter&lt;f32&gt;&gt;&gt;::next (76 samples, 0.62%)</title><rect x="92.1878%" y="197" width="0.6204%" height="15" fill="rgb(213,28,5)" fg:x="11293" fg:w="76"/><text x="92.4378%" y="207.50"></text></g><g><title>&lt;f32&gt;::clamp (7 samples, 0.06%)</title><rect x="92.8082%" y="213" width="0.0571%" height="15" fill="rgb(215,77,49)" fg:x="11369" fg:w="7"/><text x="93.0582%" y="223.50"></text></g><g><title>&lt;i32 as core::convert::From&lt;bool&gt;&gt;::from (125 samples, 1.02%)</title><rect x="96.1714%" y="197" width="1.0204%" height="15" fill="rgb(248,100,22)" fg:x="11781" fg:w="125"/><text x="96.4214%" y="207.50"></text></g><g><title>&lt;i32&gt;::saturating_add (291 samples, 2.38%)</title><rect x="97.1918%" y="197" width="2.3755%" height="15" fill="rgb(208,67,9)" fg:x="11906" fg:w="291"/><text x="97.4418%" y="207.50">&lt;i..</text></g><g><title>shl_codec_jpeg2000::prep::write_rows::&lt;2, shl_codec_jpeg2000::decode::{closure#6}&gt; (948 samples, 7.74%)</title><rect x="91.8367%" y="245" width="7.7388%" height="15" fill="rgb(219,133,21)" fg:x="11250" fg:w="948"/><text x="92.0867%" y="255.50">shl_codec_j..</text></g><g><title>shl_codec_jpeg2000::decode::{closure#6} (948 samples, 7.74%)</title><rect x="91.8367%" y="229" width="7.7388%" height="15" fill="rgb(246,46,29)" fg:x="11250" fg:w="948"/><text x="92.0867%" y="239.50">shl_codec_j..</text></g><g><title>shl_codec_jpeg2000::prep::round_to_i32 (822 samples, 6.71%)</title><rect x="92.8653%" y="213" width="6.7102%" height="15" fill="rgb(246,185,52)" fg:x="11376" fg:w="822"/><text x="93.1153%" y="223.50">shl_codec..</text></g><g><title>shl_dicom_decode::pixel::fix_unused_bits (50 samples, 0.41%)</title><rect x="99.5755%" y="245" width="0.4082%" height="15" fill="rgb(252,136,11)" fg:x="12198" fg:w="50"/><text x="99.8255%" y="255.50"></text></g><g><title>all (12,250 samples, 100%)</title><rect x="0.0000%" y="277" width="100.0000%" height="15" fill="rgb(219,138,53)" fg:x="0" fg:w="12250"/><text x="0.2500%" y="287.50"></text></g><g><title>bench-native (12,250 samples, 100.00%)</title><rect x="0.0000%" y="261" width="100.0000%" height="15" fill="rgb(211,51,23)" fg:x="0" fg:w="12250"/><text x="0.2500%" y="271.50">bench-native</text></g></svg></svg>

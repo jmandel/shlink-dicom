@@ -1,0 +1,10 @@
+jpeg-ls/gen-bench-dx2048-u12-charls-ls (DX 2048² u12 (synthetic)) — native (perf record, 4s loop)
+
+self time by crate
+   98.8%  shl_codec_jpeg_ls
+
+self time by function (top 8)
+   49.3%  <shl_codec_jpeg_ls::scan::Decoder>::regular
+   29.0%  shl_codec_jpeg_ls::decode_scan
+   18.6%  <shl_codec_jpeg_ls::scan::Decoder>::golomb
+    1.9%  shl_codec_jpeg_ls::decode_frame

@@ -1,0 +1,21 @@
+[package]
+name = "shl-dicom-decode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "shl-dicom-decode"
+path = "src/main.rs"
+
+[dependencies]
+shl-codec-common = { path = "../shl-codec-common" }
+shl-codec-rle = { path = "../shl-codec-rle" }
+shl-codec-jpeg = { path = "../shl-codec-jpeg" }
+shl-codec-jpeg-ls = { path = "../shl-codec-jpeg-ls" }
+shl-codec-jpeg2000 = { path = "../shl-codec-jpeg2000" }
+shl-codec-htj2k = { path = "../shl-codec-htj2k" }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

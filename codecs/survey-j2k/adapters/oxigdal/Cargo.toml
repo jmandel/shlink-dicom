@@ -1,0 +1,9 @@
+[package]
+name = "a-oxigdal"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+oxigdal-jpeg2000 = "=0.1.7"
+survey-common = { path = "../../common" }

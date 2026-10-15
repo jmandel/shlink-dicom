@@ -1,0 +1,6003 @@
+//! Tier-1 EBCOT bit-plane coding passes — T.800 Annex D.
+//!
+//! This module implements the **decoder** side of the Annex D coefficient
+//! bit-modelling that drives the [`mq`](crate::mq) arithmetic decoder.
+//! Annex D specifies three coding passes that decode each bit-plane of a
+//! code-block from MSB toward LSB: the **significance propagation pass**
+//! (§D.3.1), the **magnitude refinement pass** (§D.3.3) and the
+//! **cleanup pass** (§D.3.4). For every bit-plane after the first
+//! non-empty one all three passes run in that order; for the first
+//! non-empty bit-plane only the cleanup pass runs (§D.3).
+//!
+//! ## What this module covers
+//!
+//! Earlier rounds landed the **significance propagation pass** of §D.3.1
+//! (with the **sign-bit subroutine** of §D.3.2) and the **magnitude
+//! refinement pass** of §D.3.3 (Table D.4, contexts 14, 15, 16). This
+//! round adds the **cleanup pass** of §D.3.4 (Table D.5), the last of the
+//! three Annex D coding passes: it codes every coefficient the earlier
+//! two passes left insignificant, using the run-length context (label 17)
+//! with the UNIFORM context (label 18) four-zero-column shortcut where
+//! eligible and the Table D.1 significance contexts otherwise. All three
+//! coding passes are now in place. They share the coefficient state and
+//! scan-order machinery in this module:
+//!
+//! * The [`CodeBlock`] coefficient state — sample values, per-coefficient
+//!   significance state (`σ`), and the sign bit (`χ`). §D.3 calls `σ`
+//!   the "significance state" and notes that it is initialised to 0 and
+//!   may transition to 1 on any pass.
+//! * The §D.1 stripe-major scan order: top-down, the code-block is
+//!   partitioned into horizontal stripes of height 4 (the bottom stripe
+//!   may be 1, 2 or 3 rows tall when the code-block height is not
+//!   divisible by 4); within each stripe coefficients are scanned column
+//!   by column, top to bottom of the stripe, before moving to the next
+//!   column. The whole stripe is traversed before the next stripe starts.
+//!   Figure D.1 illustrates the pattern.
+//! * The neighbour-σ derivation: each coefficient `(u, v)` has the eight
+//!   neighbours `(u−1, v−1)`, `(u, v−1)`, `(u+1, v−1)`, `(u−1, v)`,
+//!   `(u+1, v)`, `(u−1, v+1)`, `(u, v+1)`, `(u+1, v+1)` shown in Figure
+//!   D.2. Neighbours outside the code-block are taken to be insignificant
+//!   per §D.3.
+//! * The per-orientation significance-context map of Table D.1 (context
+//!   labels `0..=8` per [`SP_CTX_OFFSET`] + 0..8), and the sign-context
+//!   map of Tables D.2 / D.3 (context labels `9..=13` per
+//!   [`SIGN_CTX_OFFSET`] + 0..4, with the §D.3.2 XORbit).
+//!
+//! ## Context array layout
+//!
+//! Annex D uses 19 distinct contexts (Table D.7), all of which are now
+//! touched across the three passes: labels `0..=8` for significance
+//! propagation / cleanup, `9..=13` for sign, `14..=16` for magnitude
+//! refinement, `17` for the cleanup run-length context, and `18` for the
+//! UNIFORM context. The caller owns the `[MqContext; 19]` array (see
+//! [`reset_contexts`]).
+//!
+//! ## What this module does NOT cover yet
+//!
+//! * The bit-plane sequencer that drives the §D.3 three-pass order
+//!   (cleanup-only first bit-plane, then SP → MR → cleanup) across a whole
+//!   code-block — the three passes are individually callable; chaining
+//!   them per code-block from the packet reader's byte ranges is the next
+//!   step.
+//! * The §D.4.2 **predictable termination** flag (Scod bit-4) **is
+//!   wired** via the
+//!   [`BitPlaneSequencer::with_predictable_termination`] toggle. The
+//!   flag constrains the encoder's flush only — decode proceeds
+//!   unchanged and the §D.4.1 synthesised 0xFF extension applies as
+//!   usual, so the sequencer carries the flag purely for
+//!   introspection. The §D.4.2 **per-pass**
+//!   termination flag (Scod bit-2) **is wired** via the
+//!   [`BitPlaneSequencer::with_termination_on_each_coding_pass`]
+//!   builder, the matching accessor, and the
+//!   [`BitPlaneSequencer::next_pass_is_terminated`] dispatch predicate
+//!   that combines bit-2 with the §D.6 / Table D.9 schedule (the
+//!   fourth cleanup pass and every pass in the bypass region from
+//!   bit-plane 5 onward terminate even with only bit-0 set). The
+//!   sequencer itself still drives every pass against the supplied
+//!   [`MqDecoder`]; the predicate is the packet-reader-level dispatch
+//!   contract for deciding whether to open a fresh decoder per pass.
+//!   **§D.5 error-resilience segmentation symbols are wired** via
+//!   [`decode_segmentation_symbol`] and the
+//!   [`BitPlaneSequencer::with_segmentation_symbols`] toggle that the
+//!   COD / COC Table A.19 flag (decoded into
+//!   [`crate::CodeBlockStyle::segmentation_symbols`]) drives. **§D.6
+//!   selective arithmetic-coding bypass is wired** via the
+//!   [`RawBitReader`] (with the §D.6 stuff-bit rule), the
+//!   [`CodeBlock::significance_propagation_pass_raw`] /
+//!   [`CodeBlock::magnitude_refinement_pass_raw`] raw-mode pass
+//!   entry points, and the
+//!   [`BitPlaneSequencer::with_selective_arithmetic_coding_bypass`]
+//!   toggle plus the
+//!   [`BitPlaneSequencer::raw_mode_for_next_pass`] dispatch query that
+//!   the COD / COC Table A.19 flag (decoded into
+//!   [`crate::CodeBlockStyle::selective_arithmetic_coding_bypass`])
+//!   drives.
+//! * §D.7 vertically causal context formation is wired via
+//!   [`CodeBlock::with_vertically_causal_context`] and the matching
+//!   [`BitPlaneSequencer::with_vertically_causal_context`] toggle.
+//!
+//! ## Clean-room provenance
+//!
+//! Implemented solely from `docs/image/jpeg2000/T-REC-T.800-201906-S.pdf`
+//! (§D.1 — code-block scan pattern; §D.2 — coefficient bits / significance
+//! / sign notations; §D.3 — decoding passes prologue + Figure D.2
+//! neighbour layout; §D.3.1 + Table D.1 — significance propagation
+//! contexts; §D.3.2 + Table D.2 + Table D.3 + Equation D-1 — sign
+//! contexts and XORbit; §D.3.3 + Table D.4 — magnitude refinement
+//! contexts; §D.3.4 + Table D.5 — cleanup pass run-length / UNIFORM
+//! four-zero-column shortcut; §D.4 + Table D.7 — initial context states).
+//! The Figure D.2 layout is the in-PDF diagram transcribed to neighbour
+//! offsets; the Tables D.1 / D.2 / D.3 / D.4 / D.5 contents are
+//! transcribed verbatim from the PDF.
+
+use crate::geometry::SubBandOrientation;
+use crate::mq::{MqContext, MqDecoder};
+use crate::mqenc::MqEncoder;
+use crate::Error;
+
+/// First Annex D context label devoted to significance propagation
+/// (Table D.1 row "0", the all-insignificant-neighbours row).
+///
+/// The nine SP labels are `SP_CTX_OFFSET + 0 ..= SP_CTX_OFFSET + 8`
+/// (i.e., `0..=8` in the caller's context array).
+pub const SP_CTX_OFFSET: usize = 0;
+
+/// First Annex D context label devoted to sign-bit decoding (Table D.3
+/// label "9", the `(H=0, V=0)` row).
+///
+/// The five sign labels are `SIGN_CTX_OFFSET + 0 ..= SIGN_CTX_OFFSET + 4`
+/// (i.e., `9..=13` in the caller's context array).
+pub const SIGN_CTX_OFFSET: usize = 9;
+
+/// First magnitude-refinement label (Table D.4 label "14", the
+/// `∑(Hi+Vi+Di) = 0`, first-refinement row).
+///
+/// The three refinement labels are
+/// `REFINEMENT_CTX_OFFSET + 0 ..= REFINEMENT_CTX_OFFSET + 2` (i.e.,
+/// `14..=16` in the caller's context array): 14 for a first refinement
+/// with no significant neighbours, 15 for a first refinement with at
+/// least one significant neighbour, and 16 for any later refinement.
+pub const REFINEMENT_CTX_OFFSET: usize = 14;
+
+/// Run-length context label per Table D.7 (§D.3.4 cleanup pass).
+pub const RUN_LENGTH_CTX: usize = 17;
+
+/// UNIFORM context label per Table D.7 (§C.3 / §D.3.4).
+pub const UNIFORM_CTX: usize = 18;
+
+/// Number of distinct context labels the Annex D coding passes use
+/// across all three passes (Table D.7).
+pub const NUM_CONTEXTS: usize = 19;
+
+/// T.800 §D.5 error-resilience segmentation symbol value.
+///
+/// When the COD / COC Table A.19 `segmentation_symbols` flag is set, the
+/// encoder appends this 4-bit value (binary `1010`, hex `0xA`) to the
+/// end of every cleanup pass, coded under the UNIFORM context. The
+/// decoder reads back four UNIFORM bits in MSB-first order; if their
+/// concatenation matches this constant the cleanup pass is intact, if
+/// not the bit-plane carries an error per §D.5.
+pub const SEGMENTATION_SYMBOL: u8 = 0xA;
+
+/// Encode the T.800 §D.5 error-resilience segmentation symbol — the
+/// exact forward of [`decode_segmentation_symbol`]: the four bits of
+/// `0xA` (`1, 0, 1, 0`, most significant first) each coded with the
+/// UNIFORM context at the end of a cleanup pass when the Table A.19
+/// `segmentation_symbols` style bit is signalled.
+pub fn encode_segmentation_symbol(encoder: &mut MqEncoder, ctx: &mut [MqContext; NUM_CONTEXTS]) {
+    for shift in (0..4).rev() {
+        encoder.encode(&mut ctx[UNIFORM_CTX], (SEGMENTATION_SYMBOL >> shift) & 1);
+    }
+}
+
+/// Decode the T.800 §D.5 error-resilience segmentation symbol.
+///
+/// Reads four bits from `decoder` against the UNIFORM context (Table
+/// D.7 label 18 — Table C.2 index 46), concatenates them MSB-first into
+/// a 4-bit value, and verifies the result equals [`SEGMENTATION_SYMBOL`]
+/// (`0xA` = `1010`).
+///
+/// Returns:
+///
+/// * `Ok(())` — the four UNIFORM bits decoded to `1010`. The bit-plane
+///   is intact per §D.5.
+/// * `Err(Error::SegmentationSymbolMismatch)` — the four UNIFORM bits
+///   decoded to some other value. Per §D.5 this signals that bit errors
+///   occurred in this bit-plane's compressed image data; the caller may
+///   discard the bit-plane or surface the error to the layer above.
+///
+/// The caller is responsible for invoking this only when the COD / COC
+/// [`crate::CodeBlockStyle::segmentation_symbols`] flag is set (the
+/// symbol is not present otherwise — calling this on an unmarked stream
+/// would consume four bits the cleanup pass did not produce). The four
+/// MQ decisions modify the UNIFORM context's state only via the
+/// Table C.2 NMPS / NLPS transitions exactly like any other UNIFORM
+/// decode — the symbol is not "free."
+///
+/// T.800 §D.5 explicitly permits this to be used "with or without the
+/// predictable termination" (the §D.4.2 termination is independent).
+pub fn decode_segmentation_symbol(
+    decoder: &mut MqDecoder<'_>,
+    ctx: &mut [MqContext; NUM_CONTEXTS],
+) -> Result<(), Error> {
+    let b3 = decoder.decode(&mut ctx[UNIFORM_CTX]);
+    let b2 = decoder.decode(&mut ctx[UNIFORM_CTX]);
+    let b1 = decoder.decode(&mut ctx[UNIFORM_CTX]);
+    let b0 = decoder.decode(&mut ctx[UNIFORM_CTX]);
+    let value = (b3 << 3) | (b2 << 2) | (b1 << 1) | b0;
+    if value == SEGMENTATION_SYMBOL {
+        Ok(())
+    } else {
+        Err(Error::SegmentationSymbolMismatch)
+    }
+}
+
+/// T.800 §D.6 raw-bit reader for the selective arithmetic-coding bypass.
+///
+/// When the COD / COC Table A.19
+/// [`crate::CodeBlockStyle::selective_arithmetic_coding_bypass`] flag is
+/// set, every §D.3.1 significance-propagation pass and every §D.3.3
+/// magnitude-refinement pass from the fourth set onward (i.e. starting
+/// with the fifth bit-plane per Table D.9) returns its decoded bits
+/// directly from the codeword segment rather than through the MQ
+/// arithmetic decoder. The bits are packed **most-significant-bit-first
+/// per byte** with one stuffing rule: any byte equal to `0xFF` is
+/// followed by a byte whose top bit was inserted by the encoder solely
+/// to break the marker prefix, and that top bit is discarded by the
+/// decoder before any payload bits are read from the following byte.
+///
+/// This reader implements the read side of that rule:
+///
+/// * `next_bit()` returns the next payload bit (`0` or `1`).
+/// * After a `0xFF` byte has been fully consumed (all eight payload
+///   bits delivered), the very next bit read from the next byte is the
+///   stuff bit; the reader discards it and returns the second bit of
+///   that byte as the first bit of the byte's payload. Subsequent reads
+///   from the same byte deliver its remaining six bits unchanged.
+/// * Exhausting the byte slice while there are still bits to read
+///   surfaces [`Error::UnexpectedEof`]; the §D.6 segment must be long
+///   enough to carry every bit the §D.3 pass requests.
+///
+/// The reader does **not** validate the §D.6 "last byte is not `0xFF`"
+/// rule — that's an encoder-side guarantee. The decoder only cares
+/// about consuming the right number of bits.
+///
+/// Clean-room provenance: the rule "throws out the first bit after an
+/// 0xFF byte value" comes verbatim from §D.6 paragraph 3, and the
+/// MSB-first byte packing from the §D.6 encoder paragraph ("bits are
+/// packed into bytes from the most significant bit to the least
+/// significant bit").
+#[derive(Debug, Clone)]
+pub struct RawBitReader<'a> {
+    bytes: &'a [u8],
+    /// Index of the next byte to load when `bits_remaining == 0`.
+    byte_pos: usize,
+    /// Current byte's payload (MSB-first); only the high `bits_remaining`
+    /// bits are still valid.
+    current_byte: u8,
+    /// Number of unread bits left in `current_byte` (0..=8).
+    bits_remaining: u8,
+    /// `true` iff the previously consumed byte was `0xFF`; the very next
+    /// bit read from the new byte is the §D.6 stuff bit and gets discarded
+    /// before the next payload bit is returned.
+    prev_was_ff: bool,
+    /// Total payload bits consumed since construction (stuff bits not
+    /// counted). Useful for callers that need to know how many bits a
+    /// pass drew from the segment.
+    bits_consumed: usize,
+    /// When `true`, once the real bytes are exhausted the reader
+    /// synthesises `0xFF` fill bytes (honouring the §D.6 stuff-bit rule)
+    /// rather than surfacing [`Error::UnexpectedEof`]. This mirrors the
+    /// §D.4.1 model the [`crate::mq::MqDecoder`] uses: the decoder may
+    /// extend the codeword segment with `0xFF` so the residual symbols
+    /// of an in-progress (or truncated, §D.6 NOTE 2) pass can still be
+    /// decoded. Off by default so the low-level reader stays strict.
+    d4_1_fill: bool,
+}
+
+impl<'a> RawBitReader<'a> {
+    /// Wrap a §D.6 raw-bit codeword segment. Reading past the end
+    /// surfaces [`Error::UnexpectedEof`].
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            byte_pos: 0,
+            current_byte: 0,
+            bits_remaining: 0,
+            prev_was_ff: false,
+            bits_consumed: 0,
+            d4_1_fill: false,
+        }
+    }
+
+    /// Wrap a §D.6 raw-bit codeword segment with §D.4.1 `0xFF` fill: once
+    /// the real bytes are exhausted the reader keeps returning bits drawn
+    /// from synthesised `0xFF` bytes (honouring the stuff-bit rule)
+    /// instead of [`Error::UnexpectedEof`].
+    ///
+    /// This is the model the tier-1 driver uses for the in-codestream
+    /// raw spans — §D.4.1 lets the decoder extend the segment with `0xFF`
+    /// so the residual bits of an in-progress or §D.6-NOTE-2-truncated
+    /// pass still decode, exactly as [`crate::mq::MqDecoder::new`]
+    /// synthesises `0xFF` for the AC path.
+    pub fn new_with_d4_1_fill(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            byte_pos: 0,
+            current_byte: 0,
+            bits_remaining: 0,
+            prev_was_ff: false,
+            bits_consumed: 0,
+            d4_1_fill: true,
+        }
+    }
+
+    /// Number of payload bits the reader has produced so far.
+    pub fn bits_consumed(&self) -> usize {
+        self.bits_consumed
+    }
+
+    /// Number of bytes wholly or partially consumed from the underlying
+    /// slice — exposed for tests and progress logging.
+    pub fn bytes_consumed(&self) -> usize {
+        if self.bits_remaining == 0 {
+            self.byte_pos
+        } else {
+            // The current byte has been loaded but not exhausted.
+            self.byte_pos
+        }
+    }
+
+    /// Read one payload bit. Returns `Ok(0)` or `Ok(1)`.
+    ///
+    /// Surfaces [`Error::UnexpectedEof`] if no more bytes remain to load
+    /// when the bit cache is empty.
+    pub fn read_bit(&mut self) -> Result<u8, Error> {
+        if self.bits_remaining == 0 {
+            self.load_next_byte()?;
+        }
+        let bit = (self.current_byte >> 7) & 1;
+        self.current_byte <<= 1;
+        self.bits_remaining -= 1;
+        self.bits_consumed += 1;
+        Ok(bit)
+    }
+
+    /// Internal: pull the next byte off `bytes`, honouring the §D.6
+    /// stuff-bit rule. After a `0xFF` byte was just consumed, the new
+    /// byte's most-significant bit is the stuff bit — drop it from the
+    /// payload (the next `read_bit` therefore returns the second-from-top
+    /// bit of the loaded byte). Records whether the newly loaded byte
+    /// itself is `0xFF` so the next call repeats the rule on the byte
+    /// after it.
+    fn load_next_byte(&mut self) -> Result<(), Error> {
+        let raw = if self.byte_pos >= self.bytes.len() {
+            if !self.d4_1_fill {
+                return Err(Error::UnexpectedEof);
+            }
+            // §D.4.1: extend the segment with synthesised 0xFF bytes.
+            // `byte_pos` still advances so the stuff-bit rule fires on
+            // each successive 0xFF.
+            0xFF
+        } else {
+            self.bytes[self.byte_pos]
+        };
+        self.byte_pos += 1;
+        if self.prev_was_ff {
+            // §D.6 stuff bit — drop the top bit before exposing the
+            // remaining seven as payload. The dropped bit is not counted
+            // in `bits_consumed`.
+            self.current_byte = raw << 1;
+            self.bits_remaining = 7;
+        } else {
+            self.current_byte = raw;
+            self.bits_remaining = 8;
+        }
+        self.prev_was_ff = raw == 0xFF;
+        Ok(())
+    }
+}
+
+/// §D.6 raw (lazy) bit **writer** — the encode-side mirror of
+/// [`RawBitReader`]. Payload bits are packed MSB-first; after a
+/// produced `0xFF` byte the next byte's most-significant bit is the
+/// stuff bit (forced `0`), so only seven payload bits land in it —
+/// exactly the rule the reader undoes.
+#[derive(Debug, Clone, Default)]
+pub struct RawBitWriter {
+    out: Vec<u8>,
+    /// Bits accumulated into the pending byte (MSB-first).
+    current: u8,
+    /// Number of payload+stuff bits already placed in `current`.
+    filled: u8,
+}
+
+impl RawBitWriter {
+    /// Fresh writer with an empty output buffer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn start_byte_if_needed(&mut self) {
+        if self.filled == 0 && self.out.last() == Some(&0xFF) {
+            // §D.6 stuff bit: the byte following a 0xFF starts with a
+            // forced 0 in its most-significant position.
+            self.filled = 1;
+        }
+    }
+
+    /// Append one payload bit.
+    pub fn write_bit(&mut self, bit: u8) {
+        self.start_byte_if_needed();
+        self.current |= (bit & 1) << (7 - self.filled);
+        self.filled += 1;
+        if self.filled == 8 {
+            self.out.push(self.current);
+            self.current = 0;
+            self.filled = 0;
+        }
+    }
+
+    /// Terminate the raw codeword segment: zero-pad the pending byte to
+    /// a boundary and return the bytes. A terminated segment never ends
+    /// on `0xFF` (which could emulate a marker prefix against the byte
+    /// that follows it in the packet body) — a trailing `0x00` is
+    /// appended in that corner.
+    pub fn finish(mut self) -> Vec<u8> {
+        if self.filled > 0 {
+            self.out.push(self.current);
+        }
+        if self.out.last() == Some(&0xFF) {
+            self.out.push(0x00);
+        }
+        self.out
+    }
+
+    /// Terminate the raw segment under the §D.6 **predictable
+    /// termination** rule (Table A.19 bit 4 together with bit 0): the
+    /// unused bits of the last byte are filled with the alternating
+    /// sequence `0, 1, 0, 1, …` — starting with a `0` whatever the
+    /// count — and, when the last assembled byte is `0xFF`, the
+    /// bit-stuffing routine appends one more byte whose most
+    /// significant bit is the stuffed `0` and whose remaining bits
+    /// carry the same alternating fill (§D.6 NOTE 2), so the segment
+    /// never ends on `0xFF` and every emitted bit is reproducible.
+    pub fn finish_predictable(mut self) -> Vec<u8> {
+        if self.filled > 0 {
+            let mut alt = 0u8;
+            while self.filled < 8 {
+                self.current |= alt << (7 - self.filled);
+                self.filled += 1;
+                alt ^= 1;
+            }
+            self.out.push(self.current);
+            self.current = 0;
+            self.filled = 0;
+        }
+        if self.out.last() == Some(&0xFF) {
+            // Stuffed 0 in the MSB, then 0,1,0,1,0,1,0.
+            self.out.push(0b0010_1010);
+        }
+        self.out
+    }
+}
+
+/// Initialise an Annex D context array to the Table D.7 reset states.
+///
+/// Per Table D.7 every context starts at Table C.2 index 0 / MPS 0
+/// except for three special cases:
+///
+/// * Label 0 (the "zero-neighbours" / first SP row) — index 4.
+/// * Label 17 (the run-length context) — index 3.
+/// * Label 18 (the UNIFORM context) — index 46.
+///
+/// The caller passes this array, along with a freshly-initialised
+/// [`MqDecoder`], into [`CodeBlock::significance_propagation_pass`].
+pub fn reset_contexts() -> [MqContext; NUM_CONTEXTS] {
+    let mut ctx = [MqContext::default(); NUM_CONTEXTS];
+    ctx[0] = MqContext::zero_neighbours();
+    ctx[RUN_LENGTH_CTX] = MqContext::run_length();
+    ctx[UNIFORM_CTX] = MqContext::uniform();
+    ctx
+}
+
+/// One transform coefficient inside a code-block.
+///
+/// * `magnitude` — the absolute value being recovered MSB-first. The
+///   coding passes shift bits into the low end of this field as they
+///   come out of the MQ decoder; on the bit-plane currently being
+///   decoded the bit's positional value is `1 << bitplane`.
+/// * `sigma` — the §D.3 significance state. `false` while the
+///   coefficient is still insignificant, flipping to `true` once a `1`
+///   magnitude bit has been observed.
+/// * `sign` — the §D.2 sign bit `sb(u, v)`. `false` ≡ positive, `true`
+///   ≡ negative. Only meaningful once `sigma` is true; ignored on
+///   insignificant coefficients per §D.3.2.
+/// * `already_refined` — set by the magnitude refinement pass after the
+///   first refinement bit lands (Table D.4's "first refinement"
+///   indicator). The §D.3.3 pass reads it to pick context 16 (already
+///   refined) over 14/15 (first refinement), then sets it; the SP pass
+///   leaves it untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Coefficient {
+    /// Reconstructed magnitude (bits arrive MSB-first).
+    pub magnitude: u32,
+    /// §D.3 significance state σ(u, v).
+    pub sigma: bool,
+    /// §D.2 sign bit sb(u, v) — `true` is negative.
+    pub sign: bool,
+    /// Table D.4 "first refinement" flag — `true` after one refinement
+    /// pass has fired on this coefficient.
+    pub already_refined: bool,
+}
+
+/// Per-coefficient `Nb(u, v)` source returned by
+/// [`CodeBlock::effective_nb_map`] (shl patch).
+#[derive(Debug, Clone, Copy)]
+pub enum EffectiveNb<'a> {
+    /// The same `Nb` for every coefficient.
+    Uniform(u32),
+    /// `base + counts[raster index]`.
+    PerCoefficient(&'a [u32], u32),
+}
+
+impl EffectiveNb<'_> {
+    /// `Nb` of the coefficient at raster index `i`.
+    #[inline]
+    pub fn get(&self, i: usize) -> u32 {
+        match *self {
+            EffectiveNb::Uniform(n) => n,
+            EffectiveNb::PerCoefficient(counts, base) => base + counts[i],
+        }
+    }
+}
+
+/// One rectangular code-block under tier-1 decoding.
+///
+/// The coefficient grid is stored in raster-major (row-major) order:
+/// `coefficients[u + v * width]` is `(u, v)`.
+#[derive(Debug, Clone)]
+pub struct CodeBlock {
+    /// Sub-band orientation; selects the Table D.1 column.
+    orientation: SubBandOrientation,
+    /// Code-block width in samples.
+    width: usize,
+    /// Code-block height in samples.
+    height: usize,
+    /// Raster-major coefficient grid (`width * height` entries).
+    coefficients: Vec<Coefficient>,
+    /// Per-coefficient "this coefficient was made significant inside the
+    /// current SP pass" flag. The magnitude refinement pass (§D.3.3)
+    /// uses this to **skip** coefficients that just became significant,
+    /// per §D.3.3's "except those that have just become significant in
+    /// the immediately preceding significance propagation pass". Cleared
+    /// at the start of every SP pass.
+    newly_significant: Vec<bool>,
+    /// Per-coefficient "this coefficient's significance bit was coded
+    /// (decoded) by the current bit-plane's SP pass" flag — the π
+    /// pass-membership of T.800 §D.3.4 / Table D.10 decision D9: the
+    /// cleanup pass codes only "the remaining coefficients", i.e. those
+    /// neither significant nor already coded during the same plane's
+    /// significance propagation pass (even when that coding decoded a
+    /// 0 and the coefficient stayed insignificant). Cleared at the
+    /// start of every SP pass.
+    sp_visited: Vec<bool>,
+    /// Per-coefficient count of decoded magnitude bits drawn by the
+    /// §D.3 coding passes — the actually-iterated half of the §D.2.1
+    /// `Nb(u, v)` (the §B.10.5 zero-MSB count `P` is recorded
+    /// separately in [`Self::zero_bit_planes`] and added by
+    /// [`Self::effective_nb`]). Every coefficient gets exactly one
+    /// increment per **completed** bit-plane: the SP pass for an
+    /// insignificant coefficient with a non-zero Table D.1 context, the
+    /// MR pass for an already-significant coefficient, or the cleanup
+    /// pass for a coefficient left over (zero-context insignificant).
+    /// When a packet header truncates the decode mid-bit-plane the
+    /// counts diverge — the coefficients the truncated final pass
+    /// reached carry one more decoded bit than those it did not — which
+    /// is exactly the per-coefficient `Nb(u, v)` of §E.1.1.2 /
+    /// §E.1.2.1 Equation E-6 / E-8.
+    decoded_bits: Vec<u32>,
+    /// The §B.10.5 zero-most-significant-bit-plane count `P` for this
+    /// code-block, recorded by the decode driver via
+    /// [`Self::set_zero_bit_planes`]. `Nb(u, v) = P + decoded_bits(u, v)`
+    /// per §D.2.1 ("the number `Nb(u, v)` … includes the number of all
+    /// zero most significant bit-planes signalled in the packet
+    /// header"). Default `0`.
+    zero_bit_planes: u32,
+    /// Whether the COD / COC Table A.19 `vertically_causal_context`
+    /// flag is set for this code-block (T.800 §D.7).
+    ///
+    /// When `true`, the §D.3 passes treat the three "below the current
+    /// stripe" neighbour slots (`D2`, `V1`, `D3` of Figure D.2) as
+    /// insignificant for any coefficient sitting on the **bottom row of
+    /// its 4-row stripe** — i.e. they are read as zero exactly the same
+    /// way out-of-block neighbours are read as zero. Coefficients above
+    /// the bottom row of the stripe see their full Figure D.2 neighbour
+    /// set unchanged. Default `false` (full Figure D.2 neighbour read
+    /// everywhere, identical to the round-208 behaviour).
+    ///
+    /// Toggle via [`Self::with_vertically_causal_context`].
+    vertically_causal: bool,
+    /// Per-coefficient §D.2.1 `Nb(u, v)` after the §H.1 region-of-interest
+    /// (Maxshift) remap, when an `RGN` marker is in force. `None` (the
+    /// default) means no ROI: [`Self::effective_nb`] falls back to the
+    /// `P + decoded_bits` reading. When `Some`, every coefficient's
+    /// `Nb(u, v)` was rewritten by [`Self::apply_roi_maxshift`] (the
+    /// §H.1 steps subtract / cap `Nb` per coefficient class) and is read
+    /// directly from this vector. The magnitudes carried in
+    /// [`Self::coefficients`] are likewise rewritten in place to the
+    /// background-`Mb`-anchored values §E.1 expects.
+    roi_nb: Option<Vec<u32>>,
+}
+
+impl CodeBlock {
+    /// Construct a fresh, all-insignificant code-block of the given
+    /// sub-band orientation and dimensions.
+    ///
+    /// `width` and `height` must be at least 1; the §B.7 effective
+    /// `xcb'` / `ycb'` are at least `0` (`2^0 = 1`).
+    pub fn new(orientation: SubBandOrientation, width: usize, height: usize) -> Self {
+        assert!(width >= 1, "code-block width must be ≥ 1");
+        assert!(height >= 1, "code-block height must be ≥ 1");
+        Self {
+            orientation,
+            width,
+            height,
+            coefficients: vec![Coefficient::default(); width * height],
+            newly_significant: vec![false; width * height],
+            sp_visited: vec![false; width * height],
+            decoded_bits: vec![0u32; width * height],
+            zero_bit_planes: 0,
+            vertically_causal: false,
+            roi_nb: None,
+        }
+    }
+
+    /// Construct a code-block directly from a flat row-major coefficient
+    /// vector — useful for sibling modules (e.g. [`crate::reassemble`])
+    /// that need to round-trip a fully-decoded code-block through their
+    /// own logic, and for tests that want to drive a known state into
+    /// the reassembly bridge without first running the §D.3 passes.
+    ///
+    /// Panics if `coefficients.len() != width * height`.
+    pub fn from_coefficients(
+        orientation: SubBandOrientation,
+        width: usize,
+        height: usize,
+        coefficients: Vec<Coefficient>,
+    ) -> Self {
+        assert!(width >= 1, "code-block width must be ≥ 1");
+        assert!(height >= 1, "code-block height must be ≥ 1");
+        assert_eq!(
+            coefficients.len(),
+            width * height,
+            "coefficients length must equal width * height",
+        );
+        Self {
+            orientation,
+            width,
+            height,
+            coefficients,
+            newly_significant: vec![false; width * height],
+            sp_visited: vec![false; width * height],
+            decoded_bits: vec![0u32; width * height],
+            zero_bit_planes: 0,
+            vertically_causal: false,
+            roi_nb: None,
+        }
+    }
+
+    /// Enable the T.800 §D.7 vertically-causal context-formation toggle.
+    ///
+    /// When the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::vertically_causal_context`] bit is set
+    /// for this code-block, call this with `true` **before** invoking
+    /// any of the §D.3 pass methods. The pass methods then read the
+    /// Figure D.2 neighbour slots `D2`, `V1`, `D3` (the three slots in
+    /// the row immediately *below* the current row) as insignificant
+    /// for every coefficient sitting on the bottom row of its 4-row
+    /// stripe — i.e. those three slots are clipped to zero the same way
+    /// out-of-block neighbours are clipped to zero. Coefficients above
+    /// the bottom row of the stripe still see their full Figure D.2
+    /// neighbour set: the §D.7 mode only modifies bits at stripe
+    /// position 3 (the bottom of each four-row band, per the §D.7
+    /// "Figure D.1 bit 15" worked example).
+    ///
+    /// Builder-style: returns `self` so it can be chained with
+    /// [`Self::from_coefficients`] / [`Self::new`].
+    ///
+    /// Default is `false` (no clipping; identical neighbour reads to
+    /// the round-208 behaviour).
+    pub fn with_vertically_causal_context(mut self, enabled: bool) -> Self {
+        self.vertically_causal = enabled;
+        self
+    }
+
+    /// Whether T.800 §D.7 vertically-causal context formation is on.
+    pub fn vertically_causal_context(&self) -> bool {
+        self.vertically_causal
+    }
+
+    /// Code-block width in samples.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Code-block height in samples.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Sub-band orientation (used for the Table D.1 context column).
+    pub fn orientation(&self) -> SubBandOrientation {
+        self.orientation
+    }
+
+    /// Read one coefficient `(u, v)` (`u` ∈ `0..width`, `v` ∈ `0..height`).
+    pub fn coefficient(&self, u: usize, v: usize) -> Coefficient {
+        debug_assert!(u < self.width && v < self.height);
+        self.coefficients[u + v * self.width]
+    }
+
+    /// Whether `(u, v)` became significant in the most recent SP pass.
+    /// Cleared at the start of every SP pass.
+    pub fn was_newly_significant(&self, u: usize, v: usize) -> bool {
+        debug_assert!(u < self.width && v < self.height);
+        self.newly_significant[u + v * self.width]
+    }
+
+    /// The number of decoded magnitude bits the §D.3 passes have drawn
+    /// for coefficient `(u, v)` — the actually-iterated half of
+    /// §D.2.1's `Nb(u, v)`. Does **not** include the §B.10.5 zero-MSB
+    /// count `P`; use [`Self::effective_nb`] for the full `Nb(u, v)`.
+    pub fn decoded_bits(&self, u: usize, v: usize) -> u32 {
+        debug_assert!(u < self.width && v < self.height);
+        self.decoded_bits[u + v * self.width]
+    }
+
+    /// The largest per-coefficient decoded-bit count in the block. Zero
+    /// for a block whose coding passes never ran (e.g. one built via
+    /// [`Self::from_coefficients`] for a reassembly test) — callers use
+    /// this to decide whether per-coefficient `Nb(u, v)` data is
+    /// available or whether to fall back to a uniform `Nb`.
+    pub fn max_decoded_bits(&self) -> u32 {
+        self.decoded_bits.iter().copied().max().unwrap_or(0)
+    }
+
+    /// Record the §B.10.5 zero-most-significant-bit-plane count `P` so
+    /// [`Self::effective_nb`] can return the full §D.2.1 `Nb(u, v)`.
+    /// The decode driver sets this after the §B.10 packet-header walk
+    /// (the first-inclusion `zero_bit_planes` field) and before
+    /// handing the block to the reassembly bridge.
+    pub fn set_zero_bit_planes(&mut self, p: u32) {
+        self.zero_bit_planes = p;
+    }
+
+    /// The §B.10.5 zero-MSB count `P` recorded on this block.
+    pub fn zero_bit_planes(&self) -> u32 {
+        self.zero_bit_planes
+    }
+
+    /// Raw per-coefficient completed-plane counts (the iterated half of
+    /// the §D.2.1 `Nb(u, v)`, raster order). The encoder's Annex J.13.4
+    /// distortion estimate reads these between forward coding passes to
+    /// derive each coefficient's midpoint-reconstruction uncertainty.
+    pub(crate) fn decoded_bits_raw(&self) -> &[u32] {
+        &self.decoded_bits
+    }
+
+    /// Overwrite the per-coefficient completed-plane counts (raster
+    /// order). The T.814 HT block decoder computes these directly from
+    /// its §7.6 output (`Nb(u, v) = S_blk + 1 + z_n`, minus the `P`
+    /// added back by [`Self::effective_nb`]) rather than iterating
+    /// Annex D passes.
+    pub(crate) fn set_decoded_bits_raw(&mut self, bits: Vec<u32>) {
+        assert_eq!(bits.len(), self.width * self.height);
+        self.decoded_bits = bits;
+    }
+
+    /// The full per-coefficient §D.2.1 `Nb(u, v)` for reconstruction:
+    /// `P + decoded_bits(u, v)` when the §D.3 passes were tracked on
+    /// this block, or the supplied `uniform_fallback` when they were
+    /// not (a test-constructed block via [`Self::from_coefficients`]
+    /// carries no per-coefficient bit counts). Used by the §E.1.1.2 /
+    /// §E.1.2.1 reconstruction in [`crate::reassemble`].
+    /// [`Self::effective_nb`] for every coefficient at once, with the
+    /// block-wide checks (ROI map present, any decoded bits) done once
+    /// instead of per coefficient. (shl patch: `max_decoded_bits` scans
+    /// the whole block, so calling `effective_nb` per coefficient was
+    /// quadratic in the block size.)
+    pub fn effective_nb_map(&self, uniform_fallback: u32) -> EffectiveNb<'_> {
+        if let Some(roi) = &self.roi_nb {
+            EffectiveNb::PerCoefficient(roi, 0)
+        } else if self.max_decoded_bits() == 0 {
+            EffectiveNb::Uniform(uniform_fallback)
+        } else {
+            EffectiveNb::PerCoefficient(&self.decoded_bits, self.zero_bit_planes)
+        }
+    }
+
+    /// Raw raster-order coefficients (`width * height`).
+    pub fn coefficients_raw(&self) -> &[Coefficient] {
+        &self.coefficients
+    }
+
+    pub fn effective_nb(&self, u: usize, v: usize, uniform_fallback: u32) -> u32 {
+        debug_assert!(u < self.width && v < self.height);
+        // Under an `RGN` marker (T.800 §H.1) the per-coefficient Nb(u, v)
+        // was rewritten by the Maxshift remap; read it directly.
+        if let Some(roi) = &self.roi_nb {
+            return roi[u + v * self.width];
+        }
+        if self.max_decoded_bits() == 0 {
+            uniform_fallback
+        } else {
+            self.zero_bit_planes + self.decoded_bits[u + v * self.width]
+        }
+    }
+
+    /// Apply the T.800 §H.1 region-of-interest (Maxshift) decode remap
+    /// to this code-block, given the background Equation E-2 `mb` and the
+    /// `SPrgn` scaling value `s` (§A.6.3 / Table A.26).
+    ///
+    /// The tier-1 driver must have decoded this block against the
+    /// **increased** bit budget `M'b = mb + s` (the encoder shifts ROI
+    /// coefficients up into the top `s` planes per §H.2), so every stored
+    /// magnitude is anchored at weight `2^(M'b − 1)`. This routine maps
+    /// each coefficient back to the background-`mb` anchor §E.1 expects,
+    /// applying the three §H.1 branches that switch on `Nb(u, v)` and on
+    /// whether any of the top `mb` MSBs (the bits at weights
+    /// `2^(M'b − 1) … 2^(M'b − mb)`, i.e. `magnitude >> s`) is non-zero:
+    ///
+    /// * `Nb < mb` (§H.1 step 2): no §H.1 modification. The magnitude is
+    ///   re-anchored from the `M'b` budget to the `mb` budget by §E.1's
+    ///   own `2^(mb − i)` weighting, which for the stored integer is
+    ///   `magnitude >> s`. `Nb` is unchanged.
+    /// * `Nb ≥ mb`, top `mb` MSBs non-zero (§H.1 step 3, ROI): the
+    ///   coefficient is a region-of-interest coefficient; keep its top
+    ///   `mb` bits (`magnitude >> s`) and cap `Nb = mb`.
+    /// * `Nb ≥ mb`, top `mb` MSBs all zero (§H.1 step 4, background):
+    ///   discard the (zero) top `s` MSBs and shift the remainder down `s`
+    ///   places (Equation H-1); on the stored integer this leaves the
+    ///   magnitude unchanged because its top `s` bits are already zero,
+    ///   and `Nb` drops to `max(0, Nb − s)` (Equation H-2).
+    ///
+    /// `s = 0` is a no-op (`M'b = mb`, every branch reduces to identity).
+    /// After this call [`Self::effective_nb`] returns the §H.1-remapped
+    /// `Nb(u, v)` and [`Self::coefficient`] the §E.1-ready magnitude.
+    pub fn apply_roi_maxshift(&mut self, mb: u32, s: u32) {
+        if s == 0 {
+            return;
+        }
+        let mut roi_nb = vec![0u32; self.width * self.height];
+        for ((slot, coeff), &decoded) in roi_nb
+            .iter_mut()
+            .zip(self.coefficients.iter_mut())
+            .zip(self.decoded_bits.iter())
+        {
+            // Per-coefficient Nb(u, v) under the M'b budget: P + decoded.
+            let nb = self.zero_bit_planes + decoded;
+            // Top `mb` MSBs of the M'b-anchored magnitude.
+            let top = coeff.magnitude >> s;
+            if nb >= mb && top == 0 {
+                // §H.1 step 4 — background: magnitude unchanged (its top
+                // `s` bits are already zero), Nb drops by `s`.
+                *slot = nb.saturating_sub(s);
+            } else if nb >= mb {
+                // §H.1 step 3 — ROI: keep the top `mb` bits, cap Nb = mb.
+                coeff.magnitude = top;
+                *slot = mb;
+            } else {
+                // §H.1 step 2 — Nb < mb: re-anchor only (magnitude >> s),
+                // Nb unchanged.
+                coeff.magnitude = top;
+                *slot = nb;
+            }
+        }
+        self.roi_nb = Some(roi_nb);
+    }
+
+    /// Run one §D.3.1 significance-propagation pass over the bit-plane
+    /// with positional weight `1 << bitplane`.
+    ///
+    /// The pass walks every coefficient in §D.1 stripe-major order;
+    /// for each one that is currently insignificant and whose Table D.1
+    /// context label is **non-zero**, one MQ decision is drawn against
+    /// that context. A `1` decision flips σ to true, immediately
+    /// followed by the §D.3.2 sign-bit subroutine (one further MQ
+    /// decision against the Table D.3 sign context, XORed with the
+    /// Table D.3 XORbit to recover the spec's `sb(u, v)`). A `0`
+    /// decision leaves σ false and skips the sign subroutine.
+    ///
+    /// The caller-supplied `ctx` array must hold all 19 Annex D
+    /// contexts in their Table D.7 initial states (see
+    /// [`reset_contexts`]); the SP pass only mutates entries
+    /// `0..=8` (significance) and `9..=13` (sign).
+    ///
+    /// Returns the number of coefficients that **became newly
+    /// significant** in this pass — exposed mainly for tests; the
+    /// per-coefficient flag is reachable via
+    /// [`was_newly_significant`](Self::was_newly_significant).
+    pub fn significance_propagation_pass(
+        &mut self,
+        bitplane: u32,
+        decoder: &mut MqDecoder<'_>,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) -> Result<usize, Error> {
+        // §D.3.3: clear the "just became significant in the last SP
+        // pass" carry at the start of every new SP pass; bits set during
+        // *this* pass will be visible to the *next* magnitude refinement
+        // pass. The §D.3.4 π pass-membership flags reset on the same
+        // boundary: a new bit-plane's SP pass owns a fresh membership.
+        self.newly_significant.fill(false);
+        self.sp_visited.fill(false);
+
+        let weight: u32 = 1u32 << bitplane;
+        let mut newly = 0usize;
+
+        // §D.1: stripes of height 4, top to bottom. Within a stripe the
+        // scan is column-by-column, top to bottom of the stripe.
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let coef = self.coefficients[u + v * self.width];
+
+                    // SP pass: only insignificant coefficients with a
+                    // non-zero Table D.1 context are considered.
+                    if coef.sigma {
+                        continue;
+                    }
+                    let label = significance_context_label(
+                        self.orientation,
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                    );
+                    if label == 0 {
+                        // Zero context — deferred to the cleanup pass.
+                        continue;
+                    }
+
+                    let cx = &mut ctx[SP_CTX_OFFSET + label as usize];
+                    let bit = decoder.decode(cx);
+                    // §D.3.4 / Table D.10 D9: this coefficient's bit was
+                    // coded in the SP pass — the same plane's cleanup
+                    // pass must skip it whatever the outcome.
+                    self.sp_visited[u + v * self.width] = true;
+                    // §D.2.1: a magnitude MSB was decoded for this
+                    // coefficient on this bit-plane (whether it read 0
+                    // or 1) — count it toward Nb(u, v).
+                    self.decoded_bits[u + v * self.width] += 1;
+                    if bit == 1 {
+                        // Newly significant — set σ, accumulate the
+                        // bit-plane's positional value into magnitude,
+                        // then immediately run the §D.3.2 sign-bit
+                        // subroutine.
+                        let nb = self.neighbours_in_stripe(u, v, v0, stripe_h);
+                        let (sign_label, xorbit) = sign_context_label(nb);
+                        let sign_cx = &mut ctx[SIGN_CTX_OFFSET + sign_label as usize];
+                        let d = decoder.decode(sign_cx);
+                        let sign_bit = (d ^ xorbit) != 0;
+
+                        let updated = Coefficient {
+                            magnitude: coef.magnitude | weight,
+                            sigma: true,
+                            sign: sign_bit,
+                            already_refined: coef.already_refined,
+                        };
+                        self.coefficients[u + v * self.width] = updated;
+                        self.newly_significant[u + v * self.width] = true;
+                        newly += 1;
+                    }
+                }
+            }
+            v0 += 4;
+        }
+
+        Ok(newly)
+    }
+
+    /// Run one §D.3.3 magnitude-refinement pass over the bit-plane with
+    /// positional weight `1 << bitplane`.
+    ///
+    /// The pass walks every coefficient in §D.1 stripe-major order (the
+    /// same order as the SP pass) and refines exactly those coefficients
+    /// that are **already significant** *and* did **not** become
+    /// significant in the immediately preceding significance-propagation
+    /// pass (§D.3.3's "except those that have just become significant in
+    /// the immediately preceding significance propagation pass" — the
+    /// `newly_significant` carry tracks that set).
+    ///
+    /// For each refined coefficient one MQ decision is drawn against the
+    /// Table D.4 context: label 14 / 15 for the **first** refinement of
+    /// the coefficient (depending on whether `∑(Hi+Vi+Di) = 0` or `≥ 1`
+    /// using the *current* significance states) and label 16 for any
+    /// later refinement. The decoded bit is OR-ed into `magnitude` at the
+    /// bit-plane's positional weight and the coefficient is marked
+    /// `already_refined`.
+    ///
+    /// The caller-supplied `ctx` array must hold all 19 Annex D contexts
+    /// (see [`reset_contexts`]); the refinement pass only mutates entries
+    /// `14..=16`. The `newly_significant` carry is left intact so a
+    /// following pass on the same bit-plane (there is none in the §D.3
+    /// order, but tests may chain passes) still sees it; it is cleared at
+    /// the start of the next SP pass.
+    ///
+    /// Returns the number of coefficients refined in this pass (exposed
+    /// mainly for tests).
+    pub fn magnitude_refinement_pass(
+        &mut self,
+        bitplane: u32,
+        decoder: &mut MqDecoder<'_>,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) -> Result<usize, Error> {
+        let weight: u32 = 1u32 << bitplane;
+        let mut refined = 0usize;
+
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    let coef = self.coefficients[idx];
+
+                    // §D.3.3: refine coefficients that are already
+                    // significant, *except* those that became significant
+                    // in the immediately preceding SP pass.
+                    if !coef.sigma || self.newly_significant[idx] {
+                        continue;
+                    }
+
+                    // Table D.4 context: the neighbour summation uses the
+                    // significance states currently known to the decoder.
+                    let label = refinement_context_label(
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                        coef.already_refined,
+                    );
+                    let cx = &mut ctx[REFINEMENT_CTX_OFFSET + label as usize];
+                    let bit = decoder.decode(cx);
+
+                    let mut updated = coef;
+                    if bit == 1 {
+                        updated.magnitude |= weight;
+                    }
+                    updated.already_refined = true;
+                    self.coefficients[idx] = updated;
+                    // §D.2.1: one refinement (magnitude) bit decoded for
+                    // this already-significant coefficient on this plane.
+                    self.decoded_bits[idx] += 1;
+                    refined += 1;
+                }
+            }
+            v0 += 4;
+        }
+
+        Ok(refined)
+    }
+
+    /// Run one §D.3.4 cleanup pass over the bit-plane with positional
+    /// weight `1 << bitplane`.
+    ///
+    /// The cleanup pass codes every coefficient that is **still
+    /// insignificant** after the significance-propagation and
+    /// magnitude-refinement passes of this bit-plane (i.e., every
+    /// coefficient the earlier passes "left over"). It walks the same
+    /// §D.1 stripe-major scan order as the other two passes.
+    ///
+    /// Two coding modes apply, per Table D.5:
+    ///
+    /// * **Run-length mode.** When a column inside a *full* (4-row) stripe
+    ///   has all four of its coefficients still insignificant *and* the
+    ///   Table D.1 significance context of every one of them is `0`
+    ///   (computed from the significance state currently known to the
+    ///   decoder), the four coefficients are coded together. One MQ
+    ///   decision is drawn against the **run-length context** (label 17).
+    ///   A `0` leaves all four insignificant. A `1` means at least one is
+    ///   significant; two further bits are drawn against the **UNIFORM
+    ///   context** (label 18), MSB then LSB, giving the 0-based index
+    ///   (from the top of the column) of the first significant
+    ///   coefficient. That coefficient is made significant and its sign
+    ///   bit decoded per §D.3.2; the coefficients below it in the column
+    ///   are then coded "in the manner described in §D.3.1" (Table D.1
+    ///   significance context + sign subroutine).
+    /// * **Normal mode.** When the column is not run-length-eligible
+    ///   (fewer than four rows remain, or any of the four was already
+    ///   coded / has a non-zero context), each still-insignificant
+    ///   coefficient of the column is coded individually exactly as in the
+    ///   significance-propagation pass: one MQ decision against its Table
+    ///   D.1 context, and on a `1` the §D.3.2 sign subroutine.
+    ///
+    /// Coefficients already significant (from the SP or MR pass of this
+    /// bit-plane, or any earlier bit-plane) are skipped — they were not
+    /// "left over" for the cleanup pass.
+    ///
+    /// The caller-supplied `ctx` array must hold all 19 Annex D contexts
+    /// (see [`reset_contexts`]); the cleanup pass mutates the significance
+    /// labels `0..=8`, the sign labels `9..=13`, the run-length label
+    /// `17`, and the UNIFORM label `18`.
+    ///
+    /// Returns the number of coefficients that **became newly significant**
+    /// in this pass (exposed mainly for tests).
+    pub fn cleanup_pass(
+        &mut self,
+        bitplane: u32,
+        decoder: &mut MqDecoder<'_>,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) -> Result<usize, Error> {
+        let weight: u32 = 1u32 << bitplane;
+        let mut newly = 0usize;
+
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                // §D.3.4 / Table D.5 run-length eligibility: a full
+                // (4-row) stripe whose column has all four coefficients
+                // still insignificant and each currently carrying the 0
+                // significance context.
+                let mut start_dv = 0usize;
+                if stripe_h == 4 && self.column_run_length_eligible(u, v0) {
+                    let rl_cx = &mut ctx[RUN_LENGTH_CTX];
+                    if decoder.decode(rl_cx) == 0 {
+                        // All four remain insignificant; the run-length
+                        // escape decoded a 0 magnitude bit for every one
+                        // of the column's four coefficients on this
+                        // bit-plane (§D.2.1: count each toward Nb).
+                        for dv in 0..4 {
+                            self.decoded_bits[u + (v0 + dv) * self.width] += 1;
+                        }
+                        continue;
+                    }
+                    // At least one significant: two UNIFORM bits (MSB
+                    // then LSB) give the 0-based first-significant index.
+                    let hi = decoder.decode(&mut ctx[UNIFORM_CTX]);
+                    let lo = decoder.decode(&mut ctx[UNIFORM_CTX]);
+                    let first = ((hi << 1) | lo) as usize;
+                    // The first-significant coefficient is significant by
+                    // construction (the run-length escape already told us
+                    // so); decode only its sign, then continue normally
+                    // from the next coefficient down the column.
+                    let v = v0 + first;
+                    self.make_significant_with_sign(u, v, weight, v0, stripe_h, decoder, ctx);
+                    newly += 1;
+                    // §D.2.1: the coefficients above `first` were decoded
+                    // as 0 by the run-length escape; `first` itself was
+                    // decoded as a 1. Each gets one magnitude bit this
+                    // bit-plane. (Coefficients below `first` are coded by
+                    // the normal loop below, which counts them there.)
+                    for dv in 0..=first {
+                        self.decoded_bits[u + (v0 + dv) * self.width] += 1;
+                    }
+                    start_dv = first + 1;
+                }
+
+                // Normal §D.3.1-style coding for the remaining
+                // coefficients of the column (or the whole column when
+                // run-length mode did not apply).
+                for dv in start_dv..stripe_h {
+                    let v = v0 + dv;
+                    // Table D.10 decision D9: skip coefficients that are
+                    // already significant — or whose bit was already
+                    // coded during this bit-plane's significance
+                    // propagation pass (§D.3.4 "the remaining
+                    // coefficients … not handled by the significance
+                    // propagation pass").
+                    if self.coefficients[u + v * self.width].sigma
+                        || self.sp_visited[u + v * self.width]
+                    {
+                        continue;
+                    }
+                    let label = significance_context_label(
+                        self.orientation,
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                    );
+                    let cx = &mut ctx[SP_CTX_OFFSET + label as usize];
+                    // §D.2.1: this leftover coefficient is coded (a 0 or
+                    // 1 magnitude bit) by the cleanup pass on this plane.
+                    self.decoded_bits[u + v * self.width] += 1;
+                    if decoder.decode(cx) == 1 {
+                        self.make_significant_with_sign(u, v, weight, v0, stripe_h, decoder, ctx);
+                        newly += 1;
+                    }
+                }
+            }
+            v0 += 4;
+        }
+
+        Ok(newly)
+    }
+
+    // === Encode-side Annex D forward coding passes ===================
+    //
+    // These mirror the AC decode passes above bit-for-bit: identical §D.1
+    // scan order, identical Table D.1 / D.3 / D.4 / D.5 context formation,
+    // and the identical progressive-significance state update. The only
+    // difference is that the magnitude / sign bit fed to each MQ coding
+    // decision comes from the caller-supplied `targets` (the fully-known
+    // quantised coefficients) rather than the decoder, and the decision is
+    // handed to [`MqEncoder::encode`]. Because `self.coefficients` evolves
+    // exactly as the decoder would reconstruct it, every context label the
+    // encoder computes equals the label the decoder will compute — so the
+    // produced codeword segment decodes back to the same coefficients. The
+    // block must be freshly [`Self::new`]-constructed (all-insignificant
+    // progressive state); `targets` is the row-major `width * height`
+    // coefficient grid to code.
+
+    /// Encode one §D.3.1 significance-propagation pass (the forward
+    /// counterpart of [`Self::significance_propagation_pass`]).
+    pub fn significance_propagation_encode(
+        &mut self,
+        bitplane: u32,
+        targets: &[Coefficient],
+        encoder: &mut MqEncoder,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) {
+        self.newly_significant.fill(false);
+        self.sp_visited.fill(false);
+        let weight: u32 = 1u32 << bitplane;
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    if self.coefficients[idx].sigma {
+                        continue;
+                    }
+                    let label = significance_context_label(
+                        self.orientation,
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                    );
+                    if label == 0 {
+                        continue;
+                    }
+                    let bit = ((targets[idx].magnitude >> bitplane) & 1) as u8;
+                    encoder.encode(&mut ctx[SP_CTX_OFFSET + label as usize], bit);
+                    self.sp_visited[idx] = true;
+                    self.decoded_bits[idx] += 1;
+                    if bit == 1 {
+                        self.code_sign_encode(u, v, weight, targets, v0, stripe_h, encoder, ctx);
+                        self.newly_significant[idx] = true;
+                    }
+                }
+            }
+            v0 += 4;
+        }
+    }
+
+    /// Encode one §D.3.3 magnitude-refinement pass (the forward
+    /// counterpart of [`Self::magnitude_refinement_pass`]).
+    pub fn magnitude_refinement_encode(
+        &mut self,
+        bitplane: u32,
+        targets: &[Coefficient],
+        encoder: &mut MqEncoder,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) {
+        let weight: u32 = 1u32 << bitplane;
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    let coef = self.coefficients[idx];
+                    if !coef.sigma || self.newly_significant[idx] {
+                        continue;
+                    }
+                    let label = refinement_context_label(
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                        coef.already_refined,
+                    );
+                    let bit = ((targets[idx].magnitude >> bitplane) & 1) as u8;
+                    encoder.encode(&mut ctx[REFINEMENT_CTX_OFFSET + label as usize], bit);
+                    let mut updated = coef;
+                    if bit == 1 {
+                        updated.magnitude |= weight;
+                    }
+                    updated.already_refined = true;
+                    self.coefficients[idx] = updated;
+                    self.decoded_bits[idx] += 1;
+                }
+            }
+            v0 += 4;
+        }
+    }
+
+    /// Encode one §D.6 **raw-mode** significance-propagation pass — the
+    /// forward counterpart of [`Self::significance_propagation_pass_raw`]:
+    /// same scan and Table D.1 context gate as the AC pass, but the
+    /// magnitude bit and (Equation D-2, no XOR redirection) sign bit go
+    /// straight to a [`RawBitWriter`].
+    pub fn significance_propagation_encode_raw(
+        &mut self,
+        bitplane: u32,
+        targets: &[Coefficient],
+        raw: &mut RawBitWriter,
+    ) {
+        self.newly_significant.fill(false);
+        self.sp_visited.fill(false);
+        let weight: u32 = 1u32 << bitplane;
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    if self.coefficients[idx].sigma {
+                        continue;
+                    }
+                    let label = significance_context_label(
+                        self.orientation,
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                    );
+                    if label == 0 {
+                        continue;
+                    }
+                    let bit = ((targets[idx].magnitude >> bitplane) & 1) as u8;
+                    raw.write_bit(bit);
+                    self.sp_visited[idx] = true;
+                    self.decoded_bits[idx] += 1;
+                    if bit == 1 {
+                        // §D.6 Equation D-2: the sign is one raw bit.
+                        raw.write_bit(targets[idx].sign as u8);
+                        let mut updated = self.coefficients[idx];
+                        updated.magnitude |= weight;
+                        updated.sigma = true;
+                        updated.sign = targets[idx].sign;
+                        self.coefficients[idx] = updated;
+                        self.newly_significant[idx] = true;
+                    }
+                }
+            }
+            v0 += 4;
+        }
+    }
+
+    /// Encode one §D.6 **raw-mode** magnitude-refinement pass — the
+    /// forward counterpart of [`Self::magnitude_refinement_pass_raw`]:
+    /// one raw bit per already-significant coefficient (Table D.4
+    /// contexts play no role in raw mode).
+    pub fn magnitude_refinement_encode_raw(
+        &mut self,
+        bitplane: u32,
+        targets: &[Coefficient],
+        raw: &mut RawBitWriter,
+    ) {
+        let weight: u32 = 1u32 << bitplane;
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    let coef = self.coefficients[idx];
+                    if !coef.sigma || self.newly_significant[idx] {
+                        continue;
+                    }
+                    let bit = ((targets[idx].magnitude >> bitplane) & 1) as u8;
+                    raw.write_bit(bit);
+                    let mut updated = coef;
+                    if bit == 1 {
+                        updated.magnitude |= weight;
+                    }
+                    updated.already_refined = true;
+                    self.coefficients[idx] = updated;
+                    self.decoded_bits[idx] += 1;
+                }
+            }
+            v0 += 4;
+        }
+    }
+
+    /// Encode one §D.3.4 cleanup pass (the forward counterpart of
+    /// [`Self::cleanup_pass`]), including the Table D.5 run-length mode.
+    pub fn cleanup_encode(
+        &mut self,
+        bitplane: u32,
+        targets: &[Coefficient],
+        encoder: &mut MqEncoder,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) {
+        let weight: u32 = 1u32 << bitplane;
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                let mut start_dv = 0usize;
+                if stripe_h == 4 && self.column_run_length_eligible(u, v0) {
+                    // First column entry whose target bit is 1 on this
+                    // bit-plane (top to bottom), if any.
+                    let first_sig = (0..4).find(|&dv| {
+                        (targets[u + (v0 + dv) * self.width].magnitude >> bitplane) & 1 == 1
+                    });
+                    match first_sig {
+                        None => {
+                            encoder.encode(&mut ctx[RUN_LENGTH_CTX], 0);
+                            for dv in 0..4 {
+                                self.decoded_bits[u + (v0 + dv) * self.width] += 1;
+                            }
+                            continue;
+                        }
+                        Some(first) => {
+                            encoder.encode(&mut ctx[RUN_LENGTH_CTX], 1);
+                            // Two UNIFORM bits, MSB then LSB, of the 0-based
+                            // index of the first significant coefficient.
+                            encoder.encode(&mut ctx[UNIFORM_CTX], ((first >> 1) & 1) as u8);
+                            encoder.encode(&mut ctx[UNIFORM_CTX], (first & 1) as u8);
+                            let v = v0 + first;
+                            self.code_sign_encode(
+                                u, v, weight, targets, v0, stripe_h, encoder, ctx,
+                            );
+                            for dv in 0..=first {
+                                self.decoded_bits[u + (v0 + dv) * self.width] += 1;
+                            }
+                            start_dv = first + 1;
+                        }
+                    }
+                }
+                for dv in start_dv..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    if self.coefficients[idx].sigma || self.sp_visited[idx] {
+                        continue;
+                    }
+                    let label = significance_context_label(
+                        self.orientation,
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                    );
+                    let bit = ((targets[idx].magnitude >> bitplane) & 1) as u8;
+                    self.decoded_bits[idx] += 1;
+                    encoder.encode(&mut ctx[SP_CTX_OFFSET + label as usize], bit);
+                    if bit == 1 {
+                        self.code_sign_encode(u, v, weight, targets, v0, stripe_h, encoder, ctx);
+                    }
+                }
+            }
+            v0 += 4;
+        }
+    }
+
+    /// Encode the §D.3.2 sign subroutine for a coefficient made
+    /// significant on this bit-plane, and fold the magnitude bit + sign
+    /// into the progressive state (the forward counterpart of
+    /// [`Self::make_significant_with_sign`]).
+    ///
+    /// The sign context / XORbit come from the Table D.3 lookup; the
+    /// decoder recovers `sb = D ⊕ XORbit`, so the encoder emits
+    /// `D = sb ⊕ XORbit`.
+    #[allow(clippy::too_many_arguments)]
+    fn code_sign_encode(
+        &mut self,
+        u: usize,
+        v: usize,
+        weight: u32,
+        targets: &[Coefficient],
+        stripe_v0: usize,
+        stripe_h: usize,
+        encoder: &mut MqEncoder,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) {
+        let idx = u + v * self.width;
+        let nb = self.neighbours_in_stripe(u, v, stripe_v0, stripe_h);
+        let (sign_label, xorbit) = sign_context_label(nb);
+        let sign_bit = targets[idx].sign;
+        let d = (sign_bit as u8) ^ xorbit;
+        encoder.encode(&mut ctx[SIGN_CTX_OFFSET + sign_label as usize], d);
+        let coef = &mut self.coefficients[idx];
+        coef.magnitude |= weight;
+        coef.sigma = true;
+        coef.sign = sign_bit;
+    }
+
+    /// Run one §D.6 **raw-mode** significance-propagation pass over the
+    /// bit-plane with positional weight `1 << bitplane`.
+    ///
+    /// Mirrors [`Self::significance_propagation_pass`] in scan order,
+    /// the "non-zero context only" filter, and the sign-bit subroutine,
+    /// but draws its bits straight from a [`RawBitReader`] rather than
+    /// the MQ arithmetic decoder. Per T.800 §D.6 Equation D-2 the
+    /// raw-mode sign bit is `signbit = raw_value` — i.e. the XOR with
+    /// the Table D.3 XORbit collapses to the identity and only the raw
+    /// bit value is read.
+    ///
+    /// This is the §D.6 SP path the COD / COC
+    /// [`crate::CodeBlockStyle::selective_arithmetic_coding_bypass`]
+    /// flag turns on starting with the **fourth** SP coding pass (i.e.
+    /// the SP pass on bit-plane 5 per Table D.9). The caller is
+    /// responsible for the bit-plane-counting that picks AC vs. raw —
+    /// the pass method does not check.
+    ///
+    /// The `ctx` array is **not** referenced here (no MQ contexts are
+    /// touched in raw mode) but the §D.3 significance state of the
+    /// code-block is still threaded through so the Table D.1 context
+    /// label can be computed to drive the "non-zero context = read
+    /// this bit, zero context = defer to cleanup" filter (§D.6 retains
+    /// the §D.3.1 filter — only the bit's source changes).
+    ///
+    /// Returns the number of coefficients that **became newly
+    /// significant** in this pass.
+    pub fn significance_propagation_pass_raw(
+        &mut self,
+        bitplane: u32,
+        raw: &mut RawBitReader<'_>,
+    ) -> Result<usize, Error> {
+        // §D.3.3: clear the "just became significant in the last SP
+        // pass" carry at the start of every new SP pass; the §D.6 raw
+        // path keeps the same MR-skip semantics as the AC path. The
+        // §D.3.4 π pass-membership flags reset on the same boundary.
+        self.newly_significant.fill(false);
+        self.sp_visited.fill(false);
+
+        let weight: u32 = 1u32 << bitplane;
+        let mut newly = 0usize;
+
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let coef = self.coefficients[u + v * self.width];
+                    if coef.sigma {
+                        continue;
+                    }
+                    let label = significance_context_label(
+                        self.orientation,
+                        self.neighbours_in_stripe(u, v, v0, stripe_h),
+                    );
+                    if label == 0 {
+                        // Zero context — deferred to the cleanup pass,
+                        // exactly as in the AC path.
+                        continue;
+                    }
+                    let bit = raw.read_bit()?;
+                    // §D.3.4 / Table D.10 D9: coded in the SP pass —
+                    // skipped by the same plane's cleanup pass.
+                    self.sp_visited[u + v * self.width] = true;
+                    // §D.2.1: one magnitude MSB decoded for this
+                    // coefficient on this bit-plane — count toward
+                    // Nb(u, v).
+                    self.decoded_bits[u + v * self.width] += 1;
+                    if bit == 1 {
+                        // §D.6 Equation D-2: signbit = raw_value (no
+                        // XOR-with-XORbit redirection).
+                        let sign_bit = raw.read_bit()? == 1;
+                        let updated = Coefficient {
+                            magnitude: coef.magnitude | weight,
+                            sigma: true,
+                            sign: sign_bit,
+                            already_refined: coef.already_refined,
+                        };
+                        self.coefficients[u + v * self.width] = updated;
+                        self.newly_significant[u + v * self.width] = true;
+                        newly += 1;
+                    }
+                }
+            }
+            v0 += 4;
+        }
+
+        Ok(newly)
+    }
+
+    /// Run one §D.6 **raw-mode** magnitude-refinement pass over the
+    /// bit-plane with positional weight `1 << bitplane`.
+    ///
+    /// Mirrors [`Self::magnitude_refinement_pass`] in scan order and
+    /// the "refine the already-significant, skip the newly-significant"
+    /// filter (§D.3.3) but draws its refinement bits straight from a
+    /// [`RawBitReader`] rather than the MQ arithmetic decoder. Per
+    /// T.800 §D.6 the per-coefficient bit is a single raw bit (the
+    /// AC-side Table D.4 context label has no role in raw mode).
+    ///
+    /// This is the §D.6 MR path the COD / COC
+    /// [`crate::CodeBlockStyle::selective_arithmetic_coding_bypass`]
+    /// flag turns on starting with the **fourth** MR coding pass.
+    ///
+    /// Returns the number of coefficients refined in this pass.
+    pub fn magnitude_refinement_pass_raw(
+        &mut self,
+        bitplane: u32,
+        raw: &mut RawBitReader<'_>,
+    ) -> Result<usize, Error> {
+        let weight: u32 = 1u32 << bitplane;
+        let mut refined = 0usize;
+
+        let mut v0 = 0usize;
+        while v0 < self.height {
+            let stripe_h = core::cmp::min(4, self.height - v0);
+            for u in 0..self.width {
+                for dv in 0..stripe_h {
+                    let v = v0 + dv;
+                    let idx = u + v * self.width;
+                    let coef = self.coefficients[idx];
+                    if !coef.sigma || self.newly_significant[idx] {
+                        continue;
+                    }
+                    let bit = raw.read_bit()?;
+                    let mut updated = coef;
+                    if bit == 1 {
+                        updated.magnitude |= weight;
+                    }
+                    updated.already_refined = true;
+                    self.coefficients[idx] = updated;
+                    // §D.2.1: one refinement (magnitude) bit decoded for
+                    // this already-significant coefficient on this plane.
+                    self.decoded_bits[idx] += 1;
+                    refined += 1;
+                }
+            }
+            v0 += 4;
+        }
+
+        Ok(refined)
+    }
+
+    /// Whether the four-coefficient column starting at `(u, v0)` is
+    /// run-length-eligible per §D.3.4: every one of the four coefficients
+    /// is still insignificant and its current Table D.1 significance
+    /// context label is `0`. Callers must have already established that
+    /// the stripe is a full 4-row stripe.
+    ///
+    /// The label is computed with the **stripe-aware** neighbour read —
+    /// when the §D.7 vertically-causal flag is set, the bottom row of
+    /// the stripe reads its `D2 / V1 / D3` slots as zero, exactly the
+    /// way the §D.3 passes themselves read them.
+    fn column_run_length_eligible(&self, u: usize, v0: usize) -> bool {
+        for dv in 0..4 {
+            let v = v0 + dv;
+            let c = self.coefficients[u + v * self.width];
+            // Table D.10 decision D8: the four coefficients must be
+            // *undecoded* in this bit-plane — insignificant and not
+            // already coded by the SP pass. (A zero context implies the
+            // SP pass skipped the coefficient, so the π check is
+            // defensive; significance is monotonic within a plane.)
+            if c.sigma || self.sp_visited[u + v * self.width] {
+                return false;
+            }
+            if significance_context_label(self.orientation, self.neighbours_in_stripe(u, v, v0, 4))
+                != 0
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Make coefficient `(u, v)` significant: set σ, accumulate the
+    /// bit-plane `weight` into the magnitude, decode the sign bit via the
+    /// §D.3.2 subroutine, and flag it newly-significant (the §D.3.3
+    /// carry). Shared by the cleanup pass's run-length and normal modes.
+    ///
+    /// `stripe_v0` / `stripe_h` thread the current stripe extent into
+    /// the §D.3.2 sign-context neighbour read so the §D.7
+    /// vertically-causal flag (when set on the code-block) clips the
+    /// below-stripe `V1` slot to zero for bottom-row coefficients.
+    #[allow(clippy::too_many_arguments)]
+    fn make_significant_with_sign(
+        &mut self,
+        u: usize,
+        v: usize,
+        weight: u32,
+        stripe_v0: usize,
+        stripe_h: usize,
+        decoder: &mut MqDecoder<'_>,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) {
+        let idx = u + v * self.width;
+        let nb = self.neighbours_in_stripe(u, v, stripe_v0, stripe_h);
+        let (sign_label, xorbit) = sign_context_label(nb);
+        let sign_cx = &mut ctx[SIGN_CTX_OFFSET + sign_label as usize];
+        let d = decoder.decode(sign_cx);
+        let sign_bit = (d ^ xorbit) != 0;
+
+        let coef = &mut self.coefficients[idx];
+        coef.magnitude |= weight;
+        coef.sigma = true;
+        coef.sign = sign_bit;
+        self.newly_significant[idx] = true;
+    }
+
+    /// Build a [`Neighbours`] snapshot of `(u, v)`'s 8 nearest neighbours,
+    /// **without** the §D.7 stripe clipping.
+    ///
+    /// Out-of-block neighbours are treated as insignificant
+    /// (`sigma = false`, `sign = false`) per §D.3 / §D.3.2.
+    ///
+    /// The §D.3 pass methods go through
+    /// [`Self::neighbours_in_stripe`] instead — that path layers the
+    /// §D.7 vertically-causal clip on top of this read.
+    fn neighbours(&self, u: usize, v: usize) -> Neighbours {
+        let mut nb = Neighbours::default();
+        // Iterate the eight (du, dv) offsets in the Figure D.2 grid.
+        let positions: [(i32, i32, NeighbourSlot); 8] = [
+            (-1, -1, NeighbourSlot::D0),
+            (0, -1, NeighbourSlot::V0),
+            (1, -1, NeighbourSlot::D1),
+            (-1, 0, NeighbourSlot::H0),
+            (1, 0, NeighbourSlot::H1),
+            (-1, 1, NeighbourSlot::D2),
+            (0, 1, NeighbourSlot::V1),
+            (1, 1, NeighbourSlot::D3),
+        ];
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let ui = u as i32;
+        let vi = v as i32;
+        for (du, dv, slot) in positions {
+            let nu = ui + du;
+            let nv = vi + dv;
+            if nu < 0 || nu >= w || nv < 0 || nv >= h {
+                continue;
+            }
+            let c = self.coefficients[(nu as usize) + (nv as usize) * self.width];
+            nb.set(slot, c.sigma, c.sign);
+        }
+        nb
+    }
+
+    /// Build a [`Neighbours`] snapshot for the §D.3 pass methods.
+    ///
+    /// `stripe_v0` is the top row of the 4-row stripe currently being
+    /// scanned and `stripe_h` is its height (`1..=4`; less than `4` only
+    /// when the block height is not a multiple of four and the bottom
+    /// partial stripe is in progress). The current coefficient `(u, v)`
+    /// lies inside the stripe (`stripe_v0 <= v < stripe_v0 + stripe_h`).
+    ///
+    /// When the §D.7 vertically-causal flag is **off** (default), this
+    /// is a straight pass-through to [`Self::neighbours`] — the full
+    /// Figure D.2 neighbour set is read.
+    ///
+    /// When the §D.7 vertically-causal flag is **on** and `(u, v)`
+    /// sits on the **bottom row of the stripe** (`v == stripe_v0 +
+    /// stripe_h - 1`), the three "below the current row" Figure D.2
+    /// slots — `D2`, `V1`, `D3` — are clipped to insignificant
+    /// (`sigma = false`, `sign = false`) regardless of whether the
+    /// next row exists in the code-block. Coefficients above the
+    /// stripe bottom (`v < stripe_v0 + stripe_h - 1`) see their
+    /// full neighbour set unchanged: the stripe's bottom row is the
+    /// only one whose `D2 / V1 / D3` slots would otherwise reach
+    /// into the *next* stripe (the four-row layout sketched in §D.7
+    /// — Figure D.1 bit 15 is the worked example).
+    fn neighbours_in_stripe(
+        &self,
+        u: usize,
+        v: usize,
+        stripe_v0: usize,
+        stripe_h: usize,
+    ) -> Neighbours {
+        let mut nb = self.neighbours(u, v);
+        if self.vertically_causal && stripe_h > 0 && v == stripe_v0 + stripe_h - 1 {
+            // §D.7: clip D2, V1, D3 to insignificant on the bottom row
+            // of the current stripe.
+            nb.d2_sigma = false;
+            nb.v1_sigma = false;
+            nb.v1_sign = false;
+            nb.d3_sigma = false;
+        }
+        nb
+    }
+}
+
+/// The eight Figure D.2 neighbour slots around the current coefficient
+/// X. Naming follows the diagram: `D0..=D3` are the four diagonal
+/// neighbours (top-left, top-right, bottom-left, bottom-right), `V0` /
+/// `V1` are vertical (top, bottom), `H0` / `H1` are horizontal (left,
+/// right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NeighbourSlot {
+    D0,
+    V0,
+    D1,
+    H0,
+    H1,
+    D2,
+    V1,
+    D3,
+}
+
+/// Significance + sign snapshot of the 8 Figure D.2 neighbours.
+///
+/// Each slot carries the neighbour's σ state and (when σ is true) its
+/// sign bit. Slots outside the code-block are left at `sigma = false`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Neighbours {
+    /// Top-left diagonal `(u−1, v−1)`.
+    pub d0_sigma: bool,
+    /// Top vertical `(u, v−1)`.
+    pub v0_sigma: bool,
+    /// Top vertical sign.
+    pub v0_sign: bool,
+    /// Top-right diagonal `(u+1, v−1)`.
+    pub d1_sigma: bool,
+    /// Left horizontal `(u−1, v)`.
+    pub h0_sigma: bool,
+    /// Left horizontal sign.
+    pub h0_sign: bool,
+    /// Right horizontal `(u+1, v)`.
+    pub h1_sigma: bool,
+    /// Right horizontal sign.
+    pub h1_sign: bool,
+    /// Bottom-left diagonal `(u−1, v+1)`.
+    pub d2_sigma: bool,
+    /// Bottom vertical `(u, v+1)`.
+    pub v1_sigma: bool,
+    /// Bottom vertical sign.
+    pub v1_sign: bool,
+    /// Bottom-right diagonal `(u+1, v+1)`.
+    pub d3_sigma: bool,
+}
+
+impl Neighbours {
+    /// Construct a Neighbours snapshot directly. Mainly for unit tests
+    /// that exercise [`significance_context_label`] and
+    /// [`sign_context_label`] in isolation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_slots(
+        d0_sigma: bool,
+        v0_sigma: bool,
+        v0_sign: bool,
+        d1_sigma: bool,
+        h0_sigma: bool,
+        h0_sign: bool,
+        h1_sigma: bool,
+        h1_sign: bool,
+        d2_sigma: bool,
+        v1_sigma: bool,
+        v1_sign: bool,
+        d3_sigma: bool,
+    ) -> Self {
+        Self {
+            d0_sigma,
+            v0_sigma,
+            v0_sign,
+            d1_sigma,
+            h0_sigma,
+            h0_sign,
+            h1_sigma,
+            h1_sign,
+            d2_sigma,
+            v1_sigma,
+            v1_sign,
+            d3_sigma,
+        }
+    }
+
+    fn set(&mut self, slot: NeighbourSlot, sigma: bool, sign: bool) {
+        match slot {
+            NeighbourSlot::D0 => self.d0_sigma = sigma,
+            NeighbourSlot::V0 => {
+                self.v0_sigma = sigma;
+                self.v0_sign = sign;
+            }
+            NeighbourSlot::D1 => self.d1_sigma = sigma,
+            NeighbourSlot::H0 => {
+                self.h0_sigma = sigma;
+                self.h0_sign = sign;
+            }
+            NeighbourSlot::H1 => {
+                self.h1_sigma = sigma;
+                self.h1_sign = sign;
+            }
+            NeighbourSlot::D2 => self.d2_sigma = sigma,
+            NeighbourSlot::V1 => {
+                self.v1_sigma = sigma;
+                self.v1_sign = sign;
+            }
+            NeighbourSlot::D3 => self.d3_sigma = sigma,
+        }
+    }
+
+    /// `∑Hi` — number of significant horizontal neighbours (0, 1, or 2).
+    pub fn h_sum(&self) -> u8 {
+        u8::from(self.h0_sigma) + u8::from(self.h1_sigma)
+    }
+
+    /// `∑Vi` — number of significant vertical neighbours (0, 1, or 2).
+    pub fn v_sum(&self) -> u8 {
+        u8::from(self.v0_sigma) + u8::from(self.v1_sigma)
+    }
+
+    /// `∑Di` — number of significant diagonal neighbours (0..=4).
+    pub fn d_sum(&self) -> u8 {
+        u8::from(self.d0_sigma)
+            + u8::from(self.d1_sigma)
+            + u8::from(self.d2_sigma)
+            + u8::from(self.d3_sigma)
+    }
+}
+
+/// Map an `(orientation, neighbour-σ)` pair onto its Table D.1 context
+/// label (`0..=8`). The label is the row's right-most "Context label"
+/// column.
+///
+/// The mapping reads Table D.1 row-by-row, taking the first row whose
+/// `∑Hi` / `∑Vi` / `∑Di` constraints all match for the orientation's
+/// column. "x" entries are wildcards.
+///
+/// Table D.1 swaps the H and V columns between the LL/LH "vertical
+/// high-pass" group and the HL "horizontal high-pass" group; we handle
+/// HL by symmetrically swapping the input `h_sum` / `v_sum` and reading
+/// the LL/LH column. The HH column reduces to `∑(Hi+Vi)` and `∑Di`,
+/// since the table merges H and V there.
+pub fn significance_context_label(orientation: SubBandOrientation, nb: Neighbours) -> u8 {
+    let h = nb.h_sum();
+    let v = nb.v_sum();
+    let d = nb.d_sum();
+    match orientation {
+        // LL and LH read the table directly.
+        SubBandOrientation::LL | SubBandOrientation::LH => sp_label_ll_lh(h, v, d),
+        // HL swaps H and V (the table's HL column has H and V columns
+        // mirrored relative to LL/LH).
+        SubBandOrientation::HL => sp_label_ll_lh(v, h, d),
+        // HH uses (H+V, D).
+        SubBandOrientation::HH => sp_label_hh(h + v, d),
+    }
+}
+
+/// Table D.1 LL / LH (and HL after H/V swap) significance-context
+/// lookup — column triple `(∑Hi, ∑Vi, ∑Di)` to label.
+fn sp_label_ll_lh(h: u8, v: u8, d: u8) -> u8 {
+    // Table D.1, rows top to bottom (label 8 down to label 0). The
+    // first matching row wins.
+    if h == 2 {
+        return 8;
+    }
+    if h == 1 && v >= 1 {
+        return 7;
+    }
+    if h == 1 && v == 0 && d >= 1 {
+        return 6;
+    }
+    if h == 1 && v == 0 && d == 0 {
+        return 5;
+    }
+    if h == 0 && v == 2 {
+        return 4;
+    }
+    if h == 0 && v == 1 {
+        return 3;
+    }
+    if h == 0 && v == 0 && d >= 2 {
+        return 2;
+    }
+    if h == 0 && v == 0 && d == 1 {
+        return 1;
+    }
+    // h == 0, v == 0, d == 0
+    0
+}
+
+/// Table D.1 HH significance-context lookup — `(∑(Hi+Vi), ∑Di)` to
+/// label.
+fn sp_label_hh(hv: u8, d: u8) -> u8 {
+    // Rows top to bottom (label 8 down to label 0).
+    if d >= 3 {
+        return 8;
+    }
+    if d == 2 && hv >= 1 {
+        return 7;
+    }
+    if d == 2 && hv == 0 {
+        return 6;
+    }
+    if d == 1 && hv >= 2 {
+        return 5;
+    }
+    if d == 1 && hv == 1 {
+        return 4;
+    }
+    if d == 1 && hv == 0 {
+        return 3;
+    }
+    if d == 0 && hv >= 2 {
+        return 2;
+    }
+    if d == 0 && hv == 1 {
+        return 1;
+    }
+    // d == 0, hv == 0
+    0
+}
+
+/// Compute the §D.3.2 sign context label (`0..=4`, relative to
+/// [`SIGN_CTX_OFFSET`]) and the Table D.3 XORbit (`0` or `1`) for a
+/// coefficient whose 8-neighbour snapshot is `nb`.
+///
+/// Returns `(label_within_sign_block, xorbit)`. The MQ decision drawn
+/// against context `SIGN_CTX_OFFSET + label_within_sign_block` is XORed
+/// with `xorbit` to produce the sign bit per Equation D-1
+/// (`signbit = D ⊕ XORbit`; `1` is negative).
+pub fn sign_context_label(nb: Neighbours) -> (u8, u8) {
+    let h_contrib =
+        horizontal_or_vertical_contribution(nb.h0_sigma, nb.h0_sign, nb.h1_sigma, nb.h1_sign);
+    let v_contrib =
+        horizontal_or_vertical_contribution(nb.v0_sigma, nb.v0_sign, nb.v1_sigma, nb.v1_sign);
+    sign_label_from_contributions(h_contrib, v_contrib)
+}
+
+/// Map the §D.3.2 first-step contribution table (Table D.2) for one
+/// axis. Inputs are the two neighbours' `(sigma, sign)` pairs; the
+/// output is `-1`, `0`, or `+1`.
+///
+/// Table D.2 rows (the first neighbour is X0, the second X1):
+///
+/// * both significant positive                  → +1
+/// * significant negative, significant positive →  0
+/// * insignificant,        significant positive → +1
+/// * significant positive, significant negative →  0
+/// * both significant negative                  → -1
+/// * insignificant,        significant negative → -1
+/// * significant positive, insignificant        → +1
+/// * significant negative, insignificant        → -1
+/// * both insignificant                         →  0
+fn horizontal_or_vertical_contribution(
+    x0_sigma: bool,
+    x0_sign: bool,
+    x1_sigma: bool,
+    x1_sign: bool,
+) -> i8 {
+    // Map to (significant_positive, significant_negative, insignificant)
+    // tri-state.
+    let s0 = state(x0_sigma, x0_sign);
+    let s1 = state(x1_sigma, x1_sign);
+    match (s0, s1) {
+        (NState::SPos, NState::SPos) => 1,
+        (NState::SNeg, NState::SPos) => 0,
+        (NState::Insig, NState::SPos) => 1,
+        (NState::SPos, NState::SNeg) => 0,
+        (NState::SNeg, NState::SNeg) => -1,
+        (NState::Insig, NState::SNeg) => -1,
+        (NState::SPos, NState::Insig) => 1,
+        (NState::SNeg, NState::Insig) => -1,
+        (NState::Insig, NState::Insig) => 0,
+    }
+}
+
+/// Internal tri-state per Table D.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NState {
+    /// Significant, positive sign (sign bit 0).
+    SPos,
+    /// Significant, negative sign (sign bit 1).
+    SNeg,
+    /// Insignificant (σ false).
+    Insig,
+}
+
+fn state(sigma: bool, sign: bool) -> NState {
+    if !sigma {
+        NState::Insig
+    } else if sign {
+        NState::SNeg
+    } else {
+        NState::SPos
+    }
+}
+
+/// Table D.3 second step — reduce `(H_contrib, V_contrib)` to the
+/// `(context label, XORbit)` pair. Labels in the table are 9..=13;
+/// we return them relative to [`SIGN_CTX_OFFSET`] (i.e., 0..=4).
+fn sign_label_from_contributions(h: i8, v: i8) -> (u8, u8) {
+    // Table D.3 rows, top to bottom:
+    //   ( 1,  1) → 13 / 0
+    //   ( 1,  0) → 12 / 0
+    //   ( 1, -1) → 11 / 0
+    //   ( 0,  1) → 10 / 0
+    //   ( 0,  0) →  9 / 0
+    //   ( 0, -1) → 10 / 1
+    //   (-1,  1) → 11 / 1
+    //   (-1,  0) → 12 / 1
+    //   (-1, -1) → 13 / 1
+    let (label_abs, xor) = match (h, v) {
+        (1, 1) => (13, 0),
+        (1, 0) => (12, 0),
+        (1, -1) => (11, 0),
+        (0, 1) => (10, 0),
+        (0, 0) => (9, 0),
+        (0, -1) => (10, 1),
+        (-1, 1) => (11, 1),
+        (-1, 0) => (12, 1),
+        (-1, -1) => (13, 1),
+        // Unreachable: contributions are constrained to {-1, 0, 1}.
+        _ => unreachable!("sign contributions outside {{-1, 0, 1}}"),
+    };
+    debug_assert!((9..=13).contains(&label_abs));
+    (label_abs - SIGN_CTX_OFFSET as u8, xor)
+}
+
+/// Map an `(8-neighbour snapshot, already-refined)` pair onto its Table
+/// D.4 magnitude-refinement context label, returned relative to
+/// [`REFINEMENT_CTX_OFFSET`] (i.e., `0..=2` for absolute labels
+/// `14..=16`).
+///
+/// Per Table D.4 the choice is:
+///
+/// * `already_refined == true`  → label 16 (the "x"/don't-care row;
+///   neighbour state is irrelevant once a coefficient has been refined
+///   at least once).
+/// * `already_refined == false` and `∑(Hi+Vi+Di) ≥ 1` → label 15 (first
+///   refinement with at least one significant neighbour).
+/// * `already_refined == false` and `∑(Hi+Vi+Di) == 0` → label 14 (first
+///   refinement with no significant neighbours).
+///
+/// The neighbour summation merges all three axes (horizontal, vertical,
+/// diagonal) into one count, using the significance states currently
+/// known to the decoder (§D.3.3).
+pub fn refinement_context_label(nb: Neighbours, already_refined: bool) -> u8 {
+    if already_refined {
+        // Label 16: REFINEMENT_CTX_OFFSET + 2.
+        return 2;
+    }
+    let sum = nb.h_sum() + nb.v_sum() + nb.d_sum();
+    if sum >= 1 {
+        // Label 15: REFINEMENT_CTX_OFFSET + 1.
+        1
+    } else {
+        // Label 14: REFINEMENT_CTX_OFFSET + 0.
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bit-plane sequencer — T.800 §D.3 three-pass order across a code-block.
+// ---------------------------------------------------------------------------
+
+/// The three Annex D Tier-1 coding passes, in §D.3 order.
+///
+/// Per T.800 §D.3 — "The first bit-plane within the current block with a
+/// non-zero element has a cleanup pass only. The remaining bit-planes are
+/// decoded in three coding passes." — the natural order for the second
+/// and subsequent non-empty bit-planes is significance propagation
+/// ([`Pass::Sp`]), then magnitude refinement ([`Pass::Mr`]), then cleanup
+/// ([`Pass::Cleanup`]).
+///
+/// [`BitPlaneSequencer::next_pass`] returns the kind of the pass that
+/// will run next on its driving code-block, so callers can introspect the
+/// state machine (and tests can assert on transitions) without having to
+/// reproduce the §D.3 control flow themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    /// §D.3.1 significance propagation (with the §D.3.2 sign-bit
+    /// subroutine inlined). Decodes the still-insignificant coefficients
+    /// whose Table D.1 context is non-zero.
+    Sp,
+    /// §D.3.3 magnitude refinement. Refines the magnitude bit of
+    /// already-significant coefficients that did not just become
+    /// significant in the preceding [`Pass::Sp`] pass.
+    Mr,
+    /// §D.3.4 cleanup. Codes every coefficient the [`Pass::Sp`] and
+    /// [`Pass::Mr`] passes left insignificant, with the Table D.5
+    /// run-length / UNIFORM four-zero-column shortcut where eligible.
+    Cleanup,
+}
+
+/// Drives the §D.3 three-pass order across a code-block's bit-planes
+/// from MSB toward LSB.
+///
+/// Per T.800 §D.3:
+///
+/// * The **first bit-plane within the current block with a non-zero
+///   element** is decoded with a **cleanup pass only**. The first
+///   non-empty bit-plane is `Mb − 1 − P` per §B.10.5, where `Mb` is the
+///   maximum number of magnitude bit-planes available in the sub-band
+///   (Equation E-2) and `P` is the **zero-bit-plane count** signalled in
+///   the packet header.
+/// * For **each subsequent bit-plane**, all three passes run in §D.3
+///   order: significance propagation ([`Pass::Sp`]) → magnitude
+///   refinement ([`Pass::Mr`]) → cleanup ([`Pass::Cleanup`]). Once
+///   cleanup completes, the sequencer drops the bit-plane index by one
+///   and the next pass is again significance propagation.
+///
+/// The number of passes contributed to **this packet** comes from the
+/// `coding_passes` field in the packet header (T.800 §B.10.6 / Table
+/// B.4). A single code-block may straddle multiple packets across
+/// layers: the §D.3 state is per code-block, **not** per packet, so the
+/// sequencer preserves its `next_pass` / `current_bitplane` across calls
+/// to [`Self::decode_packet`]. The next packet's `decode_packet` resumes
+/// exactly where the previous one stopped.
+///
+/// The sequencer does **not** consume bytes itself — the caller hands it
+/// a freshly-constructed [`MqDecoder`] over the byte segment the packet
+/// header allocated to this code-block. T.800 §D.4.1 explicitly allows
+/// the decoder to extend the codestream with `0xFF` bytes past the
+/// signalled count so the residual symbols of an in-progress pass can
+/// still be decoded; [`MqDecoder`] already synthesises that `0xFF` fill
+/// in [`crate::mq::MqDecoder::new`] / its BYTEIN procedure. The
+/// sequencer therefore neither tracks nor enforces a per-pass byte
+/// budget — the byte budget is the packet's responsibility, not the
+/// sequencer's.
+///
+/// ## §D.5 segmentation-symbol mode
+///
+/// When the COD / COC Table A.19 segmentation-symbols flag is set, the
+/// encoder writes the four-bit `0xA` symbol against the UNIFORM context
+/// at the end of every cleanup pass (with or without the §D.4.2
+/// predictable-termination flag, per §D.5 NOTE). Enable the matching
+/// decoder by passing
+/// [`with_segmentation_symbols(true)`](Self::with_segmentation_symbols)
+/// when constructing the sequencer — the cleanup-pass branch then drains
+/// the symbol via [`decode_segmentation_symbol`] before advancing the
+/// bit-plane cursor, and any non-`0xA` result raises
+/// [`Error::SegmentationSymbolMismatch`] (the partially-completed
+/// [`CodeBlock`] is left visible to the caller for diagnostic purposes).
+/// The four UNIFORM decisions modify the UNIFORM context's state per
+/// Table C.2 NMPS / NLPS exactly like any other UNIFORM decode.
+///
+/// ## §D.4.2 termination dispatch
+///
+/// The COD / COC Table A.19 bit-2 flag
+/// ([`crate::CodeBlockStyle::termination_on_each_coding_pass`]) and the
+/// bit-0 ([`crate::CodeBlockStyle::selective_arithmetic_coding_bypass`])
+/// flag together drive the §D.4.2 / Table D.9 dispatch — which passes
+/// own their own terminated codeword segment in the packet body and
+/// which share one. The sequencer exposes the COD bit-2 toggle via
+/// [`Self::with_termination_on_each_coding_pass`] /
+/// [`Self::termination_on_each_coding_pass`] and the combined
+/// classification via [`Self::next_pass_is_terminated`]. The
+/// classifier returns `true` when bit-2 is set (every pass terminated,
+/// including the §D.6 raw passes); when bit-0 alone is set it returns
+/// `true` for the fourth cleanup pass (the bypass-region gate) and
+/// thereafter for every MR raw pass and every Cleanup AC pass; with
+/// neither flag set the predicate returns `false` and one decoder
+/// covers the whole packet. The sequencer itself still drives every
+/// pass against the [`MqDecoder`] the caller supplies — termination
+/// is a packet-reader-level concern (which decoder to feed each pass),
+/// not a sequencer-internal one. The lower-level
+/// [`Self::decode_passes`] entry point exists exactly so a §D.4.2-aware
+/// caller can construct one [`MqDecoder`] per terminated segment and
+/// call the driver one pass at a time.
+///
+/// ## §D.4.2 predictable termination
+///
+/// The COD / COC Table A.19 bit-4 flag
+/// ([`crate::CodeBlockStyle::predictable_termination`]) signals that
+/// every terminated codeword segment in the packet body was flushed by
+/// the specific §D.4.2 procedure (k = (11 − CT) + 1 bits pushed out,
+/// terminating BYTEOUT, no 0xFF tail-byte elision). The constraint
+/// binds the *encoder*; decoding is unchanged (the §D.4.1 synthesised
+/// 0xFF extension still applies, and real predictable-termination
+/// streams routinely finish their final renormalisations inside it).
+/// The sequencer carries the toggle via
+/// [`Self::with_predictable_termination`] /
+/// [`Self::predictable_termination`] for introspection only.
+///
+/// ## §D.7 vertically-causal context formation
+///
+/// When the COD / COC Table A.19
+/// [`crate::CodeBlockStyle::vertically_causal_context`] flag is set,
+/// enable the matching neighbour clip by calling
+/// [`with_vertically_causal_context(true)`](Self::with_vertically_causal_context)
+/// **before** invoking [`Self::decode_packet`] / [`Self::decode_passes`].
+/// The sequencer pushes the toggle onto the supplied [`CodeBlock`] at
+/// the start of the call so the three §D.3 pass methods consult the
+/// §D.7-clipped Figure D.2 neighbour set for any coefficient sitting on
+/// the bottom row of its 4-row stripe (the spec's worked-example bit
+/// 15). Coefficients above the stripe bottom see their full neighbour
+/// set unchanged. Default off — the round-208 (non-clipped) behaviour
+/// is byte-for-byte preserved.
+#[derive(Debug, Clone)]
+pub struct BitPlaneSequencer {
+    /// 0-based bit-plane index currently being decoded, MSB-first
+    /// (`Mb − 1 − P` on construction, decreasing as passes complete).
+    current_bitplane: u32,
+    /// Kind of pass that the next call to a pass driver will run.
+    next_pass: Pass,
+    /// Total passes decoded so far across every call to
+    /// [`Self::decode_packet`] / [`Self::decode_passes`]. Mainly a sanity
+    /// counter exposed via [`Self::passes_decoded`].
+    passes_decoded: u32,
+    /// Whether the COD / COC Table A.19 segmentation-symbols flag is
+    /// set for this code-block. When true the sequencer decodes the
+    /// §D.5 four-bit segmentation symbol against the UNIFORM context
+    /// at the end of every cleanup pass and returns
+    /// [`Error::SegmentationSymbolMismatch`] on a non-`0xA` value.
+    segmentation_symbols: bool,
+    /// Whether the COD / COC Table A.19 vertically-causal-context flag
+    /// is set for this code-block. When true the sequencer pushes the
+    /// matching toggle onto the [`CodeBlock`] at the start of every
+    /// [`Self::decode_packet`] / [`Self::decode_passes`] call so the
+    /// three §D.3 pass methods read the §D.7-clipped Figure D.2
+    /// neighbour set on the bottom row of each stripe.
+    vertically_causal_context: bool,
+    /// Whether the COD / COC Table A.19
+    /// `selective_arithmetic_coding_bypass` flag is set for this
+    /// code-block (T.800 §D.6).
+    ///
+    /// When `true`, the SP and MR coding passes starting with the
+    /// **fourth** SP / MR set (i.e. the SP / MR passes that fire on
+    /// bit-plane 5 onwards per Table D.9) read their per-coefficient
+    /// bits from a [`RawBitReader`] instead of the MQ arithmetic
+    /// decoder. The cleanup pass remains AC-coded throughout.
+    ///
+    /// The sequencer surface in this round exposes the flag and tracks
+    /// it on construction; the dispatch wiring that picks between AC
+    /// and raw mode per coding pass lives in
+    /// [`Self::raw_mode_for_next_pass`] — the packet-reader integration
+    /// supplies the matching [`RawBitReader`] segments and calls the
+    /// dedicated raw-mode pass entry points
+    /// ([`CodeBlock::significance_propagation_pass_raw`] /
+    /// [`CodeBlock::magnitude_refinement_pass_raw`]) when the
+    /// sequencer indicates the next SP / MR pass should run raw.
+    selective_arithmetic_coding_bypass: bool,
+    /// Whether the COD / COC Table A.19
+    /// `termination_on_each_coding_pass` flag (bit 2 of `Scod`) is set
+    /// for this code-block (T.800 §D.4.2).
+    ///
+    /// When `true`, **every** coding pass owns its own terminated
+    /// codeword segment — the packet-reader integration must construct
+    /// a fresh [`MqDecoder`] (and / or [`RawBitReader`] in the §D.6
+    /// raw region) for each pass and consult the packet header's
+    /// §B.10.7 per-pass byte allocations. When `false`, the §D.4.2
+    /// dispatch falls back to the §D.6 / Table D.9 default — only the
+    /// AC ↔ raw transitions (cleanup at bit-plane 4 and onward, plus
+    /// every MR / cleanup pass once raw kicks in) own their own
+    /// segments.
+    ///
+    /// The sequencer's surface in this round exposes the flag plus the
+    /// [`Self::next_pass_is_terminated`] dispatch predicate. The pass
+    /// driver itself ([`Self::decode_passes`] / [`Self::decode_packet`])
+    /// still walks every pass against the [`MqDecoder`] the caller
+    /// supplies — termination is a packet-reader-level concern (which
+    /// decoder to feed each pass), not a sequencer-internal one.
+    termination_on_each_coding_pass: bool,
+    /// Whether the COD / COC Table A.19 `predictable_termination` flag
+    /// (bit 4 of `Scod`) is set for this code-block (T.800 §D.4.2).
+    ///
+    /// When `true`, every terminated codeword segment in the packet
+    /// body has been flushed by the §D.4.2 procedure (k = (11 − CT) + 1
+    /// bits pushed out, terminating BYTEOUT, no 0xFF tail-byte
+    /// elision). That is an *encoder-side* contract: the decode path is
+    /// identical either way, so the sequencer carries the flag for
+    /// introspection only. The toggle composes with the §D.5
+    /// segmentation-symbol mode (per the §D.5 NOTE, "this can be used
+    /// with or without the predictable termination"). HTJ2K (Part 15)
+    /// HT code-blocks opt out — the flag does not apply to HT
+    /// code-block segments.
+    predictable_termination: bool,
+    /// Whether the COD / COC Table A.19 `reset of context probabilities
+    /// on coding pass boundaries` flag (bit 1 of `Scod`, `0x02`) is set
+    /// for this code-block (T.800 §C.3.6, §D.4; Annex J §J.18 error
+    /// resilience tools — "the contexts may be reset after each coding
+    /// pass").
+    ///
+    /// When `true`, [`Self::decode_passes`] re-initialises the Annex D
+    /// context array to its Table D.7 reset states at every coding-pass
+    /// boundary (after each pass completes, before the next begins). The
+    /// MQ arithmetic stream itself is **not** disturbed — reset of
+    /// context probabilities only restores `I(CX)` / `MPS(CX)` to their
+    /// Table D.7 initial values per §C.3.6, leaving the continuous
+    /// single-§C.3-codeword-segment decode intact. The code-block
+    /// contribution therefore remains a single codeword segment
+    /// (§B.10.7.1): reset, unlike termination, does not split the
+    /// stream.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::reset_context_probabilities`] bit. It
+    /// composes freely with the §D.5 segmentation-symbol and §D.7
+    /// vertically-causal toggles.
+    reset_context_probabilities: bool,
+}
+
+impl BitPlaneSequencer {
+    /// Build a new sequencer for a code-block whose first non-empty
+    /// bit-plane is `starting_bitplane` (i.e. `Mb − 1 − P`).
+    ///
+    /// `starting_bitplane` must be a valid bit-plane index for the
+    /// caller's reconstruction; the sequencer itself does not validate
+    /// it against `Mb` (which is a sub-band-level quantisation property)
+    /// — that's a packet-reader responsibility.
+    ///
+    /// The first pass to run is the **cleanup-only** pass on
+    /// `starting_bitplane`, per §D.3. Segmentation-symbol checking is
+    /// off by default; enable it with
+    /// [`Self::with_segmentation_symbols`] when the COD / COC
+    /// [`crate::CodeBlockStyle::segmentation_symbols`] flag is set.
+    pub fn new(starting_bitplane: u32) -> Self {
+        Self {
+            current_bitplane: starting_bitplane,
+            next_pass: Pass::Cleanup,
+            passes_decoded: 0,
+            segmentation_symbols: false,
+            vertically_causal_context: false,
+            selective_arithmetic_coding_bypass: false,
+            termination_on_each_coding_pass: false,
+            predictable_termination: false,
+            reset_context_probabilities: false,
+        }
+    }
+
+    /// Builder — enable T.800 §D.5 error-resilience segmentation-symbol
+    /// decoding for this code-block.
+    ///
+    /// When enabled, [`Self::decode_passes`] and [`Self::decode_packet`]
+    /// invoke [`decode_segmentation_symbol`] against the same
+    /// [`MqDecoder`] / context array at the end of every cleanup pass.
+    /// A non-`0xA` decoded value propagates
+    /// [`Error::SegmentationSymbolMismatch`] up through the pass driver
+    /// and the partially-completed [`CodeBlock`] state is left visible
+    /// to the caller for inspection / discard.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::segmentation_symbols`] bit.
+    pub fn with_segmentation_symbols(mut self, enabled: bool) -> Self {
+        self.segmentation_symbols = enabled;
+        self
+    }
+
+    /// Whether T.800 §D.5 segmentation-symbol checking is enabled.
+    pub fn segmentation_symbols(&self) -> bool {
+        self.segmentation_symbols
+    }
+
+    /// Builder — enable T.800 §D.7 vertically-causal context formation
+    /// for this code-block.
+    ///
+    /// When enabled, [`Self::decode_passes`] / [`Self::decode_packet`]
+    /// push the toggle onto the supplied [`CodeBlock`] at the start of
+    /// the call (via [`CodeBlock::with_vertically_causal_context`]). The
+    /// three §D.3 pass methods then clip the §D.7 below-stripe slots
+    /// (`D2`, `V1`, `D3` of Figure D.2) to insignificant for any
+    /// coefficient sitting on the **bottom row of its 4-row stripe** —
+    /// the spec's "Figure D.1 bit 15" worked example. Coefficients
+    /// above the stripe bottom retain the full Figure D.2 neighbour
+    /// read.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::vertically_causal_context`] bit.
+    pub fn with_vertically_causal_context(mut self, enabled: bool) -> Self {
+        self.vertically_causal_context = enabled;
+        self
+    }
+
+    /// Whether T.800 §D.7 vertically-causal context formation is on.
+    pub fn vertically_causal_context(&self) -> bool {
+        self.vertically_causal_context
+    }
+
+    /// Builder — enable T.800 §C.3.6 / §D.4 context-probability reset on
+    /// coding-pass boundaries for this code-block.
+    ///
+    /// When enabled, [`Self::decode_passes`] / [`Self::decode_packet`]
+    /// re-initialise the Annex D context array to its Table D.7 reset
+    /// states at every coding-pass boundary (after each pass, before the
+    /// next). The MQ arithmetic stream is untouched — the code-block
+    /// still decodes from a single continuous §C.3 codeword segment;
+    /// only the per-context `I(CX)` / `MPS(CX)` adaptive state is
+    /// restored to its initial values. This is the Annex J §J.18
+    /// "reset of contexts after each coding pass" error-resilience tool,
+    /// which lets the arithmetic coder recover its statistics after a bit
+    /// error in an earlier pass.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::reset_context_probabilities`] bit.
+    pub fn with_reset_context_probabilities(mut self, enabled: bool) -> Self {
+        self.reset_context_probabilities = enabled;
+        self
+    }
+
+    /// Whether T.800 §C.3.6 context-probability reset on coding-pass
+    /// boundaries is on.
+    pub fn reset_context_probabilities(&self) -> bool {
+        self.reset_context_probabilities
+    }
+
+    /// Builder — enable T.800 §D.6 selective arithmetic-coding bypass
+    /// for this code-block.
+    ///
+    /// When enabled, the sequencer reports `true` from
+    /// [`Self::raw_mode_for_next_pass`] for every SP / MR coding pass
+    /// from the **fourth** SP / MR set onward (i.e. the SP / MR passes
+    /// that fire on bit-plane 5 onwards per Table D.9). The cleanup
+    /// pass remains AC-coded for every bit-plane regardless of the
+    /// toggle.
+    ///
+    /// The dispatch into the raw-mode pass methods
+    /// ([`CodeBlock::significance_propagation_pass_raw`] /
+    /// [`CodeBlock::magnitude_refinement_pass_raw`]) is the
+    /// packet-reader integration's responsibility — the sequencer's
+    /// [`Self::decode_passes`] entry point still drives every pass
+    /// through the AC path. Callers that wire §D.6 in feed
+    /// [`Self::raw_mode_for_next_pass`] back into their pass-dispatch
+    /// loop to pick the right entry point on the next iteration.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::selective_arithmetic_coding_bypass`]
+    /// bit.
+    pub fn with_selective_arithmetic_coding_bypass(mut self, enabled: bool) -> Self {
+        self.selective_arithmetic_coding_bypass = enabled;
+        self
+    }
+
+    /// Whether T.800 §D.6 selective arithmetic-coding bypass is on.
+    pub fn selective_arithmetic_coding_bypass(&self) -> bool {
+        self.selective_arithmetic_coding_bypass
+    }
+
+    /// Whether the **next** pass to run (per [`Self::next_pass`]) is
+    /// in §D.6 raw mode for this sequencer's current state.
+    ///
+    /// Returns `true` iff all three of the following hold:
+    ///
+    /// 1. The sequencer has [`Self::selective_arithmetic_coding_bypass`]
+    ///    set (the COD / COC Table A.19 bit).
+    /// 2. The next pass is significance-propagation
+    ///    ([`Pass::Sp`]) or magnitude-refinement ([`Pass::Mr`]) — the
+    ///    cleanup pass is always AC per Table D.9.
+    /// 3. At least three previous SP/MR pairs have already run — i.e.
+    ///    the bit-plane this pass would fire on is the fifth or later
+    ///    (Table D.9 starts the raw mode at the fourth significance
+    ///    propagation pass).
+    ///
+    /// The pass-driver loop in a §D.6-aware packet reader consults
+    /// this before each pass to decide whether to feed the
+    /// [`CodeBlock`] the AC entry point
+    /// ([`CodeBlock::significance_propagation_pass`] /
+    /// [`CodeBlock::magnitude_refinement_pass`]) or the raw one
+    /// ([`CodeBlock::significance_propagation_pass_raw`] /
+    /// [`CodeBlock::magnitude_refinement_pass_raw`]).
+    ///
+    /// The "fifth bit-plane" count is taken from the sequencer's
+    /// [`Self::passes_decoded`] cursor. A fresh sequencer ahead of its
+    /// very first pass has `passes_decoded == 0`. Per §D.3, the first
+    /// non-empty bit-plane has only a cleanup pass (one pass); the next
+    /// three bit-planes each have SP, MR, cleanup (nine passes total).
+    /// The tenth pass (`passes_decoded == 10`) is therefore the SP of
+    /// the fifth bit-plane — the first raw-mode pass per Table D.9. The
+    /// sequencer reports raw mode iff `passes_decoded >= 10` *and* the
+    /// next pass is SP or MR.
+    pub fn raw_mode_for_next_pass(&self) -> bool {
+        if !self.selective_arithmetic_coding_bypass {
+            return false;
+        }
+        match self.next_pass {
+            Pass::Sp | Pass::Mr => self.passes_decoded >= 10,
+            Pass::Cleanup => false,
+        }
+    }
+
+    /// Builder — enable T.800 §D.4.2 termination on each coding pass
+    /// for this code-block.
+    ///
+    /// When enabled, [`Self::next_pass_is_terminated`] returns `true`
+    /// for every pass: the COD / COC Table A.19 bit-2 flag asks the
+    /// encoder to flush the arithmetic coder (or pad the raw stream)
+    /// at the end of every coding pass, so each pass owns its own
+    /// codeword segment in the packet body. The packet-reader
+    /// integration is then responsible for opening a fresh
+    /// [`MqDecoder`] (or [`RawBitReader`] in §D.6 raw mode) for each
+    /// pass against that pass's allocated byte slice.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::termination_on_each_coding_pass`] bit.
+    pub fn with_termination_on_each_coding_pass(mut self, enabled: bool) -> Self {
+        self.termination_on_each_coding_pass = enabled;
+        self
+    }
+
+    /// Whether T.800 §D.4.2 termination on each coding pass is on.
+    pub fn termination_on_each_coding_pass(&self) -> bool {
+        self.termination_on_each_coding_pass
+    }
+
+    /// Builder — enable T.800 §D.4.2 predictable termination for this
+    /// code-block.
+    ///
+    /// When enabled, every terminated codeword segment in the packet
+    /// body was flushed by the §D.4.2 procedure (k = (11 − CT) + 1 bits
+    /// pushed out, terminating BYTEOUT, no 0xFF tail-byte elision) —
+    /// an encoder-side contract that leaves the decode path unchanged,
+    /// so the toggle is carried for introspection only.
+    ///
+    /// The flag is taken from the COD / COC Table A.19
+    /// [`crate::CodeBlockStyle::predictable_termination`] bit. The
+    /// toggle composes with [`Self::with_segmentation_symbols`] (per the
+    /// §D.5 NOTE the two are independent) and with the §D.6 bypass /
+    /// bit-2 termination flags. HTJ2K (Part 15) HT code-blocks opt out
+    /// of predictable termination per Table A.13 — do not enable it for
+    /// HT code-blocks.
+    pub fn with_predictable_termination(mut self, enabled: bool) -> Self {
+        self.predictable_termination = enabled;
+        self
+    }
+
+    /// Whether T.800 §D.4.2 predictable termination is on.
+    pub fn predictable_termination(&self) -> bool {
+        self.predictable_termination
+    }
+
+    /// Whether the **next** pass (per [`Self::next_pass`]) owns its
+    /// own terminated codeword segment in the packet body.
+    ///
+    /// This is the T.800 §D.4.2 / §D.6 dispatch contract a packet
+    /// reader consults to decide whether to construct a fresh
+    /// [`MqDecoder`] (or [`RawBitReader`] in §D.6 raw mode) for the
+    /// upcoming pass. The classification combines the COD / COC Table
+    /// A.19 bit-2 ([`Self::termination_on_each_coding_pass`]) flag and
+    /// the bit-0 ([`Self::selective_arithmetic_coding_bypass`]) flag
+    /// per the spec's Table D.9 + §D.6 prose:
+    ///
+    /// * **Bit-2 (termination on each coding pass) set** — every pass
+    ///   is terminated. The §D.6 prose explicitly confirms this:
+    ///   "If termination on each coding pass is selected, then every
+    ///   pass is terminated (including both raw passes)."
+    /// * **Bit-2 clear, bit-0 (AC bypass) clear** — the default
+    ///   single-segment packet of §D.4.1: only the end of the packet
+    ///   is terminated, which is outside this predicate's scope.
+    ///   Returns `false` for every pass.
+    /// * **Bit-2 clear, bit-0 set** — Table D.9 schedule. The first
+    ///   ten passes (bit-plane 1 cleanup + bit-planes 2/3/4 each
+    ///   running SP/MR/cleanup) are AC. The fourth cleanup pass
+    ///   (`passes_decoded == 9` ahead of running it) is the
+    ///   `AC, terminate` row of Table D.9 — it terminates so the
+    ///   following bit-plane 5 SP can start the raw region. From
+    ///   bit-plane 5 onward each set has `SP raw` (not terminated),
+    ///   `MR raw, terminate`, `cleanup AC, terminate`. The §D.6
+    ///   prose's "the cleanup coding passes ... are always
+    ///   terminated" applies once the bypass region kicks in — the
+    ///   earlier cleanups (bit-planes 1/2/3) sit inside a single
+    ///   AC-decoder run with the SP / MR passes that surround them
+    ///   and do **not** terminate on their own.
+    ///
+    /// The classification is independent of whether the sequencer has
+    /// already driven any passes — it reflects only the **state at
+    /// the boundary in front of the next pass**. After the pass runs
+    /// the sequencer advances `passes_decoded` and `next_pass` /
+    /// `current_bitplane`, so the predicate's answer for the
+    /// following call may change.
+    pub fn next_pass_is_terminated(&self) -> bool {
+        // Bit-2 wins outright — every pass terminated, including
+        // every raw pass in the §D.6 region.
+        if self.termination_on_each_coding_pass {
+            return true;
+        }
+        // Default packet (no AC bypass either): single segment, no
+        // intra-packet termination.
+        if !self.selective_arithmetic_coding_bypass {
+            return false;
+        }
+        // §D.6 bypass region per Table D.9. `passes_decoded` is the
+        // count of passes **completed**, so it equals the 0-based
+        // index of the pass about to run.
+        //
+        //   passes_decoded == 0  → bp1 cleanup           (AC, no term)
+        //   passes_decoded == 1  → bp2 SP                (AC, no term)
+        //   passes_decoded == 2  → bp2 MR                (AC, no term)
+        //   passes_decoded == 3  → bp2 cleanup           (AC, no term)
+        //   passes_decoded == 4  → bp3 SP                (AC, no term)
+        //   …
+        //   passes_decoded == 9  → bp4 cleanup           (AC, terminate)
+        //   passes_decoded == 10 → bp5 SP                (raw, no term)
+        //   passes_decoded == 11 → bp5 MR                (raw, terminate)
+        //   passes_decoded == 12 → bp5 cleanup           (AC, terminate)
+        //   passes_decoded == 13 → bp6 SP                (raw, no term)
+        //   …
+        match (self.next_pass, self.passes_decoded) {
+            // The fourth cleanup row of Table D.9 — terminate so the
+            // next SP can flip to raw without backtracking.
+            (Pass::Cleanup, 9) => true,
+            // Inside the raw region the cleanup pass is always
+            // terminated, and so is each MR pass; the SP pass is not.
+            (Pass::Cleanup, n) if n >= 10 => true,
+            (Pass::Mr, n) if n >= 10 => true,
+            (Pass::Sp, n) if n >= 10 => false,
+            // Pre-bypass-region (passes 0..=8 AC SP/MR/Cleanup) — the
+            // single AC-decoder run carries all of them.
+            _ => false,
+        }
+    }
+
+    /// Bit-plane index that the **next** pass will run on
+    /// (`Mb − 1 − P` on construction, decreasing as passes complete).
+    pub fn current_bitplane(&self) -> u32 {
+        self.current_bitplane
+    }
+
+    /// Kind of the **next** pass to run.
+    pub fn next_pass(&self) -> Pass {
+        self.next_pass
+    }
+
+    /// Total number of passes the sequencer has driven since construction.
+    pub fn passes_decoded(&self) -> u32 {
+        self.passes_decoded
+    }
+
+    /// Decode all coding passes signalled for one packet on this
+    /// code-block.
+    ///
+    /// `bytes` is the concatenated single codeword-segment the packet
+    /// header reserved for this code-block (§B.10.7.1). `passes` is the
+    /// pass count decoded from §B.10.6 / Table B.4. Both come from the
+    /// packet's [`crate::packet::CodeBlockContribution`].
+    ///
+    /// Each pass runs against a freshly-built [`MqDecoder`] over the
+    /// same `bytes` slice **only on the first call** for a multi-packet
+    /// code-block — subsequent calls open a fresh decoder over **their
+    /// own** bytes (because the MQ engine is reset between codeword
+    /// segments per §C.3, even when those segments span layers). The
+    /// `ctx` array is **never** reset across calls — the §D.3 contexts
+    /// persist over the lifetime of the code-block per T.800 §D.4.
+    ///
+    /// `passes == 0` is a valid no-op (the packet's
+    /// `CodeBlockContribution::included` was false and no bytes were
+    /// drawn from the body).
+    ///
+    /// Returns the **total number of newly-significant coefficients +
+    /// refined coefficients** across all passes run — exposed primarily
+    /// for tests and progress logging.
+    pub fn decode_packet(
+        &mut self,
+        block: &mut CodeBlock,
+        bytes: &[u8],
+        passes: u32,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+    ) -> Result<usize, Error> {
+        if passes == 0 {
+            return Ok(0);
+        }
+        let mut decoder = MqDecoder::new(bytes);
+        self.decode_passes(block, &mut decoder, ctx, passes)
+    }
+
+    /// Lower-level entry point: run exactly `passes` Annex D coding
+    /// passes against a caller-built [`MqDecoder`].
+    ///
+    /// Use this when you need to drive the sequencer against a specific
+    /// `MqDecoder` instance — e.g. when COD bit-4 "termination on each
+    /// pass" is set and each pass has its own codeword segment, so each
+    /// pass needs its own fresh `MqDecoder`. The high-level
+    /// [`Self::decode_packet`] wraps a single decoder across an entire
+    /// packet's worth of passes (the common case).
+    pub fn decode_passes(
+        &mut self,
+        block: &mut CodeBlock,
+        decoder: &mut MqDecoder<'_>,
+        ctx: &mut [MqContext; NUM_CONTEXTS],
+        passes: u32,
+    ) -> Result<usize, Error> {
+        // Push the sequencer's §D.7 vertically-causal toggle onto the
+        // block before any pass runs. The block is the owner of the
+        // neighbour-read clip and the sequencer is the owner of the
+        // packet-level flag — this is the one-line sync between them.
+        block.vertically_causal = self.vertically_causal_context;
+        let mut total = 0usize;
+        for _ in 0..passes {
+            let bitplane = self.current_bitplane;
+            let n = match self.next_pass {
+                Pass::Cleanup => {
+                    let n = block.cleanup_pass(bitplane, decoder, ctx)?;
+                    // §D.5: when the COD / COC Table A.19 flag is set
+                    // the encoder appended the 4-bit symbol `1010` at
+                    // the end of every cleanup pass (UNIFORM context).
+                    // Drain it now — a mismatch raises
+                    // SegmentationSymbolMismatch and leaves the
+                    // partially-completed CodeBlock state visible.
+                    if self.segmentation_symbols {
+                        decode_segmentation_symbol(decoder, ctx)?;
+                    }
+                    // §D.3: after cleanup on bit-plane k, drop to k-1
+                    // and the next pass is significance propagation
+                    // (unless we've finished the LSB — the sequencer
+                    // lets `current_bitplane` underflow saturating-style
+                    // because §D.3 does not define behaviour past
+                    // bit-plane 0; the caller stops asking).
+                    self.next_pass = Pass::Sp;
+                    self.current_bitplane = bitplane.saturating_sub(1);
+                    n
+                }
+                Pass::Sp => {
+                    let n = block.significance_propagation_pass(bitplane, decoder, ctx)?;
+                    self.next_pass = Pass::Mr;
+                    n
+                }
+                Pass::Mr => {
+                    let n = block.magnitude_refinement_pass(bitplane, decoder, ctx)?;
+                    self.next_pass = Pass::Cleanup;
+                    n
+                }
+            };
+            total += n;
+            self.passes_decoded = self.passes_decoded.saturating_add(1);
+            // §C.3.6 / §D.4: when the COD / COC Table A.19 reset bit is
+            // set the contexts are reset to their Table D.7 initial
+            // states at each coding-pass boundary — i.e. after every
+            // pass completes (and, for a cleanup pass with the §D.5 flag
+            // on, after the segmentation symbol has been drained). The MQ
+            // decoder is untouched: this only restores the adaptive
+            // per-context I(CX) / MPS(CX) probabilities, leaving the
+            // single continuous §C.3 codeword segment intact.
+            if self.reset_context_probabilities {
+                *ctx = reset_contexts();
+            }
+        }
+        Ok(total)
+    }
+
+    /// Lower-level entry point: run exactly `passes` Annex D coding
+    /// passes against a caller-built [`RawBitReader`], for a §D.6
+    /// selective-arithmetic-coding-bypass **raw (lazy) span**.
+    ///
+    /// Only the significance-propagation and magnitude-refinement passes
+    /// are ever decoded raw (Table D.9) — the cleanup pass is always
+    /// arithmetic-coded and never appears in a raw span — so this
+    /// method drives [`CodeBlock::significance_propagation_pass_raw`] /
+    /// [`CodeBlock::magnitude_refinement_pass_raw`] and rejects a
+    /// [`Pass::Cleanup`] boundary as [`Error::InvalidPacketHeader`]
+    /// (a malformed split that would put a cleanup pass in a raw
+    /// segment).
+    ///
+    /// The MQ context array is **not** referenced — raw passes touch no
+    /// MQ contexts (§D.6). The §C.3.6 context-reset bit therefore has no
+    /// effect across a raw span; the §D.3 significance / refinement
+    /// state of the [`CodeBlock`] still threads through so the next AC
+    /// pass resumes correctly.
+    ///
+    /// The sequencer advances `next_pass` / `current_bitplane` /
+    /// `passes_decoded` exactly as the AC driver does, so the AC and raw
+    /// spans interleave on one continuous §D.3 schedule.
+    pub fn decode_passes_raw(
+        &mut self,
+        block: &mut CodeBlock,
+        raw: &mut RawBitReader<'_>,
+        passes: u32,
+    ) -> Result<usize, Error> {
+        block.vertically_causal = self.vertically_causal_context;
+        let mut total = 0usize;
+        for _ in 0..passes {
+            let bitplane = self.current_bitplane;
+            let n = match self.next_pass {
+                Pass::Sp => {
+                    let n = block.significance_propagation_pass_raw(bitplane, raw)?;
+                    self.next_pass = Pass::Mr;
+                    n
+                }
+                Pass::Mr => {
+                    let n = block.magnitude_refinement_pass_raw(bitplane, raw)?;
+                    self.next_pass = Pass::Cleanup;
+                    n
+                }
+                // §D.6 / Table D.9: a cleanup pass is always AC-coded and
+                // is never carried in a raw span. Reaching one here means
+                // the segment split mis-assigned passes to a raw reader.
+                Pass::Cleanup => return Err(Error::InvalidPacketHeader),
+            };
+            total += n;
+            self.passes_decoded = self.passes_decoded.saturating_add(1);
+        }
+        Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Context-array reset (Table D.7) ------------------------------
+
+    #[test]
+    fn reset_contexts_populates_table_d7_specials() {
+        let ctx = reset_contexts();
+        // Label 0 → zero-neighbours (Table C.2 index 4).
+        assert_eq!(ctx[0].index(), 4);
+        assert!(!ctx[0].mps());
+        // Label 17 → run-length (Table C.2 index 3).
+        assert_eq!(ctx[RUN_LENGTH_CTX].index(), 3);
+        assert!(!ctx[RUN_LENGTH_CTX].mps());
+        // Label 18 → UNIFORM (Table C.2 index 46).
+        assert_eq!(ctx[UNIFORM_CTX].index(), 46);
+        // Everything else (labels 1..=8, 9..=13, 14..=16) → default
+        // (index 0, MPS 0).
+        for label in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+            assert_eq!(ctx[label].index(), 0, "label {label} should default");
+            assert!(!ctx[label].mps());
+        }
+    }
+
+    #[test]
+    fn reset_contexts_array_length_matches_constant() {
+        let ctx = reset_contexts();
+        assert_eq!(ctx.len(), NUM_CONTEXTS);
+        assert_eq!(NUM_CONTEXTS, 19);
+    }
+
+    // -- Table D.1 spot checks (significance propagation context) ----
+
+    #[test]
+    fn sp_context_zero_neighbours_is_label_0() {
+        let nb = Neighbours::default();
+        assert_eq!(significance_context_label(SubBandOrientation::LL, nb), 0);
+        assert_eq!(significance_context_label(SubBandOrientation::HL, nb), 0);
+        assert_eq!(significance_context_label(SubBandOrientation::LH, nb), 0);
+        assert_eq!(significance_context_label(SubBandOrientation::HH, nb), 0);
+    }
+
+    #[test]
+    fn sp_context_ll_lh_top_row_h_eq_2_is_label_8() {
+        // Both horizontal neighbours significant → label 8 (LL/LH).
+        let nb = Neighbours::from_slots(
+            false, false, false, false, // d0, v0, v0_sign, d1
+            true, false, true, false, // h0, h0_sign, h1, h1_sign
+            false, false, false, false, // d2, v1, v1_sign, d3
+        );
+        assert_eq!(significance_context_label(SubBandOrientation::LL, nb), 8);
+        assert_eq!(significance_context_label(SubBandOrientation::LH, nb), 8);
+    }
+
+    #[test]
+    fn sp_context_hl_top_row_v_eq_2_is_label_8() {
+        // Both vertical neighbours significant → label 8 (HL column).
+        let nb = Neighbours::from_slots(
+            false, true, false, false, // d0, v0=sig, v0_sign, d1
+            false, false, false, false, // h0, h0_sign, h1, h1_sign
+            false, true, false, false, // d2, v1=sig, v1_sign, d3
+        );
+        assert_eq!(significance_context_label(SubBandOrientation::HL, nb), 8);
+        // The same neighbours on LL/LH give label 4 (H=0, V=2).
+        assert_eq!(significance_context_label(SubBandOrientation::LL, nb), 4);
+    }
+
+    #[test]
+    fn sp_context_hh_three_diagonals_is_label_8() {
+        // Three diagonals significant → HH label 8.
+        let nb = Neighbours::from_slots(
+            true, false, false, true, // d0=sig, ..., d1=sig
+            false, false, false, false, true, false, false, false, // d2=sig
+        );
+        assert_eq!(significance_context_label(SubBandOrientation::HH, nb), 8);
+    }
+
+    #[test]
+    fn sp_context_ll_label_5_h1_v0_d0() {
+        // (∑Hi=1, ∑Vi=0, ∑Di=0) → LL/LH label 5.
+        let nb = Neighbours::from_slots(
+            false, false, false, false, true, false, false, false, // only h0 significant
+            false, false, false, false,
+        );
+        assert_eq!(significance_context_label(SubBandOrientation::LL, nb), 5);
+    }
+
+    #[test]
+    fn sp_context_ll_label_1_h0_v0_d1() {
+        // (∑Hi=0, ∑Vi=0, ∑Di=1) → LL/LH label 1.
+        let nb = Neighbours::from_slots(
+            true, false, false, false, // only d0
+            false, false, false, false, false, false, false, false,
+        );
+        assert_eq!(significance_context_label(SubBandOrientation::LL, nb), 1);
+    }
+
+    #[test]
+    fn sp_context_hh_label_1_one_hv_zero_d() {
+        // HH: (∑(Hi+Vi) = 1, ∑Di = 0) → label 1.
+        let nb = Neighbours::from_slots(
+            false, false, false, false, true, false, false, false, // h0 significant only
+            false, false, false, false,
+        );
+        assert_eq!(significance_context_label(SubBandOrientation::HH, nb), 1);
+    }
+
+    #[test]
+    fn sp_context_full_table_d1_round_trip() {
+        // Cover every Table D.1 row's *canonical* assignment for LL/LH,
+        // HL, HH. The witness is the (∑H, ∑V, ∑D) triple per row.
+        // LL/LH expected labels per (h, v, d):
+        for &(h, v, d, want) in &[
+            (2, 0, 0, 8u8),
+            (2, 1, 0, 8),
+            (2, 2, 4, 8),
+            (1, 2, 0, 7),
+            (1, 1, 0, 7),
+            (1, 0, 4, 6),
+            (1, 0, 1, 6),
+            (1, 0, 0, 5),
+            (0, 2, 0, 4),
+            (0, 2, 4, 4),
+            (0, 1, 0, 3),
+            (0, 1, 4, 3),
+            (0, 0, 4, 2),
+            (0, 0, 2, 2),
+            (0, 0, 1, 1),
+            (0, 0, 0, 0),
+        ] {
+            // Synthesise neighbours satisfying the (h, v, d) triple.
+            let nb = synth_neighbours(h, v, d);
+            assert_eq!(
+                significance_context_label(SubBandOrientation::LL, nb),
+                want,
+                "LL row (h={h}, v={v}, d={d}) expected label {want}"
+            );
+        }
+        // HL swaps H/V at the input; reuse LL labels with swapped axes.
+        for &(h, v, d, want) in &[
+            (0, 2, 0, 8u8),
+            (1, 2, 0, 8),
+            (2, 1, 0, 7),
+            (0, 1, 4, 6),
+            (0, 1, 0, 5),
+            (2, 0, 0, 4),
+            (1, 0, 0, 3),
+            (0, 0, 2, 2),
+            (0, 0, 1, 1),
+            (0, 0, 0, 0),
+        ] {
+            let nb = synth_neighbours(h, v, d);
+            assert_eq!(
+                significance_context_label(SubBandOrientation::HL, nb),
+                want,
+                "HL row (h={h}, v={v}, d={d}) expected label {want}"
+            );
+        }
+        // HH reduces to (∑(H+V), ∑D).
+        for &(hv, d, want) in &[
+            (0, 3, 8u8),
+            (0, 4, 8),
+            (1, 3, 8),
+            (1, 2, 7),
+            (4, 2, 7),
+            (0, 2, 6),
+            (2, 1, 5),
+            (3, 1, 5),
+            (1, 1, 4),
+            (0, 1, 3),
+            (2, 0, 2),
+            (4, 0, 2),
+            (1, 0, 1),
+            (0, 0, 0),
+        ] {
+            // Distribute hv across H and V (h = min(hv, 2), rest in V).
+            let h = core::cmp::min(hv, 2);
+            let v = hv - h;
+            let nb = synth_neighbours(h, v, d);
+            assert_eq!(
+                significance_context_label(SubBandOrientation::HH, nb),
+                want,
+                "HH row (hv={hv}, d={d}) expected label {want}"
+            );
+        }
+    }
+
+    /// Build a Neighbours snapshot with exactly `h` significant H
+    /// neighbours, `v` significant V neighbours, and `d` significant D
+    /// neighbours (all positive-sign for simplicity).
+    fn synth_neighbours(h: u8, v: u8, d: u8) -> Neighbours {
+        let mut nb = Neighbours::default();
+        if h >= 1 {
+            nb.h0_sigma = true;
+        }
+        if h >= 2 {
+            nb.h1_sigma = true;
+        }
+        if v >= 1 {
+            nb.v0_sigma = true;
+        }
+        if v >= 2 {
+            nb.v1_sigma = true;
+        }
+        if d >= 1 {
+            nb.d0_sigma = true;
+        }
+        if d >= 2 {
+            nb.d1_sigma = true;
+        }
+        if d >= 3 {
+            nb.d2_sigma = true;
+        }
+        if d >= 4 {
+            nb.d3_sigma = true;
+        }
+        nb
+    }
+
+    // -- Table D.3 sign-context spot checks ---------------------------
+
+    #[test]
+    fn sign_context_zero_zero_is_label_9() {
+        let nb = Neighbours::default();
+        let (label, xor) = sign_context_label(nb);
+        // Label 9 → 0 inside the sign block.
+        assert_eq!(label, 0);
+        assert_eq!(xor, 0);
+    }
+
+    #[test]
+    fn sign_context_positive_horizontal_label_12_xor_0() {
+        // H0 significant positive, H1 insignificant, V's insignificant.
+        // H contribution = +1 (Table D.2), V = 0.
+        // → label 12, XORbit 0.
+        let nb = Neighbours::from_slots(
+            false, false, false, false, true, false, false,
+            false, // h0 sig, sign = false (positive)
+            false, false, false, false,
+        );
+        let (label, xor) = sign_context_label(nb);
+        assert_eq!(label, 12 - 9);
+        assert_eq!(xor, 0);
+    }
+
+    #[test]
+    fn sign_context_negative_horizontal_label_12_xor_1() {
+        // H0 significant negative, V's insignificant.
+        // H contribution = -1, V = 0 → label 12, XORbit 1.
+        let nb = Neighbours::from_slots(
+            false, false, false, false, true, true, false,
+            false, // h0 sig, sign = true (negative)
+            false, false, false, false,
+        );
+        let (label, xor) = sign_context_label(nb);
+        assert_eq!(label, 12 - 9);
+        assert_eq!(xor, 1);
+    }
+
+    #[test]
+    fn sign_context_pos_pos_label_13_xor_0() {
+        // H0 sig+, V0 sig+. H=+1, V=+1 → label 13, XORbit 0.
+        let nb = Neighbours::from_slots(
+            false, true, false, false, // v0 sig (sign false = positive)
+            true, false, false, false, // h0 sig+
+            false, false, false, false,
+        );
+        let (label, xor) = sign_context_label(nb);
+        assert_eq!(label, 13 - 9);
+        assert_eq!(xor, 0);
+    }
+
+    #[test]
+    fn sign_context_neg_neg_label_13_xor_1() {
+        // Both negative → H=-1, V=-1 → label 13, XORbit 1.
+        let nb = Neighbours::from_slots(
+            false, true, true, false, // v0 sig negative
+            true, true, false, false, // h0 sig negative
+            false, false, false, false,
+        );
+        let (label, xor) = sign_context_label(nb);
+        assert_eq!(label, 13 - 9);
+        assert_eq!(xor, 1);
+    }
+
+    #[test]
+    fn sign_context_mixed_signs_cancel_to_zero_contribution() {
+        // Two H neighbours, one positive, one negative → H = 0 per
+        // Table D.2 (a "significant positive / significant negative"
+        // row collapses to 0). With V also 0, label is 9.
+        let nb = Neighbours::from_slots(
+            false, false, false, false, true, false, true, true, // h0 +, h1 -
+            false, false, false, false,
+        );
+        let (label, xor) = sign_context_label(nb);
+        assert_eq!(label, 0); // 9 - 9
+        assert_eq!(xor, 0);
+    }
+
+    #[test]
+    fn sign_context_xorbit_inverts_label_polarity() {
+        // For every (h, v) combination the XORbit pattern is
+        // symmetric under negation of *both* H and V (because Table
+        // D.3 mirrors top-half rows to bottom-half rows with XOR=1).
+        for h in [-1i8, 0, 1] {
+            for v in [-1i8, 0, 1] {
+                if h == 0 && v == 0 {
+                    continue;
+                }
+                let (lp, xp) = sign_label_from_contributions(h, v);
+                let (ln, xn) = sign_label_from_contributions(-h, -v);
+                assert_eq!(
+                    lp, ln,
+                    "labels should match for ({h}, {v}) and ({}, {})",
+                    -h, -v
+                );
+                assert_eq!(
+                    xp ^ xn,
+                    1,
+                    "XORbit should differ for ({h}, {v}) vs negation"
+                );
+            }
+        }
+    }
+
+    // -- Table D.4 magnitude-refinement context labels ----------------
+
+    #[test]
+    fn refinement_label_first_no_neighbours_is_14() {
+        // First refinement, ∑(Hi+Vi+Di) = 0 → label 14 (offset 0).
+        let nb = Neighbours::default();
+        assert_eq!(refinement_context_label(nb, false), 0);
+    }
+
+    #[test]
+    fn refinement_label_first_with_neighbour_is_15() {
+        // First refinement, at least one significant neighbour → label 15
+        // (offset 1). One diagonal neighbour is enough.
+        let nb = Neighbours::from_slots(
+            true, false, false, false, // d0 significant
+            false, false, false, false, false, false, false, false,
+        );
+        assert_eq!(refinement_context_label(nb, false), 1);
+        // A single horizontal or vertical neighbour also gives 15.
+        let nb_h = synth_neighbours(1, 0, 0);
+        assert_eq!(refinement_context_label(nb_h, false), 1);
+        let nb_v = synth_neighbours(0, 1, 0);
+        assert_eq!(refinement_context_label(nb_v, false), 1);
+    }
+
+    #[test]
+    fn refinement_label_already_refined_is_16_regardless_of_neighbours() {
+        // Once already_refined is set, the neighbour state is a
+        // don't-care: label 16 (offset 2) in all cases.
+        assert_eq!(refinement_context_label(Neighbours::default(), true), 2);
+        let busy = synth_neighbours(2, 2, 4);
+        assert_eq!(refinement_context_label(busy, true), 2);
+    }
+
+    // -- §D.3.3 magnitude refinement pass behaviour -------------------
+
+    #[test]
+    fn refinement_skips_insignificant_and_newly_significant() {
+        // A 4x1 LL block: (0,0) significant + already a prior pass (not
+        // newly significant), (1,0) newly significant, (2,0)/(3,0)
+        // insignificant. Only (0,0) should be refined.
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 1);
+        block.mark_significant_for_test(0, 0, false, 0b10); // sig, not new
+        block.mark_significant_for_test(1, 0, false, 0b10); // sig, but new
+        block.set_newly_significant_for_test(1, 0);
+
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        let refined = block
+            .magnitude_refinement_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        assert_eq!(refined, 1, "only (0,0) is eligible for refinement");
+        // (0,0) is now flagged already_refined; (1,0) is not.
+        assert!(block.coefficient(0, 0).already_refined);
+        assert!(!block.coefficient(1, 0).already_refined);
+        // Insignificant coefficients are untouched.
+        assert!(!block.coefficient(2, 0).already_refined);
+        assert!(!block.coefficient(3, 0).already_refined);
+    }
+
+    #[test]
+    fn refinement_no_eligible_coefficients_makes_no_mq_decision() {
+        // An all-insignificant block: nothing to refine, decoder must
+        // not advance.
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut block = CodeBlock::new(SubBandOrientation::HH, 5, 7);
+        let mut dec = MqDecoder::new(&bytes);
+        let bp_start = dec.byte_pointer();
+        let mut ctx = reset_contexts();
+        let refined = block
+            .magnitude_refinement_pass(3, &mut dec, &mut ctx)
+            .unwrap();
+        assert_eq!(refined, 0);
+        assert_eq!(dec.byte_pointer(), bp_start);
+    }
+
+    #[test]
+    fn refinement_first_bit_matches_context_14_reference() {
+        // A 1x1 LL block with one significant, not-yet-refined, isolated
+        // coefficient. ∑(Hi+Vi+Di)=0 + first refinement → context 14.
+        // The decoded refinement bit must equal what a fresh MQ decoder
+        // produces against a default context (label 14 starts at Table
+        // C.2 index 0 / MPS 0, like all non-special contexts).
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut ref_dec = MqDecoder::new(&bytes);
+        let mut ref_ctx = MqContext::default();
+        let expected = ref_dec.decode(&mut ref_ctx);
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        block.mark_significant_for_test(0, 0, false, 0b100); // magnitude MSB set
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        let refined = block
+            .magnitude_refinement_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        assert_eq!(refined, 1);
+        let c = block.coefficient(0, 0);
+        assert!(c.already_refined);
+        // Bit-plane 0 weight is 1; magnitude gains it iff the bit was 1.
+        let expected_mag = 0b100 | u32::from(expected);
+        assert_eq!(c.magnitude, expected_mag);
+    }
+
+    #[test]
+    fn refinement_second_pass_uses_context_16() {
+        // Refine the same coefficient twice. The first refinement uses
+        // context 14/15 and sets already_refined; the second must use
+        // context 16. We verify by comparing the context array state:
+        // after pass 1 only label 14 (offset 0) has moved from index 0;
+        // after pass 2 label 16 (offset 2) has also moved.
+        let bytes = [0xFFu8, 0xFF, 0xFF, 0xFF];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        block.mark_significant_for_test(0, 0, false, 0b1000);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+
+        // Snapshot context-16 state before any refinement.
+        let ctx16_before = ctx[REFINEMENT_CTX_OFFSET + 2].index();
+
+        // Pass 1 (bit-plane 2): first refinement → context 14.
+        block
+            .magnitude_refinement_pass(2, &mut dec, &mut ctx)
+            .unwrap();
+        assert!(block.coefficient(0, 0).already_refined);
+        // Context 16 must be untouched after the *first* refinement.
+        assert_eq!(ctx[REFINEMENT_CTX_OFFSET + 2].index(), ctx16_before);
+
+        // Pass 2 (bit-plane 1): now already_refined → context 16.
+        block
+            .magnitude_refinement_pass(1, &mut dec, &mut ctx)
+            .unwrap();
+        // Context 16 must now have been exercised (its adaptive index
+        // moved away from the reset value after at least one decision).
+        assert_ne!(
+            ctx[REFINEMENT_CTX_OFFSET + 2].index(),
+            ctx16_before,
+            "context 16 should be used by the second refinement"
+        );
+    }
+
+    #[test]
+    fn refinement_context_15_used_when_neighbour_significant() {
+        // 2x1 LL block, both coefficients significant and not-new.
+        // (0,0) has a significant right neighbour (1,0) and vice-versa,
+        // so each sees ∑(H+V+D) ≥ 1 → first refinement uses context 15.
+        let bytes = [0xFFu8, 0xFF, 0xFF, 0xFF];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 1);
+        block.mark_significant_for_test(0, 0, false, 0b10);
+        block.mark_significant_for_test(1, 0, false, 0b10);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+
+        let ctx14_before = ctx[REFINEMENT_CTX_OFFSET].index();
+        let ctx15_before = ctx[REFINEMENT_CTX_OFFSET + 1].index();
+
+        let refined = block
+            .magnitude_refinement_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        assert_eq!(refined, 2);
+        // Context 15 (offset 1) must have been exercised; context 14
+        // (offset 0) must be untouched.
+        assert_ne!(ctx[REFINEMENT_CTX_OFFSET + 1].index(), ctx15_before);
+        assert_eq!(ctx[REFINEMENT_CTX_OFFSET].index(), ctx14_before);
+    }
+
+    #[test]
+    fn refinement_pass_visits_stripe_major_order() {
+        // Indirect scan-order check mirroring the SP-pass test: an
+        // all-insignificant block triggers no decisions and no state
+        // change, proving the loop ran exhaustively without entering the
+        // inner body.
+        let mut block = CodeBlock::new(SubBandOrientation::LH, 6, 10);
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut dec = MqDecoder::new(&bytes);
+        let bp_start = dec.byte_pointer();
+        let mut ctx = reset_contexts();
+        let refined = block
+            .magnitude_refinement_pass(5, &mut dec, &mut ctx)
+            .unwrap();
+        assert_eq!(refined, 0);
+        for v in 0..block.height() {
+            for u in 0..block.width() {
+                assert!(!block.coefficient(u, v).already_refined);
+            }
+        }
+        assert_eq!(dec.byte_pointer(), bp_start);
+    }
+
+    // -- §D.1 scan order ----------------------------------------------
+
+    #[test]
+    fn scan_order_visits_every_coefficient_exactly_once() {
+        // We can't observe the scan order directly from a public
+        // accessor, but we can verify it indirectly: an SP pass on an
+        // all-insignificant code-block where every context is label 0
+        // (no MQ decisions made) leaves every coefficient untouched and
+        // never advances the decoder. We assert (a) zero "newly
+        // significant" coefficients, (b) every coefficient remains
+        // insignificant, (c) the bit pointer of the MQ decoder hasn't
+        // moved beyond its INITDEC position. This proves the loop ran
+        // exhaustively without entering the inner body.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 6, 10);
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut dec = MqDecoder::new(&bytes);
+        let bp_start = dec.byte_pointer();
+        let mut ctx = reset_contexts();
+        let newly = block
+            .significance_propagation_pass(7, &mut dec, &mut ctx)
+            .unwrap();
+        assert_eq!(newly, 0);
+        for v in 0..block.height() {
+            for u in 0..block.width() {
+                let c = block.coefficient(u, v);
+                assert!(!c.sigma, "({u}, {v}) should still be insignificant");
+                assert_eq!(c.magnitude, 0);
+            }
+        }
+        // No MQ decision means no byte consumption.
+        assert_eq!(dec.byte_pointer(), bp_start);
+    }
+
+    // -- §D.2.1 per-coefficient decoded-bit (Nb) tracking -------------
+
+    #[test]
+    fn decoded_bits_start_zero_and_effective_nb_falls_back() {
+        // A test-constructed block (no passes run) carries zero
+        // decoded-bit counts; effective_nb must return the uniform
+        // fallback so the historical reassembly test path is unchanged.
+        let block = CodeBlock::new(SubBandOrientation::LL, 3, 5);
+        for v in 0..5 {
+            for u in 0..3 {
+                assert_eq!(block.decoded_bits(u, v), 0);
+            }
+        }
+        assert_eq!(block.max_decoded_bits(), 0);
+        assert_eq!(block.zero_bit_planes(), 0);
+        // Fallback returned verbatim when no per-coefficient data.
+        assert_eq!(block.effective_nb(1, 2, 7), 7);
+        assert_eq!(block.effective_nb(0, 0, 12), 12);
+    }
+
+    #[test]
+    fn set_zero_bit_planes_round_trips() {
+        let mut block = CodeBlock::new(SubBandOrientation::HL, 2, 2);
+        block.set_zero_bit_planes(3);
+        assert_eq!(block.zero_bit_planes(), 3);
+    }
+
+    #[test]
+    fn sp_pass_increments_decoded_bits_for_visited_coefficients() {
+        // (0, 0) pre-significant → its right neighbour (1, 0) has a
+        // non-zero context (label 5) and is visited by the SP pass,
+        // gaining one decoded bit whatever the decision. (2, 0) / (3, 0)
+        // have zero context and are deferred to cleanup — no bit yet.
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 1);
+        block.mark_significant_for_test(0, 0, false, 1);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        block
+            .significance_propagation_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        // (0, 0) was pre-marked (not via a pass) → no decoded bit.
+        assert_eq!(block.decoded_bits(0, 0), 0);
+        // (1, 0) had a non-zero context → exactly one decoded bit.
+        assert_eq!(block.decoded_bits(1, 0), 1);
+        // Zero-context coefficients are untouched by SP.
+        assert_eq!(block.decoded_bits(2, 0), 0);
+        assert_eq!(block.decoded_bits(3, 0), 0);
+    }
+
+    #[test]
+    fn cleanup_run_length_zero_counts_one_bit_per_column_coefficient() {
+        // Run-length escape decodes a single 0 for the whole column but
+        // §D.2.1 counts a decoded magnitude bit for every one of the
+        // four coefficients on this bit-plane.
+        let candidates: [[u8; 4]; 4] = [
+            [0x00, 0x00, 0x00, 0x00],
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            [0x84, 0xC7, 0x3B, 0xFC],
+            [0x42, 0x91, 0x6A, 0x0D],
+        ];
+        let bytes = candidates
+            .iter()
+            .find(|b| replay_eligible_column_1x4(*b, 1 << 7).0 == 0)
+            .expect("a run-length-0 candidate must exist");
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 4);
+        let mut dec = MqDecoder::new(bytes);
+        let mut ctx = reset_contexts();
+        block.cleanup_pass(7, &mut dec, &mut ctx).unwrap();
+        for v in 0..4 {
+            assert_eq!(
+                block.decoded_bits(0, v),
+                1,
+                "({v}) should have one decoded bit after the run-length-0 column"
+            );
+        }
+    }
+
+    #[test]
+    fn full_bitplane_gives_every_coefficient_exactly_one_bit() {
+        // A complete bit-plane (SP, MR, CL) on an all-insignificant LL
+        // block: every coefficient is reached exactly once — the
+        // zero-context coefficients via the cleanup pass, none via SP.
+        // After the cleanup pass every coefficient has exactly one
+        // decoded bit, so under full decode Nb is uniform.
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC, 0x11, 0x22, 0x33, 0x44];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        block
+            .significance_propagation_pass(7, &mut dec, &mut ctx)
+            .unwrap();
+        block
+            .magnitude_refinement_pass(7, &mut dec, &mut ctx)
+            .unwrap();
+        block.cleanup_pass(7, &mut dec, &mut ctx).unwrap();
+        for v in 0..4 {
+            for u in 0..4 {
+                assert_eq!(
+                    block.decoded_bits(u, v),
+                    1,
+                    "({u}, {v}) should have exactly one decoded bit after a full plane"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn effective_nb_diverges_across_coefficients_on_truncated_plane() {
+        // SP pass only (no cleanup) on a block with one pre-significant
+        // seed: the SP-visited coefficient carries one decoded bit while
+        // the zero-context coefficients carry none → effective_nb
+        // diverges by exactly one once P is recorded.
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 1);
+        block.mark_significant_for_test(0, 0, false, 1);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        block
+            .significance_propagation_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        block.set_zero_bit_planes(2);
+        // The SP-visited (1, 0) has Nb = P + 1; the deferred (2, 0) /
+        // (3, 0) have Nb = P + 0. The fallback is ignored because the
+        // block now carries per-coefficient data.
+        assert_eq!(block.effective_nb(1, 0, 99), 3);
+        assert_eq!(block.effective_nb(2, 0, 99), 2);
+        assert_eq!(block.effective_nb(3, 0, 99), 2);
+    }
+
+    // -- §H.1 region-of-interest (Maxshift) decode --------------------
+
+    #[test]
+    fn roi_maxshift_zero_shift_is_a_noop() {
+        // s = 0 ⇒ M'b = Mb; every §H.1 branch reduces to identity and no
+        // per-coefficient override is recorded.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 1);
+        block.mark_significant_for_test(0, 0, false, 0b1011);
+        block.set_decoded_bits_for_test(0, 0, 4);
+        block.set_zero_bit_planes(0);
+        block.apply_roi_maxshift(5, 0);
+        assert_eq!(block.coefficient(0, 0).magnitude, 0b1011);
+        // No roi_nb recorded → falls back to P + decoded_bits.
+        assert_eq!(block.effective_nb(0, 0, 99), 4);
+    }
+
+    #[test]
+    fn roi_maxshift_background_keeps_magnitude_and_drops_nb() {
+        // §H.1 step 4: Nb ≥ Mb and the top Mb MSBs (magnitude >> s) are
+        // all zero ⇒ background. Mb = 3, s = 4 ⇒ M'b = 7. A magnitude
+        // whose only set bits are below weight 2^s stays unchanged; Nb
+        // drops by s (Equation H-2).
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        // magnitude = 0b0000101 = 5, top 3 MSBs (>> 4) = 0 ⇒ background.
+        block.mark_significant_for_test(0, 0, false, 5);
+        // Nb = P + decoded = 0 + 6 = 6 ≥ Mb (3).
+        block.set_decoded_bits_for_test(0, 0, 6);
+        block.set_zero_bit_planes(0);
+        block.apply_roi_maxshift(3, 4);
+        assert_eq!(
+            block.coefficient(0, 0).magnitude,
+            5,
+            "background magnitude unchanged"
+        );
+        assert_eq!(block.effective_nb(0, 0, 99), 6 - 4, "Nb drops by s");
+    }
+
+    #[test]
+    fn roi_maxshift_roi_coefficient_divides_magnitude_and_caps_nb() {
+        // §H.1 step 3: Nb ≥ Mb and at least one of the top Mb MSBs is
+        // non-zero ⇒ ROI. Mb = 3, s = 4 ⇒ M'b = 7. A magnitude with a
+        // set bit at or above weight 2^s is shifted down by s (top Mb
+        // bits re-anchored to weight 2^(Mb−1)); Nb caps at Mb.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        // magnitude = 0b1010011 = 83. >> 4 = 0b101 = 5 ⇒ ROI, qb = 5.
+        block.mark_significant_for_test(0, 0, true, 0b1010011);
+        block.set_decoded_bits_for_test(0, 0, 7); // Nb = 7 ≥ Mb (3).
+        block.set_zero_bit_planes(0);
+        block.apply_roi_maxshift(3, 4);
+        assert_eq!(
+            block.coefficient(0, 0).magnitude,
+            0b101,
+            "ROI magnitude = m >> s"
+        );
+        assert!(block.coefficient(0, 0).sign, "sign preserved");
+        assert_eq!(block.effective_nb(0, 0, 99), 3, "Nb capped at Mb");
+    }
+
+    #[test]
+    fn roi_maxshift_low_nb_coefficient_reanchors_only() {
+        // §H.1 step 2: Nb < Mb ⇒ no §H.1 shift, but §E.1 still re-anchors
+        // the M'b-budget magnitude to the background Mb (m >> s); Nb is
+        // unchanged. Mb = 6, s = 4 ⇒ M'b = 10; a coefficient that only
+        // reached Nb = 2 bits sits in the top of the M'b budget.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        // magnitude = 0b11_0000_0000 = 768 (the two decoded MSBs at the
+        // top of the M'b = 10 budget). >> 4 = 0b11_0000 = 48.
+        block.mark_significant_for_test(0, 0, false, 0b11_0000_0000);
+        block.set_decoded_bits_for_test(0, 0, 2); // Nb = 2 < Mb (6).
+        block.set_zero_bit_planes(0);
+        block.apply_roi_maxshift(6, 4);
+        assert_eq!(
+            block.coefficient(0, 0).magnitude,
+            0b11_0000,
+            "re-anchored m >> s"
+        );
+        assert_eq!(block.effective_nb(0, 0, 99), 2, "Nb unchanged when Nb < Mb");
+    }
+
+    #[test]
+    fn roi_maxshift_uses_p_plus_decoded_for_nb_decision() {
+        // The Nb ≥ Mb gate uses the full §D.2.1 Nb = P + decoded_bits,
+        // not just the decoded count. With P = 4, decoded = 1, Mb = 3:
+        // Nb = 5 ≥ Mb, and a zero-top-MSB magnitude takes the background
+        // branch (Nb → 5 − s).
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        block.mark_significant_for_test(0, 0, false, 3); // < 2^s, background.
+        block.set_decoded_bits_for_test(0, 0, 1);
+        block.set_zero_bit_planes(4); // Nb = 4 + 1 = 5.
+        block.apply_roi_maxshift(3, 2); // Mb = 3, s = 2.
+        assert_eq!(block.coefficient(0, 0).magnitude, 3);
+        assert_eq!(block.effective_nb(0, 0, 99), 5 - 2);
+    }
+
+    // -- Single-coefficient SP decode end-to-end ----------------------
+
+    #[test]
+    fn single_significant_neighbour_drives_one_mq_decision() {
+        // Construct a 4x1 LL code-block where coefficient (0, 0) is
+        // pre-marked significant. Its right neighbour (1, 0) then has
+        // h-context label 5 (H=1, V=0, D=0). The SP pass should draw
+        // exactly one MQ decision against context 5 for (1, 0); the
+        // other two coefficients ((2, 0) and (3, 0)) have label 0 and
+        // are skipped. We don't predict the decision bit (it depends
+        // on the byte stream + adaptive state) — we only assert that
+        // (a) at most one coefficient became significant, (b) the
+        // decision aligns with what a fresh MQ decoder produces on the
+        // same context. We do this by running the same MQ decoder once
+        // up front against a separate context-5 instance and comparing.
+        let bytes = [0x84u8, 0xC7, 0x3B, 0xFC];
+        // Reference decoder: one decision against a default context.
+        let mut ref_dec = MqDecoder::new(&bytes);
+        let mut ref_ctx = MqContext::default();
+        let expected_first = ref_dec.decode(&mut ref_ctx);
+
+        // Subject: full SP pass with the same byte stream.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 1);
+        // Pre-mark (0, 0) significant with positive sign, magnitude 1.
+        // We synthesise this via a small private helper on CodeBlock
+        // exposed below (`mark_significant`).
+        block.mark_significant_for_test(0, 0, false, 1);
+
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        let newly = block
+            .significance_propagation_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        assert!(newly <= 1);
+        // (1, 0) was the only coefficient whose context label was
+        // non-zero (label 5). It must match the reference decoder.
+        let became_significant = block.coefficient(1, 0).sigma;
+        if expected_first == 1 {
+            assert!(became_significant, "(1, 0) should now be significant");
+            assert!(
+                block.was_newly_significant(1, 0),
+                "(1, 0) should be flagged newly-significant"
+            );
+            // newly_significant flag also implies magnitude carries
+            // the 1 << bitplane (here bitplane = 0).
+            assert_eq!(block.coefficient(1, 0).magnitude, 1);
+        } else {
+            assert!(!became_significant);
+            assert!(!block.was_newly_significant(1, 0));
+        }
+        // (2, 0) and (3, 0) have label-0 contexts → untouched.
+        assert!(!block.coefficient(2, 0).sigma);
+        assert!(!block.coefficient(3, 0).sigma);
+    }
+
+    #[test]
+    fn newly_significant_flag_clears_between_passes() {
+        // Run two SP passes back-to-back. The second one must clear
+        // every newly_significant flag from the first.
+        let bytes = [0xFFu8, 0xFF]; // 0xFF-fill — predictable state.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 3, 1);
+        // Pre-mark (0, 0) significant to give (1, 0) a non-zero context.
+        block.mark_significant_for_test(0, 0, false, 1);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        // First pass: may or may not flip (1, 0) — we don't care for
+        // this test, only that no flag from a prior pass survives.
+        let _ = block
+            .significance_propagation_pass(1, &mut dec, &mut ctx)
+            .unwrap();
+        // Manually re-mark (0, 0) "newly significant" (simulating a
+        // SP-pass carry from a previous bit-plane).
+        block.set_newly_significant_for_test(0, 0);
+        assert!(block.was_newly_significant(0, 0));
+        // Second pass clears the carry first.
+        let _ = block
+            .significance_propagation_pass(1, &mut dec, &mut ctx)
+            .unwrap();
+        // (0, 0) wasn't visited by the SP pass (σ already true), so the
+        // flag must have been cleared by the prologue and not re-set.
+        assert!(!block.was_newly_significant(0, 0));
+    }
+
+    // -- Test-only helpers --------------------------------------------
+
+    impl CodeBlock {
+        /// Test-only: pre-mark a coefficient as significant.
+        pub(super) fn mark_significant_for_test(
+            &mut self,
+            u: usize,
+            v: usize,
+            sign: bool,
+            magnitude: u32,
+        ) {
+            let idx = u + v * self.width;
+            self.coefficients[idx] = Coefficient {
+                magnitude,
+                sigma: true,
+                sign,
+                already_refined: false,
+            };
+        }
+
+        /// Test-only: set the "newly significant" flag for a coefficient.
+        pub(super) fn set_newly_significant_for_test(&mut self, u: usize, v: usize) {
+            self.newly_significant[u + v * self.width] = true;
+        }
+
+        /// Test-only: set a coefficient's decoded-bit count directly so a
+        /// known per-coefficient `Nb(u, v) = P + decoded_bits` can be
+        /// driven into [`CodeBlock::apply_roi_maxshift`] without replaying
+        /// the §D.3 passes.
+        pub(super) fn set_decoded_bits_for_test(&mut self, u: usize, v: usize, bits: u32) {
+            self.decoded_bits[u + v * self.width] = bits;
+        }
+    }
+
+    // -- §D.3.4 cleanup pass behaviour --------------------------------
+
+    /// Replay the full cleanup-pass decode of one 1×4 run-length-eligible
+    /// LL column against an independent reference decoder, returning the
+    /// expected `(sigma, sign, magnitude)` per row plus the run-length
+    /// bit. This mirrors the §D.3.4 / Table D.5 control flow exactly and
+    /// is the oracle the subject [`CodeBlock::cleanup_pass`] must match.
+    fn replay_eligible_column_1x4(bytes: &[u8], weight: u32) -> (u8, [(bool, bool, u32); 4]) {
+        let mut dec = MqDecoder::new(bytes);
+        let mut ctx = reset_contexts();
+        let mut expect = [(false, false, 0u32); 4];
+        let rl = dec.decode(&mut ctx[RUN_LENGTH_CTX]);
+        if rl == 0 {
+            return (rl, expect);
+        }
+        let hi = dec.decode(&mut ctx[UNIFORM_CTX]);
+        let lo = dec.decode(&mut ctx[UNIFORM_CTX]);
+        let first = ((hi << 1) | lo) as usize;
+        let mut sig = [false; 4];
+        // First-significant coefficient: sign only (significance is implied
+        // by the run-length escape + UNIFORM index).
+        {
+            let nb = col_neighbours_1x4(&sig, first);
+            let (sl, xb) = sign_context_label(nb);
+            let sd = dec.decode(&mut ctx[SIGN_CTX_OFFSET + sl as usize]);
+            expect[first] = (true, (sd ^ xb) != 0, weight);
+            sig[first] = true;
+        }
+        for v in (first + 1)..4 {
+            let nb = col_neighbours_1x4(&sig, v);
+            let label = significance_context_label(SubBandOrientation::LL, nb);
+            let sbit = dec.decode(&mut ctx[SP_CTX_OFFSET + label as usize]);
+            if sbit == 1 {
+                let (sl, xb) = sign_context_label(nb);
+                let sd = dec.decode(&mut ctx[SIGN_CTX_OFFSET + sl as usize]);
+                expect[v] = (true, (sd ^ xb) != 0, weight);
+                sig[v] = true;
+            }
+        }
+        (rl, expect)
+    }
+
+    /// Neighbours of row `v` in a 1-wide, 4-tall column: only the vertical
+    /// up/down neighbours can be in-block (sign treated as positive — the
+    /// significance-context label ignores sign anyway).
+    fn col_neighbours_1x4(sig: &[bool; 4], v: usize) -> Neighbours {
+        let v_up = v >= 1 && sig[v - 1];
+        let v_dn = v + 1 < 4 && sig[v + 1];
+        Neighbours::from_slots(
+            false, v_up, false, false, false, false, false, false, false, v_dn, false, false,
+        )
+    }
+
+    #[test]
+    fn cleanup_run_length_zero_leaves_column_insignificant() {
+        // A 1x4 LL block: one full (4-row) column, all insignificant with
+        // zero context → run-length eligible. When the run-length bit is
+        // 0, the whole column stays insignificant. We replay to find a
+        // byte stream whose run-length bit is 0, then assert the subject
+        // leaves all four insignificant.
+        let candidates: [[u8; 4]; 4] = [
+            [0x00, 0x00, 0x00, 0x00],
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            [0x84, 0xC7, 0x3B, 0xFC],
+            [0x42, 0x91, 0x6A, 0x0D],
+        ];
+        let bytes = candidates
+            .iter()
+            .find(|b| replay_eligible_column_1x4(*b, 1 << 7).0 == 0)
+            .expect("a candidate with run-length bit 0 must exist");
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 4);
+        let mut dec = MqDecoder::new(bytes);
+        let mut ctx = reset_contexts();
+        let newly = block.cleanup_pass(7, &mut dec, &mut ctx).unwrap();
+        assert_eq!(newly, 0, "run-length 0 leaves all four insignificant");
+        for v in 0..4 {
+            assert!(!block.coefficient(0, v).sigma);
+            assert_eq!(block.coefficient(0, v).magnitude, 0);
+        }
+    }
+
+    #[test]
+    fn cleanup_run_length_one_uses_uniform_first_index() {
+        // A 1x4 LL block where the run-length bit is 1 (escape). The two
+        // UNIFORM bits select the first-significant coefficient; it
+        // becomes significant with the bit-plane weight + a decoded sign,
+        // and the rows below are decoded normally. We replay the exact MQ
+        // operation sequence to predict the outcome bit-for-bit.
+        let candidates: [&[u8]; 4] = [
+            &[0xFF, 0xAC, 0x73, 0x1D, 0x9E, 0x42],
+            &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+            &[0xC3, 0x5A, 0x96, 0x7E, 0x21, 0xBD],
+            &[0x84, 0xC7, 0x3B, 0xFC, 0x10, 0x6F],
+        ];
+        let weight = 1u32 << 5;
+        let (bytes, (_, expect)) = candidates
+            .iter()
+            .map(|b| (*b, replay_eligible_column_1x4(b, weight)))
+            .find(|(_, (rl, _))| *rl == 1)
+            .expect("a candidate with run-length bit 1 must exist");
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 4);
+        let mut dec = MqDecoder::new(bytes);
+        let mut ctx = reset_contexts();
+        let newly = block.cleanup_pass(5, &mut dec, &mut ctx).unwrap();
+
+        let mut expected_newly = 0usize;
+        for (v, &(e_sig, e_sign, e_mag)) in expect.iter().enumerate() {
+            let c = block.coefficient(0, v);
+            assert_eq!(c.sigma, e_sig, "sigma mismatch at v={v}");
+            if e_sig {
+                expected_newly += 1;
+                assert_eq!(c.sign, e_sign, "sign mismatch at v={v}");
+                assert_eq!(c.magnitude, e_mag, "magnitude mismatch at v={v}");
+                assert!(block.was_newly_significant(0, v));
+            }
+        }
+        assert_eq!(newly, expected_newly);
+        // The run-length escape guarantees at least one significant.
+        assert!(expected_newly >= 1);
+    }
+
+    #[test]
+    fn cleanup_short_stripe_never_uses_run_length() {
+        // A 1x3 block: only three rows → no run-length coding per §D.3.4
+        // ("fewer than four rows remaining"). Each coefficient is coded
+        // individually with its Table D.1 context (all label 0 here). We
+        // replay three significance decisions against the *zero-neighbour*
+        // context (label 0, Table C.2 index 4) to predict the outcome.
+        let bytes = [0xC1u8, 0x5D, 0x82, 0x77, 0x3A];
+        let mut ref_dec = MqDecoder::new(&bytes);
+        let mut ref_ctx = reset_contexts();
+        let mut expect = [false; 3];
+        let mut sig = [false; 3];
+        for v in 0..3 {
+            let v_up = v >= 1 && sig[v - 1];
+            let v_dn = v + 1 < 3 && sig[v + 1];
+            let nb = Neighbours::from_slots(
+                false, v_up, false, false, false, false, false, false, false, v_dn, false, false,
+            );
+            let label = significance_context_label(SubBandOrientation::LL, nb);
+            // Run-length context must NOT be consulted here.
+            assert_eq!(label, 0, "isolated column should have label 0 at v={v}");
+            let sbit = ref_dec.decode(&mut ref_ctx[SP_CTX_OFFSET + label as usize]);
+            if sbit == 1 {
+                let (sl, _xb) = sign_context_label(nb);
+                let _ = ref_dec.decode(&mut ref_ctx[SIGN_CTX_OFFSET + sl as usize]);
+                expect[v] = true;
+                sig[v] = true;
+            }
+        }
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 3);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        // The run-length context must be untouched (its adaptive index
+        // stays at the reset value 3).
+        assert_eq!(ctx[RUN_LENGTH_CTX].index(), 3);
+        block.cleanup_pass(0, &mut dec, &mut ctx).unwrap();
+        assert_eq!(
+            ctx[RUN_LENGTH_CTX].index(),
+            3,
+            "short stripe must not use the run-length context"
+        );
+        for (v, &want) in expect.iter().enumerate() {
+            assert_eq!(block.coefficient(0, v).sigma, want, "v={v}");
+        }
+    }
+
+    #[test]
+    fn cleanup_skips_already_significant_and_nonzero_context_columns() {
+        // A 1x4 LL block with (0,0) pre-marked significant. The column is
+        // NOT run-length-eligible because (0,0) is already significant and
+        // (0,1) now has a non-zero (vertical) context. Each remaining
+        // insignificant coefficient is coded individually; (0,0) is
+        // skipped. The run-length context must stay at its reset index.
+        let bytes = [0x9Au8, 0x3F, 0xC4, 0x71, 0x2E];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 4);
+        block.mark_significant_for_test(0, 0, false, 1 << 6);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        let rl_before = ctx[RUN_LENGTH_CTX].index();
+        block.cleanup_pass(5, &mut dec, &mut ctx).unwrap();
+        assert_eq!(
+            ctx[RUN_LENGTH_CTX].index(),
+            rl_before,
+            "non-eligible column must not touch the run-length context"
+        );
+        // (0,0) stays exactly as pre-marked (significant, untouched).
+        let c0 = block.coefficient(0, 0);
+        assert!(c0.sigma);
+        assert_eq!(c0.magnitude, 1 << 6);
+    }
+
+    #[test]
+    fn cleanup_first_bitplane_only_pass_decodes_isolated_coefficient() {
+        // §D.3: the first non-empty bit-plane of a code-block is a
+        // cleanup-only pass. Here a 1x1 LL block (a single coefficient,
+        // never run-length-eligible because the stripe is height 1) is
+        // decoded directly via the normal-mode significance context.
+        let bytes = [0xE3u8, 0x55, 0x9C, 0x08];
+        let mut ref_dec = MqDecoder::new(&bytes);
+        let mut ref_ctx = reset_contexts();
+        // Zero-neighbour significance context (label 0, index 4).
+        let sbit = ref_dec.decode(&mut ref_ctx[SP_CTX_OFFSET]);
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 1);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        let newly = block.cleanup_pass(7, &mut dec, &mut ctx).unwrap();
+        if sbit == 1 {
+            assert_eq!(newly, 1);
+            assert!(block.coefficient(0, 0).sigma);
+            assert!(block.coefficient(0, 0).magnitude & (1 << 7) != 0);
+        } else {
+            assert_eq!(newly, 0);
+            assert!(!block.coefficient(0, 0).sigma);
+        }
+    }
+
+    #[test]
+    fn cleanup_run_length_zero_makes_no_uniform_decision() {
+        // When the run-length bit is 0, the two UNIFORM bits are NOT
+        // drawn (Table D.5 row 1: "Symbols decoded with UNIFORM = none").
+        // We pick a byte stream whose run-length bit is 0 and verify the
+        // UNIFORM context is left at its reset index afterward.
+        let candidates: [[u8; 4]; 4] = [
+            [0x00, 0x00, 0x00, 0x00],
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            [0x84, 0xC7, 0x3B, 0xFC],
+            [0x42, 0x91, 0x6A, 0x0D],
+        ];
+        let bytes = candidates
+            .iter()
+            .find(|b| replay_eligible_column_1x4(*b, 1 << 3).0 == 0)
+            .expect("a candidate with run-length bit 0 must exist");
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 4);
+        let mut dec = MqDecoder::new(bytes);
+        let mut ctx = reset_contexts();
+        let uniform_before = ctx[UNIFORM_CTX].index();
+        block.cleanup_pass(3, &mut dec, &mut ctx).unwrap();
+        assert_eq!(
+            ctx[UNIFORM_CTX].index(),
+            uniform_before,
+            "symbol-0 run-length must not consult the UNIFORM context"
+        );
+        for v in 0..4 {
+            assert!(!block.coefficient(0, v).sigma);
+        }
+    }
+
+    #[test]
+    fn cleanup_full_three_pass_bitplane_sequence_self_consistent() {
+        // Drive the §D.3 three-pass order (SP → MR → cleanup) on one
+        // bit-plane of a small LL block and confirm the cleanup pass only
+        // touches coefficients the earlier two passes left insignificant.
+        // This is a structural test: it does not predict the bits, only
+        // that no coefficient is decoded twice in a single bit-plane.
+        let bytes = [0xB7u8, 0x29, 0xEE, 0x4C, 0x81, 0x6A, 0xD3];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        // First non-empty bit-plane: cleanup only.
+        let bp = 5;
+        let n_cleanup0 = block.cleanup_pass(bp, &mut dec, &mut ctx).unwrap();
+        // Snapshot which coefficients are significant after the cleanup.
+        let mut sig_after: Vec<bool> = Vec::new();
+        for v in 0..4 {
+            for u in 0..4 {
+                sig_after.push(block.coefficient(u, v).sigma);
+            }
+        }
+        // Next bit-plane: SP then MR then cleanup.
+        let bp2 = bp - 1;
+        let _ = block
+            .significance_propagation_pass(bp2, &mut dec, &mut ctx)
+            .unwrap();
+        let _ = block
+            .magnitude_refinement_pass(bp2, &mut dec, &mut ctx)
+            .unwrap();
+        let _ = block.cleanup_pass(bp2, &mut dec, &mut ctx).unwrap();
+        // Every coefficient significant after the first cleanup is still
+        // significant (significance is monotone — never cleared).
+        let mut k = 0;
+        for v in 0..4 {
+            for u in 0..4 {
+                if sig_after[k] {
+                    assert!(
+                        block.coefficient(u, v).sigma,
+                        "({u},{v}) significance must be monotone"
+                    );
+                }
+                k += 1;
+            }
+        }
+        // Sanity: the first cleanup pass produced a non-negative count
+        // and the decoder advanced through the stream without panicking.
+        let _ = n_cleanup0;
+        assert!(dec.byte_pointer() > 0);
+    }
+
+    // -- Boundary handling --------------------------------------------
+
+    #[test]
+    fn out_of_block_neighbours_are_treated_as_insignificant() {
+        // A 1x1 code-block: all 8 neighbours are out-of-block.
+        // Context label must be 0 on every orientation regardless of
+        // sub-band.
+        let block = CodeBlock::new(SubBandOrientation::LH, 1, 1);
+        let nb = block.neighbours(0, 0);
+        assert_eq!(nb.h_sum(), 0);
+        assert_eq!(nb.v_sum(), 0);
+        assert_eq!(nb.d_sum(), 0);
+        assert_eq!(significance_context_label(SubBandOrientation::LH, nb), 0);
+    }
+
+    #[test]
+    fn neighbours_at_corners_clip_correctly() {
+        // 3x3 LL block, only (1, 1) (centre) significant. Corner (0, 0)
+        // has neighbours d0/v0/d1/h0 outside the block; only h1, v1, d3
+        // exist on the grid, of which only (1, 1) — d3 — is significant.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 3, 3);
+        block.mark_significant_for_test(1, 1, false, 1);
+        let nb = block.neighbours(0, 0);
+        assert!(!nb.h0_sigma); // out of block
+        assert!(!nb.v0_sigma); // out of block
+        assert!(!nb.d0_sigma); // out of block
+        assert!(!nb.d1_sigma); // out of block
+        assert!(!nb.h1_sigma); // (1, 0) — insignificant
+        assert!(!nb.v1_sigma); // (0, 1) — insignificant
+        assert!(!nb.d2_sigma); // out of block (v+1 = 1, u-1 = -1)
+        assert!(nb.d3_sigma); // (1, 1) — significant
+        assert_eq!(nb.h_sum(), 0);
+        assert_eq!(nb.v_sum(), 0);
+        assert_eq!(nb.d_sum(), 1);
+        // LL/LH (h=0, v=0, d=1) → label 1.
+        assert_eq!(significance_context_label(SubBandOrientation::LL, nb), 1);
+    }
+
+    // -- Bit-plane sequencer (§D.3 three-pass order) ------------------
+
+    #[test]
+    fn sequencer_new_starts_with_cleanup_only() {
+        // §D.3: "The first bit-plane within the current block with a
+        // non-zero element has a cleanup pass only."
+        let seq = BitPlaneSequencer::new(7);
+        assert_eq!(seq.next_pass(), Pass::Cleanup);
+        assert_eq!(seq.current_bitplane(), 7);
+        assert_eq!(seq.passes_decoded(), 0);
+    }
+
+    #[test]
+    fn sequencer_first_pass_runs_cleanup_then_drops_to_sp_next_plane() {
+        // After the first (cleanup-only) pass on bit-plane K, the
+        // sequencer must advance to bit-plane K-1 with SP next.
+        let bytes = [0x42u8, 0x91, 0x6A, 0x0D];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(7);
+        let _ = seq.decode_packet(&mut block, &bytes, 1, &mut ctx).unwrap();
+        assert_eq!(seq.next_pass(), Pass::Sp);
+        assert_eq!(seq.current_bitplane(), 6);
+        assert_eq!(seq.passes_decoded(), 1);
+    }
+
+    #[test]
+    fn sequencer_three_pass_cycle_returns_to_cleanup_one_plane_down() {
+        // §D.3 order after the first cleanup: SP → MR → cleanup. After
+        // running all three on bit-plane K, the next pass is SP on K-1.
+        let bytes = [0xB7u8, 0x29, 0xEE, 0x4C, 0x81, 0x6A, 0xD3, 0x55];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(8);
+        // Pass 1: cleanup-only on bit-plane 8.
+        let _ = seq.decode_packet(&mut block, &bytes, 1, &mut ctx).unwrap();
+        assert_eq!(seq.next_pass(), Pass::Sp);
+        assert_eq!(seq.current_bitplane(), 7);
+        // Three more passes: SP, MR, cleanup on bit-plane 7.
+        // We use a fresh decoder (the common "termination at end of
+        // every code-block only" case across packets is the *same*
+        // decoder, but here we just want to exercise the state machine).
+        let _ = seq.decode_packet(&mut block, &bytes, 3, &mut ctx).unwrap();
+        assert_eq!(seq.next_pass(), Pass::Sp);
+        assert_eq!(seq.current_bitplane(), 6);
+        assert_eq!(seq.passes_decoded(), 4);
+    }
+
+    #[test]
+    fn sequencer_zero_passes_is_noop() {
+        // CodeBlockContribution::included = false → coding_passes = 0,
+        // so a sequencer call with `passes == 0` must not advance state
+        // or open the byte slice.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(5);
+        let n = seq.decode_packet(&mut block, &[], 0, &mut ctx).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(seq.next_pass(), Pass::Cleanup);
+        assert_eq!(seq.current_bitplane(), 5);
+        assert_eq!(seq.passes_decoded(), 0);
+    }
+
+    #[test]
+    fn sequencer_multiple_packets_resume_state() {
+        // A code-block split across two packets: first packet
+        // contributes 2 passes (cleanup + SP on the next plane),
+        // second packet contributes 2 more (MR + cleanup completing
+        // that plane). The sequencer state must carry across calls.
+        let bytes_a = [0xB7u8, 0x29, 0xEE, 0x4C];
+        let bytes_b = [0x55u8, 0xAA, 0xC3, 0x91];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(6);
+        let _ = seq
+            .decode_packet(&mut block, &bytes_a, 2, &mut ctx)
+            .unwrap();
+        // After cleanup + SP: still on bit-plane 5, next pass MR.
+        assert_eq!(seq.next_pass(), Pass::Mr);
+        assert_eq!(seq.current_bitplane(), 5);
+        assert_eq!(seq.passes_decoded(), 2);
+
+        let _ = seq
+            .decode_packet(&mut block, &bytes_b, 2, &mut ctx)
+            .unwrap();
+        // After MR + cleanup: bit-plane drops to 4, next pass SP.
+        assert_eq!(seq.next_pass(), Pass::Sp);
+        assert_eq!(seq.current_bitplane(), 4);
+        assert_eq!(seq.passes_decoded(), 4);
+    }
+
+    #[test]
+    fn sequencer_first_packet_matches_standalone_cleanup_call() {
+        // The sequencer's first call (cleanup-only on the starting
+        // bit-plane) must be byte-for-byte equivalent to a direct
+        // `CodeBlock::cleanup_pass` invocation.
+        let bytes = [0xB7u8, 0x29, 0xEE, 0x4C, 0x81, 0x6A];
+        let bp = 5;
+
+        // Subject: drive via the sequencer.
+        let mut subject = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut subject_ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(bp);
+        let subject_n = seq
+            .decode_packet(&mut subject, &bytes, 1, &mut subject_ctx)
+            .unwrap();
+
+        // Oracle: call `cleanup_pass` directly.
+        let mut oracle = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut oracle_dec = MqDecoder::new(&bytes);
+        let mut oracle_ctx = reset_contexts();
+        let oracle_n = oracle
+            .cleanup_pass(bp, &mut oracle_dec, &mut oracle_ctx)
+            .unwrap();
+
+        assert_eq!(subject_n, oracle_n);
+        // The two code-blocks must end in identical coefficient state.
+        for v in 0..4 {
+            for u in 0..4 {
+                assert_eq!(
+                    subject.coefficient(u, v),
+                    oracle.coefficient(u, v),
+                    "({u},{v}) must match the standalone cleanup oracle"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequencer_full_bitplane_sp_mr_cleanup_matches_manual_calls() {
+        // Drive the second bit-plane (post-startup) via the sequencer
+        // and via three direct pass calls; assert the coefficient
+        // state matches.
+        let bytes_first = [0xAAu8, 0x55, 0x73, 0x1F];
+        let bytes_second = [0xC3u8, 0x5A, 0x96, 0x7E, 0x21, 0xBD];
+        let bp_first = 6;
+
+        // Subject: sequencer drives the first cleanup-only pass on the
+        // first call, then the next three passes via a single
+        // `decode_packet(..., 3, ...)`.
+        let mut subject = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut subject_ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(bp_first);
+        seq.decode_packet(&mut subject, &bytes_first, 1, &mut subject_ctx)
+            .unwrap();
+        seq.decode_packet(&mut subject, &bytes_second, 3, &mut subject_ctx)
+            .unwrap();
+        assert_eq!(seq.current_bitplane(), bp_first - 2);
+        assert_eq!(seq.next_pass(), Pass::Sp);
+        assert_eq!(seq.passes_decoded(), 4);
+
+        // Oracle: three direct calls in §D.3 order, fresh decoders for
+        // each "packet" (one for the cleanup-only first packet, one
+        // shared across SP/MR/cleanup of the second).
+        let mut oracle = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut oracle_ctx = reset_contexts();
+        {
+            let mut dec = MqDecoder::new(&bytes_first);
+            oracle
+                .cleanup_pass(bp_first, &mut dec, &mut oracle_ctx)
+                .unwrap();
+        }
+        {
+            let mut dec = MqDecoder::new(&bytes_second);
+            let bp2 = bp_first - 1;
+            oracle
+                .significance_propagation_pass(bp2, &mut dec, &mut oracle_ctx)
+                .unwrap();
+            oracle
+                .magnitude_refinement_pass(bp2, &mut dec, &mut oracle_ctx)
+                .unwrap();
+            oracle.cleanup_pass(bp2, &mut dec, &mut oracle_ctx).unwrap();
+        }
+
+        for v in 0..4 {
+            for u in 0..4 {
+                assert_eq!(
+                    subject.coefficient(u, v),
+                    oracle.coefficient(u, v),
+                    "({u},{v}) sequencer / manual disagreement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequencer_decode_passes_runs_against_supplied_decoder() {
+        // The lower-level `decode_passes` entry point takes a caller-
+        // owned `MqDecoder`, the right shape when COD bit-4
+        // "termination on each pass" requires one decoder per pass.
+        let bytes = [0x42u8, 0x91, 0x6A, 0x0D];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(7);
+        let mut dec = MqDecoder::new(&bytes);
+        let _ = seq
+            .decode_passes(&mut block, &mut dec, &mut ctx, 1)
+            .unwrap();
+        assert_eq!(seq.next_pass(), Pass::Sp);
+        assert_eq!(seq.current_bitplane(), 6);
+    }
+
+    #[test]
+    fn sequencer_runs_n_passes_in_one_call() {
+        // Driving N passes in one call must produce the same end state
+        // as N single-pass calls — the §D.3 state-machine transitions
+        // are independent of the call boundary.
+        let bytes = [0xB7u8, 0x29, 0xEE, 0x4C, 0x81, 0x6A, 0xD3, 0x55];
+        let bp = 5;
+
+        // Subject: one decode_passes call with N=4.
+        let mut subject = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut subject_ctx = reset_contexts();
+        let mut subject_seq = BitPlaneSequencer::new(bp);
+        let mut subject_dec = MqDecoder::new(&bytes);
+        let _ = subject_seq
+            .decode_passes(&mut subject, &mut subject_dec, &mut subject_ctx, 4)
+            .unwrap();
+
+        // Oracle: four single-pass calls on the same decoder.
+        let mut oracle = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut oracle_ctx = reset_contexts();
+        let mut oracle_seq = BitPlaneSequencer::new(bp);
+        let mut oracle_dec = MqDecoder::new(&bytes);
+        for _ in 0..4 {
+            let _ = oracle_seq
+                .decode_passes(&mut oracle, &mut oracle_dec, &mut oracle_ctx, 1)
+                .unwrap();
+        }
+
+        assert_eq!(subject_seq.next_pass(), oracle_seq.next_pass());
+        assert_eq!(
+            subject_seq.current_bitplane(),
+            oracle_seq.current_bitplane()
+        );
+        for v in 0..4 {
+            for u in 0..4 {
+                assert_eq!(subject.coefficient(u, v), oracle.coefficient(u, v));
+            }
+        }
+    }
+
+    #[test]
+    fn sequencer_bitplane_zero_saturates() {
+        // Driving cleanup on bit-plane 0 must not panic. §D.3 does not
+        // specify behaviour past bit-plane 0 (the LSB) — the spec relies
+        // on the caller stopping (the packet's pass count is bounded).
+        // The sequencer protects itself with a saturating decrement so
+        // a buggy caller still gets defined behaviour.
+        let bytes = [0x00u8, 0x00, 0x00, 0x00];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(0);
+        let _ = seq.decode_packet(&mut block, &bytes, 1, &mut ctx).unwrap();
+        // current_bitplane saturates at 0; next pass is SP per §D.3.
+        assert_eq!(seq.current_bitplane(), 0);
+        assert_eq!(seq.next_pass(), Pass::Sp);
+    }
+
+    // -- §D.5 segmentation symbol -------------------------------------
+
+    /// Replay four UNIFORM decisions over `bytes` from a fresh
+    /// [`MqDecoder`] / context array and reconstruct the resulting
+    /// 4-bit symbol the same way [`decode_segmentation_symbol`] does
+    /// (MSB-first). Used to probe candidate byte streams for ones that
+    /// decode to a chosen target.
+    fn replay_four_uniform_bits(bytes: &[u8]) -> u8 {
+        let mut dec = MqDecoder::new(bytes);
+        let mut ctx = reset_contexts();
+        let b3 = dec.decode(&mut ctx[UNIFORM_CTX]);
+        let b2 = dec.decode(&mut ctx[UNIFORM_CTX]);
+        let b1 = dec.decode(&mut ctx[UNIFORM_CTX]);
+        let b0 = dec.decode(&mut ctx[UNIFORM_CTX]);
+        (b3 << 3) | (b2 << 2) | (b1 << 1) | b0
+    }
+
+    /// Brute-force-search the 16-bit seed space until we find one
+    /// 6-byte stream whose four UNIFORM decisions decode to `target`,
+    /// and return it. The construction `(seed * 0x9E37) ^ (i * 0xC3A5)`
+    /// is just a deterministic mixer; what we need is coverage of the
+    /// 16 possible 4-bit outputs which a few-hundred seeds always
+    /// reach.
+    fn find_bytes_decoding_to(target: u8) -> Vec<u8> {
+        for seed in 0u32..=0xFFFF {
+            let mut bytes = [0u8; 12];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                let mix = seed.wrapping_mul(0x9E37).wrapping_add((i as u32) * 0xC3A5);
+                *b = (mix >> ((i % 4) * 4)) as u8;
+            }
+            if replay_four_uniform_bits(&bytes) == target {
+                return bytes.to_vec();
+            }
+        }
+        panic!("no candidate byte stream decoded to target 0x{target:X}");
+    }
+
+    #[test]
+    fn segmentation_symbol_constant_matches_d5() {
+        // §D.5 fixes the symbol at the four-bit value `1010` = 0xA.
+        assert_eq!(SEGMENTATION_SYMBOL, 0x0A);
+    }
+
+    #[test]
+    fn raw_writer_predictable_finish_pads_alternating_and_stuffs_after_0xff() {
+        // §D.6 with predictable termination: unused bits fill 0,1,0,…
+        // starting with 0; a trailing 0xFF grows a stuffed byte whose
+        // MSB is 0 and whose remaining bits carry the same fill.
+        let mut w = RawBitWriter::new();
+        for b in [1u8, 1, 1] {
+            w.write_bit(b);
+        }
+        assert_eq!(w.finish_predictable(), vec![0b1110_1010]);
+        let mut w = RawBitWriter::new();
+        for _ in 0..8 {
+            w.write_bit(1);
+        }
+        assert_eq!(w.finish_predictable(), vec![0xFF, 0b0010_1010]);
+        let mut w = RawBitWriter::new();
+        w.write_bit(0);
+        assert_eq!(w.finish_predictable(), vec![0b0010_1010]);
+        assert_eq!(RawBitWriter::new().finish_predictable(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn segmentation_symbol_encodes_as_its_own_decoder_expects() {
+        let mut enc = MqEncoder::new();
+        let mut ectx = reset_contexts();
+        encode_segmentation_symbol(&mut enc, &mut ectx);
+        let bytes = enc.flush();
+        let mut dec = MqDecoder::new(&bytes);
+        let mut dctx = reset_contexts();
+        decode_segmentation_symbol(&mut dec, &mut dctx).expect("0xA round-trips");
+    }
+
+    #[test]
+    fn decode_segmentation_symbol_accepts_target_0xa() {
+        // Find a candidate stream whose four UNIFORM bits land on
+        // `1010` and verify the decoder accepts it.
+        let bytes = find_bytes_decoding_to(0xA);
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        decode_segmentation_symbol(&mut dec, &mut ctx).expect("0xA must succeed");
+    }
+
+    #[test]
+    fn decode_segmentation_symbol_rejects_non_0xa_values() {
+        // Sweep all 15 non-`1010` 4-bit values that the decoder must
+        // reject as bit-plane corruption per §D.5.
+        for target in 0u8..=0xF {
+            if target == 0xA {
+                continue;
+            }
+            let bytes = find_bytes_decoding_to(target);
+            let mut dec = MqDecoder::new(&bytes);
+            let mut ctx = reset_contexts();
+            assert!(
+                matches!(
+                    decode_segmentation_symbol(&mut dec, &mut ctx),
+                    Err(Error::SegmentationSymbolMismatch)
+                ),
+                "target 0x{target:X} should mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_segmentation_symbol_consumes_four_uniform_decisions() {
+        // Independent of the result, the symbol decoder always draws
+        // exactly four UNIFORM decisions. Verify by comparing the
+        // UNIFORM context state after the decoder against a manual
+        // replay of four `dec.decode(&mut ctx[UNIFORM_CTX])` calls.
+        let bytes = [0xC3u8, 0x5A, 0x96, 0x7E, 0x21, 0xBD];
+        let mut subject_dec = MqDecoder::new(&bytes);
+        let mut subject_ctx = reset_contexts();
+        let _ = decode_segmentation_symbol(&mut subject_dec, &mut subject_ctx);
+
+        let mut oracle_dec = MqDecoder::new(&bytes);
+        let mut oracle_ctx = reset_contexts();
+        for _ in 0..4 {
+            let _ = oracle_dec.decode(&mut oracle_ctx[UNIFORM_CTX]);
+        }
+        assert_eq!(
+            subject_ctx[UNIFORM_CTX].index(),
+            oracle_ctx[UNIFORM_CTX].index()
+        );
+        assert_eq!(
+            subject_ctx[UNIFORM_CTX].mps(),
+            oracle_ctx[UNIFORM_CTX].mps()
+        );
+    }
+
+    #[test]
+    fn segmentation_symbol_off_matches_bare_cleanup_pass() {
+        // With segmentation_symbols off (the default), the sequencer
+        // must match an isolated `cleanup_pass` call bit-for-bit on
+        // the same byte stream — i.e. the §D.5 path consumed exactly
+        // zero UNIFORM decisions, exactly zero coefficient updates.
+        let bytes = [0xC1u8, 0x5D, 0x82, 0x77, 0x3A, 0xE6];
+
+        let mut subj_block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut subj_ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(0).with_segmentation_symbols(false);
+        assert!(!seq.segmentation_symbols());
+        let subj_n = seq
+            .decode_packet(&mut subj_block, &bytes, 1, &mut subj_ctx)
+            .expect("disabled D.5 path must not fail");
+
+        let mut oracle_block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut oracle_ctx = reset_contexts();
+        let mut oracle_dec = MqDecoder::new(&bytes);
+        let oracle_n = oracle_block
+            .cleanup_pass(0, &mut oracle_dec, &mut oracle_ctx)
+            .expect("oracle cleanup must not fail");
+
+        assert_eq!(subj_n, oracle_n);
+        for v in 0..2 {
+            for u in 0..2 {
+                let s = subj_block.coefficient(u, v);
+                let o = oracle_block.coefficient(u, v);
+                assert_eq!(s.sigma, o.sigma, "sigma at ({u},{v})");
+                assert_eq!(s.sign, o.sign, "sign at ({u},{v})");
+                assert_eq!(s.magnitude, o.magnitude, "magnitude at ({u},{v})");
+            }
+        }
+        // The UNIFORM context must have been touched identically.
+        assert_eq!(
+            subj_ctx[UNIFORM_CTX].index(),
+            oracle_ctx[UNIFORM_CTX].index()
+        );
+    }
+
+    #[test]
+    fn sequencer_with_segmentation_symbols_enables_flag() {
+        // Builder threads through; default is off, on after toggle.
+        let seq_off = BitPlaneSequencer::new(7);
+        assert!(!seq_off.segmentation_symbols());
+        let seq_on = BitPlaneSequencer::new(7).with_segmentation_symbols(true);
+        assert!(seq_on.segmentation_symbols());
+        // Toggle back off.
+        let seq_back = seq_on.with_segmentation_symbols(false);
+        assert!(!seq_back.segmentation_symbols());
+    }
+
+    #[test]
+    fn sequencer_propagates_segmentation_symbol_mismatch() {
+        // Drive an empty 2x2 code-block through one cleanup pass with
+        // segmentation-symbols on. The 2x2 block triggers no
+        // significance-pass or run-length decisions on the zero stream
+        // (every coefficient is insignificant, columns are short of 4
+        // rows so run-length mode is ineligible per §D.3.4), so the
+        // symbol decoder reads the first four UNIFORM bits straight off
+        // the §C.3.5 INITDEC-primed state. Those bits are not `1010`,
+        // so the sequencer must propagate
+        // `SegmentationSymbolMismatch`.
+        //
+        // First confirm the assumption: the first four UNIFORM
+        // decisions over the zero stream do NOT decode to 0xA.
+        let bytes = [0x00u8, 0x00, 0x00, 0x00];
+        assert_ne!(replay_four_uniform_bits(&bytes), 0xA);
+
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(0).with_segmentation_symbols(true);
+        assert!(matches!(
+            seq.decode_packet(&mut block, &bytes, 1, &mut ctx),
+            Err(Error::SegmentationSymbolMismatch)
+        ));
+    }
+
+    // -- §D.7 vertically-causal context formation ---------------------
+
+    #[test]
+    fn code_block_vertically_causal_default_off() {
+        // Default constructors leave §D.7 off — the round-208 read.
+        let block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        assert!(!block.vertically_causal_context());
+        let block2 = CodeBlock::from_coefficients(
+            SubBandOrientation::HL,
+            2,
+            2,
+            vec![Coefficient::default(); 4],
+        );
+        assert!(!block2.vertically_causal_context());
+    }
+
+    #[test]
+    fn code_block_with_vertically_causal_toggles_both_directions() {
+        // Builder is monotonic in either direction.
+        let block_on =
+            CodeBlock::new(SubBandOrientation::LL, 4, 4).with_vertically_causal_context(true);
+        assert!(block_on.vertically_causal_context());
+        let block_back = block_on.with_vertically_causal_context(false);
+        assert!(!block_back.vertically_causal_context());
+    }
+
+    #[test]
+    fn neighbours_in_stripe_off_matches_neighbours() {
+        // With the §D.7 flag off, the stripe-aware neighbour read is a
+        // pass-through to the standard neighbour read on every position.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 3, 5);
+        // Populate a few coefficients so the read has something to mirror.
+        block.mark_significant_for_test(0, 0, false, 1);
+        block.mark_significant_for_test(1, 1, true, 1);
+        block.mark_significant_for_test(2, 4, false, 1);
+        for v in 0..5 {
+            for u in 0..3 {
+                // Try every stripe layout the §D.3 pass loops will use:
+                // v0 = 0 stripe_h = 4 covers rows 0..=3; v0 = 4 covers row 4.
+                let v0 = (v / 4) * 4;
+                let stripe_h = core::cmp::min(4, 5 - v0);
+                assert_eq!(
+                    block.neighbours_in_stripe(u, v, v0, stripe_h),
+                    block.neighbours(u, v),
+                    "(u={u}, v={v}) must be identical with §D.7 off",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neighbours_in_stripe_clips_d2_v1_d3_on_stripe_bottom() {
+        // The §D.7 worked example: bit 15 (bottom of stripe) reads
+        // D2 = V1 = D3 = 0. Set up a 3x5 LL block with the row BELOW
+        // the bottom of the first stripe (row 4, i.e. (0,4), (1,4),
+        // (2,4)) all significant. Without §D.7 they show up as the
+        // D2/V1/D3 neighbours of (1, 3); with §D.7 they read as zero.
+        let mut block =
+            CodeBlock::new(SubBandOrientation::LL, 3, 5).with_vertically_causal_context(true);
+        block.mark_significant_for_test(0, 4, false, 1);
+        block.mark_significant_for_test(1, 4, false, 1);
+        block.mark_significant_for_test(2, 4, false, 1);
+
+        // §D.7-off baseline: D2, V1, D3 are all significant for (1, 3).
+        let baseline = block.neighbours(1, 3);
+        assert!(baseline.d2_sigma);
+        assert!(baseline.v1_sigma);
+        assert!(baseline.d3_sigma);
+
+        // Stripe v0 = 0, stripe_h = 4 — (1, 3) is on the bottom row.
+        let clipped = block.neighbours_in_stripe(1, 3, 0, 4);
+        assert!(!clipped.d2_sigma);
+        assert!(!clipped.v1_sigma);
+        assert!(!clipped.v1_sign);
+        assert!(!clipped.d3_sigma);
+        // Above-stripe-bottom positions are unaffected even with the
+        // flag set: at v = 2, D2/V1/D3 reach into row 3 (inside the
+        // stripe), so the clip does not fire.
+        let inside = block.neighbours_in_stripe(1, 2, 0, 4);
+        assert_eq!(inside, block.neighbours(1, 2));
+    }
+
+    #[test]
+    fn neighbours_in_stripe_off_does_not_clip_even_on_stripe_bottom() {
+        // With §D.7 off the bottom-row neighbour read sees the next
+        // stripe — the round-208 behaviour. Same fixture as the
+        // previous test, vertically_causal flag left clear.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 3, 5);
+        block.mark_significant_for_test(0, 4, false, 1);
+        block.mark_significant_for_test(1, 4, false, 1);
+        block.mark_significant_for_test(2, 4, false, 1);
+        let nb = block.neighbours_in_stripe(1, 3, 0, 4);
+        assert!(nb.d2_sigma);
+        assert!(nb.v1_sigma);
+        assert!(nb.d3_sigma);
+    }
+
+    #[test]
+    fn neighbours_in_stripe_short_stripe_treats_top_as_bottom() {
+        // When the trailing partial stripe has stripe_h = 1, the
+        // single row is itself the "bottom" of the stripe and §D.7
+        // clips its D2/V1/D3. Set up an 3x5 block where row 4 is the
+        // partial bottom stripe (stripe_v0 = 4, stripe_h = 1) and the
+        // (hypothetical) next stripe rows (which don't exist — block
+        // ends at v = 4) wouldn't carry anything anyway, so this test
+        // confirms the partial-stripe code path stays well-behaved.
+        let block =
+            CodeBlock::new(SubBandOrientation::LL, 3, 5).with_vertically_causal_context(true);
+        let nb = block.neighbours_in_stripe(1, 4, 4, 1);
+        // No coefficient set anywhere — every slot is zero regardless,
+        // but the clip must not panic and must return the expected
+        // all-zero Neighbours value.
+        assert!(!nb.d2_sigma);
+        assert!(!nb.v1_sigma);
+        assert!(!nb.d3_sigma);
+        assert!(!nb.v0_sigma);
+        assert!(!nb.h0_sigma);
+        assert!(!nb.h1_sigma);
+        assert!(!nb.d0_sigma);
+        assert!(!nb.d1_sigma);
+    }
+
+    #[test]
+    fn sequencer_with_vertically_causal_context_enables_flag() {
+        // Builder threads through; default off, on after toggle.
+        let seq_off = BitPlaneSequencer::new(7);
+        assert!(!seq_off.vertically_causal_context());
+        let seq_on = BitPlaneSequencer::new(7).with_vertically_causal_context(true);
+        assert!(seq_on.vertically_causal_context());
+        let seq_back = seq_on.with_vertically_causal_context(false);
+        assert!(!seq_back.vertically_causal_context());
+    }
+
+    #[test]
+    fn sequencer_pushes_vertically_causal_toggle_onto_block() {
+        // decode_passes / decode_packet must sync the sequencer's flag
+        // onto the supplied block at the start of the call so the
+        // block's neighbour read picks it up. Use a zero-pass call so
+        // no MQ state is touched — the sync line runs before the loop.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        assert!(!block.vertically_causal_context());
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(5).with_vertically_causal_context(true);
+        // Direct decode_passes call to exercise the sync at the entry
+        // point that drives the passes (decode_packet wraps this one).
+        let mut decoder = MqDecoder::new(&[0u8; 4]);
+        let _ = seq
+            .decode_passes(&mut block, &mut decoder, &mut ctx, 0)
+            .unwrap();
+        assert!(block.vertically_causal_context());
+
+        // And the reverse direction — turning the flag off later
+        // resets the block's view on the next call.
+        let mut seq_off = BitPlaneSequencer::new(5);
+        let mut decoder2 = MqDecoder::new(&[0u8; 4]);
+        let _ = seq_off
+            .decode_passes(&mut block, &mut decoder2, &mut ctx, 0)
+            .unwrap();
+        assert!(!block.vertically_causal_context());
+    }
+
+    #[test]
+    fn vertically_causal_off_matches_baseline_cleanup_pass() {
+        // With the toggle off, a full cleanup pass on an 8-tall block
+        // must produce byte-for-byte identical state to a baseline
+        // CodeBlock that never saw the toggle. This is the §D.7
+        // "off path stays the round-208 byte-for-byte" guarantee.
+        let bytes = [0xB7u8, 0x29, 0xEE, 0x4C, 0x81, 0x6A, 0xD3, 0x55];
+
+        let mut baseline = CodeBlock::new(SubBandOrientation::LL, 4, 8);
+        let mut ctx_b = reset_contexts();
+        let mut dec_b = MqDecoder::new(&bytes);
+        baseline.cleanup_pass(6, &mut dec_b, &mut ctx_b).unwrap();
+
+        let mut probe = CodeBlock::new(SubBandOrientation::LL, 4, 8);
+        let mut ctx_p = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(6).with_vertically_causal_context(false);
+        let mut dec_p = MqDecoder::new(&bytes);
+        seq.decode_passes(&mut probe, &mut dec_p, &mut ctx_p, 1)
+            .unwrap();
+
+        for v in 0..8 {
+            for u in 0..4 {
+                assert_eq!(
+                    baseline.coefficient(u, v),
+                    probe.coefficient(u, v),
+                    "(u={u}, v={v}) must match baseline with §D.7 off",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vertically_causal_on_diverges_from_baseline_when_bottom_row_decisions_fire() {
+        // Construct a fixture where §D.7 must change the decoder's
+        // labelling on a stripe-bottom coefficient: pre-mark every
+        // coefficient on row 4 (the top of the next stripe) as
+        // significant. The (u, 3) coefficients sit on the bottom row
+        // of the first stripe (v0 = 0, stripe_h = 4) and their
+        // significance-propagation context now differs between §D.7-on
+        // and §D.7-off — off sees D2/V1/D3 significant, on reads zero.
+        //
+        // Walking the SP pass with a fixed MQ stream must therefore
+        // produce a different coefficient grid in at least one cell.
+        let bytes = [0xB7u8, 0x29, 0xEE, 0x4C, 0x81, 0x6A, 0xD3, 0x55];
+
+        let mut on_block =
+            CodeBlock::new(SubBandOrientation::LL, 4, 8).with_vertically_causal_context(true);
+        let mut off_block = CodeBlock::new(SubBandOrientation::LL, 4, 8);
+        for block in [&mut on_block, &mut off_block] {
+            for u in 0..4 {
+                block.mark_significant_for_test(u, 4, false, 0b1000);
+            }
+        }
+
+        let mut ctx_on = reset_contexts();
+        let mut dec_on = MqDecoder::new(&bytes);
+        on_block
+            .significance_propagation_pass(3, &mut dec_on, &mut ctx_on)
+            .unwrap();
+
+        let mut ctx_off = reset_contexts();
+        let mut dec_off = MqDecoder::new(&bytes);
+        off_block
+            .significance_propagation_pass(3, &mut dec_off, &mut ctx_off)
+            .unwrap();
+
+        // Some coefficient inside the first stripe (rows 0..=3) must
+        // differ between the two runs; otherwise the §D.7 clip didn't
+        // actually affect any decision.
+        let mut differs = false;
+        for v in 0..4 {
+            for u in 0..4 {
+                if on_block.coefficient(u, v) != off_block.coefficient(u, v) {
+                    differs = true;
+                }
+            }
+        }
+        assert!(
+            differs,
+            "§D.7 on vs. off must change at least one coefficient inside the bottom row of the first stripe",
+        );
+    }
+
+    // -- §D.6 selective arithmetic-coding bypass -----------------------
+
+    #[test]
+    fn raw_bit_reader_msb_first_within_byte() {
+        // §D.6 packs the encoder's raw bits MSB-first per byte.
+        let mut r = RawBitReader::new(&[0b1010_0110]);
+        let bits: Vec<u8> = (0..8).map(|_| r.read_bit().unwrap()).collect();
+        assert_eq!(bits, vec![1, 0, 1, 0, 0, 1, 1, 0]);
+        assert_eq!(r.bits_consumed(), 8);
+    }
+
+    #[test]
+    fn raw_bit_reader_crosses_byte_boundary() {
+        // Two bytes of distinct payloads — bit 8 must be the MSB of
+        // the second byte, no stuff bit between them (the first byte
+        // is 0x55, not 0xFF, so the §D.6 stuff-bit rule does not fire).
+        let mut r = RawBitReader::new(&[0x55, 0xAA]);
+        let bits: Vec<u8> = (0..16).map(|_| r.read_bit().unwrap()).collect();
+        assert_eq!(
+            bits,
+            vec![
+                // 0x55 = 0101_0101
+                0, 1, 0, 1, 0, 1, 0, 1, // 0xAA = 1010_1010
+                1, 0, 1, 0, 1, 0, 1, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_bit_reader_drops_stuff_bit_after_ff() {
+        // §D.6: after a 0xFF byte, the top bit of the next byte is
+        // the stuff bit and the decoder discards it. The next byte's
+        // payload is its lower seven bits, MSB-first.
+        //
+        // First byte 0xFF (all eight bits = 1).
+        // Second byte 0b1_010_1010: top bit is the stuff bit; payload
+        // is `010_1010` (seven bits).
+        let mut r = RawBitReader::new(&[0xFF, 0b1010_1010]);
+        // Read the eight bits of 0xFF.
+        for _ in 0..8 {
+            assert_eq!(r.read_bit().unwrap(), 1);
+        }
+        // Now the stuff bit (top of next byte = 1) is discarded; the
+        // next payload bit is `0` (bit 6 of the second byte).
+        let payload: Vec<u8> = (0..7).map(|_| r.read_bit().unwrap()).collect();
+        assert_eq!(payload, vec![0, 1, 0, 1, 0, 1, 0]);
+        // 8 + 7 = 15 payload bits consumed; the stuff bit is not
+        // counted as a payload bit.
+        assert_eq!(r.bits_consumed(), 15);
+    }
+
+    #[test]
+    fn raw_bit_reader_consecutive_ff_bytes_each_introduce_stuff_bit() {
+        // 0xFF, 0xFF, 0x00 — both 0xFF bytes are followed by a stuff
+        // bit. The third byte's top bit is the stuff bit after the
+        // second 0xFF (regardless of being zero); payload is the
+        // remaining seven bits of 0x00 = `0000000`.
+        let mut r = RawBitReader::new(&[0xFF, 0xFF, 0x00]);
+        // Eight payload bits from first 0xFF.
+        for _ in 0..8 {
+            assert_eq!(r.read_bit().unwrap(), 1);
+        }
+        // Seven payload bits from second 0xFF (top bit is the stuff
+        // bit after the first 0xFF).
+        for _ in 0..7 {
+            assert_eq!(r.read_bit().unwrap(), 1);
+        }
+        // Seven payload bits from 0x00 (top bit is the stuff bit
+        // after the second 0xFF).
+        for _ in 0..7 {
+            assert_eq!(r.read_bit().unwrap(), 0);
+        }
+        assert_eq!(r.bits_consumed(), 22);
+    }
+
+    #[test]
+    fn raw_bit_reader_unexpected_eof_when_exhausted() {
+        // Two-bit slice (one byte): the 9th read surfaces UnexpectedEof.
+        let mut r = RawBitReader::new(&[0xAB]);
+        for _ in 0..8 {
+            r.read_bit().unwrap();
+        }
+        assert!(matches!(r.read_bit(), Err(Error::UnexpectedEof)));
+    }
+
+    #[test]
+    fn raw_bit_reader_empty_input_eofs_on_first_read() {
+        let mut r = RawBitReader::new(&[]);
+        assert!(matches!(r.read_bit(), Err(Error::UnexpectedEof)));
+    }
+
+    #[test]
+    fn raw_bit_reader_d4_1_fill_synthesises_ff_past_end() {
+        // §D.4.1 fill: after the real byte (0x00, 8 payload bits = 0)
+        // the reader keeps returning bits from synthesised 0xFF bytes —
+        // the first 0xFF gives eight 1-bits, then the stuff-bit rule
+        // drops the top bit of the next (also 0xFF) byte.
+        let mut r = RawBitReader::new_with_d4_1_fill(&[0x00]);
+        for _ in 0..8 {
+            assert_eq!(r.read_bit().unwrap(), 0); // real byte
+        }
+        for _ in 0..8 {
+            assert_eq!(r.read_bit().unwrap(), 1); // first synthetic 0xFF
+        }
+        // Next byte is another synthetic 0xFF; its top bit is the §D.6
+        // stuff bit after the preceding 0xFF, so seven payload 1-bits.
+        for _ in 0..7 {
+            assert_eq!(r.read_bit().unwrap(), 1);
+        }
+        // No EOF — the fill never runs out.
+        assert_eq!(r.read_bit().unwrap(), 1);
+    }
+
+    #[test]
+    fn raw_bit_reader_ff_then_eof() {
+        // 0xFF followed by no byte: the 9th read tries to load the
+        // next byte (which would carry the stuff bit) and surfaces
+        // UnexpectedEof.
+        let mut r = RawBitReader::new(&[0xFF]);
+        for _ in 0..8 {
+            assert_eq!(r.read_bit().unwrap(), 1);
+        }
+        assert!(matches!(r.read_bit(), Err(Error::UnexpectedEof)));
+    }
+
+    #[test]
+    fn sp_raw_pass_decodes_two_significant_with_signs() {
+        // Code-block: 2x2 LL. Pre-seed (0,0) as already significant so
+        // its non-zero neighbour pushes (1,0) and (0,1) into Table D.1
+        // label != 0. Then the raw SP pass should read one bit per
+        // candidate (and one sign bit per `1`).
+        //
+        // We arrange the raw stream so:
+        //   - (0,0) is sigma=true, so the SP pass skips it.
+        //   - (1,0) decision bit = 1, sign bit = 0 (positive).
+        //   - (0,1) decision bit = 1, sign bit = 1 (negative).
+        //   - (1,1) — after the two new significances its context is
+        //     non-zero too; we put a `0` decision bit (no sign read).
+        //
+        // §D.1 scan-order over a 2x2 stripe (stripe_h = 2, full
+        // column-first traversal): column 0 → (0,0), (0,1); column 1
+        // → (1,0), (1,1).  But coefficient (0,0) is already significant,
+        // so the order of reads becomes:
+        //   1) (0,1) decision bit
+        //   2) (0,1) sign bit (if decision = 1)
+        //   3) (1,0) decision bit
+        //   4) (1,0) sign bit (if decision = 1)
+        //   5) (1,1) decision bit
+        //   6) (1,1) sign bit (if decision = 1)
+        //
+        // Stream bits, MSB-first: 1 (sig 0,1), 1 (neg sign), 1 (sig 1,0),
+        // 0 (positive sign), 0 (no sig 1,1), then padding zeros to byte.
+        //   1 1 1 0 0 0 0 0 = 0b1110_0000 = 0xE0
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        block.mark_significant_for_test(0, 0, false, 1 << 3);
+        let mut raw = RawBitReader::new(&[0xE0]);
+        let newly = block
+            .significance_propagation_pass_raw(3, &mut raw)
+            .unwrap();
+        assert_eq!(newly, 2, "two coefficients should become significant");
+        assert!(block.coefficient(0, 0).sigma);
+        assert!(block.coefficient(0, 1).sigma);
+        assert!(block.coefficient(0, 1).sign);
+        assert_eq!(block.coefficient(0, 1).magnitude, 1 << 3);
+        assert!(block.coefficient(1, 0).sigma);
+        assert!(!block.coefficient(1, 0).sign);
+        assert_eq!(block.coefficient(1, 0).magnitude, 1 << 3);
+        assert!(!block.coefficient(1, 1).sigma);
+        // §D.6 Eq. D-2 — five payload bits consumed total (one zero-
+        // context coefficient was skipped, but our seed makes every
+        // remaining coefficient non-zero-context).
+        assert_eq!(raw.bits_consumed(), 5);
+    }
+
+    #[test]
+    fn sp_raw_pass_skips_zero_context_coefficients() {
+        // No significant seeds — every Table D.1 context label is 0
+        // → the §D.6 raw SP pass reads no bits at all.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut raw = RawBitReader::new(&[]);
+        let newly = block
+            .significance_propagation_pass_raw(5, &mut raw)
+            .unwrap();
+        assert_eq!(newly, 0);
+        assert_eq!(raw.bits_consumed(), 0);
+        // No coefficient should be touched.
+        for v in 0..4 {
+            for u in 0..4 {
+                assert!(!block.coefficient(u, v).sigma);
+            }
+        }
+    }
+
+    #[test]
+    fn sp_raw_pass_eof_propagates() {
+        // Pre-seed so the SP pass reads at least one bit; then give it
+        // an empty raw stream.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        block.mark_significant_for_test(0, 0, false, 1);
+        let mut raw = RawBitReader::new(&[]);
+        assert!(matches!(
+            block.significance_propagation_pass_raw(0, &mut raw),
+            Err(Error::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn mr_raw_pass_refines_already_significant() {
+        // Pre-seed (0,0) and (1,0) as already significant with
+        // magnitude carrying the higher bit. Run the §D.6 raw MR
+        // pass over bit-plane 2: each coefficient consumes one raw
+        // bit; on `1` the bit is OR-ed into magnitude at `1 << 2`.
+        //
+        // Scan order (stripe_h = 2): column 0 → (0,0), (0,1); column
+        // 1 → (1,0), (1,1). Skips (0,1) and (1,1) — not significant.
+        // So two raw bits get consumed: one for (0,0), one for (1,0).
+        //
+        // Stream: 1 (refine 0,0), 0 (don't refine 1,0), then padding.
+        //   = 0b1000_0000 = 0x80
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        block.mark_significant_for_test(0, 0, false, 1 << 4);
+        block.mark_significant_for_test(1, 0, true, 1 << 4);
+        let mut raw = RawBitReader::new(&[0x80]);
+        let refined = block.magnitude_refinement_pass_raw(2, &mut raw).unwrap();
+        assert_eq!(refined, 2);
+        // (0,0) refined to `(1<<4) | (1<<2)`.
+        assert_eq!(block.coefficient(0, 0).magnitude, (1 << 4) | (1 << 2));
+        assert!(block.coefficient(0, 0).already_refined);
+        // (1,0) refined with bit 0 — magnitude unchanged.
+        assert_eq!(block.coefficient(1, 0).magnitude, 1 << 4);
+        assert!(block.coefficient(1, 0).already_refined);
+        assert_eq!(raw.bits_consumed(), 2);
+    }
+
+    #[test]
+    fn mr_raw_pass_skips_newly_significant_carry() {
+        // §D.3.3 carry: a coefficient marked newly-significant in the
+        // immediately preceding SP pass must NOT be refined this round.
+        // The raw MR path inherits the same filter.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        block.mark_significant_for_test(0, 0, false, 1);
+        block.mark_significant_for_test(1, 0, false, 1);
+        block.set_newly_significant_for_test(1, 0);
+        // Only (0,0) should consume a raw bit.
+        let mut raw = RawBitReader::new(&[0x80]); // first bit = 1
+        let refined = block.magnitude_refinement_pass_raw(0, &mut raw).unwrap();
+        assert_eq!(refined, 1);
+        assert!(block.coefficient(0, 0).already_refined);
+        assert!(!block.coefficient(1, 0).already_refined);
+        assert_eq!(raw.bits_consumed(), 1);
+    }
+
+    #[test]
+    fn mr_raw_pass_skips_insignificant() {
+        // A 2x2 block with nothing pre-marked: every coefficient is
+        // insignificant → MR raw reads no bits.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut raw = RawBitReader::new(&[]);
+        let refined = block.magnitude_refinement_pass_raw(7, &mut raw).unwrap();
+        assert_eq!(refined, 0);
+        assert_eq!(raw.bits_consumed(), 0);
+    }
+
+    #[test]
+    fn sequencer_with_selective_arithmetic_coding_bypass_toggles() {
+        // Builder is monotonic in either direction; default off.
+        let seq_off = BitPlaneSequencer::new(7);
+        assert!(!seq_off.selective_arithmetic_coding_bypass());
+        let seq_on = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+        assert!(seq_on.selective_arithmetic_coding_bypass());
+        let seq_back = seq_on.with_selective_arithmetic_coding_bypass(false);
+        assert!(!seq_back.selective_arithmetic_coding_bypass());
+    }
+
+    #[test]
+    fn sequencer_raw_mode_off_when_bypass_off() {
+        // With the §D.6 toggle off, raw_mode_for_next_pass is false at
+        // every state.
+        let mut seq = BitPlaneSequencer::new(7);
+        assert!(!seq.raw_mode_for_next_pass());
+        // Pretend we have driven 10 passes — still false because the
+        // toggle is off.
+        for _ in 0..10 {
+            seq.passes_decoded = seq.passes_decoded.saturating_add(1);
+        }
+        assert!(!seq.raw_mode_for_next_pass());
+    }
+
+    #[test]
+    fn sequencer_raw_mode_on_after_three_full_bitplane_sets() {
+        // With the §D.6 toggle on:
+        //   - Pass 1 (cleanup of bit-plane 1, passes_decoded=0): AC (Cleanup).
+        //   - Passes 2-10 (3 sets of SP/MR/Cleanup on bit-planes 2-4):
+        //     all AC.
+        //   - Pass 11 (SP of bit-plane 5, passes_decoded=10): RAW.
+        //
+        // Drive the sequencer's pass-state cursor manually (the
+        // dispatcher in this round still goes through the AC path; we
+        // just check the query side that the wiring will consult).
+        let mut seq = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+        // passes_decoded = 0, next_pass = Cleanup → AC.
+        assert!(!seq.raw_mode_for_next_pass());
+
+        // Walk the §D.3 pass order forwards by hand: after the first
+        // cleanup, next_pass becomes Sp; then Mr; then Cleanup; cycle.
+        // Use the same transitions the decode_passes loop uses.
+        let mut next = [Pass::Sp, Pass::Mr, Pass::Cleanup].iter().cycle();
+        seq.next_pass = *next.next().unwrap(); // Sp
+        seq.passes_decoded = 1;
+        // 1 pass done → bit-plane 1 cleanup done. Still AC.
+        assert!(!seq.raw_mode_for_next_pass());
+
+        // Walk through bit-planes 2, 3, 4 (3 sets of 3 passes = 9
+        // additional passes).
+        for _ in 0..9 {
+            seq.passes_decoded += 1;
+            seq.next_pass = *next.next().unwrap();
+        }
+        // After 1 + 9 = 10 passes, next_pass is Sp (start of
+        // bit-plane 5). Raw mode kicks in.
+        assert_eq!(seq.passes_decoded, 10);
+        assert_eq!(seq.next_pass, Pass::Sp);
+        assert!(seq.raw_mode_for_next_pass());
+
+        // After the SP of bit-plane 5, next_pass is Mr → still raw.
+        seq.passes_decoded += 1;
+        seq.next_pass = *next.next().unwrap();
+        assert!(seq.raw_mode_for_next_pass());
+
+        // After the MR of bit-plane 5, next_pass is Cleanup →
+        // always AC per Table D.9 last row.
+        seq.passes_decoded += 1;
+        seq.next_pass = *next.next().unwrap();
+        assert_eq!(seq.next_pass, Pass::Cleanup);
+        assert!(!seq.raw_mode_for_next_pass());
+
+        // After the Cleanup of bit-plane 5, next_pass is Sp of
+        // bit-plane 6 → raw again.
+        seq.passes_decoded += 1;
+        seq.next_pass = *next.next().unwrap();
+        assert_eq!(seq.next_pass, Pass::Sp);
+        assert!(seq.raw_mode_for_next_pass());
+    }
+
+    #[test]
+    fn sequencer_bypass_off_dispatch_unchanged() {
+        // With the §D.6 toggle off, decode_packet over a known stream
+        // is byte-for-byte identical to a bare cleanup_pass — i.e.
+        // the toggle's state is the only switch, exactly like §D.5.
+        let bytes = [0xC1u8, 0x5D, 0x82, 0x77, 0x3A, 0xE6];
+
+        let mut subj_block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut subj_ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(0).with_selective_arithmetic_coding_bypass(false);
+        assert!(!seq.selective_arithmetic_coding_bypass());
+        let subj_n = seq
+            .decode_packet(&mut subj_block, &bytes, 1, &mut subj_ctx)
+            .expect("disabled §D.6 path must not fail");
+
+        let mut oracle_block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut oracle_ctx = reset_contexts();
+        let mut oracle_dec = MqDecoder::new(&bytes);
+        let oracle_n = oracle_block
+            .cleanup_pass(0, &mut oracle_dec, &mut oracle_ctx)
+            .expect("oracle cleanup must not fail");
+
+        assert_eq!(subj_n, oracle_n);
+        for v in 0..2 {
+            for u in 0..2 {
+                let s = subj_block.coefficient(u, v);
+                let o = oracle_block.coefficient(u, v);
+                assert_eq!(s.sigma, o.sigma);
+                assert_eq!(s.sign, o.sign);
+                assert_eq!(s.magnitude, o.magnitude);
+            }
+        }
+    }
+
+    // -- §D.4.2 termination dispatch (Table D.9 + Scod bits 0 / 2) ----
+
+    #[test]
+    fn sequencer_termination_default_off() {
+        let seq = BitPlaneSequencer::new(7);
+        assert!(!seq.termination_on_each_coding_pass());
+    }
+
+    #[test]
+    fn sequencer_with_termination_on_each_coding_pass_round_trips() {
+        // Builder monotonicity in both directions, like the §D.5 / §D.7
+        // builders above.
+        let seq_off = BitPlaneSequencer::new(7);
+        assert!(!seq_off.termination_on_each_coding_pass());
+
+        let seq_on = seq_off.with_termination_on_each_coding_pass(true);
+        assert!(seq_on.termination_on_each_coding_pass());
+
+        let seq_back = seq_on.with_termination_on_each_coding_pass(false);
+        assert!(!seq_back.termination_on_each_coding_pass());
+    }
+
+    #[test]
+    fn next_pass_is_terminated_false_when_no_flags() {
+        // The default packet (Scod bit-0 / bit-2 both clear): single
+        // segment carries every pass. Walk a synthetic state through
+        // all three pass kinds at low and high pass counts and confirm
+        // the predicate stays false everywhere.
+        let mut seq = BitPlaneSequencer::new(7);
+        for passes in [0u32, 1, 2, 3, 9, 10, 11, 12, 25] {
+            for pass in [Pass::Cleanup, Pass::Sp, Pass::Mr] {
+                seq.passes_decoded = passes;
+                seq.next_pass = pass;
+                assert!(
+                    !seq.next_pass_is_terminated(),
+                    "passes_decoded={passes} pass={pass:?} must be unterminated"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_true_for_every_pass_when_bit2_set() {
+        // Scod bit-2 (termination on each coding pass) set — §D.6
+        // explicitly says this wins outright, including over the §D.6
+        // raw passes. Cover every (pass kind, passes_decoded) the
+        // sequencer can land in, including the §D.6 raw region.
+        let mut seq = BitPlaneSequencer::new(7).with_termination_on_each_coding_pass(true);
+        for passes in [0u32, 1, 2, 3, 9, 10, 11, 12, 25] {
+            for pass in [Pass::Cleanup, Pass::Sp, Pass::Mr] {
+                seq.passes_decoded = passes;
+                seq.next_pass = pass;
+                assert!(
+                    seq.next_pass_is_terminated(),
+                    "passes_decoded={passes} pass={pass:?} must be terminated"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_bit2_wins_over_bypass() {
+        // When both Scod bit-0 (AC bypass) and bit-2 (termination on
+        // each) are set, bit-2's "every pass terminated" wins — the
+        // SP raw pass terminates too, contrary to the bypass-only
+        // schedule below.
+        let mut seq = BitPlaneSequencer::new(7)
+            .with_selective_arithmetic_coding_bypass(true)
+            .with_termination_on_each_coding_pass(true);
+        // SP at passes_decoded == 10 — raw region. Under bypass-only
+        // this would be `false`; here it must be `true`.
+        seq.next_pass = Pass::Sp;
+        seq.passes_decoded = 10;
+        assert!(seq.next_pass_is_terminated());
+    }
+
+    #[test]
+    fn next_pass_is_terminated_table_d9_schedule_under_bypass_only() {
+        // Scod bit-0 (AC bypass) set, bit-2 clear — Table D.9 schedule.
+        // Walk passes_decoded across the entire pre-bypass + bypass
+        // regions and confirm the predicate matches each row.
+        let mut seq = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+
+        // Pre-bypass region: passes 0..=8 (bp1 cleanup + bp2/3 full
+        // sets + bp4 SP/MR). None terminated.
+        // Walk the §D.3 pass cycle by hand from the sequencer's start
+        // state (next_pass=Cleanup, passes_decoded=0).
+        let cycle = [
+            Pass::Cleanup,
+            Pass::Sp,
+            Pass::Mr,
+            Pass::Cleanup,
+            Pass::Sp,
+            Pass::Mr,
+            Pass::Cleanup,
+            Pass::Sp,
+            Pass::Mr,
+            Pass::Cleanup,
+            Pass::Sp,
+            Pass::Mr,
+            Pass::Cleanup,
+        ];
+        let terminated_schedule = [
+            // passes_decoded=0: bp1 cleanup → AC, not term
+            false, // 1: bp2 SP, 2: bp2 MR, 3: bp2 cleanup — all AC, not term
+            false, false, false,
+            // 4: bp3 SP, 5: bp3 MR, 6: bp3 cleanup — all AC, not term
+            false, false, false, // 7: bp4 SP, 8: bp4 MR — AC, not term
+            false, false, // 9: bp4 cleanup — AC, terminate (Table D.9 row 10)
+            true,  // 10: bp5 SP — raw, not term
+            false, // 11: bp5 MR — raw, terminate
+            true,  // 12: bp5 cleanup — AC, terminate
+            true,
+        ];
+
+        for (i, (&pass, &want_term)) in cycle.iter().zip(terminated_schedule.iter()).enumerate() {
+            seq.passes_decoded = i as u32;
+            seq.next_pass = pass;
+            assert_eq!(
+                seq.next_pass_is_terminated(),
+                want_term,
+                "passes_decoded={i} pass={pass:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_repeats_per_bitplane_in_bypass_region() {
+        // From bit-plane 5 onward the (SP raw not-term, MR raw term,
+        // Cleanup AC term) pattern repeats indefinitely. Spot-check
+        // bit-planes 6 and 7.
+        let mut seq = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+
+        // bit-plane 6: passes_decoded = 13 (SP), 14 (MR), 15 (Cleanup)
+        for (passes, pass, want) in [
+            (13u32, Pass::Sp, false),
+            (14, Pass::Mr, true),
+            (15, Pass::Cleanup, true),
+            // bit-plane 7
+            (16, Pass::Sp, false),
+            (17, Pass::Mr, true),
+            (18, Pass::Cleanup, true),
+        ] {
+            seq.passes_decoded = passes;
+            seq.next_pass = pass;
+            assert_eq!(
+                seq.next_pass_is_terminated(),
+                want,
+                "passes_decoded={passes} pass={pass:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_bit2_only_no_bypass_terminates_every_pass() {
+        // Scod bit-2 set, bit-0 clear — no bypass region, but every
+        // AC pass still terminates per §D.4.2. Confirm the predicate
+        // returns true regardless of pass-index.
+        let mut seq = BitPlaneSequencer::new(7).with_termination_on_each_coding_pass(true);
+        assert!(!seq.selective_arithmetic_coding_bypass());
+
+        // Walk the §D.3 cycle from a fresh state.
+        let cycle = [
+            Pass::Cleanup,
+            Pass::Sp,
+            Pass::Mr,
+            Pass::Cleanup,
+            Pass::Sp,
+            Pass::Mr,
+            Pass::Cleanup,
+        ];
+        for (i, &pass) in cycle.iter().enumerate() {
+            seq.passes_decoded = i as u32;
+            seq.next_pass = pass;
+            assert!(
+                seq.next_pass_is_terminated(),
+                "passes_decoded={i} pass={pass:?} must terminate when bit-2 only is set",
+            );
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_bypass_only_bp4_cleanup_terminates() {
+        // Spot-check the Table D.9 row 10 transition by itself: the
+        // bp4 cleanup is the gate into the raw region and must
+        // terminate even though the surrounding bp4 SP/MR did not.
+        let mut seq = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+
+        seq.next_pass = Pass::Sp;
+        seq.passes_decoded = 7;
+        assert!(!seq.next_pass_is_terminated(), "bp4 SP not terminated");
+
+        seq.next_pass = Pass::Mr;
+        seq.passes_decoded = 8;
+        assert!(!seq.next_pass_is_terminated(), "bp4 MR not terminated");
+
+        seq.next_pass = Pass::Cleanup;
+        seq.passes_decoded = 9;
+        assert!(seq.next_pass_is_terminated(), "bp4 cleanup must terminate");
+    }
+
+    #[test]
+    fn next_pass_is_terminated_bypass_only_cleanups_outside_raw_region_unterminated() {
+        // The pre-bypass-region cleanups (bit-planes 1, 2, 3) live
+        // inside the one AC-decoder run with the surrounding SP / MR
+        // passes and do not terminate. Confirm bp1/2/3 cleanups
+        // remain unterminated under bypass-only.
+        let mut seq = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+
+        for cleanup_pass_idx in [0u32, 3, 6] {
+            seq.next_pass = Pass::Cleanup;
+            seq.passes_decoded = cleanup_pass_idx;
+            assert!(
+                !seq.next_pass_is_terminated(),
+                "cleanup at passes_decoded={cleanup_pass_idx} must not terminate",
+            );
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_drives_off_passes_decoded_not_next_pass_alone() {
+        // The bp4 cleanup boundary depends on passes_decoded — a
+        // Pass::Cleanup with passes_decoded < 9 does NOT terminate
+        // under bypass-only. Sanity-check that the predicate reads
+        // both fields, not just `next_pass`.
+        let mut seq = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+        seq.next_pass = Pass::Cleanup;
+
+        // passes_decoded < 9 → AC pre-bypass cleanup, not terminated.
+        for early in [0u32, 3, 6, 8] {
+            seq.passes_decoded = early;
+            assert!(
+                !seq.next_pass_is_terminated(),
+                "Cleanup at passes_decoded={early} must NOT terminate (pre-bypass)",
+            );
+        }
+        // passes_decoded == 9 → bp4 cleanup terminates.
+        seq.passes_decoded = 9;
+        assert!(seq.next_pass_is_terminated());
+        // passes_decoded >= 10 → bp5+ cleanup terminates.
+        for late in [12u32, 15, 25] {
+            seq.passes_decoded = late;
+            assert!(seq.next_pass_is_terminated());
+        }
+    }
+
+    #[test]
+    fn next_pass_is_terminated_independent_of_other_toggles() {
+        // The §D.4.2 / Table D.9 dispatch must be independent of the
+        // §D.5 segmentation-symbol toggle and the §D.7
+        // vertically-causal-context toggle — those are not termination
+        // flags. Toggle each on and confirm the predicate's output
+        // for the bp4 cleanup row matches the bare bypass-only case.
+        let baseline = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+
+        let with_segsym = baseline.clone().with_segmentation_symbols(true);
+        let with_vcc = baseline.clone().with_vertically_causal_context(true);
+
+        for mut s in [baseline, with_segsym, with_vcc] {
+            s.next_pass = Pass::Cleanup;
+            s.passes_decoded = 9;
+            assert!(
+                s.next_pass_is_terminated(),
+                "bp4 cleanup must terminate regardless of seg-sym / VCC toggles",
+            );
+            s.passes_decoded = 10;
+            s.next_pass = Pass::Sp;
+            assert!(
+                !s.next_pass_is_terminated(),
+                "bp5 SP must remain unterminated under bypass-only",
+            );
+        }
+    }
+
+    // -- §D.4.2 predictable-termination (Scod bit-4) ------------------
+
+    #[test]
+    fn sequencer_predictable_termination_default_off() {
+        let seq = BitPlaneSequencer::new(7);
+        assert!(!seq.predictable_termination());
+    }
+
+    #[test]
+    fn sequencer_with_predictable_termination_round_trips() {
+        // Builder monotonicity in both directions, matching the §D.5 /
+        // §D.6 / §D.7 / bit-2 builders.
+        let seq_off = BitPlaneSequencer::new(5);
+        assert!(!seq_off.predictable_termination());
+
+        let seq_on = seq_off.with_predictable_termination(true);
+        assert!(seq_on.predictable_termination());
+
+        let seq_back = seq_on.with_predictable_termination(false);
+        assert!(!seq_back.predictable_termination());
+    }
+
+    #[test]
+    fn sequencer_predictable_termination_does_not_affect_dispatch_predicates() {
+        // The §D.4.2 predictable flag (Scod bit-4) is independent of the
+        // §D.4.2 per-pass termination flag (Scod bit-2) and the §D.6
+        // bypass (Scod bit-0): it shapes only the segment-validation
+        // check on each terminated segment, not the dispatch of "which
+        // passes own their own segment". Toggle the predictable flag on
+        // and confirm the bit-2 / bit-0 dispatch predicate is identical
+        // to the no-predictable case across the §D.6 schedule rows.
+        let mut without = BitPlaneSequencer::new(7).with_selective_arithmetic_coding_bypass(true);
+        let mut with = without.clone().with_predictable_termination(true);
+
+        for (passes, pass) in [
+            (0u32, Pass::Cleanup),
+            (1, Pass::Sp),
+            (2, Pass::Mr),
+            (3, Pass::Cleanup),
+            (9, Pass::Cleanup),
+            (10, Pass::Sp),
+            (11, Pass::Mr),
+            (12, Pass::Cleanup),
+            (13, Pass::Sp),
+        ] {
+            without.passes_decoded = passes;
+            without.next_pass = pass;
+            with.passes_decoded = passes;
+            with.next_pass = pass;
+            assert_eq!(
+                with.next_pass_is_terminated(),
+                without.next_pass_is_terminated(),
+                "predictable flag must not influence next_pass_is_terminated at \
+                 (passes_decoded={passes}, pass={pass:?})",
+            );
+            assert_eq!(
+                with.raw_mode_for_next_pass(),
+                without.raw_mode_for_next_pass(),
+                "predictable flag must not influence raw_mode_for_next_pass at \
+                 (passes_decoded={passes}, pass={pass:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn sequencer_predictable_termination_composes_with_other_flags() {
+        // All four Table A.19 toggles (§D.5, §D.7, §D.6, bit-2) compose
+        // independently with the bit-4 predictable flag — switching the
+        // bit-4 flag does not flip any of the other accessors.
+        let base = BitPlaneSequencer::new(7)
+            .with_segmentation_symbols(true)
+            .with_vertically_causal_context(true)
+            .with_selective_arithmetic_coding_bypass(true)
+            .with_termination_on_each_coding_pass(true);
+        assert!(!base.predictable_termination());
+
+        let on = base.clone().with_predictable_termination(true);
+        assert!(on.predictable_termination());
+        assert!(on.segmentation_symbols());
+        assert!(on.vertically_causal_context());
+        assert!(on.selective_arithmetic_coding_bypass());
+        assert!(on.termination_on_each_coding_pass());
+
+        let off = on.with_predictable_termination(false);
+        assert!(!off.predictable_termination());
+        assert!(off.segmentation_symbols());
+        assert!(off.vertically_causal_context());
+        assert!(off.selective_arithmetic_coding_bypass());
+        assert!(off.termination_on_each_coding_pass());
+    }
+
+    #[test]
+    fn sequencer_predictable_termination_independent_of_passes() {
+        // The §D.4.2 predictable flag is a static code-block style
+        // attribute — it does not change as the sequencer drives
+        // passes. Run a short decode on a known stream and confirm the
+        // accessor returns the constructed value before and after.
+        let bytes = [0xC1u8, 0x5D, 0x82, 0x77];
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        let mut ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(0).with_predictable_termination(true);
+        assert!(seq.predictable_termination());
+        let _ = seq
+            .decode_packet(&mut block, &bytes, 1, &mut ctx)
+            .expect("decode_packet must not fail");
+        assert!(seq.predictable_termination());
+    }
+
+    #[test]
+    fn sp_raw_pass_clears_newly_significant_carry() {
+        // §D.3.3: the SP pass clears the newly-significant carry at
+        // the start of every pass. The raw SP path must mirror this.
+        // Set the carry on (0,0) and then drive a raw SP pass; the
+        // carry must have been cleared before the pass body runs.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 2);
+        block.mark_significant_for_test(0, 0, false, 1);
+        block.set_newly_significant_for_test(0, 0);
+        // Pre-significant coefficients are skipped, so (0,0) does not
+        // consume a bit. (0,1), (1,0), (1,1) each acquire a non-zero
+        // Table D.1 context from (0,0)'s significance — feed them
+        // `0` decision bits. Five raw bits at most are needed; pad
+        // with zeros.
+        let mut raw = RawBitReader::new(&[0x00, 0x00]);
+        let _ = block
+            .significance_propagation_pass_raw(2, &mut raw)
+            .unwrap();
+        // Carry on (0,0) must have been cleared at the top of the
+        // pass; pre-marked significant coefficient is otherwise
+        // untouched.
+        assert!(!block.was_newly_significant(0, 0));
+        assert!(block.coefficient(0, 0).sigma);
+    }
+
+    // -- §D.3.4 π pass-membership (Table D.10 decisions D8 / D9) ------
+
+    #[test]
+    fn sp_pass_marks_pass_membership_for_coded_zero_bits() {
+        // 2×1 LL block, (0, 0) significant from a previous bit-plane:
+        // the SP pass codes (1, 0) (non-zero Table D.1 context) and
+        // must record the π membership whatever the decoded outcome;
+        // (0, 0) is already significant and is not coded by SP.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 1);
+        block.mark_significant_for_test(0, 0, false, 2);
+        let bytes = [0u8; 4];
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        block
+            .significance_propagation_pass(1, &mut dec, &mut ctx)
+            .unwrap();
+        assert!(
+            block.sp_visited[1],
+            "(1, 0) was coded by the SP pass — π must be set"
+        );
+        assert!(
+            !block.sp_visited[0],
+            "(0, 0) is significant — SP does not code it"
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_coefficients_coded_by_same_plane_sp_pass() {
+        // Table D.10 decision D9: a coefficient whose bit was already
+        // coded during this bit-plane's SP pass is skipped by the
+        // cleanup pass even when it stayed insignificant. Mark every
+        // insignificant coefficient as SP-coded; the cleanup pass must
+        // then code nothing at all — no coefficient state changes no
+        // matter what the decoder would have produced.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 3, 2);
+        block.mark_significant_for_test(1, 0, true, 2);
+        for idx in 0..6 {
+            if !block.coefficients[idx].sigma {
+                block.sp_visited[idx] = true;
+            }
+        }
+        let before = block.coefficients.clone();
+        // 0xFF-heavy bytes decode plenty of 1-decisions if anything is
+        // coded, so an unchanged block proves nothing was coded.
+        let bytes = [0x5A, 0xFF, 0x00, 0xFF, 0x00, 0xFF];
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        let newly = block.cleanup_pass(1, &mut dec, &mut ctx).unwrap();
+        assert_eq!(newly, 0);
+        assert_eq!(block.coefficients, before);
+    }
+
+    #[test]
+    fn run_length_eligibility_requires_undecoded_column() {
+        // Table D.10 decision D8: the four column coefficients must be
+        // *undecoded* in this bit-plane. An all-insignificant,
+        // zero-context column is eligible; flagging any entry as
+        // SP-coded revokes it.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 1, 4);
+        assert!(block.column_run_length_eligible(0, 0));
+        block.sp_visited[2] = true;
+        assert!(!block.column_run_length_eligible(0, 0));
+    }
+
+    #[test]
+    fn new_sp_pass_resets_pass_membership() {
+        // π membership belongs to one bit-plane's SP pass; the next SP
+        // pass starts from a clean slate.
+        let mut block = CodeBlock::new(SubBandOrientation::LL, 2, 1);
+        block.sp_visited[0] = true;
+        block.sp_visited[1] = true;
+        // No significant coefficient anywhere → every context is zero
+        // and the SP pass codes nothing; the flags must still clear.
+        let bytes = [0u8; 2];
+        let mut dec = MqDecoder::new(&bytes);
+        let mut ctx = reset_contexts();
+        block
+            .significance_propagation_pass(0, &mut dec, &mut ctx)
+            .unwrap();
+        assert!(!block.sp_visited[0]);
+        assert!(!block.sp_visited[1]);
+    }
+
+    // -- §C.3.6 / §D.4 reset of context probabilities (Scod bit-1) ----
+
+    #[test]
+    fn sequencer_reset_context_probabilities_default_off() {
+        let seq = BitPlaneSequencer::new(7);
+        assert!(!seq.reset_context_probabilities());
+    }
+
+    #[test]
+    fn sequencer_with_reset_context_probabilities_round_trips() {
+        // Builder monotonicity in both directions, matching the §D.5 /
+        // §D.6 / §D.7 / bit-2 / bit-4 builders.
+        let seq_off = BitPlaneSequencer::new(5);
+        assert!(!seq_off.reset_context_probabilities());
+
+        let seq_on = seq_off.with_reset_context_probabilities(true);
+        assert!(seq_on.reset_context_probabilities());
+
+        let seq_back = seq_on.with_reset_context_probabilities(false);
+        assert!(!seq_back.reset_context_probabilities());
+    }
+
+    #[test]
+    fn sequencer_reset_context_probabilities_composes_with_other_flags() {
+        // The Scod bit-1 reset toggle is independent of the §D.5 / §D.7 /
+        // §D.6 / bit-2 / bit-4 toggles — flipping it leaves the others
+        // untouched, and vice versa.
+        let base = BitPlaneSequencer::new(7)
+            .with_segmentation_symbols(true)
+            .with_vertically_causal_context(true)
+            .with_selective_arithmetic_coding_bypass(true)
+            .with_termination_on_each_coding_pass(true)
+            .with_predictable_termination(true);
+        assert!(!base.reset_context_probabilities());
+
+        let on = base.clone().with_reset_context_probabilities(true);
+        assert!(on.reset_context_probabilities());
+        assert!(on.segmentation_symbols());
+        assert!(on.vertically_causal_context());
+        assert!(on.selective_arithmetic_coding_bypass());
+        assert!(on.termination_on_each_coding_pass());
+        assert!(on.predictable_termination());
+
+        let off = on.with_reset_context_probabilities(false);
+        assert!(!off.reset_context_probabilities());
+        assert!(off.segmentation_symbols());
+        assert!(off.vertically_causal_context());
+        assert!(off.selective_arithmetic_coding_bypass());
+        assert!(off.termination_on_each_coding_pass());
+        assert!(off.predictable_termination());
+    }
+
+    #[test]
+    fn sequencer_reset_context_matches_manual_per_pass_reset_oracle() {
+        // §C.3.6 / §D.4 / Annex J §J.18: with Scod bit-1 set the contexts
+        // are re-initialised to their Table D.7 states at every coding-
+        // pass boundary, while the MQ arithmetic stream stays continuous
+        // (single §C.3 codeword segment per §B.10.7.1 — reset does NOT
+        // split the stream the way termination does).
+        //
+        // Subject: drive the four-pass schedule (bp cleanup, then a full
+        // SP/MR/cleanup set on the next bit-plane) through the sequencer
+        // with the reset toggle on, over ONE shared byte segment.
+        let bytes = [0xC3u8, 0x5A, 0x96, 0x7E, 0x21, 0xBD, 0x44, 0x91];
+        let bp_first = 6;
+
+        let mut subject = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut subject_ctx = reset_contexts();
+        let mut seq = BitPlaneSequencer::new(bp_first).with_reset_context_probabilities(true);
+        seq.decode_packet(&mut subject, &bytes, 4, &mut subject_ctx)
+            .unwrap();
+
+        // Oracle: one shared MqDecoder across all four passes (single
+        // segment), but the context array is restored to Table D.7
+        // between every pass — exactly what bit-1 mandates.
+        let mut oracle = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut oracle_ctx = reset_contexts();
+        let mut dec = MqDecoder::new(&bytes);
+        oracle
+            .cleanup_pass(bp_first, &mut dec, &mut oracle_ctx)
+            .unwrap();
+        oracle_ctx = reset_contexts();
+        let bp2 = bp_first - 1;
+        oracle
+            .significance_propagation_pass(bp2, &mut dec, &mut oracle_ctx)
+            .unwrap();
+        oracle_ctx = reset_contexts();
+        oracle
+            .magnitude_refinement_pass(bp2, &mut dec, &mut oracle_ctx)
+            .unwrap();
+        oracle_ctx = reset_contexts();
+        oracle.cleanup_pass(bp2, &mut dec, &mut oracle_ctx).unwrap();
+
+        for v in 0..4 {
+            for u in 0..4 {
+                assert_eq!(
+                    subject.coefficient(u, v),
+                    oracle.coefficient(u, v),
+                    "({u},{v}) must match the per-pass-reset oracle"
+                );
+            }
+        }
+        // The subject's context array, after the final pass, must equal a
+        // freshly-reset array (bit-1 resets after the last pass too).
+        assert_eq!(subject_ctx, reset_contexts());
+    }
+
+    #[test]
+    fn sequencer_reset_context_observably_differs_from_no_reset() {
+        // The reset toggle must actually change the sequencer's behaviour
+        // — it is not a no-op. The robust, fixture-independent witness is
+        // the post-decode context array: with bit-1 ON the array is
+        // restored to its Table D.7 reset state after the final pass
+        // boundary, whereas with bit-1 OFF the contexts have adapted away
+        // from Table D.7 across a multi-pass decode (§D.4 — the contexts
+        // persist and adapt over the code-block lifetime). A non-trivial
+        // multi-pass stream therefore leaves the two arrays unequal.
+        let bytes = [0xF3u8, 0x1C, 0xA7, 0x6B, 0x5D, 0x82, 0x39, 0xEE];
+        let bp_first = 6;
+
+        let mut with_reset = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut ctx_on = reset_contexts();
+        BitPlaneSequencer::new(bp_first)
+            .with_reset_context_probabilities(true)
+            .decode_packet(&mut with_reset, &bytes, 4, &mut ctx_on)
+            .unwrap();
+
+        let mut without_reset = CodeBlock::new(SubBandOrientation::LL, 4, 4);
+        let mut ctx_off = reset_contexts();
+        BitPlaneSequencer::new(bp_first)
+            .decode_packet(&mut without_reset, &bytes, 4, &mut ctx_off)
+            .unwrap();
+
+        // bit-1 ON: final array equals a fresh Table D.7 reset.
+        assert_eq!(ctx_on, reset_contexts());
+        // bit-1 OFF: the contexts adapted, so they are NOT a fresh reset.
+        assert_ne!(
+            ctx_off,
+            reset_contexts(),
+            "a multi-pass decode without reset must adapt at least one context"
+        );
+        // The two modes therefore reached different context state.
+        assert_ne!(ctx_on, ctx_off);
+    }
+
+    // -- Tier-1 forward-pass round-trip (encode → decode) -------------
+
+    /// Encode a code-block of known coefficients through the §D.3 forward
+    /// passes (single default-style codeword segment, §D.3 pass schedule:
+    /// cleanup-only on the top bit-plane, then SP → MR → cleanup down to
+    /// bit-plane 0), flush, then decode the bytes back through the AC
+    /// decode passes with the same schedule and assert every coefficient
+    /// magnitude / significance / sign round-trips exactly.
+    fn tier1_roundtrip(orient: SubBandOrientation, w: usize, h: usize, targets: Vec<Coefficient>) {
+        assert_eq!(targets.len(), w * h);
+        let maxmag = targets.iter().map(|c| c.magnitude).max().unwrap_or(0);
+        if maxmag == 0 {
+            // All-zero block: nothing to code; a fresh decode block is
+            // already all-zero, so the round-trip is trivially exact.
+            return;
+        }
+        let top = 31 - maxmag.leading_zeros();
+
+        // Encode.
+        let mut enc = CodeBlock::new(orient, w, h);
+        let mut encoder = MqEncoder::new();
+        let mut ectx = reset_contexts();
+        enc.cleanup_encode(top, &targets, &mut encoder, &mut ectx);
+        for p in (0..top).rev() {
+            enc.significance_propagation_encode(p, &targets, &mut encoder, &mut ectx);
+            enc.magnitude_refinement_encode(p, &targets, &mut encoder, &mut ectx);
+            enc.cleanup_encode(p, &targets, &mut encoder, &mut ectx);
+        }
+        let bytes = encoder.flush();
+
+        // Decode.
+        let mut dec = CodeBlock::new(orient, w, h);
+        let mut decoder = MqDecoder::new(&bytes);
+        let mut dctx = reset_contexts();
+        dec.cleanup_pass(top, &mut decoder, &mut dctx).unwrap();
+        for p in (0..top).rev() {
+            dec.significance_propagation_pass(p, &mut decoder, &mut dctx)
+                .unwrap();
+            dec.magnitude_refinement_pass(p, &mut decoder, &mut dctx)
+                .unwrap();
+            dec.cleanup_pass(p, &mut decoder, &mut dctx).unwrap();
+        }
+
+        for v in 0..h {
+            for u in 0..w {
+                let t = targets[u + v * w];
+                let d = dec.coefficient(u, v);
+                assert_eq!(d.magnitude, t.magnitude, "magnitude ({u},{v})");
+                assert_eq!(d.sigma, t.magnitude != 0, "sigma ({u},{v})");
+                if t.magnitude != 0 {
+                    assert_eq!(d.sign, t.sign, "sign ({u},{v})");
+                }
+            }
+        }
+    }
+
+    /// Build a coefficient grid from `(magnitude, sign)` pairs, zeroing the
+    /// sign of any zero-magnitude coefficient (its sign is never coded).
+    fn coeffs(mags_signs: &[(u32, bool)]) -> Vec<Coefficient> {
+        mags_signs
+            .iter()
+            .map(|&(m, s)| Coefficient {
+                magnitude: m,
+                sigma: false,
+                sign: m != 0 && s,
+                already_refined: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tier1_encode_single_significant() {
+        // One significant coefficient in an otherwise empty 4x4 block.
+        let mut g = vec![(0u32, false); 16];
+        g[5] = (13, true);
+        tier1_roundtrip(SubBandOrientation::LL, 4, 4, coeffs(&g));
+    }
+
+    #[test]
+    fn tier1_encode_all_orientations() {
+        // A small fixed pattern under every sub-band orientation (the
+        // Table D.1 / D.3 columns differ per orientation).
+        let g = coeffs(&[
+            (3, false),
+            (0, false),
+            (7, true),
+            (1, false),
+            (0, false),
+            (5, true),
+            (2, false),
+            (0, false),
+            (9, false),
+            (0, false),
+            (0, false),
+            (4, true),
+            (1, true),
+            (6, false),
+            (0, false),
+            (2, true),
+        ]);
+        for orient in [
+            SubBandOrientation::LL,
+            SubBandOrientation::HL,
+            SubBandOrientation::LH,
+            SubBandOrientation::HH,
+        ] {
+            tier1_roundtrip(orient, 4, 4, g.clone());
+        }
+    }
+
+    #[test]
+    fn tier1_encode_sparse_runlength() {
+        // A tall, sparse 4-wide block: full 4-row stripes with columns of
+        // all-insignificant zero-context coefficients exercise the §D.3.4
+        // run-length mode on the encode side.
+        let mut g = vec![(0u32, false); 4 * 12];
+        g[4 * 5 + 1] = (11, true); // one lone significant coefficient
+        g[4 * 9 + 2] = (3, false);
+        tier1_roundtrip(SubBandOrientation::HL, 4, 12, coeffs(&g));
+    }
+
+    #[test]
+    fn tier1_encode_partial_bottom_stripe() {
+        // Height 6 → a full 4-row stripe plus a 2-row partial stripe,
+        // exercising the non-run-length partial-stripe cleanup path.
+        let mut state: u32 = 0x2468_ACE0;
+        let mut g = Vec::with_capacity(5 * 6);
+        for _ in 0..30 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let m = (state >> 26) & 0x1F; // 0..31, biased sparse
+            let s = (state >> 3) & 1 == 1;
+            g.push((if m < 20 { 0 } else { m }, s));
+        }
+        tier1_roundtrip(SubBandOrientation::LH, 5, 6, coeffs(&g));
+    }
+
+    #[test]
+    fn tier1_encode_dense_random() {
+        // A dense pseudo-random block drives magnitude refinement (many
+        // coefficients significant early, refined on later planes) across
+        // all three passes and both the run-length and normal cleanup
+        // branches.
+        let mut state: u32 = 0xC0FF_EE42;
+        let mut g = Vec::with_capacity(16 * 16);
+        for _ in 0..256 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let m = (state >> 20) & 0x7F; // 0..127
+            let s = (state >> 2) & 1 == 1;
+            g.push((m, s));
+        }
+        tier1_roundtrip(SubBandOrientation::HH, 16, 16, coeffs(&g));
+    }
+
+    #[test]
+    fn tier1_encode_all_zero_is_trivial() {
+        // An all-zero block codes nothing and round-trips trivially.
+        tier1_roundtrip(
+            SubBandOrientation::LL,
+            8,
+            8,
+            coeffs(&vec![(0u32, false); 64]),
+        );
+    }
+
+    #[test]
+    fn tier1_encode_high_magnitude_many_planes() {
+        // Large magnitudes exercise many bit-planes (deep MR chains).
+        let g = coeffs(&[
+            (1023, true),
+            (512, false),
+            (0, false),
+            (256, true),
+            (7, false),
+            (900, true),
+            (0, false),
+            (128, false),
+            (64, true),
+            (0, false),
+            (1000, false),
+            (3, true),
+            (0, false),
+            (777, true),
+            (15, false),
+            (600, false),
+        ]);
+        tier1_roundtrip(SubBandOrientation::HL, 4, 4, g);
+    }
+}

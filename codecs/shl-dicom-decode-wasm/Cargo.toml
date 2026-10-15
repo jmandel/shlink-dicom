@@ -1,0 +1,16 @@
+[package]
+name = "shl-dicom-decode-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "shl_dicom_decode::decode_file for the browser: raw C-ABI wasm exports with image metadata and frame-range decoding. Used by viewer-kit/."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+shl-dicom-decode = { path = "../shl-dicom-decode" }
+# parse.rs (included by path from shl-dicom-decode) inflates Deflated Explicit VR LE data sets.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

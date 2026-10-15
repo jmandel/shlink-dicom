@@ -1,0 +1,11 @@
+rle/gen-bench-cine-rgb8-640x480x30-pydicom-rle (RGB cine 640×480×30 (synthetic)) — native (perf record, 4s loop)
+
+self time by crate
+   61.3%  shl_dicom_decode
+   34.1%  libc/alloc
+    1.5%  shl_codec_rle
+
+self time by function (top 12)
+   61.3%  shl_dicom_decode::pixel::interleave
+   34.1%  (libc.so.6)
+    1.5%  shl_codec_rle::unpack_bits_partial

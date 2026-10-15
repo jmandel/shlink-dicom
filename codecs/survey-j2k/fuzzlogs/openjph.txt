@@ -1,0 +1,3 @@
+adapter=openjph execs=30759 {'ok': 22277, 'err': 8358, 'skipped(wrapper rejects SIZ)': 5721, 'panic': 112, 'abort': 12}
+  abort:alloc-failure  [001-abort.j2c from gen-synth-u12-65x31-openjph-q]
+  panic:params/local.rs:1474  [000-panic.j2c from gen-synth-u16-3frame-32x32-openjph-rev-rpcl]

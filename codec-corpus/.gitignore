@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+# Binaries are reproducible from scripts (discover/generate/oracle); cases.json records hashes.
+formats/*/samples/
+formats/*/oracle/
+seeds/*.dcm
+seeds/*.npy
+reports/
+prevalence/cache/
+formats/*/frames/
+formats/*/cases.lock

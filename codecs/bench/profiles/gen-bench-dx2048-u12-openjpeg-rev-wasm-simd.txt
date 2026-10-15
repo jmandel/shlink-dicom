@@ -1,0 +1,31 @@
+jpeg2000/gen-bench-dx2048-u12-openjpeg-rev (DX 2048² u12 lossless (synthetic)) — wasm-simd in Chromium 154.0.8037.97, 5 decodes in 4s (800.00 ms each), 22924 samples
+
+self time by crate
+   90.5%  hayro_jpeg2000
+    9.1%  shl_codec_jpeg2000
+    0.3%  shl_dicom_decode
+    0.1%  other
+    0.0%  (anonymous)
+    0.0%  dlmalloc
+    0.0%  alloc
+
+self time by function (top 25)
+   69.8%  hayro_jpeg2000::j2c::bitplane::decode_inner
+   15.4%  hayro_jpeg2000::j2c::bitplane::fast_path::cleanup_pass
+    9.1%  shl_codec_jpeg2000::prep::pack::<shl_codec_jpeg2000::decode_frame::{closure#4}>
+    2.5%  hayro_jpeg2000::j2c::idwt::filter_2d
+    2.4%  hayro_jpeg2000::j2c::decode::decode_tile
+    0.3%  <hayro_jpeg2000::Image>::decode
+    0.2%  shl_dicom_decode::pixel::fix_unused_bits
+    0.1%  shl_dicom_decode::decode_encapsulated
+    0.1%  measure
+    0.0%  (anonymous)
+    0.0%  serialize
+    0.0%  shl_dicom_decode::parse::read_dataset
+    0.0%  <dlmalloc::dlmalloc::Dlmalloc<dlmalloc::sys::System>>::malloc
+    0.0%  hayro_jpeg2000::j2c::tag_tree::read_tag_node
+    0.0%  <hayro_jpeg2000::j2c::tag_tree::TagNode>::build
+    0.0%  hayro_jpeg2000::j2c::build::build_decompositions::{closure#1}
+    0.0%  <alloc::string::String as core::clone::Clone>::clone
+    0.0%  jsonValue
+    0.0%  serializeAsCallArgument

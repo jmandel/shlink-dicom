@@ -1,0 +1,21 @@
+# Pure-Rust DICOM pixel codecs. Separate from the main crates/ workspace; see codec-corpus/AGENTS.md.
+[workspace]
+resolver = "2"
+members = [
+    "shl-codec-common",
+    "shl-codec-rle",
+    "shl-codec-jpeg",
+    "shl-codec-jpeg-ls",
+    "shl-codec-jpeg2000",
+    "shl-codec-htj2k",
+    "shl-dicom-decode",
+    "shl-dicom-wasm-bench",
+    "shl-dicom-decode-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+debug = 1

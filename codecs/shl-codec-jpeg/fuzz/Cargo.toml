@@ -1,0 +1,31 @@
+[package]
+name = "shl-codec-jpeg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shl-codec-jpeg = { path = ".." }
+shl-codec-common = { path = "../../shl-codec-common" }
+
+# Separate workspace so the codecs workspace never builds this (it needs nightly + libFuzzer).
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_scaled"
+path = "fuzz_targets/decode_scaled.rs"
+test = false
+doc = false
+bench = false

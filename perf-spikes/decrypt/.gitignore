@@ -1,0 +1,4 @@
+rust/target/
+out/
+fixtures/
+bench/record-decrypt.js

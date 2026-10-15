@@ -1,0 +1,8 @@
+[package]
+name = "w-openjp2-nofileio"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+openjp2 = { version = "=0.6.1", default-features = false, features = ["std"] }

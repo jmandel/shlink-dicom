@@ -1,0 +1,23 @@
+# Speed check for shl-codec-jpeg2000 and shl-codec-htj2k, native and wasm32 (see
+# codec-corpus/formats/jpeg2000/FORMAT.md, STATUS, Speed). Not part of the codecs workspace.
+[package]
+name = "shl-j2k-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+shl-codec-common = { path = "../../shl-codec-common" }
+shl-codec-jpeg2000 = { path = ".." }
+shl-codec-htj2k = { path = "../../shl-codec-htj2k" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[workspace]
+members = ["."]

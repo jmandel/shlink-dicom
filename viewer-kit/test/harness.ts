@@ -1,0 +1,313 @@
+// Browser-side harness for test/gl-vs-cpu.mjs and bench/*.mjs (driven by playwright-core).
+// Loaded by test/harness.html; exposes window.vk.
+import { DecoderPool, Priority } from "../src/decoder-pool";
+import { GlRenderer } from "../src/gl-renderer";
+import { renderCpu, defaultView, legacyPrepare, legacyToRgba, type View } from "../src/cpu-render";
+import { frameOf, defaultWindow, type DecodedImage, type Frame } from "../src/types";
+
+const WASM = new URL("../dist/shl_dicom_decode.wasm", location.href);
+const WORKER = new URL("../dist/decoder-worker.js", location.href);
+let module: WebAssembly.Module | null = null;
+
+async function wasmModule() {
+  return (module ??= await WebAssembly.compileStreaming(fetch(WASM)));
+}
+
+async function fetchBytes(url: string): Promise<ArrayBuffer> {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return r.arrayBuffer();
+}
+
+function parseNpy(buf: ArrayBuffer) {
+  const b = new Uint8Array(buf);
+  const dv = new DataView(buf);
+  const major = b[6];
+  const hlen = major === 1 ? dv.getUint16(8, true) : dv.getUint32(8, true);
+  const hs = major === 1 ? 10 : 12;
+  const header = new TextDecoder().decode(b.subarray(hs, hs + hlen));
+  const shape = /'shape':\s*\(([^)]*)\)/.exec(header)![1].split(",").map((s) => s.trim()).filter(Boolean).map(Number);
+  return { header, shape, data: b.subarray(hs + hlen) };
+}
+
+const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+const pct = (a: number[], p: number) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };
+const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
+
+/** Decode a set of instances with a pool of `workers`; returns wall time per repetition. */
+async function poolBench(opts: { urls: string[]; workers: number[]; reps: number; seedUrl?: string; mode?: "instances" | "frames" }) {
+  const files = await Promise.all(opts.urls.map(fetchBytes));
+  const totalBytes = files.reduce((a, f) => a + f.byteLength, 0);
+  const out: any[] = [];
+  let verified: string | null = null;
+  for (const n of opts.workers) {
+    const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: n });
+    const run = async () => {
+      const t0 = performance.now();
+      let imgs: DecodedImage[];
+      if (opts.mode === "frames") {
+        imgs = await Promise.all(files.map((f) => pool.decodeFrames(f.slice(0), { priority: Priority.Visible })));
+      } else {
+        imgs = await Promise.all(files.map((f) => pool.decode(f.slice(0), { priority: Priority.Prefetch })));
+      }
+      return { ms: performance.now() - t0, imgs, decodeMs: imgs.reduce((a, i) => a + i.decodeMs, 0) };
+    };
+    await run(); // warm-up: instantiation, tier-up, memory growth
+    const times: number[] = [], cpu: number[] = [];
+    let last: DecodedImage[] = [];
+    for (let r = 0; r < opts.reps; r++) {
+      const res = await run();
+      times.push(res.ms);
+      cpu.push(res.decodeMs);
+      last = res.imgs;
+    }
+    if (opts.seedUrl && verified === null) {
+      const seed = parseNpy(await fetchBytes(opts.seedUrl));
+      const per = seed.data.length / seed.shape[0];
+      let bad = 0;
+      last.forEach((img, k) => {
+        const a = new Uint8Array(img.pixels), b = seed.data.subarray(k * per, (k + 1) * per);
+        if (a.length !== b.length || a.some((v, i) => v !== b[i])) bad++;
+      });
+      verified = bad ? `${bad} of ${last.length} differ from seed` : `all ${last.length} identical to seed`;
+    }
+    out.push({ workers: n, medianMs: median(times), minMs: Math.min(...times), maxMs: Math.max(...times), decodeCpuMs: median(cpu), reps: opts.reps });
+    pool.destroy();
+  }
+  return { files: files.length, totalBytes, results: out, verified, hardwareConcurrency: navigator.hardwareConcurrency };
+}
+
+/** Render one frame with GL and with renderCpu under several views; count differing samples. */
+async function glVsCpu(opts: { url: string; frame?: number }) {
+  const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 1 });
+  try {
+    const img = await pool.decode(await fetchBytes(opts.url));
+    const k = Math.min(opts.frame ?? 0, img.frames - 1);
+    const frame = frameOf(img, k);
+    const w = defaultWindow(img, k);
+    const W = frame.columns, H = frame.rows;
+    const canvas = new OffscreenCanvas(W, H);
+    const gl = GlRenderer.create(canvas);
+    if (!gl) return { error: "no webgl2" };
+    const ramp = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) ramp.set([i, 255 - i, (i * 7) & 255, 255], i * 4);
+    const views: [string, Partial<View>][] = [
+      ["default window, 1:1, nearest", { windowCenter: w.center, windowWidth: w.width }],
+      ["default window, 1:1, linear", { windowCenter: w.center, windowWidth: w.width, interpolation: "linear" }],
+      ["narrow window (w=7), 1:1", { windowCenter: w.center, windowWidth: 7 }],
+      ["threshold window (w=1), 1:1", { windowCenter: w.center, windowWidth: 1 }],
+      ["wide window, inverted, 1:1", { windowCenter: w.center + w.width / 3, windowWidth: w.width * 3, invert: true }],
+      ["colour map, 1:1", { windowCenter: w.center, windowWidth: w.width, colormap: ramp }],
+      ["zoom 2.37 + pan, nearest", { windowCenter: w.center, windowWidth: w.width, zoom: 2.37, panX: 13.25, panY: -7.5 }],
+      ["zoom 2.37 + pan, linear", { windowCenter: w.center, windowWidth: w.width, zoom: 2.37, panX: 13.25, panY: -7.5, interpolation: "linear" }],
+      ["zoom 0.61, linear", { windowCenter: w.center, windowWidth: w.width, zoom: 0.61, interpolation: "linear" }],
+    ];
+    const rows: any[] = [];
+    for (const [name, v] of views) {
+      const view: View = { ...defaultView(), fit: "none", ...v };
+      gl.view = { ...view };
+      gl.setFrame(frame);
+      const g = gl.readPixels();
+      const c = renderCpu(frame, view, W, H);
+      let diff = 0, maxd = 0, off1 = 0;
+      for (let i = 0; i < g.length; i++) {
+        const d = Math.abs(g[i] - c[i]);
+        if (d) { diff++; if (d === 1) off1++; if (d > maxd) maxd = d; }
+      }
+      rows.push({ view: name, samples: g.length, differing: diff, off1, maxDiff: maxd });
+    }
+    // Context loss: lose, restore, and check the frame is re-uploaded and drawn identically.
+    let contextLoss = "not tested";
+    const sim = gl.simulateContextLoss();
+    if (sim) {
+      gl.view = { ...defaultView(), fit: "none", windowCenter: w.center, windowWidth: w.width };
+      const before = gl.readPixels();
+      sim.lose();
+      await new Promise((r) => setTimeout(r, 50));
+      const lostFlag = gl.contextLost;
+      sim.restore();
+      await new Promise((r) => setTimeout(r, 100));
+      const after = gl.readPixels();
+      const same = before.length === after.length && before.every((v, i) => v === after[i]);
+      contextLoss = `${lostFlag ? "lost" : "NOT lost"} → restored, redraw ${same ? "identical" : "DIFFERENT"}`;
+    }
+    const info = { rows: img.rows, columns: img.columns, bitsAllocated: img.bitsAllocated, bitsStored: img.bitsStored, signed: !!img.pixelRepresentation, photometric: img.photometric, slope: img.rescaleSlope, intercept: img.rescaleIntercept, window: w, palette: !!img.palette };
+    gl.destroy();
+    return { url: opts.url, info, rows, contextLoss, gpu: gl.gpu };
+  } finally {
+    pool.destroy();
+  }
+}
+
+/** Window/level drag: GPU uniforms + redraw vs the viewer's current CPU RGBA re-render. */
+async function wlBench(opts: { url: string; frames: number; canvas?: [number, number] }) {
+  const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 1 });
+  const img = await pool.decode(await fetchBytes(opts.url));
+  pool.destroy();
+  const frame = frameOf(img, 0);
+  const w = defaultWindow(img, 0);
+  const W = opts.canvas?.[0] ?? frame.columns, H = opts.canvas?.[1] ?? frame.rows;
+  const centres = Array.from({ length: opts.frames }, (_, i) => w.center + Math.sin(i / 7) * w.width * 0.4);
+  const widths = Array.from({ length: opts.frames }, (_, i) => w.width * (1 + 0.3 * Math.cos(i / 5)));
+
+  // GPU
+  const glCanvas = document.createElement("canvas");
+  glCanvas.width = W; glCanvas.height = H;
+  document.body.append(glCanvas);
+  const gl = GlRenderer.create(glCanvas)!;
+  gl.setFrame(frame, { windowCenter: w.center, windowWidth: w.width, fit: "contain" });
+  gl.finish();
+  const gpuWork: number[] = [], gpuFrame: number[] = [], gpuSubmit: number[] = [];
+  await nextFrame();
+  let prev = await nextFrame();
+  for (let i = 0; i < opts.frames; i++) {
+    const t0 = performance.now();
+    gl.view.windowCenter = centres[i];
+    gl.view.windowWidth = widths[i];
+    gl.draw();
+    gpuSubmit.push(performance.now() - t0);
+    gl.finish();
+    gpuWork.push(performance.now() - t0);
+    const t = await nextFrame();
+    gpuFrame.push(t - prev);
+    prev = t;
+  }
+
+  // CPU, as the viewer does it today: f32 rescaled values (once), RGBA per change, copy, putImageData.
+  const cpuCanvas = document.createElement("canvas");
+  cpuCanvas.width = frame.columns; cpuCanvas.height = frame.rows;
+  document.body.append(cpuCanvas);
+  const ctx = cpuCanvas.getContext("2d")!;
+  const values = legacyPrepare(frame);
+  const cpuWork: number[] = [], cpuFrame: number[] = [];
+  await nextFrame();
+  prev = await nextFrame();
+  for (let i = 0; i < opts.frames; i++) {
+    const t0 = performance.now();
+    const rgba = legacyToRgba(values, centres[i], widths[i], false).slice(); // rgba_bytes() copies
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer), frame.columns, frame.rows), 0, 0);
+    ctx.getImageData(0, 0, 1, 1); // make the canvas finish the upload before timing stops
+    cpuWork.push(performance.now() - t0);
+    const t = await nextFrame();
+    cpuFrame.push(t - prev);
+    prev = t;
+  }
+
+  // CPU fallback renderer of this kit (renderCpu into the same canvas size as the GPU path).
+  const fbCanvas = document.createElement("canvas");
+  fbCanvas.width = W; fbCanvas.height = H;
+  const fbCtx = fbCanvas.getContext("2d")!;
+  const fbImage = new ImageData(W, H);
+  const fbWork: number[] = [];
+  for (let i = 0; i < Math.min(opts.frames, 30); i++) {
+    const t0 = performance.now();
+    renderCpu(frame, { ...defaultView(), windowCenter: centres[i], windowWidth: widths[i] }, W, H, fbImage.data);
+    fbCtx.putImageData(fbImage, 0, 0);
+    fbWork.push(performance.now() - t0);
+  }
+  glCanvas.remove(); cpuCanvas.remove();
+  const s = (a: number[]) => ({ median: +median(a).toFixed(3), p90: +pct(a, 0.9).toFixed(3), max: +Math.max(...a).toFixed(3) });
+  return {
+    image: `${frame.columns}×${frame.rows} ${img.bitsAllocated}-bit`,
+    canvas: `${W}×${H}`,
+    gpu: { submit: s(gpuSubmit), work: s(gpuWork), frameInterval: s(gpuFrame), renderer: gl.gpu },
+    cpuCurrent: { work: s(cpuWork), frameInterval: s(cpuFrame) },
+    cpuFallback: { work: s(fbWork) },
+  };
+}
+
+/** Pool behaviour: errors, priorities, abort, transfer, dedupe, frame split. */
+async function poolSemantics(opts: { big: string; multiframe: string; unsupported: string }) {
+  const checks: { name: string; ok: boolean; detail: string }[] = [];
+  const check = (name: string, ok: boolean, detail = "") => checks.push({ name, ok, detail });
+  const pool = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 1 });
+  try {
+    // Typed errors.
+    try {
+      await pool.decode(new TextEncoder().encode("DICM? no, just text").buffer);
+      check("garbage -> InvalidDicomError", false, "decoded");
+    } catch (e: any) {
+      check("garbage -> InvalidDicomError", e?.name === "InvalidDicomError" && e.exitCode === 2, `${e?.name}: ${e?.message}`);
+    }
+    try {
+      await pool.decode(await fetchBytes(opts.unsupported));
+      check("unsupported -> UnsupportedDicomError", false, "decoded");
+    } catch (e: any) {
+      check("unsupported -> UnsupportedDicomError", e?.name === "UnsupportedDicomError" && e.exitCode === 3, `${e?.name}: ${e?.message}`);
+    }
+
+    // Transfer: the caller's buffer is detached, no copy.
+    const big = await fetchBytes(opts.big);
+    const mine = big.slice(0);
+    const p0 = pool.decode(mine);
+    check("input transferred (detached)", mine.byteLength === 0, `byteLength after decode() = ${mine.byteLength}`);
+    const img0 = await p0;
+    const copyIn = big.slice(0);
+    await pool.decode(copyIn, { copy: true });
+    check("copy: true keeps the input", copyIn.byteLength === big.byteLength);
+
+    // Priority: one worker busy, 6 prefetch queued, then a visible job: it runs next.
+    const order: string[] = [];
+    const jobs: Promise<unknown>[] = [];
+    for (let i = 0; i < 6; i++) jobs.push(pool.decode(big.slice(0), { priority: Priority.Prefetch }).then(() => order.push(`prefetch${i}`)));
+    jobs.push(pool.decode(big.slice(0), { priority: Priority.Visible }).then(() => order.push("visible")));
+    await Promise.all(jobs);
+    check("visible jumps the prefetch queue", order.indexOf("visible") <= 1, order.join(" "));
+
+    // Key dedupe and raising a queued job's priority.
+    // The worker is busy with "busy"; p0..p2 queue ahead of x; raising x moves it to the front.
+    const order2: string[] = [];
+    const busy = pool.decode(big.slice(0)).then(() => order2.push("busy"));
+    const others = [0, 1, 2].map((i) => pool.decode(big.slice(0), { priority: Priority.Prefetch }).then(() => order2.push(`p${i}`)));
+    const xFirst = pool.decode(big.slice(0), { priority: Priority.Prefetch, key: "x" });
+    const xAgain = pool.decode(big.slice(0), { priority: Priority.Visible, key: "x" });
+    const xFirstP = xFirst.then(() => order2.push("x"));
+    await Promise.all([busy, ...others, xFirstP, xAgain]);
+    check("same key -> same job, priority raised", xFirst === xAgain && order2.join(" ") === "busy x p0 p1 p2", order2.join(" "));
+
+    // Abort: queued job removed and rejected; running job rejected at once.
+    const ac = new AbortController();
+    const running = pool.decode(big.slice(0));
+    const queued = pool.decode(big.slice(0), { signal: ac.signal });
+    const before = pool.stats.queued;
+    ac.abort();
+    let aborted = "";
+    try { await queued; } catch (e: any) { aborted = e?.name; }
+    check("abort queued -> AbortError, dequeued", aborted === "AbortError" && pool.stats.queued === before - 1, `${aborted}, queued ${before} -> ${pool.stats.queued}`);
+    await running;
+    const ac2 = new AbortController();
+    const r2 = pool.decode(big.slice(0), { signal: ac2.signal });
+    await new Promise((r) => setTimeout(r, 0));
+    ac2.abort();
+    let aborted2 = "";
+    try { await r2; } catch (e: any) { aborted2 = e?.name; }
+    check("abort running -> AbortError", aborted2 === "AbortError");
+    const after = await pool.decode(big.slice(0));
+    check("pool still works after aborts", after.pixels.byteLength === img0.pixels.byteLength);
+  } finally {
+    pool.destroy();
+  }
+
+  // decodeFrames on 4 workers equals decode on one.
+  const pool4 = await DecoderPool.create({ wasm: await wasmModule(), workerUrl: WORKER, workers: 4 });
+  try {
+    const mf = await fetchBytes(opts.multiframe);
+    const whole = await pool4.decode(mf.slice(0));
+    let chunks = 0;
+    const split = await pool4.decodeFrames(mf.slice(0), { onChunk: () => chunks++ });
+    const a = new Uint8Array(whole.pixels), b = new Uint8Array(split.pixels);
+    check("decodeFrames == decode (bytes)", a.length === b.length && a.every((v, i) => v === b[i]), `${split.frames} frames in ${chunks} chunks`);
+    check("frameOffsets", split.frameOffsets.length === split.frames && split.frameOffsets[1] === split.frameBytes);
+  } finally {
+    pool4.destroy();
+  }
+  return checks;
+}
+
+async function webglInfo() {
+  const c = document.createElement("canvas");
+  const gl = GlRenderer.create(c);
+  return gl ? { gpu: gl.gpu, maxTextureSize: gl.maxTextureSize } : null;
+}
+
+(window as any).vk = { poolBench, glVsCpu, wlBench, webglInfo, poolSemantics, ready: true };

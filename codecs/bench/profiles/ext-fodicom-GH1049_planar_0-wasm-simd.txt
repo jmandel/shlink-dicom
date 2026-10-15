@@ -1,0 +1,35 @@
+uncompressed/ext-fodicom-GH1049_planar_0 (YBR_FULL_422 planar 576×456×24) — wasm-simd in Chromium 154.0.8037.97, 108 decodes in 4s (37.04 ms each), 25279 samples
+
+self time by crate
+   98.8%  shl_dicom_decode
+    1.1%  other
+    0.0%  (anonymous)
+    0.0%  core
+    0.0%  dlmalloc
+    0.0%  shl_dicom_wasm_bench
+    0.0%  alloc
+
+self time by function (top 25)
+   81.2%  shl_dicom_decode::to_rgb_if_ybr
+   14.9%  shl_dicom_decode::pixel::expand_ybr_422
+    2.6%  shl_dicom_decode::pixel::alloc
+    1.0%  measure
+    0.0%  (anonymous)
+    0.0%  bench_now
+    0.0%  now
+    0.0%  shl_dicom_decode::parse::read_dataset
+    0.0%  shl_dicom_decode::parse::read_header
+    0.0%  <dlmalloc::dlmalloc::Dlmalloc<dlmalloc::sys::System>>::unlink_chunk
+    0.0%  wasm-to-js
+    0.0%  shl_dicom_decode::parse::prepare
+    0.0%  shl_dicom_wasm_bench::decode_timed
+    0.0%  js-to-wasm:i:d
+    0.0%  <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+    0.0%  serialize
+    0.0%  evaluate
+    0.0%  decode
+    0.0%  shl_dicom_decode::decode_native
+    0.0%  <core::str::iter::SplitInternal<char>>::next
+    0.0%  bench_decode
+    0.0%  <alloc::raw_vec::RawVecInner>::finish_grow
+    0.0%  jsonValue

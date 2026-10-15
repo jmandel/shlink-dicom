@@ -1,0 +1,156 @@
+{
+ "date": "2026-10-15T12:00:29.928Z",
+ "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+ "cores": 12,
+ "loadStart": [
+  12.61,
+  9.63,
+  5.87
+ ],
+ "chromiumArgs": [
+  "--disable-renderer-backgrounding",
+  "--disable-background-timer-throttling",
+  "--enable-precise-memory-info",
+  "--ignore-gpu-blocklist",
+  "--enable-gpu",
+  "--use-gl=angle",
+  "--use-angle=gl-egl"
+ ],
+ "pool": {},
+ "multiframe": {},
+ "wl": [
+  {
+   "image": "512×512 16-bit",
+   "canvas": "512×512",
+   "gpu": {
+    "submit": {
+     "median": 0.055,
+     "p90": 0.09,
+     "max": 0.33
+    },
+    "work": {
+     "median": 2.735,
+     "p90": 4.14,
+     "max": 38.605
+    },
+    "frameInterval": {
+     "median": 16.665,
+     "p90": 16.67,
+     "max": 49.995
+    },
+    "renderer": "ANGLE (Mesa, llvmpipe (LLVM 23.1.1 256 bits), OpenGL ES 3.2)"
+   },
+   "cpuCurrent": {
+    "work": {
+     "median": 5.48,
+     "p90": 8.8,
+     "max": 167.575
+    },
+    "frameInterval": {
+     "median": 16.665,
+     "p90": 33.335,
+     "max": 166.655
+    }
+   },
+   "cpuFallback": {
+    "work": {
+     "median": 3.175,
+     "p90": 15.175,
+     "max": 27.375
+    }
+   }
+  },
+  {
+   "image": "2048×2048 16-bit",
+   "canvas": "2048×2048",
+   "gpu": {
+    "submit": {
+     "median": 0.05,
+     "p90": 0.12,
+     "max": 3.245
+    },
+    "work": {
+     "median": 32.47,
+     "p90": 41.455,
+     "max": 52.68
+    },
+    "frameInterval": {
+     "median": 33.335,
+     "p90": 50,
+     "max": 83.33
+    },
+    "renderer": "ANGLE (Mesa, llvmpipe (LLVM 23.1.1 256 bits), OpenGL ES 3.2)"
+   },
+   "cpuCurrent": {
+    "work": {
+     "median": 34.9,
+     "p90": 40.415,
+     "max": 76.065
+    },
+    "frameInterval": {
+     "median": 33.33,
+     "p90": 50,
+     "max": 66.67
+    }
+   },
+   "cpuFallback": {
+    "work": {
+     "median": 54.965,
+     "p90": 71.14,
+     "max": 72.69
+    }
+   }
+  },
+  {
+   "image": "2048×2048 16-bit",
+   "canvas": "1920×1080",
+   "gpu": {
+    "submit": {
+     "median": 0.05,
+     "p90": 0.14,
+     "max": 4.755
+    },
+    "work": {
+     "median": 22.68,
+     "p90": 26.885,
+     "max": 57.825
+    },
+    "frameInterval": {
+     "median": 16.67,
+     "p90": 33.335,
+     "max": 83.33
+    },
+    "renderer": "ANGLE (Mesa, llvmpipe (LLVM 23.1.1 256 bits), OpenGL ES 3.2)"
+   },
+   "cpuCurrent": {
+    "work": {
+     "median": 35.245,
+     "p90": 40.215,
+     "max": 66.445
+    },
+    "frameInterval": {
+     "median": 33.33,
+     "p90": 50,
+     "max": 66.66
+    }
+   },
+   "cpuFallback": {
+    "work": {
+     "median": 21.475,
+     "p90": 25.815,
+     "max": 32.16
+    }
+   }
+  }
+ ],
+ "chromium": "154.0.8037.97",
+ "webgl": {
+  "gpu": "ANGLE (Mesa, llvmpipe (LLVM 23.1.1 256 bits), OpenGL ES 3.2)",
+  "maxTextureSize": 16384
+ },
+ "loadEnd": [
+  15.31,
+  10.51,
+  6.26
+ ]
+}

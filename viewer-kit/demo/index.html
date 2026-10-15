@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>viewer-kit demo</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14171c; --line: #262b33; --text: #d7dce3; --muted: #8a94a3;
+    --accent: #5fb3ff; --warn: #ffb35f; --bad: #ff6b6b;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr auto; height: 100dvh; }
+  header, footer { background: var(--panel); border-color: var(--line); border-style: solid; border-width: 0 0 1px; padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+  footer { border-width: 1px 0 0; font-variant-numeric: tabular-nums; color: var(--muted); }
+  footer b { color: var(--text); font-weight: 600; }
+  h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  select, button { font: inherit; color: var(--text); background: #1c2027; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .group { display: flex; gap: 4px; align-items: center; }
+  main { position: relative; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; cursor: crosshair; }
+  .hud { position: absolute; pointer-events: none; padding: 8px 10px; font-variant-numeric: tabular-nums; color: #c9d1db; text-shadow: 0 1px 2px #000; white-space: pre; font-size: 12px; }
+  .tl { top: 0; left: 0; } .tr { top: 0; right: 0; text-align: right; } .bl { bottom: 0; left: 0; } .br { bottom: 0; right: 0; text-align: right; }
+  .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: transparent; }
+  .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .1s; }
+  .err { color: var(--bad); }
+  @media (max-width: 640px) { header { gap: 6px; } .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>viewer-kit</h1>
+  <label class="group">Data <select id="dataset"></select></label>
+  <div class="group" role="group" aria-label="Drag tool">
+    <button data-tool="wl" aria-pressed="true" title="Drag: horizontal = width, vertical = level">W/L</button>
+    <button data-tool="slice" aria-pressed="false" title="Drag vertically to change slice">Slice</button>
+    <button data-tool="pan" aria-pressed="false">Pan</button>
+    <button data-tool="zoom" aria-pressed="false">Zoom</button>
+  </div>
+  <div class="group">
+    <button id="interp" aria-pressed="false" title="Nearest or linear sampling">Linear</button>
+    <button id="invert" aria-pressed="false">Invert</button>
+    <button id="cpu" aria-pressed="false" title="Use the CPU fallback renderer">CPU</button>
+    <button id="reset">Reset</button>
+  </div>
+  <span class="hide-sm" style="color:var(--muted)">wheel / arrows: slice · ctrl+wheel or pinch: zoom · two fingers: pan</span>
+</header>
+<main id="stage">
+  <canvas id="view"></canvas>
+  <div class="hud tl" id="hud-tl"></div>
+  <div class="hud tr" id="hud-tr"></div>
+  <div class="hud bl" id="hud-bl"></div>
+  <div class="hud br" id="hud-br"></div>
+  <div class="progress"><div id="progress"></div></div>
+</main>
+<footer id="stats">loading…</footer>
+<script type="module" src="../dist/demo.js"></script>
+</body>
+</html>

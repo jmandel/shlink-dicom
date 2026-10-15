@@ -1,0 +1,3 @@
+transfer_syntax,photometric,bits_allocated,bits_stored,pixel_representation,samples_per_pixel,planar_configuration,frames,modality,instances,series,studies
+1.2.840.10008.1.2.1,MONOCHROME2,16,16,1,1,0,single,MR,263.0,14,1
+1.2.840.10008.1.2.4.51,MONOCHROME2,16,12,0,1,0,single,CR,3.0,3,1

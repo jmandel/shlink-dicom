@@ -1,0 +1,20 @@
+jpeg-ls/gen-bench-dx2048-u12-charls-ls (DX 2048² u12 (synthetic)) — wasm-simd in Chromium 154.0.8037.97, 28 decodes in 4s (142.86 ms each), 26248 samples
+
+self time by crate
+   98.3%  shl_codec_jpeg_ls
+    1.1%  shl_dicom_decode
+    0.3%  other
+    0.2%  __rustc
+    0.0%  (anonymous)
+    0.0%  dlmalloc
+    0.0%  shl_dicom_wasm_bench
+
+self time by function (top 8)
+   45.0%  <shl_codec_jpeg_ls::scan::Decoder>::regular
+   25.6%  shl_codec_jpeg_ls::decode_scan
+   17.0%  <shl_codec_jpeg_ls::scan::Decoder>::golomb
+    8.6%  <shl_codec_jpeg_ls::bits::BitReader>::bits
+    2.2%  shl_codec_jpeg_ls::decode_frame
+    0.8%  shl_dicom_decode::pixel::fix_unused_bits
+    0.3%  shl_dicom_decode::decode_encapsulated
+    0.3%  measure

@@ -1,0 +1,10 @@
+[package]
+name = "a-ndic"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ndic-htj2k = "=0.2.5"
+ndic-codestream = "=0.2.5"
+survey-common = { path = "../../common" }

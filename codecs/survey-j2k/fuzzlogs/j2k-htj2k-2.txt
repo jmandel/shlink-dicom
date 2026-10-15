@@ -1,0 +1,1 @@
+adapter=j2k execs=54924 {'err': 45709, 'ok': 9215, 'skipped(wrapper rejects SIZ)': 10204}

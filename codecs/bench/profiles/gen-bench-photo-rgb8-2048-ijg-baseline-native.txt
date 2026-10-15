@@ -1,0 +1,14 @@
+jpeg-dct/gen-bench-photo-rgb8-2048-ijg-baseline (RGB 2048² baseline 4:2:2 (synthetic)) — native (perf record, 4s loop)
+
+self time by crate
+   84.9%  shl_codec_jpeg
+   13.6%  libc/alloc
+
+self time by function (top 12)
+   28.0%  shl_codec_jpeg::simd::avx2::idct::<u8>
+   25.6%  shl_codec_jpeg::dct::decode_block
+   21.2%  shl_codec_jpeg::simd::rows_avx2::<u8>
+   13.6%  (libc.so.6)
+    4.6%  <shl_codec_jpeg::dct::DctDecoder<u8>>::idct_into
+    3.7%  <shl_codec_jpeg::dct::DctDecoder<u8>>::decode_scan
+    1.8%  shl_codec_jpeg::markers::decode

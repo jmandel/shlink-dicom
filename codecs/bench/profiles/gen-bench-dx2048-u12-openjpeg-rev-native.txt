@@ -1,0 +1,18 @@
+jpeg2000/gen-bench-dx2048-u12-openjpeg-rev (DX 2048² u12 lossless (synthetic)) — native (perf record, 4s loop)
+
+self time by crate
+   86.8%  hayro_jpeg2000
+    5.5%  other
+    5.2%  shl_codec_jpeg2000
+    1.0%  fearless_simd
+
+self time by function (top 25)
+   67.0%  hayro_jpeg2000::j2c::bitplane::decode_inner
+   14.8%  hayro_jpeg2000::j2c::bitplane::fast_path::cleanup_pass
+    5.2%  shl_codec_jpeg2000::prep::pack::<shl_codec_jpeg2000::decode_frame::{closure#4}>
+    3.7%  hayro_jpeg2000::j2c::idwt::filter_2d
+    2.7%  roundf
+    2.7%  floorf
+    1.2%  hayro_jpeg2000::j2c::decode::decode_tile
+    0.5%  <fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd>::vectorize::vectorize_avx2::<hayro_jpeg2000::j2c::idwt::filter...
+    0.4%  <fearless_simd::generated::avx2::Avx2 as fearless_simd::generated::simd_trait::Simd>::vectorize::vectorize_avx2::<hayro_jpeg2000::j2c::idwt::interl...

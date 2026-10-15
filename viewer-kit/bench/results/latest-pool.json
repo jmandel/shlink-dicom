@@ -1,0 +1,436 @@
+{
+ "date": "2026-10-15T12:01:12.081Z",
+ "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+ "cores": 12,
+ "loadStart": [
+  13.61,
+  10.37,
+  6.29
+ ],
+ "chromiumArgs": [
+  "--disable-renderer-backgrounding",
+  "--disable-background-timer-throttling",
+  "--enable-precise-memory-info",
+  "--ignore-gpu-blocklist",
+  "--enable-gpu"
+ ],
+ "pool": {
+  "explicit-le": {
+   "files": 100,
+   "totalBytes": 52513590,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 115.90499973297119,
+     "minMs": 113.79500007629395,
+     "maxMs": 116.17999982833862,
+     "decodeCpuMs": 17.979999542236328,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 124.71999979019165,
+     "minMs": 121.38000011444092,
+     "maxMs": 241.3949999809265,
+     "decodeCpuMs": 20.90999698638916,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 74.90500020980835,
+     "minMs": 69.40999984741211,
+     "maxMs": 87.17000007629395,
+     "decodeCpuMs": 19.63500213623047,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 71.98000001907349,
+     "minMs": 65.47499990463257,
+     "maxMs": 91.09999990463257,
+     "decodeCpuMs": 26.690001010894775,
+     "reps": 3
+    }
+   ],
+   "verified": "all 100 identical to seed",
+   "hardwareConcurrency": 12
+  },
+  "jpeg-lossless-sv1": {
+   "files": 100,
+   "totalBytes": 15271410,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 267.9299998283386,
+     "minMs": 242.11500024795532,
+     "maxMs": 328.3800001144409,
+     "decodeCpuMs": 219.95500230789185,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 195.05000019073486,
+     "minMs": 195.0149998664856,
+     "maxMs": 198.32499980926514,
+     "decodeCpuMs": 306.8700008392334,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 111.0499997138977,
+     "minMs": 108.50500011444092,
+     "maxMs": 117.32000017166138,
+     "decodeCpuMs": 319.900004863739,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 101.375,
+     "minMs": 98.58500003814697,
+     "maxMs": 107.53499984741211,
+     "decodeCpuMs": 490.5099992752075,
+     "reps": 3
+    }
+   ],
+   "verified": "all 100 identical to seed",
+   "hardwareConcurrency": 12
+  },
+  "jpeg-ls": {
+   "files": 100,
+   "totalBytes": 11205944,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 519.9099998474121,
+     "minMs": 476.9450001716614,
+     "maxMs": 579.1199998855591,
+     "decodeCpuMs": 455.864999294281,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 270.02500009536743,
+     "minMs": 255.0199999809265,
+     "maxMs": 271.05999994277954,
+     "decodeCpuMs": 462.6600008010864,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 191.00500011444092,
+     "minMs": 178.9249997138977,
+     "maxMs": 216.72499990463257,
+     "decodeCpuMs": 621.1799988746643,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 155.58999967575073,
+     "minMs": 140.80500030517578,
+     "maxMs": 179.5449995994568,
+     "decodeCpuMs": 993.2799997329712,
+     "reps": 3
+    }
+   ],
+   "verified": "all 100 identical to seed",
+   "hardwareConcurrency": 12
+  },
+  "rle": {
+   "files": 100,
+   "totalBytes": 15762462,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 108.57000017166138,
+     "minMs": 97.49500036239624,
+     "maxMs": 129.00500011444092,
+     "decodeCpuMs": 52.15000057220459,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 59.67500019073486,
+     "minMs": 52.480000019073486,
+     "maxMs": 62.22500038146973,
+     "decodeCpuMs": 51.44999885559082,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 46.78500032424927,
+     "minMs": 42.700000286102295,
+     "maxMs": 50.50999975204468,
+     "decodeCpuMs": 65.36000204086304,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 40.170000076293945,
+     "minMs": 37.09499979019165,
+     "maxMs": 47.55500030517578,
+     "decodeCpuMs": 87.0400037765503,
+     "reps": 3
+    }
+   ],
+   "verified": "all 100 identical to seed",
+   "hardwareConcurrency": 12
+  },
+  "j2k-lossless": {
+   "files": 100,
+   "totalBytes": 12408902,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 3729.3650002479553,
+     "minMs": 3572.210000038147,
+     "maxMs": 3753.5599999427795,
+     "decodeCpuMs": 3647.070002555847,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 1846.9900002479553,
+     "minMs": 1569.2199997901917,
+     "maxMs": 1916.159999847412,
+     "decodeCpuMs": 3574.4599990844727,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 878.710000038147,
+     "minMs": 855.875,
+     "maxMs": 886.2199997901917,
+     "decodeCpuMs": 3401.815001964569,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 671.6449999809265,
+     "minMs": 626.3800001144409,
+     "maxMs": 673.1500000953674,
+     "decodeCpuMs": 5064.429998397827,
+     "reps": 3
+    }
+   ],
+   "verified": "all 100 identical to seed",
+   "hardwareConcurrency": 12
+  },
+  "htj2k-lossless": {
+   "files": 100,
+   "totalBytes": 13198312,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 3413.8200001716614,
+     "minMs": 3187.0599999427795,
+     "maxMs": 3414.7750000953674,
+     "decodeCpuMs": 3344.519998073578,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 1643.5599999427795,
+     "minMs": 1488.7399997711182,
+     "maxMs": 1644.0749998092651,
+     "decodeCpuMs": 3170.3699946403503,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 965.8649997711182,
+     "minMs": 875.164999961853,
+     "maxMs": 1092.7850003242493,
+     "decodeCpuMs": 3706.4749999046326,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 692.2550001144409,
+     "minMs": 653.1449999809265,
+     "maxMs": 701.2300000190735,
+     "decodeCpuMs": 5240.150000572205,
+     "reps": 3
+    }
+   ],
+   "verified": "all 100 identical to seed",
+   "hardwareConcurrency": 12
+  }
+ },
+ "multiframe": {
+  "jpeg2000/idc-j2kr-mono2-u10of16-mf-mg-hologicinc-0294fa98": {
+   "label": "MG tomo 1890×2457 × 22, 16-bit, J2K lossless",
+   "files": 1,
+   "totalBytes": 12454516,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 4062.074999809265,
+     "minMs": 3577.5949997901917,
+     "maxMs": 4252.014999866486,
+     "decodeCpuMs": 4017.6299996376038,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 2349.545000076294,
+     "minMs": 2283.9900002479553,
+     "maxMs": 2358.1449999809265,
+     "decodeCpuMs": 4412.119999885559,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 1446.2250003814697,
+     "minMs": 1390.2650003433228,
+     "maxMs": 1505.960000038147,
+     "decodeCpuMs": 4827.594999790192,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 1110.8150000572205,
+     "minMs": 1108.7149996757507,
+     "maxMs": 1159.795000076294,
+     "decodeCpuMs": 6128.5549993515015,
+     "reps": 3
+    }
+   ],
+   "verified": null,
+   "hardwareConcurrency": 12
+  },
+  "jpeg-dct/pydicom-color3d_jpeg_baseline": {
+   "label": "US 640×480 × 120 RGB, JPEG baseline",
+   "files": 1,
+   "totalBytes": 6143990,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 472.2999997138977,
+     "minMs": 346.3600001335144,
+     "maxMs": 496.2550001144409,
+     "decodeCpuMs": 409.2550001144409,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 355.4299998283386,
+     "minMs": 235.33999967575073,
+     "maxMs": 428.9299998283386,
+     "decodeCpuMs": 504.65000009536743,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 386.75499963760376,
+     "minMs": 361.55000019073486,
+     "maxMs": 404.26000022888184,
+     "decodeCpuMs": 855.9599995613098,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 251.47499990463257,
+     "minMs": 244.30999994277954,
+     "maxMs": 291.3699998855591,
+     "decodeCpuMs": 817.4599995613098,
+     "reps": 3
+    }
+   ],
+   "verified": null,
+   "hardwareConcurrency": 12
+  },
+  "jpeg-lossless/ext-gdcm-GE_DLX-8-MONO2-Multiframe-Jpeg_Lossless": {
+   "label": "XA 512² × 67, 8-bit, JPEG lossless",
+   "files": 1,
+   "totalBytes": 5713368,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 197.66499996185303,
+     "minMs": 196.34499979019165,
+     "maxMs": 222.47499990463257,
+     "decodeCpuMs": 183.82999992370605,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 121.48499965667725,
+     "minMs": 113.39000034332275,
+     "maxMs": 124.6100001335144,
+     "decodeCpuMs": 168.625,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 95.44000005722046,
+     "minMs": 91.94000005722046,
+     "maxMs": 97.54499959945679,
+     "decodeCpuMs": 218.22499990463257,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 94.42500019073486,
+     "minMs": 76.54500007629395,
+     "maxMs": 96.70499992370605,
+     "decodeCpuMs": 278.3200001716614,
+     "reps": 3
+    }
+   ],
+   "verified": null,
+   "hardwareConcurrency": 12
+  },
+  "jpeg2000/idc-j2k-ict-u8of8-p0-mf-sm-leicabiosy-017f7beb": {
+   "label": "WSI tiles 256² × 888 RGB, J2K",
+   "files": 1,
+   "totalBytes": 8133806,
+   "results": [
+    {
+     "workers": 1,
+     "medianMs": 5385.844999790192,
+     "minMs": 4877.460000038147,
+     "maxMs": 5560.074999809265,
+     "decodeCpuMs": 5351.880000114441,
+     "reps": 3
+    },
+    {
+     "workers": 2,
+     "medianMs": 2806.404999732971,
+     "minMs": 2415.3049998283386,
+     "maxMs": 2878.260000228882,
+     "decodeCpuMs": 5268.099999427795,
+     "reps": 3
+    },
+    {
+     "workers": 4,
+     "medianMs": 1582.585000038147,
+     "minMs": 1525.8450002670288,
+     "maxMs": 1620.789999961853,
+     "decodeCpuMs": 5686.740000247955,
+     "reps": 3
+    },
+    {
+     "workers": 8,
+     "medianMs": 1083.8999996185303,
+     "minMs": 993.7849998474121,
+     "maxMs": 1130.340000152588,
+     "decodeCpuMs": 7035.739999294281,
+     "reps": 3
+    }
+   ],
+   "verified": null,
+   "hardwareConcurrency": 12
+  }
+ },
+ "wl": [],
+ "chromium": "154.0.8037.97",
+ "webgl": {
+  "gpu": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+  "maxTextureSize": 8192
+ },
+ "loadEnd": [
+  14.39,
+  12.12,
+  7.61
+ ]
+}

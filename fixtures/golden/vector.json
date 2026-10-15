@@ -1,0 +1,25 @@
+{
+  "shlKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+  "fileId": "AAECAwQFBgcICQoLDA0ODw",
+  "seriesKey": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "seriesKeyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "instanceLengths": [
+    70000,
+    80000
+  ],
+  "plaintextLength": 150000,
+  "ciphertextLength": 150048,
+  "plaintextSha256": "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b",
+  "ciphertextSha256": "f3205658d3fee29b343d3ba3ef20f52b3e66c2cb05974a93b65504866665fc4e",
+  "recordTags": [
+    "9a8421bd6740aeac5eb211cf59511b2f",
+    "4cd810f700957e87ae68edc29e40caf9",
+    "cf980ddc661684644fa17e5b00b08819"
+  ],
+  "instance2Range": {
+    "first": 1,
+    "last": 2,
+    "from": 65536,
+    "to": 150048
+  }
+}

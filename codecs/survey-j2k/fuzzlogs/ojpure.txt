@@ -1,0 +1,1 @@
+adapter=ojpure execs=22899 {'skipped(wrapper rejects SIZ)': 3875, 'err': 17864, 'ok': 5035}

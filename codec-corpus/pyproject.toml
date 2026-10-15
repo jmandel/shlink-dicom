@@ -1,0 +1,18 @@
+[project]
+name = "shl-dicom-codec-corpus"
+version = "0.1.0"
+description = "Reference ('oracle') decodes of DICOM pixel data, and a checker for candidate decoders"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=2.0",
+  "pydicom>=3.0",
+  "pylibjpeg>=2.0",
+  "pylibjpeg-libjpeg>=2.1",
+  "pylibjpeg-openjpeg>=2.3",
+  "pylibjpeg-rle>=2.0",
+  "pyjpegls>=1.4",
+  "python-gdcm>=3.0.24",
+]
+
+[tool.uv]
+package = false

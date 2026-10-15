@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shl-dicom-core",
+    "crates/shl-dicom-server",
+    "crates/shl-dicom-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"

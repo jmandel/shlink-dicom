@@ -1,0 +1,5 @@
+level,profiles,count
+series,1.2.840.10008.1.2.1|MONOCHROME2|16|16|1|1|0|single,14
+series,1.2.840.10008.1.2.4.51|MONOCHROME2|16|12|0|1|0|single,3
+study,1.2.840.10008.1.2.1|MONOCHROME2|16|16|1|1|0|single,1
+study,1.2.840.10008.1.2.4.51|MONOCHROME2|16|12|0|1|0|single,1

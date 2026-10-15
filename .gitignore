@@ -1,1 +1,9 @@
 .env
+/data/
+/target/
+/node_modules/
+/dist/
+/crates/shl-dicom-wasm/pkg/
+viewer-kit/dist/
+viewer-kit/node_modules/
+perf-spikes/**/node_modules/

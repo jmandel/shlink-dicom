@@ -1,0 +1,10 @@
+uncompressed/ext-fodicom-GH1049_planar_0 (YBR_FULL_422 planar 576×456×24) — native (perf record, 4s loop)
+
+self time by crate
+   97.5%  shl_dicom_decode
+    2.2%  libc/alloc
+
+self time by function (top 25)
+   83.7%  shl_dicom_decode::to_rgb_if_ybr
+   13.7%  shl_dicom_decode::pixel::expand_ybr_422
+    2.2%  (libc.so.6)

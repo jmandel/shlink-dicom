@@ -1,0 +1,19 @@
+[package]
+name = "shl-dicom-wasm-bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Benchmark harness: shl_dicom_decode::decode_file with stage timings, as raw wasm exports and a native bench binary. See codecs/bench/README.md."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bench-native"
+path = "src/bin/bench-native.rs"
+
+[dependencies]
+shl-dicom-decode = { path = "../shl-dicom-decode" }
+shl-codec-common = { path = "../shl-codec-common" }

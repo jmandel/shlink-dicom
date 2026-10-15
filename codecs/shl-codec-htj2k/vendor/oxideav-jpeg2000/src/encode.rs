@@ -1,0 +1,7748 @@
+//! J2K codestream **encoder** — lossless (reversible 5-3) Part-1 path.
+//!
+//! Composes the encode-side subsystems built across this crate into a
+//! working end-to-end encoder:
+//!
+//! * the §G.1.2 forward DC level shift,
+//! * the §F.4 forward 5-3 DWT cascade ([`crate::dwt::sd_2d_5x3`], one
+//!   analysis per decomposition level, recursing on the LL band),
+//! * the Annex D tier-1 forward coding passes
+//!   ([`crate::t1::CodeBlock`]'s `*_encode` methods driving
+//!   [`crate::mqenc::MqEncoder`]) — the full §D.3 schedule (cleanup on
+//!   the first non-empty bit-plane, then SP → MR → cleanup triples down
+//!   to plane 0) coding every bit-plane into one §C.3 codeword segment,
+//! * the §B.10 tier-2 packet-header writer
+//!   ([`crate::packet::encode_packet_header`]), and
+//! * the Annex A marker writers (`SOC`, `SIZ`, `COD`, `QCD`, `SOT`,
+//!   `SOD`, `EOC`) assembled in the §A.3 codestream order.
+//!
+//! The produced codestream is a Part-1 J2K stream: single tile at the
+//! reference-grid origin, one quality layer, any of the five §B.12.1
+//! progression orders ([`EncodeOptions::progression`]), maximum
+//! precincts (`PPx = PPy = 15`), optional Table A.17 MCT, and either
+//! the reversible 5-3 kernel with the "no quantization" style (T.800
+//! Table A.28 style 0 — fully **lossless**: decoding reproduces the
+//! input samples bit-exactly) or the irreversible 9-7 kernel with
+//! Annex E scalar-expounded quantisation.
+//!
+//! The geometry (tile / resolution-level / precinct / code-block
+//! enumeration) is obtained from the same [`crate::geometry`] functions
+//! the decoder uses, so the encoder's packet layout agrees with the
+//! decoder's walk by construction; packets are emitted in the order the
+//! [`crate::progression`] drivers enumerate them.
+//!
+//! ## Quantisation exponents
+//!
+//! For the reversible transform the `SPqcd` exponent for a sub-band `b`
+//! is `εb = RI + gain_b` (the Table E.1 log-gain: 0 for LL, 1 for
+//! HL / LH, 2 for HH), with `G = 2` guard bits, so the Equation E-2 bit
+//! budget is `Mb = G + εb − 1`. Each code-block's number of coded
+//! bit-planes is its actual magnitude width; the §B.10.5 zero-bit-plane
+//! count is `P = Mb − planes` and the pass count is the full-schedule
+//! `3 · planes − 2`, so the decoder's §D.3 cap holds with equality.
+//!
+//! ## Clean-room provenance
+//!
+//! Written solely from the T.800 documents under
+//! `docs/image/jpeg2000/`: Annex A marker syntax (Tables A.9 / A.13 –
+//! A.21 / A.27 – A.28 and §A.4.2 / §A.6.1 / §A.6.4), Annex B geometry
+//! and packet formation, Annex C / D entropy coding, §F.4 forward
+//! transform, §G.1.2 level shift, Annex E quantisation. Validation is
+//! a round-trip through this crate's own independently-written decoder.
+
+use crate::dwt::sd_2d_5x3;
+use crate::geometry::{
+    derive_precinct_code_blocks, derive_precinct_partition, derive_resolution_levels,
+    derive_tile_geometry, precinct_exponents_at, SubBandOrientation,
+};
+use crate::mqenc::MqEncoder;
+use crate::packet::{
+    encode_packet_header, CodeBlockPlan, PrecinctEncoderState, SubBandEncoderPlan, SubBandGeometry,
+};
+use crate::progression::{
+    cprl_packet_order, lrcp_packet_order, pcrl_packet_order, poc_volume_packet_order,
+    rlcp_packet_order, rpcl_packet_order, ComponentPositionInfo, ComponentProgressionInfo,
+    PocVolume, ResolutionPrecinctLayout,
+};
+use crate::t1::{reset_contexts, CodeBlock, Coefficient};
+use crate::{
+    Error, PocProgression, ProgressionOrder, Siz, SizComponent, MARKER_COD, MARKER_EOC, MARKER_POC,
+    MARKER_QCD, MARKER_SIZ, MARKER_SOC, MARKER_SOD, MARKER_SOT,
+};
+
+/// Guard-bit count `G` signalled in `Sqcd` (Table A.28) and used in the
+/// Equation E-2 budget `Mb = G + εb − 1`.
+const GUARD_BITS: u8 = 2;
+
+/// Table E.1 log2 gain of the reversible 5-3 sub-bands.
+fn band_gain(orientation: SubBandOrientation) -> u8 {
+    match orientation {
+        SubBandOrientation::LL => 0,
+        SubBandOrientation::HL | SubBandOrientation::LH => 1,
+        SubBandOrientation::HH => 2,
+    }
+}
+
+/// One sub-band's coefficient plane. `(x0, y0)` is the band's absolute
+/// corner (Table B.1 / Equation B-15 band coordinates — non-zero for
+/// tiles anchored away from the reference-grid origin), so band sample
+/// `(u, v)` lives at `data[(u - x0) + (v - y0) * width]`.
+struct BandPlane {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    data: Vec<i32>,
+}
+
+/// The full forward-DWT decomposition of one component: `ll` is the
+/// final `NL`-level LL band; `high[l]` holds the `(HL, LH, HH)` planes
+/// of decomposition level `l + 1` (1-based level `1..=NL`, level `NL`
+/// deepest).
+struct ComponentBands {
+    ll: BandPlane,
+    high: Vec<[BandPlane; 3]>,
+}
+
+/// One analysis level's band corners over the tile-component region
+/// `[x0, x1) × [y0, y1)` (Table B.1 / Equation B-15 with `nb = 1`): the
+/// low-pass (even absolute lattice sites) band spans
+/// `[⌈x0/2⌉, ⌈x1/2⌉)` and the high-pass (odd sites) band
+/// `[⌊x0/2⌋, ⌊x1/2⌋)` on each axis.
+struct SplitCorners {
+    lx0: u32,
+    lx1: u32,
+    hx0: u32,
+    hx1: u32,
+    ly0: u32,
+    ly1: u32,
+    hy0: u32,
+    hy1: u32,
+}
+
+fn split_corners(x0: u32, y0: u32, x1: u32, y1: u32) -> SplitCorners {
+    SplitCorners {
+        lx0: x0.div_ceil(2),
+        lx1: x1.div_ceil(2),
+        hx0: x0 / 2,
+        hx1: x1 / 2,
+        ly0: y0.div_ceil(2),
+        ly1: y1.div_ceil(2),
+        hy0: y0 / 2,
+        hy1: y1 / 2,
+    }
+}
+
+impl SplitCorners {
+    fn plane(&self, high_x: bool, high_y: bool, data: Vec<i32>) -> BandPlane {
+        let (x0, x1) = if high_x {
+            (self.hx0, self.hx1)
+        } else {
+            (self.lx0, self.lx1)
+        };
+        let (y0, y1) = if high_y {
+            (self.hy0, self.hy1)
+        } else {
+            (self.ly0, self.ly1)
+        };
+        BandPlane {
+            x0,
+            y0,
+            width: (x1 - x0) as usize,
+            height: (y1 - y0) as usize,
+            data,
+        }
+    }
+}
+
+/// §F.3.3 deinterleave: split one analysis output lattice anchored at
+/// absolute `(x0, y0)` into its four sub-band planes — a lattice site
+/// with **even absolute** coordinate belongs to the low-pass band at
+/// index `a / 2`, an odd one to the high-pass band at `(a − 1) / 2`.
+/// `map` converts (and, on the 9-7 path, quantises) each sample.
+fn deinterleave_map<T: Copy>(
+    data: &[T],
+    w: usize,
+    h: usize,
+    x0: u32,
+    y0: u32,
+    map: impl Fn(T) -> i32,
+) -> (BandPlane, BandPlane, BandPlane, BandPlane) {
+    let c = split_corners(x0, y0, x0 + w as u32, y0 + h as u32);
+    let (llw, hw) = ((c.lx1 - c.lx0) as usize, (c.hx1 - c.hx0) as usize);
+    let (llh, hh) = ((c.ly1 - c.ly0) as usize, (c.hy1 - c.hy0) as usize);
+    let mut ll = vec![0i32; llw * llh];
+    let mut hl = vec![0i32; hw * llh];
+    let mut lh = vec![0i32; llw * hh];
+    let mut hhb = vec![0i32; hw * hh];
+    for v in 0..h {
+        let ay = y0 + v as u32;
+        for u in 0..w {
+            let ax = x0 + u as u32;
+            let s = map(data[v * w + u]);
+            match (ax % 2, ay % 2) {
+                (0, 0) => ll[((ay / 2 - c.ly0) as usize) * llw + (ax / 2 - c.lx0) as usize] = s,
+                (1, 0) => hl[((ay / 2 - c.ly0) as usize) * hw + (ax / 2 - c.hx0) as usize] = s,
+                (0, 1) => lh[((ay / 2 - c.hy0) as usize) * llw + (ax / 2 - c.lx0) as usize] = s,
+                (1, 1) => hhb[((ay / 2 - c.hy0) as usize) * hw + (ax / 2 - c.hx0) as usize] = s,
+                _ => unreachable!(),
+            }
+        }
+    }
+    (
+        c.plane(false, false, ll),
+        c.plane(true, false, hl),
+        c.plane(false, true, lh),
+        c.plane(true, true, hhb),
+    )
+}
+
+/// Run the `NL`-level §F.4 forward 5-3 cascade over one DC-shifted
+/// tile-component region anchored at absolute `(x0, y0)` (the §F.4
+/// lifting parity follows the absolute coordinates, so tiles anchored
+/// off the origin analyse exactly as the decoder's synthesis expects).
+fn forward_cascade(
+    samples: Vec<i32>,
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    nl: u8,
+) -> ComponentBands {
+    let mut cur = BandPlane {
+        x0,
+        y0,
+        width,
+        height,
+        data: samples,
+    };
+    let mut high = Vec::with_capacity(nl as usize);
+    for _lev in 1..=nl {
+        if cur.width == 0 || cur.height == 0 {
+            // §B.5 degenerate level (a tiny tile ran out of samples):
+            // every sub-band of this and deeper levels is empty, but
+            // the corners still follow the Table B.1 splits.
+            let c = split_corners(
+                cur.x0,
+                cur.y0,
+                cur.x0 + cur.width as u32,
+                cur.y0 + cur.height as u32,
+            );
+            high.push([
+                c.plane(true, false, Vec::new()),
+                c.plane(false, true, Vec::new()),
+                c.plane(true, true, Vec::new()),
+            ]);
+            cur = c.plane(false, false, Vec::new());
+            continue;
+        }
+        let a = sd_2d_5x3(
+            cur.data,
+            cur.width,
+            cur.height,
+            cur.x0 as i32,
+            cur.y0 as i32,
+        )
+        .expect("analysis dims match by construction");
+        let (ll, hl, lh, hh) = deinterleave_map(&a.data, a.width, a.height, cur.x0, cur.y0, |s| s);
+        high.push([hl, lh, hh]);
+        cur = ll;
+    }
+    ComponentBands { ll: cur, high }
+}
+
+/// Run the `NL`-level §F.4 forward **9-7** cascade over one DC-shifted
+/// tile-component region anchored at absolute `(x0, y0)`, quantising
+/// every emitted sub-band per Annex E with the uniform
+/// `Δb = 2^(−fine_bits)` step (Equation E-1
+/// `qb = sign(y) · ⌊|y| / Δb⌋`). The recursion continues on the
+/// **unquantised** real LL (only the emitted bands quantise), so deeper
+/// levels see full precision.
+fn forward_cascade_9x7(
+    samples: Vec<f64>,
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    nl: u8,
+    fine_bits: u8,
+) -> ComponentBands {
+    let scale = f64::from(1u32 << fine_bits);
+    let q = move |y: f64| -> i32 {
+        let m = (y.abs() * scale).floor() as i32;
+        if y < 0.0 {
+            -m
+        } else {
+            m
+        }
+    };
+    struct RealPlane {
+        x0: u32,
+        y0: u32,
+        width: usize,
+        height: usize,
+        data: Vec<f64>,
+    }
+    let mut cur = RealPlane {
+        x0,
+        y0,
+        width,
+        height,
+        data: samples,
+    };
+    let mut high = Vec::with_capacity(nl as usize);
+    for _lev in 1..=nl {
+        if cur.width == 0 || cur.height == 0 {
+            // §B.5 degenerate level — same handling as the 5-3 path.
+            let c = split_corners(
+                cur.x0,
+                cur.y0,
+                cur.x0 + cur.width as u32,
+                cur.y0 + cur.height as u32,
+            );
+            high.push([
+                c.plane(true, false, Vec::new()),
+                c.plane(false, true, Vec::new()),
+                c.plane(true, true, Vec::new()),
+            ]);
+            cur = RealPlane {
+                x0: c.lx0,
+                y0: c.ly0,
+                width: (c.lx1 - c.lx0) as usize,
+                height: (c.ly1 - c.ly0) as usize,
+                data: Vec::new(),
+            };
+            continue;
+        }
+        let a = crate::dwt::sd_2d_9x7(
+            cur.data,
+            cur.width,
+            cur.height,
+            cur.x0 as i32,
+            cur.y0 as i32,
+        )
+        .expect("analysis dims match by construction");
+        let (_llq, hl, lh, hh) = deinterleave_map(&a.data, a.width, a.height, cur.x0, cur.y0, q);
+        // Real-valued LL for the next level (even absolute lattice
+        // sites on both axes).
+        let c = split_corners(
+            cur.x0,
+            cur.y0,
+            cur.x0 + a.width as u32,
+            cur.y0 + a.height as u32,
+        );
+        let (llw, llh) = ((c.lx1 - c.lx0) as usize, (c.ly1 - c.ly0) as usize);
+        let mut ll = vec![0f64; llw * llh];
+        for v in 0..a.height {
+            let ay = cur.y0 + v as u32;
+            if ay % 2 != 0 {
+                continue;
+            }
+            for u in 0..a.width {
+                let ax = cur.x0 + u as u32;
+                if ax % 2 != 0 {
+                    continue;
+                }
+                ll[((ay / 2 - c.ly0) as usize) * llw + (ax / 2 - c.lx0) as usize] =
+                    a.data[v * a.width + u];
+            }
+        }
+        high.push([hl, lh, hh]);
+        cur = RealPlane {
+            x0: c.lx0,
+            y0: c.ly0,
+            width: llw,
+            height: llh,
+            data: ll,
+        };
+    }
+    // Quantise the final LL.
+    let ll = BandPlane {
+        x0: cur.x0,
+        y0: cur.y0,
+        width: cur.width,
+        height: cur.height,
+        data: cur.data.iter().map(|&y| q(y)).collect(),
+    };
+    ComponentBands { ll, high }
+}
+
+/// One sub-band's boolean ROI-mask plane, with the same Table B.1
+/// corners as the matching [`BandPlane`].
+struct MaskPlane {
+    x0: u32,
+    y0: u32,
+    width: usize,
+    height: usize,
+    data: Vec<bool>,
+}
+
+impl MaskPlane {
+    fn from_corners(c: &SplitCorners, high_x: bool, high_y: bool) -> Self {
+        let (x0, x1) = if high_x {
+            (c.hx0, c.hx1)
+        } else {
+            (c.lx0, c.lx1)
+        };
+        let (y0, y1) = if high_y {
+            (c.hy0, c.hy1)
+        } else {
+            (c.ly0, c.ly1)
+        };
+        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        MaskPlane {
+            x0,
+            y0,
+            width: w,
+            height: h,
+            data: vec![false; w * h],
+        }
+    }
+}
+
+/// The per-band ROI masks of one component — same shape as
+/// [`ComponentBands`].
+struct MaskBands {
+    ll: MaskPlane,
+    high: Vec<[MaskPlane; 3]>,
+}
+
+/// §H.3.1 one-axis mask expansion: for a needed sample at absolute
+/// lattice coordinate `a` (pair index `n = ⌊a/2⌋`), the coefficients
+/// the §F.4 synthesis reads are `L(n)…L(n+1)`, `H(n−1)…H(n+1)` with the
+/// 5-3 kernel (H.3.1.1) and `L(n−1)…L(n+2)`, `H(n−2)…H(n+2)` with the
+/// 9-7 kernel (H.3.1.2). Returns the (low, high) index reach around
+/// `n`, in band-index space.
+fn roi_reach(reversible: bool) -> ((i64, i64), (i64, i64)) {
+    if reversible {
+        ((0, 1), (-1, 1))
+    } else {
+        ((-1, 2), (-2, 2))
+    }
+}
+
+/// Run one 2-D §H.3.1 mask-expansion level over a boolean mask anchored
+/// at absolute `(x0, y0)`, producing the four sub-band masks with the
+/// same Table B.1 corners the transform's `deinterleave_map` yields.
+fn roi_mask_split(
+    mask: &[bool],
+    w: usize,
+    h: usize,
+    x0: u32,
+    y0: u32,
+    reversible: bool,
+) -> (MaskPlane, MaskPlane, MaskPlane, MaskPlane) {
+    let c = split_corners(x0, y0, x0 + w as u32, y0 + h as u32);
+    let ((lo_a, lo_b), (hi_a, hi_b)) = roi_reach(reversible);
+    let (llw, hw) = ((c.lx1 - c.lx0) as usize, (c.hx1 - c.hx0) as usize);
+    // Pass 1 — expand each row along x into low/high column masks.
+    let mut low_x = vec![false; llw * h];
+    let mut high_x = vec![false; hw * h];
+    for v in 0..h {
+        for u in 0..w {
+            if !mask[v * w + u] {
+                continue;
+            }
+            let n = i64::from(x0 + u as u32) >> 1;
+            for i in n + lo_a..=n + lo_b {
+                let idx = i - i64::from(c.lx0);
+                if (0..llw as i64).contains(&idx) {
+                    low_x[v * llw + idx as usize] = true;
+                }
+            }
+            for i in n + hi_a..=n + hi_b {
+                let idx = i - i64::from(c.hx0);
+                if (0..hw as i64).contains(&idx) {
+                    high_x[v * hw + idx as usize] = true;
+                }
+            }
+        }
+    }
+    // Pass 2 — expand each column along y.
+    let mut ll = MaskPlane::from_corners(&c, false, false);
+    let mut hl = MaskPlane::from_corners(&c, true, false);
+    let mut lh = MaskPlane::from_corners(&c, false, true);
+    let mut hh = MaskPlane::from_corners(&c, true, true);
+    let split_y = |cols: &[bool], colw: usize, low: &mut MaskPlane, high: &mut MaskPlane| {
+        for v in 0..h {
+            for u in 0..colw {
+                if !cols[v * colw + u] {
+                    continue;
+                }
+                let n = i64::from(y0 + v as u32) >> 1;
+                for i in n + lo_a..=n + lo_b {
+                    let idx = i - i64::from(c.ly0);
+                    if (0..low.height as i64).contains(&idx) {
+                        low.data[idx as usize * colw + u] = true;
+                    }
+                }
+                for i in n + hi_a..=n + hi_b {
+                    let idx = i - i64::from(c.hy0);
+                    if (0..high.height as i64).contains(&idx) {
+                        high.data[idx as usize * colw + u] = true;
+                    }
+                }
+            }
+        }
+    };
+    split_y(&low_x, llw, &mut ll, &mut lh);
+    split_y(&high_x, hw, &mut hl, &mut hh);
+    (ll, hl, lh, hh)
+}
+
+/// Build the §H.3.1 wavelet-domain ROI masks for one tile-component:
+/// seed the image-domain mask from the reference-grid rectangle mapped
+/// onto the component grid (§B.2 / §H.3.2 — a component sample `(cx,
+/// cy)` is inside when `cx ∈ [⌈rx0/XRsiz⌉, ⌈rx1/XRsiz⌉)` and likewise
+/// vertically), then trace the `NL`-level cascade backwards level by
+/// level, mirroring [`forward_cascade`]'s geometry.
+#[allow(clippy::too_many_arguments)]
+fn roi_mask_cascade(
+    rect: &RoiRegion,
+    tcx0: u32,
+    tcy0: u32,
+    tcx1: u32,
+    tcy1: u32,
+    xr: u32,
+    yr: u32,
+    nl: u8,
+    reversible: bool,
+) -> MaskBands {
+    let (w, h) = ((tcx1 - tcx0) as usize, (tcy1 - tcy0) as usize);
+    let mut data = vec![false; w * h];
+    let (rx0, rx1) = (rect.x0.div_ceil(xr), rect.x1.div_ceil(xr));
+    let (ry0, ry1) = (rect.y0.div_ceil(yr), rect.y1.div_ceil(yr));
+    for v in 0..h {
+        let cy = tcy0 + v as u32;
+        if !(ry0..ry1).contains(&cy) {
+            continue;
+        }
+        for u in 0..w {
+            let cx = tcx0 + u as u32;
+            if (rx0..rx1).contains(&cx) {
+                data[v * w + u] = true;
+            }
+        }
+    }
+    let mut cur = MaskPlane {
+        x0: tcx0,
+        y0: tcy0,
+        width: w,
+        height: h,
+        data,
+    };
+    let mut high = Vec::with_capacity(nl as usize);
+    for _lev in 1..=nl {
+        let (ll, hl, lh, hh) =
+            roi_mask_split(&cur.data, cur.width, cur.height, cur.x0, cur.y0, reversible);
+        high.push([hl, lh, hh]);
+        cur = ll;
+    }
+    MaskBands { ll: cur, high }
+}
+
+/// One tier-1-encoded code-block ready for packet assembly.
+struct EncodedBlock {
+    /// §B.10.5 zero-bit-plane count `P = Mb − planes`.
+    zero_bit_planes: u32,
+    /// §B.10.6 coding passes (`3 · planes − 2`), zero for an all-zero
+    /// (not included) block.
+    coding_passes: u32,
+    /// The single §C.3 codeword segment.
+    bytes: Vec<u8>,
+    /// Annex J.13.4 per-pass truncation rates `R^n` (byte length of a
+    /// terminated segment covering passes `1..=n`), one entry per pass;
+    /// empty when the caller did not request them (single layer).
+    pass_rates: Vec<u32>,
+    /// Annex J.13.4 per-pass distortions `D^n` (unweighted squared
+    /// error under the midpoint-reconstruction model), one entry per
+    /// pass; empty unless rate control requested them.
+    pass_dist: Vec<f64>,
+    /// `D^0` — distortion of skipping the block entirely (Σ m²).
+    d0: f64,
+    /// J.13.4.1 sub-band weight γ² (synthesis-waveform L2 norm squared,
+    /// both axes), folded into the rate-distortion slopes.
+    weight: f64,
+    /// Global code-block ordinal — indexes the rate-control truncation
+    /// vector.
+    ordinal: usize,
+    /// Re-encode context for exact §C.2.9 termination at a truncation
+    /// point: `(orientation, width, height, coefficients, mb)`. Only
+    /// kept when rate control is active.
+    reencode: Option<(SubBandOrientation, usize, usize, Vec<Coefficient>, u32)>,
+    /// `Some(Lcup)` for a T.814 HT code-block: `bytes` holds the HT
+    /// cleanup segment (`Lcup` bytes) followed by the optional
+    /// refinement segment, and `coding_passes` is `Z_blk`.
+    ht_cleanup_len: Option<usize>,
+    /// `Some` for a T.814 **MULTIHT** HT code-block (quality layers):
+    /// `bytes` concatenates one HT cleanup segment per §B.1 HT set and
+    /// each layer carries one set (after the leading placeholder
+    /// layers). Mutually exclusive with `ht_cleanup_len`.
+    ht_multi: Option<HtMultiPlan>,
+}
+
+/// T.814 §B.1 MULTIHT emission plan for one HT code-block.
+///
+/// The block's quality-layer split is structural rather than
+/// rate-driven: layer `placeholder_layers + i` carries HT set `i`,
+/// whose cleanup pass re-codes the block one magnitude bit-plane finer
+/// than set `i − 1` (§B.3 — `S_blk` grows by one per set), and each of
+/// the first `placeholder_layers` layers carries a placeholder triple
+/// (three coding passes, one zero-length codeword segment) so that a
+/// shallow block's first real set still lands on the layer whose
+/// bit-plane depth it codes. Sets before the last signal their unused
+/// SigProp + MagRef passes with a zero-length refinement segment
+/// (§B.3 NOTE 3, `Z_blk = 1`).
+struct HtMultiPlan {
+    /// Leading layers that carry only a §B.1 placeholder triple.
+    placeholder_layers: u32,
+    /// Per-set HT cleanup segment length; `EncodedBlock::bytes`
+    /// concatenates the segments in set order.
+    cleanup_lens: Vec<usize>,
+}
+
+/// Linearised 5-3 synthesis of one interleaved level (T.800 §F.4.4
+/// lifting steps with the rounding terms dropped), used only for the
+/// Annex J.13.4.1 sub-band weight computation. `y[2n]` carries the
+/// low-pass and `y[2n+1]` the high-pass coefficients (§F.3.1, `i0 = 0`);
+/// boundary handling is the same §F.3.7 PSEO the real transform uses.
+fn synth_5x3_linear(y: &[f64]) -> Vec<f64> {
+    let n = y.len() as i32;
+    let at = |v: &[f64], i: i32| v[crate::dwt::pseo(i, 0, n) as usize];
+    let mut x = vec![0.0f64; y.len()];
+    let mut i = 0i32;
+    while i < n {
+        x[i as usize] = at(y, i) - 0.25 * (at(y, i - 1) + at(y, i + 1));
+        i += 2;
+    }
+    let mut i = 1i32;
+    while i < n {
+        let left = crate::dwt::pseo(i - 1, 0, n) as usize;
+        let right = crate::dwt::pseo(i + 1, 0, n) as usize;
+        x[i as usize] = at(y, i) + 0.5 * (x[left] + x[right]);
+        i += 2;
+    }
+    x
+}
+
+/// 1-D synthesis-waveform L2 norm of a coefficient sitting `levels`
+/// decompositions deep, entering the cascade on the high-pass branch
+/// when `first_high` (T.800 Annex J.13.4.1: "computed from the L2 norm
+/// of the relevant sub-band's wavelet synthesis waveform"). Runs an
+/// impulse through this crate's own synthesis (`idwt_1d_9x7`, or the
+/// linearised 5-3 above) level by level; deeper than 10 levels the
+/// norm has converged geometrically, so the depth is clamped.
+fn synth_gain_1d(levels: u8, first_high: bool, reversible: bool) -> f64 {
+    let levels = levels.min(10);
+    if levels == 0 {
+        return 1.0;
+    }
+    let mut cur = vec![0.0f64; 16];
+    cur[8] = 1.0;
+    for lev in 0..levels {
+        let n = cur.len();
+        let mut y = vec![0.0f64; 2 * n];
+        let odd = lev == 0 && first_high;
+        for (i, &c) in cur.iter().enumerate() {
+            y[2 * i + usize::from(odd)] = c;
+        }
+        if reversible {
+            cur = synth_5x3_linear(&y);
+        } else {
+            let mut x = vec![0.0f64; 2 * n];
+            crate::dwt::idwt_1d_9x7(&y, &mut x, 0, (2 * n) as i32)
+                .expect("power-of-two impulse lattice");
+            cur = x;
+        }
+    }
+    cur.iter().map(|v| v * v).sum::<f64>().sqrt()
+}
+
+/// J.13.4.1 sub-band weight γ² for band (r, orientation) of an
+/// `NL`-level decomposition: the separable product of the two 1-D
+/// synthesis-waveform norms, squared.
+fn band_synthesis_weight(reversible: bool, nl: u8, r: u8, orientation: SubBandOrientation) -> f64 {
+    let levels = if r == 0 { nl } else { nl - r + 1 };
+    let high_x = matches!(orientation, SubBandOrientation::HL | SubBandOrientation::HH);
+    let high_y = matches!(orientation, SubBandOrientation::LH | SubBandOrientation::HH);
+    let g = synth_gain_1d(levels, high_x, reversible) * synth_gain_1d(levels, high_y, reversible);
+    g * g
+}
+
+/// Tier-1 encode one code-block's coefficients through the full §D.3
+/// schedule into one codeword segment. `mb` is the Equation E-2 budget
+/// for the block's sub-band. Returns `None` for an all-zero block (not
+/// included in any packet).
+///
+/// What [`encode_code_block`] captures at each pass boundary, plus an
+/// optional cap on the coded pass count (used by the PCRD re-encode to
+/// terminate exactly at a truncation point).
+#[derive(Debug, Clone, Copy, Default)]
+struct PassCapture {
+    /// Record the Annex J.13.4 truncation-point rates `R^n` — for each
+    /// pass `n` (1-based) the byte length a §C.2.9-terminated segment
+    /// covering passes `1..=n` would have, obtained by flushing a
+    /// snapshot of the encoder state at that pass boundary. Multi-layer
+    /// assembly cuts the final segment at these lengths, so a decoder
+    /// that stops after an intermediate layer holds (almost exactly)
+    /// the terminated prefix the snapshot would have produced.
+    rates: bool,
+    /// Record the Annex J.13.4 per-pass distortions `D^n`.
+    dist: bool,
+    /// Encode only the first `n` passes of the §D.3 schedule.
+    max_passes: Option<u32>,
+    /// §D.6 selective arithmetic-coding bypass (Table A.19 bit 0): the
+    /// SP / MR passes from absolute pass index 10 write raw bits and
+    /// segments terminate per Table D.9.
+    bypass: bool,
+    /// §D.4.2 termination on each coding pass (Table A.19 bit 2).
+    terminate_all: bool,
+    /// Table A.19 bit 1: reset the Annex D context states to Table
+    /// D.7 at the end of every coding pass.
+    reset_probabilities: bool,
+    /// Table A.19 bit 3: §D.7 vertically causal context formation.
+    vertically_causal: bool,
+    /// Table A.19 bit 4: §D.4.2 predictable termination (every
+    /// codeword-segment termination — MQ and raw — is reproducible).
+    predictable_termination: bool,
+    /// Table A.19 bit 5: §D.5 segmentation symbol after each cleanup
+    /// pass.
+    segmentation_symbols: bool,
+}
+
+impl PassCapture {
+    /// The Table A.19 style bits of `params` (the segment-shaping
+    /// bits 0 / 2 and the coder-shaping bits 1 / 3 / 4 / 5).
+    fn styles(params: &EncodeOptions) -> Self {
+        PassCapture {
+            bypass: params.bypass,
+            terminate_all: params.terminate_all,
+            reset_probabilities: params.reset_probabilities,
+            vertically_causal: params.vertically_causal,
+            predictable_termination: params.predictable_termination,
+            segmentation_symbols: params.segmentation_symbols,
+            ..PassCapture::default()
+        }
+    }
+}
+
+fn encode_code_block(
+    orientation: SubBandOrientation,
+    width: usize,
+    height: usize,
+    targets: &[Coefficient],
+    mb: u32,
+    capture: PassCapture,
+) -> Result<Option<EncodedBlock>, Error> {
+    let pass_rates = capture.rates;
+    let pass_dist = capture.dist;
+    let max_passes = capture.max_passes;
+    let maxmag = targets.iter().map(|c| c.magnitude).max().unwrap_or(0);
+    if maxmag == 0 {
+        return Ok(None);
+    }
+    let planes = 32 - maxmag.leading_zeros();
+    if planes > mb {
+        // The εb / guard-bit budget cannot represent this coefficient —
+        // with the §E.1.1 reversible exponents this cannot arise from
+        // in-range input samples, so surface it as a defensive error
+        // rather than emitting a stream the decoder would reject.
+        return Err(Error::NotImplemented);
+    }
+    let top = planes - 1;
+    let total_passes = 3 * planes - 2;
+    let limit = max_passes.unwrap_or(total_passes).min(total_passes);
+    if limit == 0 {
+        return Ok(None);
+    }
+    let mut enc_block = CodeBlock::new(orientation, width, height)
+        .with_vertically_causal_context(capture.vertically_causal);
+    let encoder = MqEncoder::new();
+    let mut ctx = reset_contexts();
+    let mut rates: Vec<u32> = Vec::new();
+    let mut dists: Vec<f64> = Vec::new();
+    // Annex J.13.4 distortion under the §E.1.1.2 midpoint (r = 0.5)
+    // reconstruction model: after `done` completed planes a
+    // coefficient's magnitude is known down to plane `t = planes −
+    // done`, so the decoder reconstructs `known + 2^(t−1)` (or exactly
+    // `m` once t = 0, or 0 while still insignificant).
+    let dist_of = |blk: &CodeBlock| -> f64 {
+        let bits = blk.decoded_bits_raw();
+        let mut d = 0.0;
+        for (i, c) in targets.iter().enumerate() {
+            let m = c.magnitude;
+            if m == 0 {
+                continue;
+            }
+            let done = bits[i].min(planes);
+            let t = planes - done;
+            let known = (m >> t) << t;
+            let rec = if known == 0 {
+                0.0
+            } else if t == 0 {
+                f64::from(m)
+            } else {
+                f64::from(known) + f64::from(1u32 << (t - 1))
+            };
+            let e = f64::from(m) - rec;
+            d += e * e;
+        }
+        d
+    };
+    // The coding sink. With the §D.6 selective-AC-bypass style the
+    // SP / MR passes from absolute pass index 10 write raw (lazy) bits
+    // and segment terminations follow Table D.9; with the §D.4.2
+    // "termination on each coding pass" style every pass is its own
+    // terminated segment. The Annex D contexts persist across segment
+    // boundaries (only the coder terminates and restarts) — exactly the
+    // model the decoder's tier-1 driver applies.
+    enum Sink {
+        Mq(MqEncoder),
+        Raw(crate::t1::RawBitWriter),
+    }
+    let styled = capture.bypass || capture.terminate_all;
+    // §D.4.2: with the predictable-termination style every segment
+    // (and every rate snapshot, which models a segment ending there)
+    // terminates through the reproducible procedure instead of FLUSH;
+    // raw segments pad with the §D.6 alternating fill.
+    let predictable = capture.predictable_termination;
+    let flush_mq = |e: MqEncoder| -> Vec<u8> {
+        if predictable {
+            e.flush_predictable()
+        } else {
+            e.flush()
+        }
+    };
+    let finish_raw = |w: crate::t1::RawBitWriter| -> Vec<u8> {
+        if predictable {
+            w.finish_predictable()
+        } else {
+            w.finish()
+        }
+    };
+    let mut sink = Sink::Mq(encoder);
+    let mut committed: Vec<u8> = Vec::new();
+    let mut coded = 0u32;
+    for i in 0..limit {
+        // Plane and §D.3 role of absolute pass i: pass 0 is the first
+        // cleanup on the top plane; then SP / MR / cleanup triples.
+        let p = top - i.div_ceil(3);
+        let raw = capture.bypass && crate::packet::bypass_pass_is_raw(i);
+        match (&mut sink, raw) {
+            (Sink::Mq(e), false) => {
+                if i == 0 || (i - 1) % 3 == 2 {
+                    enc_block.cleanup_encode(p, targets, e, &mut ctx);
+                    if capture.segmentation_symbols {
+                        // §D.5: the symbol closes every bit-plane,
+                        // coded before any pass-boundary reset.
+                        crate::t1::encode_segmentation_symbol(e, &mut ctx);
+                    }
+                } else if (i - 1) % 3 == 0 {
+                    enc_block.significance_propagation_encode(p, targets, e, &mut ctx);
+                } else {
+                    enc_block.magnitude_refinement_encode(p, targets, e, &mut ctx);
+                }
+            }
+            (Sink::Raw(w), true) => {
+                if (i - 1) % 3 == 0 {
+                    enc_block.significance_propagation_encode_raw(p, targets, w);
+                } else {
+                    enc_block.magnitude_refinement_encode_raw(p, targets, w);
+                }
+            }
+            _ => unreachable!("sink type switches only at terminated boundaries"),
+        }
+        coded += 1;
+        if capture.reset_probabilities {
+            // Table A.19 bit 1: Table D.7 states at every pass end —
+            // the decoder resets after each pass regardless of the
+            // sink, so the raw passes reset too.
+            ctx = reset_contexts();
+        }
+        if pass_rates {
+            // Mid-span truncation estimate (§D.4.3): always the §C.2.9
+            // FLUSH length. The §D.4.2 predictable procedure applies
+            // only to *real* terminations — its length can run a byte
+            // short of what a prefix decode of the ongoing segment
+            // needs, which starved layer-limited decodes when the
+            // predictable style was set without per-pass termination
+            // (fuzz find, r452). Boundaries the coder actually
+            // terminates are pinned to the exact committed length
+            // below, so this estimate never mislabels them.
+            let pending = match &sink {
+                Sink::Mq(e) => e.clone().flush().len(),
+                Sink::Raw(w) => finish_raw(w.clone()).len(),
+            };
+            rates.push((committed.len() + pending) as u32);
+        }
+        if pass_dist {
+            dists.push(dist_of(&enc_block));
+        }
+        if coded == limit {
+            break;
+        }
+        if styled && crate::packet::bypass_pass_terminated(i, capture.terminate_all) {
+            // Terminate the current codeword segment and open the sink
+            // the next pass needs (Table D.9 / §D.4.2).
+            let old = std::mem::replace(&mut sink, Sink::Mq(MqEncoder::new()));
+            committed.extend_from_slice(&match old {
+                Sink::Mq(e) => flush_mq(e),
+                Sink::Raw(w) => finish_raw(w),
+            });
+            if pass_rates {
+                // The pass that just terminated has an *exact* rate:
+                // the committed byte count. Pin it over the snapshot —
+                // §B.10.7.2 segment attribution derives from these
+                // boundaries, so they must match the emitted bytes.
+                *rates.last_mut().expect("pass recorded") = committed.len() as u32;
+            }
+            if capture.bypass && crate::packet::bypass_pass_is_raw(i + 1) {
+                sink = Sink::Raw(crate::t1::RawBitWriter::new());
+            }
+        }
+    }
+    debug_assert_eq!(coded, limit);
+    let mut bytes = committed;
+    bytes.extend_from_slice(&match sink {
+        Sink::Mq(e) => flush_mq(e),
+        Sink::Raw(w) => finish_raw(w),
+    });
+    if pass_rates {
+        // The last snapshot and the final flush share the same coder
+        // state, so they agree; pin it exactly regardless.
+        *rates.last_mut().expect("at least one pass") = bytes.len() as u32;
+        if styled {
+            // A mid-span §C.2.9 flush snapshot is *not* monotone — a
+            // flush can shrink as further decisions arrive (SETBITS may
+            // need one byte fewer), so an interior snapshot can exceed
+            // the exact rate of the span's own terminated end. Left
+            // uncapped, the forward monotone clamp in the assembly's
+            // `cum_r` would then inflate the exact terminated boundary
+            // and mis-attribute the following raw / AC segment's bytes
+            // to the earlier segment (the decoder's §D.4.1 fill then
+            // fabricates 1-bits for the starved segment). Cap each
+            // pass's rate by its successor's, backward: terminated
+            // boundaries only grow, so they are untouched, and a
+            // capped mid-span value equals some later pass's valid
+            // §C.2.9 truncation length — a prefix that decodes more
+            // passes decodes fewer.
+            for n in (0..rates.len() - 1).rev() {
+                if rates[n] > rates[n + 1] {
+                    rates[n] = rates[n + 1];
+                }
+            }
+        }
+    }
+    let d0 = if pass_dist {
+        targets
+            .iter()
+            .map(|c| f64::from(c.magnitude) * f64::from(c.magnitude))
+            .sum()
+    } else {
+        0.0
+    };
+    Ok(Some(EncodedBlock {
+        zero_bit_planes: mb - planes,
+        coding_passes: limit,
+        bytes,
+        pass_rates: rates,
+        pass_dist: dists,
+        d0,
+        weight: 1.0,
+        ordinal: 0,
+        reencode: None,
+        ht_cleanup_len: None,
+        ht_multi: None,
+    }))
+}
+
+/// Append a marker segment: marker code, 16-bit length (payload + 2),
+/// payload.
+/// One atom of a §A.7.4 / §A.7.5 packed-header series: a byte run plus
+/// whether a `PPM` / `PPT` marker segment may **end** right after it.
+/// T.800 §A.7.4 / §A.7.5: "Every marker segment in this series shall
+/// end with a completed packet header" — so a completed packet header
+/// is a legal cut point while an `Nppm` length prefix is not (the
+/// `Ippm` series it announces must follow, though it may straddle into
+/// the next segment).
+struct PackedAtom {
+    bytes: Vec<u8>,
+    boundary: bool,
+}
+
+/// Chunk a packed-header atom series into `Ippm` / `Ippt` marker-segment
+/// payloads of at most `max_payload` bytes each (the byte budget after
+/// `Lppm` / `Lppt` and `Zppm` / `Zppt`), cutting only at atom
+/// boundaries flagged as completed packet headers.
+fn chunk_packed_headers(atoms: &[PackedAtom], max_payload: usize) -> Result<Vec<Vec<u8>>, Error> {
+    // Group atoms into indivisible runs: everything up to and including
+    // the next legal cut point must land in one segment together.
+    let mut groups: Vec<Vec<u8>> = Vec::new();
+    let mut run: Vec<u8> = Vec::new();
+    for atom in atoms {
+        run.extend_from_slice(&atom.bytes);
+        if atom.boundary {
+            groups.push(std::mem::take(&mut run));
+        }
+    }
+    debug_assert!(run.is_empty(), "series must end on a packet boundary");
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    for g in groups {
+        if g.len() > max_payload {
+            // A single packet header longer than a whole marker segment
+            // cannot be relocated (Lppm / Lppt are 16-bit).
+            return Err(Error::NotImplemented);
+        }
+        if !cur.is_empty() && cur.len() + g.len() > max_payload {
+            out.push(std::mem::take(&mut cur));
+        }
+        cur.extend_from_slice(&g);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// Table A.36 `Iplt` / `Iplm` encoding of one packet length: 7-bit
+/// groups from the most significant non-zero group down, bit 7 set on
+/// every byte but the last.
+fn iplt_bytes(len: u64) -> Vec<u8> {
+    let groups = (64 - len.leading_zeros()).div_ceil(7).max(1);
+    (0..groups)
+        .rev()
+        .map(|g| {
+            let bits = ((len >> (7 * g)) & 0x7F) as u8;
+            if g == 0 {
+                bits
+            } else {
+                bits | 0x80
+            }
+        })
+        .collect()
+}
+
+fn push_segment(out: &mut Vec<u8>, marker: u16, payload: &[u8]) {
+    out.extend_from_slice(&marker.to_be_bytes());
+    out.extend_from_slice(&((payload.len() as u16 + 2).to_be_bytes()));
+    out.extend_from_slice(payload);
+}
+
+/// Encode 8-bit unsigned component planes (all `width × height`, 1:1
+/// sub-sampling) into a **lossless** Part-1 J2K codestream.
+///
+/// * `planes` — one row-major `width * height` sample plane per
+///   component (1..=16384 components; every plane the same size).
+/// * `nl` — decomposition levels `NL` (0..=32).
+/// * `cb_exp` — `(xcb, ycb)` real code-block exponents (each `2..=10`,
+///   sum ≤ 12 per Table A.18).
+///
+/// The output decodes bit-exactly back to `planes` through
+/// [`crate::decode::decode_j2k`] (validated by the round-trip tests).
+pub fn encode_j2k_lossless(
+    planes: &[&[u8]],
+    width: u32,
+    height: u32,
+    nl: u8,
+    cb_exp: (u8, u8),
+) -> Result<Vec<u8>, Error> {
+    encode_j2k(
+        planes,
+        width,
+        height,
+        &EncodeOptions {
+            decomposition_levels: nl,
+            code_block_exp: cb_exp,
+            ..EncodeOptions::default()
+        },
+    )
+}
+
+/// How the encoder transforms and quantises the sample planes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeKernel {
+    /// Reversible 5-3, Table A.28 style 0 (no quantization) — lossless.
+    Lossless5x3,
+    /// Irreversible 9-7 with Annex E scalar-expounded quantisation
+    /// (Table A.28 style 2) — lossy. `fine_bits` sets the uniform step
+    /// `Δb = 2^(−fine_bits)` via `εb = Rb + fine_bits` (µb = 0): larger
+    /// is finer / nearer-lossless (0..=8), `0` is a coarse `Δb = 1`.
+    Lossy9x7 {
+        /// Uniform quantisation-step fineness: `Δb = 2^(−fine_bits)`.
+        fine_bits: u8,
+    },
+}
+
+/// How each tile's packet sequence divides into tile-parts (T.800
+/// §A.4.2 `SOT` — `TPsot` / `TNsot`).
+///
+/// A tile-part boundary may fall on any packet boundary (§A.4.2); the
+/// shapes offered here cut wherever the chosen packet-descriptor axis
+/// *changes* along the tile's §B.12 emission order, so the split
+/// composes with any progression order (an axis that cycles — e.g.
+/// resolution under LRCP with several layers — simply opens a new
+/// tile-part per cycle). `TPsot` counts up in codestream order and
+/// `TNsot` (8-bit, so at most 255 tile-parts per tile) is stamped on
+/// every part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TilePartSplit {
+    /// One tile-part per tile (`TPsot` = 0, `TNsot` = 1). Default.
+    #[default]
+    Single,
+    /// New tile-part when the emitted packet's **resolution** changes.
+    ByResolution,
+    /// New tile-part when the emitted packet's **layer** changes.
+    ByLayer,
+    /// New tile-part when the emitted packet's **component** changes.
+    ByComponent,
+}
+
+/// Where the emitted codestream carries its §B.10 packet headers
+/// (T.800 §A.7.4 / §A.7.5).
+///
+/// The packet headers live in exactly one of three places: interleaved
+/// with the packet data inside each tile-part body (the §B.10 default),
+/// relocated per tile into `PPT` marker segments (§A.7.5), or relocated
+/// for the whole codestream into main-header `PPM` marker segments
+/// (§A.7.4). With either relocation the tile-part bodies hold only
+/// packet data; a signalled `SOP` still frames each packet's data in
+/// the body while a signalled `EPH` trails each header inside the
+/// relocated payload (§A.8.1 / §A.8.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PackedHeaders {
+    /// §B.10 — headers interleave with packet data in the tile-part
+    /// bodies. Default.
+    #[default]
+    InStream,
+    /// §A.7.5 — every packet header of a tile is relocated into `PPT`
+    /// marker segments carried in the tile's **first** tile-part header
+    /// ("in the same tile-part header or one with a lower `TPsot`
+    /// value"), in increasing `Zppt` order, each segment ending on a
+    /// completed packet header.
+    Ppt,
+    /// §A.7.4 — every packet header of the codestream is relocated into
+    /// main-header `PPM` marker segments: one `(Nppm, Ippm)` entry per
+    /// tile-part in codestream order, concatenated in increasing `Zppm`
+    /// order, each segment ending on a completed packet header.
+    Ppm,
+}
+
+/// A rectangular region of interest on the **reference grid**
+/// (T.800 Annex H, Maxshift method), `[x0, x1) × [y0, y1)`.
+///
+/// The encoder derives each component's wavelet-domain ROI mask from
+/// this rectangle (§H.3.1 — the coefficients the inverse transform
+/// needs to reconstruct the region), scales the masked quantized
+/// coefficients up by `2^s` with the §H.2.2 scaling value
+/// `s = max(Mb)` (Equation H-6, resolved per component), and signals
+/// `s` through one main-header `RGN` marker segment per component
+/// (Table A.25, `Srgn = 0` implicit ROI). A decoder honouring §H.1
+/// then reconstructs the ROI ahead of (and at least as precisely as)
+/// the background at any truncation point; full decodes are unchanged.
+/// Per §H.3.2 the same region applies to every component (mapped onto
+/// each component's sub-sampled grid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoiRegion {
+    /// Left edge (inclusive) on the reference grid.
+    pub x0: u32,
+    /// Top edge (inclusive) on the reference grid.
+    pub y0: u32,
+    /// Right edge (exclusive) on the reference grid.
+    pub x1: u32,
+    /// Bottom edge (exclusive) on the reference grid.
+    pub y1: u32,
+}
+
+/// One component's §A.6.2 / §A.6.5 override of the tile-wide COD /
+/// QCD coding parameters, signalled through a main-header `COC`
+/// (Table A.23) and — whenever the quantisation table it implies
+/// differs from the QCD's — a main-header `QCC` (Table A.31).
+///
+/// `None` fields inherit the [`EncodeOptions`] value. The Table A.19
+/// code-block **style** byte stays tile-wide (the crate's decoder
+/// rejects a COC whose style diverges from the COD, so the encoder
+/// never emits one); the wavelet kernel *may* differ per component
+/// when no MCT is signalled (the §G.2 / §G.3 transforms pair with one
+/// kernel across components 0–2, so kernel overrides under
+/// [`EncodeOptions::mct`] must match the tile-wide kernel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentOverride {
+    /// Component index (`Ccoc` / `Cqcc`) this override applies to.
+    pub component: u16,
+    /// Per-component `NL` (Table A.15, `0..=32`).
+    pub decomposition_levels: Option<u8>,
+    /// Per-component code-block exponents (Table A.18 ranges).
+    pub code_block_exp: Option<(u8, u8)>,
+    /// Per-component precinct partition: `Some(bytes)` with
+    /// `NL_c + 1` Table A.21 bytes selects a user-defined partition
+    /// (`Scoc` bit 0 set), `Some(vec![])` forces maximum precincts
+    /// for this component (overriding a tile-wide partition), `None`
+    /// inherits the tile-wide setting (which requires the component's
+    /// `NL` to match the tile-wide `NL` when a tile-wide partition is
+    /// signalled, since the byte-per-resolution list must fit).
+    pub precincts: Option<Vec<u8>>,
+    /// Per-component wavelet kernel + quantisation family.
+    pub kernel: Option<EncodeKernel>,
+}
+
+/// Which file shape [`crate::encode()`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum Container {
+    /// A JP2 file (T.800 Annex I) — Image Header + Colour Specification
+    /// (+ palette / channel-definition) boxes around the codestream;
+    /// the JPH brand (T.814 Annex D) when the codestream signals the
+    /// HT block coder. The only shape that carries the image's
+    /// [`crate::ColorInfo`] / ICC profile / palette. The default.
+    #[default]
+    Jp2,
+    /// A bare Annex A codestream (`.j2k` / `.j2c`): no colour or
+    /// metadata; the component set alone describes the picture.
+    J2k,
+}
+
+/// Encoder options — the T.800 §A.6.1 `COD` / `SIZ` fields the encoder
+/// honours, the Annex J rate-control knobs, the T.814 HT lanes and
+/// the file [`Container`], with spec-shaped defaults.
+///
+/// Build one with [`EncodeOptions::default`] and the `with_*` builders
+/// (or assign the fields), then call [`crate::encode()`] with a
+/// [`crate::Jpeg2000Image`] or [`encode_j2k`] with raw planes. The
+/// convenience wrappers ([`encode_j2k_lossless`],
+/// [`encode_j2k_lossless_rct`], [`encode_j2k_lossy`],
+/// [`encode_j2k_lossy_ict`]) construct one internally.
+///
+/// Behaviour variants are fields, never function suffixes: the kernel
+/// ([`Self::kernel`] — reversible 5-3 or irreversible 9-7), the MCT,
+/// layers, rate / PSNR targets, tiles, progression, precincts, HT and
+/// the container all live here.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct EncodeOptions {
+    /// File shape: JP2 / JPH wrapper (default) or bare codestream.
+    /// Only [`crate::encode()`] / [`crate::encode_rgb8`] /
+    /// [`crate::encode_rgba8`] / [`crate::encode_to`] honour it; the
+    /// plane-level [`encode_j2k`] always writes a codestream and
+    /// [`encode_jp2`] always a file.
+    pub container: Container,
+    /// `NL` — wavelet decomposition levels (SPcod, Table A.15;
+    /// `0..=32`). Default `3`.
+    pub decomposition_levels: u8,
+    /// `(xcb, ycb)` — real code-block exponents (Table A.18: each
+    /// `2..=10`, sum ≤ 12). Default `(6, 6)` (64×64 code-blocks).
+    pub code_block_exp: (u8, u8),
+    /// Wavelet kernel + quantisation family (Table A.20 / Table A.28).
+    /// Default [`EncodeKernel::Lossless5x3`].
+    pub kernel: EncodeKernel,
+    /// `SGcod` multiple-component-transformation flag (Table A.17):
+    /// pairs the §G.2 RCT with the 5-3 kernel and the §G.3.1 ICT with
+    /// the 9-7 kernel, across components 0–2 (§G.1 — at least three
+    /// planes; any further components code untouched). `None` (the
+    /// default) lets the entry point decide: [`crate::encode()`] /
+    /// [`crate::encode_rgb8`] / [`crate::encode_rgba8`] turn it on for
+    /// the RGB layouts (`Rgb24` / `Rgb48Le` / `Rgba` / `Rgba64Le`) and
+    /// off for gray, palette and YCbCr (T.800 J.14.1); the plane-level
+    /// [`encode_j2k`] family reads `None` as `false`.
+    pub mct: Option<bool>,
+    /// `SGcod` progression order (Table A.16) the tile's packets are
+    /// emitted in — any of the five §B.12.1 orders. Default LRCP.
+    pub progression: ProgressionOrder,
+    /// User-defined precinct partition (T.800 Table A.21, `Scod` low
+    /// bit): one byte per resolution level `r = 0..=NL` in order, low
+    /// nibble `PPx`, high nibble `PPy` (the §B.6 partition at `r > 0`
+    /// spans `2^(PPx−1)` sub-band samples, so `0` nibbles are only
+    /// legal at `r = 0` per the Table A.21 note). **Empty** (the
+    /// default) selects maximum precincts (`PPx = PPy = 15`,
+    /// `Scod` bit clear).
+    pub precincts: Vec<u8>,
+    /// `SGcod` number of quality layers `L` (Table A.14, `1..=65535`).
+    /// Each code-block's coding passes are distributed across the
+    /// layers by coded depth (most-significant bit-planes first), and
+    /// its single codeword segment is cut at the Annex J.13.4 per-pass
+    /// truncation rates, so discarding trailing layers degrades the
+    /// image gracefully (SNR scalability, J.13.2) while decoding every
+    /// layer reproduces the single-layer result exactly. Default `1`.
+    pub layers: u16,
+    /// PCRD rate control (T.800 Annex J.13.3): a whole-codestream byte
+    /// budget. When set, each code-block's embedded bit-stream is
+    /// truncated at a coding-pass boundary chosen by the Lagrangian
+    /// slope optimisation of Equation J-13 — the rates `R^n` are the
+    /// Annex J.13.4 per-pass truncation lengths, the distortions `D^n`
+    /// are midpoint-reconstruction squared errors weighted by the
+    /// sub-band synthesis-waveform L2 norm (J.13.4.1), and the slope
+    /// threshold λ is searched so the assembled stream is the largest
+    /// one not exceeding the budget. Truncated code-blocks are
+    /// re-encoded so the emitted codeword segment is exactly
+    /// §C.2.9-terminated. A budget below the irreducible marker +
+    /// empty-packet cost yields the smallest legal stream (best
+    /// effort). Composes with `layers` (the layer split then divides
+    /// the *retained* passes). Default `None` (no rate control).
+    pub target_bytes: Option<usize>,
+    /// PCRD quality control: a whole-image **PSNR floor in dB**,
+    /// measured on the reconstruction (this crate's own decoder run on
+    /// each candidate) against the input samples over every component
+    /// — `10·log10(peak² / MSE)` with `peak = 2^depth − 1`. The same
+    /// Equation J-13 slope threshold λ as [`EncodeOptions::target_bytes`]
+    /// is bisected, here towards the **smallest** stream whose decoded
+    /// PSNR still reaches the target; every candidate is assembled
+    /// exactly (§C.2.9-terminated truncations), so the measurement is
+    /// the stream's real quality rather than a model estimate. A target
+    /// the full-rate stream itself cannot reach (the quantiser's own
+    /// distortion) yields the full stream. Mutually exclusive with
+    /// `target_bytes`. Default `None`.
+    pub target_psnr: Option<f64>,
+    /// Tile grid `(XTsiz, YTsiz)` anchored at the reference-grid origin
+    /// (T.800 §B.3 / Table A.9). Each tile transforms and codes
+    /// independently and lands in its own `SOT`/`SOD` tile-part, in
+    /// raster tile order. `None` (the default) encodes one image-sized
+    /// tile.
+    pub tile_size: Option<(u32, u32)>,
+    /// §D.6 selective arithmetic-coding bypass (Table A.19 code-block
+    /// style bit 0): from bit-plane 5 onward the SP / MR passes emit
+    /// raw (lazy) bits and the code-block carves into the Table D.9
+    /// AC + raw codeword segments. Default `false`.
+    pub bypass: bool,
+    /// §D.4.2 termination on each coding pass (Table A.19 code-block
+    /// style bit 2): every pass is flushed into its own terminated
+    /// codeword segment (composing with `bypass` per the §D.6 prose),
+    /// which makes every layer / rate-control cut land on an exactly
+    /// terminated boundary. Default `false`.
+    pub terminate_all: bool,
+    /// Table A.19 code-block style bit 1: reset the Annex D context
+    /// probabilities to their Table D.7 initial states at the end of
+    /// every coding pass (§C.3.6 — the decoder mirrors it). Default
+    /// `false`.
+    pub reset_probabilities: bool,
+    /// Table A.19 code-block style bit 3: §D.7 vertically causal
+    /// context formation — the bottom row of every four-row stripe
+    /// treats the next stripe's neighbours as insignificant. Default
+    /// `false`.
+    pub vertically_causal: bool,
+    /// Table A.19 code-block style bit 4: §D.4.2 predictable
+    /// termination — every codeword-segment termination runs the
+    /// reproducible §D.4.2 procedure (MQ segments) or the §D.6
+    /// alternating-fill padding (raw segments) instead of the
+    /// free-tail §C.2.9 FLUSH, so a decoder can verify the tail of
+    /// each segment. Default `false`.
+    pub predictable_termination: bool,
+    /// Table A.19 code-block style bit 5: §D.5 error-resilience
+    /// segmentation symbol — the four UNIFORM-context bits `1010`
+    /// coded at the end of every cleanup pass. Default `false`.
+    pub segmentation_symbols: bool,
+    /// §A.8.1 SOP packet framing (`Scod` bit 1, Table A.13): every
+    /// packet is preceded by a 6-byte `SOP` marker segment carrying the
+    /// packet's sequence number `Nsop` (zero-based per coded tile,
+    /// incremented per packet, rolling over at 65 536). Default `false`.
+    pub sop: bool,
+    /// §A.8.2 EPH framing (`Scod` bit 2, Table A.13): every packet
+    /// header is postpended with the 2-byte `EPH` marker. Default
+    /// `false`.
+    pub eph: bool,
+    /// Per-component `(XRsiz, YRsiz)` sub-sampling factors (SIZ Table
+    /// A.11, each `1..=255`). **Empty** (the default) means 1:1 for
+    /// every component; otherwise exactly one pair per plane, and each
+    /// plane must then hold `⌈Xsiz/XRsiz⌉ × ⌈Ysiz/YRsiz⌉` samples
+    /// (§B.2 component-grid extent at zero image offset). Each tile
+    /// codes the §B.3 Equation B-12 tile-component region
+    /// `⌈tx0/XRsiz⌉..⌈tx1/XRsiz⌉ × ⌈ty0/YRsiz⌉..⌈ty1/YRsiz⌉`. When
+    /// [`EncodeOptions::mct`] is set, components 0–2 must share the
+    /// same factors (§G.2 / §G.3: "the same separation on the
+    /// reference grid").
+    pub sub_sampling: Vec<(u8, u8)>,
+    /// §A.4.2 tile-part division: how each tile's packet sequence
+    /// splits into `TPsot`-indexed tile-parts. Default
+    /// [`TilePartSplit::Single`].
+    pub tile_parts: TilePartSplit,
+    /// §A.6.6 progression order changes: when non-empty, a main-header
+    /// `POC` marker segment (Table A.32) carries these entries and the
+    /// tile packets are emitted in the concatenated §B.12.2
+    /// progression-order volumes instead of the single `SGcod` order
+    /// (which remains signalled in the COD as the nominal default).
+    /// Every entry must satisfy the Table A.32 ranges
+    /// (`REpoc > RSpoc`, `CEpoc > CSpoc`, `LYEpoc >= 1`, a defined
+    /// `Ppoc`), and the volumes together must cover **every** packet of
+    /// every tile exactly once (the §B.12.2 cursor never repeats a
+    /// packet, so full coverage is checked by count) — a POC that
+    /// leaves packets unemitted is rejected rather than silently
+    /// dropping coded data. Default empty (no `POC`).
+    pub poc: Vec<PocProgression>,
+    /// §A.6.2 / §A.6.5 per-component overrides of `NL` / code-block
+    /// size / precincts / kernel, emitted as main-header `COC` (+
+    /// `QCC` where the quantisation table changes) marker segments.
+    /// At most one entry per component. Default empty.
+    pub component_overrides: Vec<ComponentOverride>,
+    /// §A.7.4 / §A.7.5 packet-header relocation: whether the §B.10
+    /// packet headers stay in-stream (default), move to per-tile `PPT`
+    /// marker segments, or move to main-header `PPM` marker segments.
+    pub packed_headers: PackedHeaders,
+    /// §A.7.3 packet-length pointer marker: every tile-part header
+    /// carries `PLT` marker segment(s) listing the Table A.36 `Iplt`
+    /// length of each packet in that tile-part — the packet's `SOP`
+    /// (when signalled), its §B.10 header (with `EPH`) and its data
+    /// for in-stream headers; `SOP` + data only when the headers are
+    /// relocated into `PPM` / `PPT` (Table A.36 note). A list that
+    /// outgrows one segment's 16-bit length continues in further
+    /// `Zplt`-indexed segments, each cut on a completed `Iplt`.
+    /// Default `false`.
+    pub plt: bool,
+    /// §A.7.1 tile-part-length pointer marker: a main-header `TLM`
+    /// marker segment (`Ztlm`-indexed series when the entry count
+    /// outgrows one segment) lists every tile-part's `(Ttlm, Ptlm)` in
+    /// codestream order — `Ptlm` equal to the tile-part's `Psot` —
+    /// with `ST = 1` (8-bit `Ttlm`) while every tile index fits, else
+    /// `ST = 2`, and `SP = 1` (32-bit `Ptlm`). Default `false`.
+    pub tlm: bool,
+    /// §A.9.2 comment: when set, one main-header `COM` marker segment
+    /// with `Rcom = 1` (Table A.44, ISO/IEC 8859-15 text) carries the
+    /// string — ASCII only here (a subset of 8859-15), non-empty, at
+    /// most 65 531 bytes. Default `None`.
+    pub comment: Option<String>,
+    /// T.814 HTJ2K block coding (SPcod bit 6): every code-block is
+    /// coded by the §7.3 HT cleanup forward coder (plus, with
+    /// [`EncodeOptions::ht_refinement`], the §7.4 / §7.5 refinement
+    /// passes) instead of the Annex D MQ passes, and the codestream
+    /// signals the capability through `Rsiz` bit 14 and a `CAP` marker
+    /// segment (`Pcap15`, HTONLY / SINGLEHT / HOMOGENEOUS `Ccap15`
+    /// with the §8.7.3 MAGB bits and the HTIRV flag when a 9-7 kernel
+    /// is involved). Layers, PCRD rate control, the §D.6 / §D.4.2
+    /// styles and ROI do not apply to HT code-blocks here and are
+    /// rejected in combination. Default `false`.
+    pub high_throughput: bool,
+    /// With [`EncodeOptions::high_throughput`]: stop each block's HT
+    /// cleanup pass one bit-plane short and carry bit-plane 0 in a
+    /// §7.4 SigProp + §7.5 MagRef refinement segment (`Z_blk = 3`)
+    /// wherever that stays lossless (see
+    /// [`crate::htenc::encode_ht_codeblock`]); blocks that cannot fall
+    /// back to the full-depth cleanup. Default `false` (cleanup-only,
+    /// `Z_blk = 1`).
+    pub ht_refinement: bool,
+    /// T.814 §8.2 **MIXED**-set emission (§A.4 `SPcod` bits 6 + 7
+    /// under a `Ccap15` whose bits 15-14 are `11`): each code-block is
+    /// coded **both** ways — the Annex D MQ passes and the §7.3 HT
+    /// cleanup pass — and, per block, the HT lane is kept wherever its
+    /// cleanup segment stays within a throughput budget of one-eighth
+    /// plus two bytes over the Annex D codeword (the preference T.814
+    /// exists for), while blocks the MQ coder compresses markedly
+    /// better — structured content — stay Annex D. The
+    /// packet writer honours the §A.4 encoder-side constraints on the
+    /// HT-lane blocks (first non-zero length field: `Lblock > 3`,
+    /// clear top bit) and the T.800-lane blocks carry the derived
+    /// single length field (§A.4 bars bypass / per-pass termination).
+    /// Single quality layer only; mutually exclusive with
+    /// [`EncodeOptions::high_throughput`], [`EncodeOptions::ht_refinement`],
+    /// the §D.6 / §D.4.2 styles, PCRD rate control and the Annex H
+    /// ROI. Default `false`.
+    pub ht_mixed: bool,
+    /// Annex H region of interest (Maxshift): when set, the masked
+    /// coefficients are scaled up by the per-component §H.2.2 value
+    /// `s = max(Mb)` and one `RGN` marker segment per component
+    /// signals it (`Srgn = 0`, `SPrgn = s`). Requires the coded budget
+    /// `M'b = Mb + s` to stay within this implementation's 30-bit
+    /// magnitude lane (8-bit inputs always fit). Default `None`.
+    pub roi: Option<RoiRegion>,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        EncodeOptions {
+            container: Container::Jp2,
+            decomposition_levels: 3,
+            code_block_exp: (6, 6),
+            kernel: EncodeKernel::Lossless5x3,
+            mct: None,
+            progression: ProgressionOrder::Lrcp,
+            precincts: Vec::new(),
+            layers: 1,
+            target_bytes: None,
+            target_psnr: None,
+            tile_size: None,
+            bypass: false,
+            terminate_all: false,
+            reset_probabilities: false,
+            vertically_causal: false,
+            predictable_termination: false,
+            segmentation_symbols: false,
+            sop: false,
+            eph: false,
+            sub_sampling: Vec::new(),
+            tile_parts: TilePartSplit::Single,
+            poc: Vec::new(),
+            component_overrides: Vec::new(),
+            packed_headers: PackedHeaders::InStream,
+            plt: false,
+            tlm: false,
+            comment: None,
+            high_throughput: false,
+            ht_refinement: false,
+            ht_mixed: false,
+            roi: None,
+        }
+    }
+}
+
+impl EncodeOptions {
+    /// The defaults (lossless 5-3, three levels, 64×64 code-blocks, one
+    /// layer, LRCP, JP2 container).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the file shape.
+    pub fn with_container(mut self, container: Container) -> Self {
+        self.container = container;
+        self
+    }
+
+    /// Set the wavelet kernel / quantisation family.
+    pub fn with_kernel(mut self, kernel: EncodeKernel) -> Self {
+        self.kernel = kernel;
+        self
+    }
+
+    /// Reversible 5-3 (lossless) coding — [`EncodeKernel::Lossless5x3`].
+    pub fn with_lossless(mut self) -> Self {
+        self.kernel = EncodeKernel::Lossless5x3;
+        self
+    }
+
+    /// Irreversible 9-7 coding with the Annex E step `Δb = 2^(−fine_bits)`
+    /// — [`EncodeKernel::Lossy9x7`] (`fine_bits` 0..=8; `6` is
+    /// near-lossless).
+    pub fn with_lossy(mut self, fine_bits: u8) -> Self {
+        self.kernel = EncodeKernel::Lossy9x7 { fine_bits };
+        self
+    }
+
+    /// Set (or clear, `None` = automatic) the multiple-component-transform
+    /// flag (RCT with 5-3, ICT with 9-7, across components 0–2).
+    pub fn with_mct(mut self, mct: impl Into<Option<bool>>) -> Self {
+        self.mct = mct.into();
+        self
+    }
+
+    /// Set the decomposition-level count `NL` (0..=32).
+    pub fn with_decomposition_levels(mut self, levels: u8) -> Self {
+        self.decomposition_levels = levels;
+        self
+    }
+
+    /// Set the code-block exponents `(xcb, ycb)`.
+    pub fn with_code_block_exp(mut self, exp: (u8, u8)) -> Self {
+        self.code_block_exp = exp;
+        self
+    }
+
+    /// Set the progression order.
+    pub fn with_progression(mut self, progression: ProgressionOrder) -> Self {
+        self.progression = progression;
+        self
+    }
+
+    /// Set the user-defined precinct partition (one byte per level).
+    pub fn with_precincts(mut self, precincts: Vec<u8>) -> Self {
+        self.precincts = precincts;
+        self
+    }
+
+    /// Set the quality-layer count (1..=65535).
+    pub fn with_layers(mut self, layers: u16) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    /// Set (or clear) the PCRD byte budget for the whole codestream.
+    pub fn with_target_bytes(mut self, bytes: impl Into<Option<usize>>) -> Self {
+        self.target_bytes = bytes.into();
+        self
+    }
+
+    /// Set (or clear) the PCRD PSNR floor in dB.
+    pub fn with_target_psnr(mut self, psnr: impl Into<Option<f64>>) -> Self {
+        self.target_psnr = psnr.into();
+        self
+    }
+
+    /// Set (or clear) the tile size `(width, height)` on the reference
+    /// grid.
+    pub fn with_tile_size(mut self, tile: impl Into<Option<(u32, u32)>>) -> Self {
+        self.tile_size = tile.into();
+        self
+    }
+
+    /// Select the T.814 HT block coder (`high_throughput`).
+    pub fn with_high_throughput(mut self, ht: bool) -> Self {
+        self.high_throughput = ht;
+        self
+    }
+
+    /// Emit `SOP` marker segments before every packet.
+    pub fn with_sop(mut self, sop: bool) -> Self {
+        self.sop = sop;
+        self
+    }
+
+    /// Emit `EPH` markers after every packet header.
+    pub fn with_eph(mut self, eph: bool) -> Self {
+        self.eph = eph;
+        self
+    }
+
+    /// Emit `PLT` packet-length pointer markers.
+    pub fn with_plt(mut self, plt: bool) -> Self {
+        self.plt = plt;
+        self
+    }
+
+    /// Emit a main-header `TLM` tile-part-length marker.
+    pub fn with_tlm(mut self, tlm: bool) -> Self {
+        self.tlm = tlm;
+        self
+    }
+
+    /// Set (or clear) the `COM` marker text.
+    pub fn with_comment(mut self, comment: impl Into<Option<String>>) -> Self {
+        self.comment = comment.into();
+        self
+    }
+}
+
+/// Pre-contract name of [`EncodeOptions`].
+#[deprecated(note = "use oxideav_jpeg2000::EncodeOptions (IMAGE_CRATE_API)")]
+pub type EncodeParams = EncodeOptions;
+
+/// Encode 8-bit unsigned component planes into a **lossy** Part-1 J2K
+/// codestream using the irreversible 9-7 kernel (T.800 §F.4.8.2) and
+/// Annex E scalar-expounded quantisation (Table A.28 style 2).
+///
+/// `fine_bits` (0..=8) sets the uniform quantisation step
+/// `Δb = 2^(−fine_bits)` through the exponent choice
+/// `εb = Rb + fine_bits` (µb = 0): `6` is near-lossless (decoded
+/// samples within ±1 of the input), `0` is a coarse `Δb = 1`. The other
+/// parameters match [`encode_j2k_lossless`].
+pub fn encode_j2k_lossy(
+    planes: &[&[u8]],
+    width: u32,
+    height: u32,
+    nl: u8,
+    cb_exp: (u8, u8),
+    fine_bits: u8,
+) -> Result<Vec<u8>, Error> {
+    encode_j2k(
+        planes,
+        width,
+        height,
+        &EncodeOptions {
+            decomposition_levels: nl,
+            code_block_exp: cb_exp,
+            kernel: EncodeKernel::Lossy9x7 { fine_bits },
+            ..EncodeOptions::default()
+        },
+    )
+}
+
+/// Encode exactly three 8-bit RGB planes into a **lossy** Part-1 J2K
+/// codestream with the §G.3.1 **irreversible component transform**
+/// (ICT, `SGcod` MCT = 1 paired with the 9-7 kernel per Table A.17).
+///
+/// The DC level-shifted planes go through the Equation G-9/G-10/G-11
+/// forward ICT before each component's 9-7 cascade; the decoder's
+/// §G.3.2 inverse (Equations G-12 – G-14) restores RGB. Unlike the
+/// §G.2 RCT, the ICT chrominance components stay within the luminance
+/// dynamic range (the G-10/G-11 rows have unit ℓ1 gain on
+/// full-range input), so all three components share the QCD exponents.
+/// For correlated RGB the ICT concentrates signal energy into `Y0`
+/// and the stream is smaller than three independently coded planes at
+/// the same `fine_bits`. The other parameters match
+/// [`encode_j2k_lossy`].
+pub fn encode_j2k_lossy_ict(
+    planes: &[&[u8]; 3],
+    width: u32,
+    height: u32,
+    nl: u8,
+    cb_exp: (u8, u8),
+    fine_bits: u8,
+) -> Result<Vec<u8>, Error> {
+    encode_j2k(
+        planes.as_slice(),
+        width,
+        height,
+        &EncodeOptions {
+            decomposition_levels: nl,
+            code_block_exp: cb_exp,
+            kernel: EncodeKernel::Lossy9x7 { fine_bits },
+            mct: Some(true),
+            ..EncodeOptions::default()
+        },
+    )
+}
+
+/// Encode exactly three 8-bit RGB planes into a **lossless** Part-1 J2K
+/// codestream with the §G.2 **reversible component transform** (RCT,
+/// `SGcod` MCT = 1, Table A.17).
+///
+/// The DC-shifted planes go through the Equation G-3/G-4/G-5 forward
+/// RCT before the 5-3 cascade; the chrominance components carry one
+/// extra bit of dynamic range (§G.2), signalled through main-header
+/// `QCC` markers whose exponents use `RI + 1` (picked up by the
+/// decoder's §A.6.5 `Main QCC over Main QCD` precedence). For
+/// correlated RGB input the RCT stream is smaller than three
+/// independent planes; decoding is still bit-exact.
+pub fn encode_j2k_lossless_rct(
+    planes: &[&[u8]; 3],
+    width: u32,
+    height: u32,
+    nl: u8,
+    cb_exp: (u8, u8),
+) -> Result<Vec<u8>, Error> {
+    encode_j2k(
+        planes.as_slice(),
+        width,
+        height,
+        &EncodeOptions {
+            decomposition_levels: nl,
+            code_block_exp: cb_exp,
+            mct: Some(true),
+            ..EncodeOptions::default()
+        },
+    )
+}
+
+/// One input sample plane — 8-bit or 16-bit unsigned storage.
+#[derive(Clone, Copy)]
+enum SamplePlane<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+}
+
+impl SamplePlane<'_> {
+    fn len(&self) -> usize {
+        match self {
+            SamplePlane::U8(p) => p.len(),
+            SamplePlane::U16(p) => p.len(),
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> i32 {
+        match self {
+            SamplePlane::U8(p) => i32::from(p[i]),
+            SamplePlane::U16(p) => i32::from(p[i]),
+        }
+    }
+}
+
+/// Encode 8-bit planes per `params` and wrap the codestream into a
+/// **JP2** file (T.800 Annex I) — or a **JPH** file (T.814 Annex D)
+/// for an HT codestream — with the conventional header for the
+/// component count ([`crate::jp2::Jp2WriteOptions::for_components`]:
+/// greyscale / sRGB, plus an opacity channel definition for 2 or 4
+/// components). Other component counts need [`encode_jp2_with`].
+pub fn encode_jp2(
+    planes: &[&[u8]],
+    width: u32,
+    height: u32,
+    params: &EncodeOptions,
+) -> Result<Vec<u8>, Error> {
+    encode_jp2_with(
+        planes,
+        width,
+        height,
+        params,
+        &crate::jp2::Jp2WriteOptions::for_components(planes.len()),
+    )
+}
+
+/// [`encode_jp2`] with an explicit JP2 Header description
+/// ([`crate::jp2::write_jp2`]).
+pub fn encode_jp2_with(
+    planes: &[&[u8]],
+    width: u32,
+    height: u32,
+    params: &EncodeOptions,
+    options: &crate::jp2::Jp2WriteOptions,
+) -> Result<Vec<u8>, Error> {
+    let codestream = encode_j2k(planes, width, height, params)?;
+    crate::jp2::write_jp2(&codestream, options)
+}
+
+/// [`encode_j2k_u16`] wrapped into a JP2 / JPH file (see
+/// [`encode_jp2`]).
+pub fn encode_jp2_u16(
+    planes: &[&[u16]],
+    width: u32,
+    height: u32,
+    precision: u8,
+    params: &EncodeOptions,
+    options: &crate::jp2::Jp2WriteOptions,
+) -> Result<Vec<u8>, Error> {
+    let codestream = encode_j2k_u16(planes, width, height, precision, params)?;
+    crate::jp2::write_jp2(&codestream, options)
+}
+
+/// Encode 8-bit unsigned component planes (all `width × height`, 1:1
+/// sub-sampling) into a Part-1 J2K codestream per `params`.
+///
+/// * `planes` — one row-major `width * height` sample plane per
+///   component (1..=16384 components; every plane the same size).
+///
+/// With the (default) reversible 5-3 kernel the output decodes back
+/// **bit-exactly**; the 9-7 kernel quantises per Annex E. See
+/// [`EncodeOptions`] for the coding-style knobs.
+pub fn encode_j2k(
+    planes: &[&[u8]],
+    width: u32,
+    height: u32,
+    params: &EncodeOptions,
+) -> Result<Vec<u8>, Error> {
+    let wrapped: Vec<SamplePlane> = planes.iter().map(|p| SamplePlane::U8(p)).collect();
+    encode_core(&wrapped, width, height, 8, params)
+}
+
+/// Encode **1- to 16-bit** unsigned component planes (u16 storage, all
+/// `width × height`, 1:1 sub-sampling) into a Part-1 J2K codestream per
+/// `params`.
+///
+/// `precision_bits` is the `Ssiz` bit depth shared by every component
+/// (Table A.11, here `1..=16`); every sample must fit it
+/// (`< 2^precision_bits`) or [`Error::InvalidSamplePrecision`] is
+/// returned. Both kernels work at any depth: the reversible 5-3
+/// round-trips bit-exactly, the 9-7 applies the Annex E step
+/// `Δb = 2^(−fine_bits)` to the wider dynamic range unchanged (the
+/// `SPqcd` exponents `εb = Rb + gain + fine_bits` stay within the
+/// 5-bit Table A.28 field). The Table A.17 MCT pairings (§G.2 RCT /
+/// §G.3.1 ICT via [`EncodeOptions::mct`]) compose with deep input —
+/// the RCT chrominance `QCC` exponents build on `precision_bits + 1`.
+pub fn encode_j2k_u16(
+    planes: &[&[u16]],
+    width: u32,
+    height: u32,
+    precision_bits: u8,
+    params: &EncodeOptions,
+) -> Result<Vec<u8>, Error> {
+    if !(1..=16).contains(&precision_bits) {
+        return Err(Error::InvalidSamplePrecision);
+    }
+    for p in planes {
+        if p.iter().any(|&s| u32::from(s) >> precision_bits != 0) {
+            return Err(Error::InvalidSamplePrecision);
+        }
+    }
+    let wrapped: Vec<SamplePlane> = planes.iter().map(|p| SamplePlane::U16(p)).collect();
+    encode_core(&wrapped, width, height, precision_bits, params)
+}
+
+/// The shared encode pipeline over type-erased sample planes. See
+/// [`encode_j2k`] / [`encode_j2k_u16`] for the public contracts;
+/// `precision` is the unsigned `Ssiz` bit depth every plane shares.
+fn encode_core(
+    planes: &[SamplePlane<'_>],
+    width: u32,
+    height: u32,
+    precision: u8,
+    params: &EncodeOptions,
+) -> Result<Vec<u8>, Error> {
+    let nl = params.decomposition_levels;
+    let (xcb, ycb) = params.code_block_exp;
+    let kernel = params.kernel;
+    let mct = params.mct.unwrap_or(false);
+    // Table A.17: MCT = 1 pairs the §G.2 RCT with the 5-3 kernel and
+    // the §G.3.1 ICT with the 9-7 kernel, always across components 0–2.
+    let use_rct = mct && matches!(kernel, EncodeKernel::Lossless5x3);
+    let use_ict = mct && matches!(kernel, EncodeKernel::Lossy9x7 { .. });
+    // §G.1: the transform is applied to the first three components;
+    // any further components (alpha, extra channels) code untouched.
+    if mct && planes.len() < 3 {
+        return Err(Error::NotImplemented);
+    }
+    if let EncodeKernel::Lossy9x7 { fine_bits } = kernel {
+        if fine_bits > 8 {
+            return Err(Error::NotImplemented);
+        }
+    }
+    // Table A.16: only the five defined §B.12.1 orders are encodable.
+    let order_byte = |o: ProgressionOrder| -> Result<u8, Error> {
+        Ok(match o {
+            ProgressionOrder::Lrcp => 0x00,
+            ProgressionOrder::Rlcp => 0x01,
+            ProgressionOrder::Rpcl => 0x02,
+            ProgressionOrder::Pcrl => 0x03,
+            ProgressionOrder::Cprl => 0x04,
+            ProgressionOrder::Reserved(_) => return Err(Error::NotImplemented),
+        })
+    };
+    let progression_byte: u8 = order_byte(params.progression)?;
+    // Table A.32 ranges for each §A.6.6 POC entry; the Ppoc byte must
+    // be a defined Table A.16 order.
+    for e in &params.poc {
+        order_byte(e.progression)?;
+        if e.resolution_end <= e.resolution_start
+            || e.resolution_end > 33
+            || e.component_end <= e.component_start
+            || e.layer_end == 0
+        {
+            return Err(Error::NotImplemented);
+        }
+        // CSpoc / CEpoc field width: one byte (CEpoc 0 ⇒ 256) when
+        // Csiz < 257, two bytes (≤ 16384) otherwise.
+        let (cs_max, ce_max) = if planes.len() >= 257 {
+            (16383, 16384)
+        } else {
+            (255, 256)
+        };
+        if e.component_start > cs_max || e.component_end > ce_max {
+            return Err(Error::NotImplemented);
+        }
+    }
+    // §B.12.1.3 / §B.12.1.4: the RPCL and PCRL position orders require
+    // power-of-two XRsiz / YRsiz — as the COD default or inside a POC
+    // volume (the decoder rejects such a stream as malformed, so do
+    // not emit it).
+    let uses_position_pow2_order = matches!(
+        params.progression,
+        ProgressionOrder::Rpcl | ProgressionOrder::Pcrl
+    ) || params.poc.iter().any(|e| {
+        matches!(
+            e.progression,
+            ProgressionOrder::Rpcl | ProgressionOrder::Pcrl
+        )
+    });
+    if uses_position_pow2_order
+        && params
+            .sub_sampling
+            .iter()
+            .any(|&(x, y)| !x.is_power_of_two() || !y.is_power_of_two())
+    {
+        return Err(Error::NotImplemented);
+    }
+    if planes.is_empty()
+        || width == 0
+        || height == 0
+        || nl > 32
+        || !(2..=10).contains(&xcb)
+        || !(2..=10).contains(&ycb)
+        || xcb + ycb > 12
+    {
+        return Err(Error::NotImplemented);
+    }
+    // Table A.14: at least one quality layer.
+    if params.layers == 0 {
+        return Err(Error::NotImplemented);
+    }
+    // Table A.43 / A.44: a non-empty Latin comment that fits Lcom.
+    if params
+        .comment
+        .as_ref()
+        .is_some_and(|c| c.is_empty() || !c.is_ascii() || c.len() > 65_535 - 4)
+    {
+        return Err(Error::NotImplemented);
+    }
+    // One PCRD objective at a time, and a finite positive PSNR floor.
+    if params.target_bytes.is_some() && params.target_psnr.is_some() {
+        return Err(Error::NotImplemented);
+    }
+    if params
+        .target_psnr
+        .is_some_and(|p| p.is_nan() || p.is_infinite() || p <= 0.0)
+    {
+        return Err(Error::NotImplemented);
+    }
+    // T.814 Table A.4 / §8: the §D.6 / §D.4.2 styles do not apply to
+    // HT code-blocks, and the PCRD machinery is Annex-D-pass based —
+    // reject the combinations rather than mis-encode. (The Annex H ROI
+    // *does* compose: §A.5 caps SPrgn at 37, which the magnitude-lane
+    // bound below already guarantees, and Ccap15 bit 12 flags the RGN
+    // presence.) Quality layers *do* compose with HT: each layer
+    // carries one §B.1 HT set per code-block (a MULTIHT codestream,
+    // with §B.1 placeholder passes aligning shallow blocks), built
+    // below — but not together with the ht_refinement segment shape.
+    let annex_d_styles = params.bypass
+        || params.terminate_all
+        || params.reset_probabilities
+        || params.vertically_causal
+        || params.predictable_termination
+        || params.segmentation_symbols;
+    if params.high_throughput
+        && (annex_d_styles
+            || params.target_bytes.is_some()
+            || params.target_psnr.is_some()
+            || (params.layers != 1 && params.ht_refinement))
+    {
+        return Err(Error::NotImplemented);
+    }
+    if params.ht_refinement && !params.high_throughput {
+        return Err(Error::NotImplemented);
+    }
+    // T.814 §A.4 MIXED emission: single-layer, style-free, no PCRD,
+    // no ROI, and not together with the all-HT mode (whose HTONLY
+    // signalling it would contradict).
+    if params.ht_mixed
+        && (params.high_throughput
+            || params.ht_refinement
+            || annex_d_styles
+            || params.target_bytes.is_some()
+            || params.target_psnr.is_some()
+            || params.layers != 1
+            || params.roi.is_some())
+    {
+        return Err(Error::NotImplemented);
+    }
+    // Table A.21: when user-defined precincts are signalled the COD
+    // carries exactly NL + 1 bytes, and a zero PPx / PPy nibble is only
+    // permitted at the lowest resolution level (r = 0).
+    if !params.precincts.is_empty() {
+        if params.precincts.len() != nl as usize + 1 {
+            return Err(Error::NotImplemented);
+        }
+        for &b in &params.precincts[1..] {
+            if b & 0x0F == 0 || (b >> 4) & 0x0F == 0 {
+                return Err(Error::NotImplemented);
+            }
+        }
+    }
+    // Table A.11 sub-sampling factors: empty = all 1:1, otherwise one
+    // (XRsiz, YRsiz) pair per component, each factor 1..=255. §G.2 /
+    // §G.3: the MCT input components share the same separation.
+    if !params.sub_sampling.is_empty() {
+        if params.sub_sampling.len() != planes.len() {
+            return Err(Error::NotImplemented);
+        }
+        if params.sub_sampling.iter().any(|&(x, y)| x == 0 || y == 0) {
+            return Err(Error::NotImplemented);
+        }
+        if mct
+            && (params.sub_sampling[0] != params.sub_sampling[1]
+                || params.sub_sampling[0] != params.sub_sampling[2])
+        {
+            return Err(Error::NotImplemented);
+        }
+    }
+    // §A.6.2 / §A.6.5 per-component effective coding parameters: the
+    // COD/QCD values with any ComponentOverride applied. Every check
+    // the tile-wide parameters pass is applied per component.
+    struct CompParams {
+        nl: u8,
+        xcb: u8,
+        ycb: u8,
+        kernel: EncodeKernel,
+        precincts: Vec<u8>,
+        overridden: bool,
+    }
+    let mut comp_params: Vec<CompParams> = (0..planes.len())
+        .map(|_| CompParams {
+            nl,
+            xcb,
+            ycb,
+            kernel,
+            precincts: params.precincts.clone(),
+            overridden: false,
+        })
+        .collect();
+    for ov in &params.component_overrides {
+        let ci = ov.component as usize;
+        let Some(cp) = comp_params.get_mut(ci) else {
+            return Err(Error::NotImplemented);
+        };
+        if cp.overridden {
+            // §A.6.2: no more than one COC per component per header.
+            return Err(Error::NotImplemented);
+        }
+        cp.overridden = true;
+        if let Some(n) = ov.decomposition_levels {
+            if n > 32 {
+                return Err(Error::NotImplemented);
+            }
+            cp.nl = n;
+        }
+        if let Some((cx, cy)) = ov.code_block_exp {
+            if !(2..=10).contains(&cx) || !(2..=10).contains(&cy) || cx + cy > 12 {
+                return Err(Error::NotImplemented);
+            }
+            cp.xcb = cx;
+            cp.ycb = cy;
+        }
+        if let Some(k) = ov.kernel {
+            // Table A.17: the §G.2 / §G.3 MCT pairs one kernel across
+            // components 0–2 — a diverging per-component kernel is
+            // only legal without an MCT.
+            if mct && k != kernel {
+                return Err(Error::NotImplemented);
+            }
+            if let EncodeKernel::Lossy9x7 { fine_bits } = k {
+                if fine_bits > 8 {
+                    return Err(Error::NotImplemented);
+                }
+            }
+            cp.kernel = k;
+        }
+        match &ov.precincts {
+            Some(p) => cp.precincts = p.clone(),
+            None => {
+                // Inheriting a tile-wide partition requires the byte-
+                // per-resolution list to fit this component's NL.
+                if !cp.precincts.is_empty() && cp.nl != nl {
+                    return Err(Error::NotImplemented);
+                }
+            }
+        }
+        // Table A.21 shape on the effective partition.
+        if !cp.precincts.is_empty() {
+            if cp.precincts.len() != cp.nl as usize + 1 {
+                return Err(Error::NotImplemented);
+            }
+            for &b in &cp.precincts[1..] {
+                if b & 0x0F == 0 || (b >> 4) & 0x0F == 0 {
+                    return Err(Error::NotImplemented);
+                }
+            }
+        }
+    }
+
+    // -- Annex H Maxshift ROI: per-component scaling value --------------
+    // §H.2.2 / Equation H-6: `s` must be at least the largest number of
+    // magnitude bit-planes `Mb` of any background coefficient in the
+    // component; the largest `Mb` across the component's sub-bands
+    // (guard bits + the largest εb − 1 — the HH gain of 2, plus the
+    // lossy `fine_bits` excess, plus the §G.2 RCT chroma bit) bounds
+    // that for every code-block. The coded budget `M'b = Mb + s = 2s`
+    // must stay inside this implementation's magnitude lane, and SPrgn
+    // is an 8-bit field (Table A.25).
+    let roi_s: Vec<u32> = (0..planes.len())
+        .map(|ci| {
+            if params.roi.is_none() {
+                return 0;
+            }
+            let cp = &comp_params[ci];
+            let ri = if use_rct && (ci == 1 || ci == 2) {
+                u32::from(precision) + 1
+            } else {
+                u32::from(precision)
+            };
+            let fine = match cp.kernel {
+                EncodeKernel::Lossless5x3 => 0,
+                EncodeKernel::Lossy9x7 { fine_bits } => u32::from(fine_bits),
+            };
+            let gain = if cp.nl == 0 { 0 } else { 2 };
+            u32::from(GUARD_BITS) + ri + gain + fine - 1
+        })
+        .collect();
+    if params.roi.is_some() && roi_s.iter().any(|&s| 2 * s > 30 || s > 255) {
+        return Err(Error::NotImplemented);
+    }
+
+    let separation = |ci: usize| -> (u32, u32) {
+        params
+            .sub_sampling
+            .get(ci)
+            .map_or((1, 1), |&(x, y)| (u32::from(x), u32::from(y)))
+    };
+    // §B.2: at zero image offset, component ci's plane spans
+    // ceil(Xsiz / XRsiz) × ceil(Ysiz / YRsiz) samples.
+    for (ci, p) in planes.iter().enumerate() {
+        let (xr, yr) = separation(ci);
+        let n = (width.div_ceil(xr) as usize)
+            .checked_mul(height.div_ceil(yr) as usize)
+            .ok_or(Error::InvalidMarkerLength)?;
+        if p.len() != n {
+            return Err(Error::InvalidMarkerLength);
+        }
+    }
+    debug_assert!((1..=16).contains(&precision));
+
+    // -- SIZ model (drives both the marker bytes and the geometry) ----
+    let (tile_w, tile_h) = params.tile_size.unwrap_or((width, height));
+    if tile_w == 0 || tile_h == 0 {
+        return Err(Error::NotImplemented);
+    }
+    let siz = Siz {
+        // T.814 §A.2: an HTJ2K codestream sets Rsiz bit 14.
+        rsiz: if params.high_throughput || params.ht_mixed {
+            0x4000
+        } else {
+            0
+        },
+        x_size: width,
+        y_size: height,
+        x_offset: 0,
+        y_offset: 0,
+        tile_width: tile_w,
+        tile_height: tile_h,
+        tile_x_offset: 0,
+        tile_y_offset: 0,
+        components: (0..planes.len())
+            .map(|ci| {
+                let (xr, yr) = separation(ci);
+                SizComponent {
+                    precision_bits: precision,
+                    is_signed: false,
+                    h_separation: xr as u8,
+                    v_separation: yr as u8,
+                }
+            })
+            .collect(),
+    };
+    let num_tiles = width.div_ceil(tile_w) * height.div_ceil(tile_h);
+    if num_tiles > u32::from(u16::MAX) {
+        // Isot is a 16-bit field (Table A.6).
+        return Err(Error::NotImplemented);
+    }
+
+    // -- Forward transform of one tile ---------------------------------
+    // §G.1.2 DC level shift, then (optionally) the Table A.17 forward
+    // MCT across components 0–2 (§G.2 RCT with the 5-3 kernel, §G.3.1
+    // ICT with the 9-7 kernel), then the per-component §F.4 cascade —
+    // integer 5-3 for the lossless kernel, real-valued 9-7 with Annex E
+    // quantisation for the lossy kernel. Each tile transforms
+    // independently over its own reference-grid region (§B.3), with the
+    // absolute tile corner driving the lifting parity.
+    let dc = 1i32 << (precision - 1);
+    let transform_tile =
+        |tile: &crate::geometry::TileGeometry| -> Result<Vec<ComponentBands>, Error> {
+            // §B.3 Equation B-12: component ci codes the tile-component
+            // region ⌈tx0/XRsiz⌉..⌈tx1/XRsiz⌉ × ⌈ty0/YRsiz⌉..⌈ty1/YRsiz⌉
+            // on its own (sub-sampled) component grid; the absolute
+            // tile-component corner drives the §F.4 lifting parity.
+            let extract = |ci: usize| -> Vec<i32> {
+                let tc = &tile.components[ci];
+                let (xr, _yr) = separation(ci);
+                let cw = width.div_ceil(xr) as usize;
+                let p = &planes[ci];
+                let mut out = Vec::with_capacity((tc.width() as usize) * (tc.height() as usize));
+                for y in tc.tcy0..tc.tcy1 {
+                    let row = (y as usize) * cw;
+                    for x in tc.tcx0..tc.tcx1 {
+                        out.push(p.get(row + x as usize) - dc);
+                    }
+                }
+                out
+            };
+            if mct {
+                // Table A.17: the MCT couples components 0–2 on one
+                // kernel (validated above); per-component NL still
+                // applies to each cascade.
+                return Ok(match kernel {
+                    EncodeKernel::Lossless5x3 => {
+                        let mut shifted: Vec<Vec<i32>> = (0..planes.len()).map(extract).collect();
+                        if use_rct {
+                            // Split into three disjoint &mut [i32].
+                            let (head, tail) = shifted.split_at_mut(1);
+                            let (mid, tail2) = tail.split_at_mut(1);
+                            crate::mct::forward_rct(&mut head[0], &mut mid[0], &mut tail2[0])?;
+                        }
+                        shifted
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ci, p)| {
+                                let tc = &tile.components[ci];
+                                forward_cascade(
+                                    p,
+                                    tc.tcx0,
+                                    tc.tcy0,
+                                    tc.width() as usize,
+                                    tc.height() as usize,
+                                    comp_params[ci].nl,
+                                )
+                            })
+                            .collect()
+                    }
+                    EncodeKernel::Lossy9x7 { fine_bits } => {
+                        let mut shifted: Vec<Vec<f64>> = (0..planes.len())
+                            .map(|ci| extract(ci).into_iter().map(f64::from).collect())
+                            .collect();
+                        if use_ict {
+                            let (head, tail) = shifted.split_at_mut(1);
+                            let (mid, tail2) = tail.split_at_mut(1);
+                            crate::mct::forward_ict_f64(&mut head[0], &mut mid[0], &mut tail2[0])?;
+                        }
+                        shifted
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ci, p)| {
+                                let tc = &tile.components[ci];
+                                forward_cascade_9x7(
+                                    p,
+                                    tc.tcx0,
+                                    tc.tcy0,
+                                    tc.width() as usize,
+                                    tc.height() as usize,
+                                    comp_params[ci].nl,
+                                    fine_bits,
+                                )
+                            })
+                            .collect()
+                    }
+                });
+            }
+            // No MCT: each component runs its own §A.6.2 kernel + NL
+            // independently (a COC may give siblings different
+            // kernels).
+            Ok((0..planes.len())
+                .map(|ci| {
+                    let cp = &comp_params[ci];
+                    let tc = &tile.components[ci];
+                    match cp.kernel {
+                        EncodeKernel::Lossless5x3 => forward_cascade(
+                            extract(ci),
+                            tc.tcx0,
+                            tc.tcy0,
+                            tc.width() as usize,
+                            tc.height() as usize,
+                            cp.nl,
+                        ),
+                        EncodeKernel::Lossy9x7 { fine_bits } => forward_cascade_9x7(
+                            extract(ci).into_iter().map(f64::from).collect(),
+                            tc.tcx0,
+                            tc.tcy0,
+                            tc.width() as usize,
+                            tc.height() as usize,
+                            cp.nl,
+                            fine_bits,
+                        ),
+                    }
+                })
+                .collect())
+        };
+
+    // -- Tier-1: encode every code-block, keyed (tile, comp, r, k) -----
+    // Per precinct: the per-sub-band code-block grids + zero-bit-plane
+    // leaves, and the encoded blocks in §B.10.8 order (`None` = empty
+    // grid cell or all-zero block, never included).
+    struct PrecinctRaw {
+        sub_bands: Vec<(SubBandGeometry, Vec<u32>)>,
+        blocks: Vec<Option<EncodedBlock>>,
+    }
+    use std::collections::BTreeMap;
+    let layer_count = params.layers;
+    let rate_control = params.target_bytes.is_some() || params.target_psnr.is_some();
+    // Per-pass rates are needed to split layers, to rate-control, and —
+    // with a termination style — to size each terminated codeword
+    // segment (§B.10.7.2).
+    let want_rates = layer_count > 1 || rate_control || params.bypass || params.terminate_all;
+    let mut packets: BTreeMap<(u32, u16, u8, u32), PrecinctRaw> = BTreeMap::new();
+    let mut num_blocks = 0usize;
+    // Largest HT cleanup magnitude bit count — drives the §8.7.3 MAGB
+    // bits of Ccap15.
+    let mut ht_max_bits = 0u32;
+    // Deepest coded depth across all code-blocks (zero-bit-planes plus
+    // coded plane ordinal) — the J.13.2-style layer split aligns layer
+    // boundaries on this global bit-plane depth scale.
+    let mut max_depth = 0u32;
+    // Per tile: the §B.12 progression inputs.
+    let mut tile_prog: Vec<(Vec<ComponentProgressionInfo>, Vec<ComponentPositionInfo>)> =
+        Vec::with_capacity(num_tiles as usize);
+
+    for t in 0..num_tiles {
+        let tile = derive_tile_geometry(&siz, t)?;
+        let bands = transform_tile(&tile)?;
+        // §H.3.1 wavelet-domain ROI masks for this tile's components.
+        let roi_masks: Option<Vec<MaskBands>> = params.roi.as_ref().map(|rect| {
+            tile.components
+                .iter()
+                .enumerate()
+                .map(|(ci, tc)| {
+                    let cp = &comp_params[ci];
+                    let (xr, yr) = separation(ci);
+                    roi_mask_cascade(
+                        rect,
+                        tc.tcx0,
+                        tc.tcy0,
+                        tc.tcx1,
+                        tc.tcy1,
+                        xr,
+                        yr,
+                        cp.nl,
+                        matches!(cp.kernel, EncodeKernel::Lossless5x3),
+                    )
+                })
+                .collect()
+        });
+        let levels_per_comp: Vec<_> = tile
+            .components
+            .iter()
+            .enumerate()
+            .map(|(ci, tc)| derive_resolution_levels(*tc, comp_params[ci].nl))
+            .collect();
+        let mut precincts_per_comp_res: Vec<Vec<u32>> = Vec::with_capacity(planes.len());
+        let mut position_infos: Vec<ComponentPositionInfo> = Vec::with_capacity(planes.len());
+        for (ci, levels) in levels_per_comp.iter().enumerate() {
+            let cp = &comp_params[ci];
+            let mut precincts_at_r = Vec::with_capacity(levels.len());
+            let mut res_layouts = Vec::with_capacity(levels.len());
+            for level in levels {
+                let pp = precinct_exponents_at(&cp.precincts, level.r);
+                let partition = derive_precinct_partition(level, pp);
+                let num_precincts = partition.num_precincts() as u32;
+                precincts_at_r.push(num_precincts);
+                // §B.6: the precinct partition anchors at (0, 0) on the
+                // reduced-resolution domain with step 2^PP; the level's
+                // left/top edge falls in anchor cell floor(trx0 / 2^PPx).
+                res_layouts.push(ResolutionPrecinctLayout {
+                    num_wide: partition.num_wide,
+                    num_high: partition.num_high,
+                    anchor_x: level.trx0 >> pp.ppx,
+                    anchor_y: level.try0 >> pp.ppy,
+                    trx0: level.trx0,
+                    try0: level.try0,
+                    ppx: pp.ppx,
+                    ppy: pp.ppy,
+                });
+                for k in 0..num_precincts {
+                    let pcb = derive_precinct_code_blocks(level, pp, cp.xcb, cp.ycb, k)?;
+                    let mut sub_bands: Vec<(SubBandGeometry, Vec<u32>)> = Vec::new();
+                    let mut blocks: Vec<Option<EncodedBlock>> = Vec::new();
+                    for psb in &pcb.sub_bands {
+                        let geom = SubBandGeometry {
+                            width: psb.grid_wide,
+                            height: psb.grid_high,
+                        };
+                        let nblocks = (psb.grid_wide as usize) * (psb.grid_high as usize);
+                        let mut zbp = vec![0u32; nblocks];
+                        // Sub-band plane for (ci, r, orientation).
+                        let plane: &BandPlane = if level.r == 0 {
+                            &bands[ci].ll
+                        } else {
+                            let lev = (cp.nl - level.r + 1) as usize; // nb = NL − r + 1
+                            let oi = match psb.orientation {
+                                SubBandOrientation::HL => 0,
+                                SubBandOrientation::LH => 1,
+                                SubBandOrientation::HH => 2,
+                                SubBandOrientation::LL => return Err(Error::InvalidPacketHeader),
+                            };
+                            &bands[ci].high[lev - 1][oi]
+                        };
+                        // §G.2: RCT chrominance carries one extra bit of
+                        // dynamic range, signalled via this component's QCC.
+                        let ri = if use_rct && (ci == 1 || ci == 2) {
+                            u32::from(precision) + 1
+                        } else {
+                            u32::from(precision)
+                        };
+                        // εb = Rb (+ fine_bits on the lossy path, where the
+                        // exponent excess sets the Equation E-3 step).
+                        let fine = match cp.kernel {
+                            EncodeKernel::Lossless5x3 => 0,
+                            EncodeKernel::Lossy9x7 { fine_bits } => u32::from(fine_bits),
+                        };
+                        let eps = ri + u32::from(band_gain(psb.orientation)) + fine;
+                        // §H.2.1 step 3: with an ROI the coded budget
+                        // grows to M'b = Mb + s (the RGN de-scaling
+                        // re-anchors it on decode).
+                        let mb = u32::from(GUARD_BITS) + eps - 1 + roi_s[ci];
+                        // The band's §H.3.1 ROI-mask plane, sharing the
+                        // coefficient plane's Table B.1 corners.
+                        let mask_plane: Option<&MaskPlane> = match (&roi_masks, level.r) {
+                            (None, _) => None,
+                            (Some(m), 0) => Some(&m[ci].ll),
+                            (Some(m), r) => {
+                                let lev = (cp.nl - r + 1) as usize;
+                                let oi = match psb.orientation {
+                                    SubBandOrientation::HL => 0,
+                                    SubBandOrientation::LH => 1,
+                                    SubBandOrientation::HH => 2,
+                                    // r > 0 carries no LL band (already
+                                    // rejected on the plane lookup).
+                                    SubBandOrientation::LL => {
+                                        return Err(Error::InvalidPacketHeader)
+                                    }
+                                };
+                                Some(&m[ci].high[lev - 1][oi])
+                            }
+                        };
+                        // J.13.4.1 rate-distortion weight of this band.
+                        let weight = if rate_control {
+                            band_synthesis_weight(
+                                matches!(cp.kernel, EncodeKernel::Lossless5x3),
+                                cp.nl,
+                                level.r,
+                                psb.orientation,
+                            )
+                        } else {
+                            1.0
+                        };
+                        for (bi, cb) in psb.code_blocks.iter().enumerate() {
+                            let (bw, bh) = (cb.width() as usize, cb.height() as usize);
+                            if bw == 0 || bh == 0 {
+                                blocks.push(None);
+                                continue;
+                            }
+                            // Extract the block's coefficients from the band
+                            // plane (absolute Table B.1 band coordinates,
+                            // offset by the plane's corner).
+                            let mut targets = Vec::with_capacity(bw * bh);
+                            for v in cb.y0..cb.y1 {
+                                for u in cb.x0..cb.x1 {
+                                    let s = plane.data[((v - plane.y0) as usize) * plane.width
+                                        + (u - plane.x0) as usize];
+                                    let mut magnitude = s.unsigned_abs();
+                                    // §H.2.1: scale the masked (ROI)
+                                    // quantized coefficients up by 2^s so
+                                    // their bits sit above every
+                                    // background bit-plane.
+                                    if let Some(mp) = mask_plane {
+                                        if mp.data[((v - mp.y0) as usize) * mp.width
+                                            + (u - mp.x0) as usize]
+                                        {
+                                            magnitude <<= roi_s[ci];
+                                        }
+                                    }
+                                    targets.push(Coefficient {
+                                        magnitude,
+                                        sigma: false,
+                                        sign: s < 0,
+                                        already_refined: false,
+                                    });
+                                }
+                            }
+                            let mut enc = if params.high_throughput {
+                                // T.814 §7.3 (+ §7.4 / §7.5) HT forward
+                                // coding: the cleanup pass transports the
+                                // full magnitudes (or all but bit-plane 0
+                                // under ht_refinement), signalled with
+                                // P = Mb − 1 − β so the §7.6 positioning
+                                // lands the LSB at weight 2^0 (Nb =
+                                // S_blk + 1 + z_n).
+                                let maxmag = targets.iter().map(|c| c.magnitude).max().unwrap_or(0);
+                                if maxmag == 0 {
+                                    None
+                                } else {
+                                    let planes = 32 - maxmag.leading_zeros();
+                                    if planes > mb {
+                                        return Err(Error::NotImplemented);
+                                    }
+                                    let mag: Vec<u32> =
+                                        targets.iter().map(|c| c.magnitude).collect();
+                                    let sgn: Vec<bool> = targets.iter().map(|c| c.sign).collect();
+                                    if layer_count > 1 {
+                                        // T.814 MULTIHT: one §B.1 HT set
+                                        // per quality layer, each set one
+                                        // magnitude bit-plane finer (the
+                                        // §B.3 S_blk grows by one per
+                                        // set); P = Mb − J anchors the
+                                        // final set at full precision
+                                        // (S_blk = Mb − 1). A block too
+                                        // shallow for the early layers
+                                        // fills them with placeholder
+                                        // triples instead of sets, and a
+                                        // band too shallow for the layer
+                                        // count simply stops
+                                        // contributing (J < L).
+                                        let j_eff = u32::from(layer_count).min(mb);
+                                        let k = j_eff.saturating_sub(planes);
+                                        let mut bytes = Vec::new();
+                                        let mut lens = Vec::with_capacity((j_eff - k) as usize);
+                                        for l in k..j_eff {
+                                            let shift = j_eff - 1 - l;
+                                            let mag_l: Vec<u32> =
+                                                mag.iter().map(|&m| m >> shift).collect();
+                                            let hb = crate::htenc::encode_ht_codeblock(
+                                                &mag_l, &sgn, bw, bh, false,
+                                            )?;
+                                            debug_assert_eq!(hb.beta, 0);
+                                            lens.push(hb.cleanup.len());
+                                            bytes.extend_from_slice(&hb.cleanup);
+                                        }
+                                        ht_max_bits = ht_max_bits.max(planes);
+                                        Some(EncodedBlock {
+                                            zero_bit_planes: mb - j_eff,
+                                            coding_passes: 3 * (j_eff - 1) + 1,
+                                            bytes,
+                                            pass_rates: Vec::new(),
+                                            pass_dist: Vec::new(),
+                                            d0: 0.0,
+                                            weight: 1.0,
+                                            ordinal: 0,
+                                            reencode: None,
+                                            ht_cleanup_len: None,
+                                            ht_multi: Some(HtMultiPlan {
+                                                placeholder_layers: k,
+                                                cleanup_lens: lens,
+                                            }),
+                                        })
+                                    } else {
+                                        let hb = crate::htenc::encode_ht_codeblock(
+                                            &mag,
+                                            &sgn,
+                                            bw,
+                                            bh,
+                                            params.ht_refinement,
+                                        )?;
+                                        ht_max_bits = ht_max_bits.max(planes - hb.beta);
+                                        let cleanup_len = hb.cleanup.len();
+                                        let z_blk = if hb.refinement.is_some() { 3 } else { 1 };
+                                        let mut bytes = hb.cleanup;
+                                        if let Some(r) = hb.refinement {
+                                            bytes.extend_from_slice(&r);
+                                        }
+                                        Some(EncodedBlock {
+                                            zero_bit_planes: mb - 1 - hb.beta,
+                                            coding_passes: z_blk,
+                                            bytes,
+                                            pass_rates: Vec::new(),
+                                            pass_dist: Vec::new(),
+                                            d0: 0.0,
+                                            weight: 1.0,
+                                            ordinal: 0,
+                                            reencode: None,
+                                            ht_cleanup_len: Some(cleanup_len),
+                                            ht_multi: None,
+                                        })
+                                    }
+                                }
+                            } else {
+                                let annexd = encode_code_block(
+                                    psb.orientation,
+                                    bw,
+                                    bh,
+                                    &targets,
+                                    mb,
+                                    PassCapture {
+                                        rates: want_rates,
+                                        dist: rate_control,
+                                        max_passes: None,
+                                        ..PassCapture::styles(params)
+                                    },
+                                )?;
+                                if params.ht_mixed {
+                                    // T.814 §A.4 MIXED: code the block
+                                    // through the §7.3 HT cleanup pass
+                                    // as well and keep the HT lane
+                                    // wherever its cost stays inside
+                                    // the throughput budget — no more
+                                    // than one-eighth plus two bytes
+                                    // over the Annex D codeword (the
+                                    // §A.4 signalling headroom). MQ
+                                    // blocks that compress markedly
+                                    // better (structured content)
+                                    // stay Annex D. §B.3 requires the
+                                    // first HT cleanup segment longer
+                                    // than one byte, so a 0/1-byte HT
+                                    // candidate stays Annex D too.
+                                    let maxmag =
+                                        targets.iter().map(|c| c.magnitude).max().unwrap_or(0);
+                                    let planes = 32 - maxmag.leading_zeros();
+                                    let ht = if maxmag > 0 && planes <= mb {
+                                        let mag: Vec<u32> =
+                                            targets.iter().map(|c| c.magnitude).collect();
+                                        let sgn: Vec<bool> =
+                                            targets.iter().map(|c| c.sign).collect();
+                                        Some(crate::htenc::encode_ht_codeblock(
+                                            &mag, &sgn, bw, bh, false,
+                                        )?)
+                                    } else {
+                                        None
+                                    };
+                                    match (annexd, ht) {
+                                        (Some(a), Some(hb))
+                                            if hb.cleanup.len() >= 2
+                                                && 8 * hb.cleanup.len()
+                                                    <= 9 * a.bytes.len() + 16 =>
+                                        {
+                                            ht_max_bits = ht_max_bits.max(planes - hb.beta);
+                                            let cleanup_len = hb.cleanup.len();
+                                            Some(EncodedBlock {
+                                                zero_bit_planes: mb - 1 - hb.beta,
+                                                coding_passes: 1,
+                                                bytes: hb.cleanup,
+                                                pass_rates: Vec::new(),
+                                                pass_dist: Vec::new(),
+                                                d0: 0.0,
+                                                weight: 1.0,
+                                                ordinal: 0,
+                                                reencode: None,
+                                                ht_cleanup_len: Some(cleanup_len),
+                                                ht_multi: None,
+                                            })
+                                        }
+                                        (a, _) => a,
+                                    }
+                                } else {
+                                    annexd
+                                }
+                            };
+                            if let Some(enc) = &mut enc {
+                                zbp[bi] = enc.zero_bit_planes;
+                                // Depth of the block's final pass on the
+                                // global bit-plane scale.
+                                max_depth = max_depth
+                                    .max(enc.zero_bit_planes + (enc.coding_passes + 1) / 3);
+                                enc.weight = weight;
+                                enc.ordinal = num_blocks;
+                                num_blocks += 1;
+                                if rate_control {
+                                    enc.reencode = Some((psb.orientation, bw, bh, targets, mb));
+                                }
+                            }
+                            blocks.push(enc);
+                        }
+                        sub_bands.push((geom, zbp));
+                    }
+                    packets.insert(
+                        (t, ci as u16, level.r, k),
+                        PrecinctRaw { sub_bands, blocks },
+                    );
+                }
+            }
+            precincts_per_comp_res.push(precincts_at_r);
+            let (xr, yr) = separation(ci);
+            position_infos.push(ComponentPositionInfo {
+                num_decomposition_levels: cp.nl,
+                tile_tx0: tile.tx0,
+                tile_ty0: tile.ty0,
+                xrsiz: xr as u8,
+                yrsiz: yr as u8,
+                resolutions: res_layouts,
+            });
+        }
+        let prog_info: Vec<ComponentProgressionInfo> = precincts_per_comp_res
+            .iter()
+            .enumerate()
+            .map(|(ci, pr)| ComponentProgressionInfo {
+                num_decomposition_levels: comp_params[ci].nl,
+                precincts_per_resolution: pr.clone(),
+            })
+            .collect();
+        tile_prog.push((prog_info, position_infos));
+    }
+
+    // -- Tier-2 packet orders (per tile; computed once) -----------------
+    // With a §A.6.6 POC the concatenated §B.12.2 progression-order
+    // volumes drive the whole tile (the same walk the decoder performs
+    // from the parsed marker); the encoder additionally requires the
+    // volumes to cover every packet of the tile exactly once — the
+    // §B.12.2 cursor never repeats a packet, so coverage reduces to a
+    // count check against the full packet population.
+    let poc_volumes: Vec<PocVolume> = params.poc.iter().map(PocVolume::from_poc).collect();
+    let mut orders: Vec<Vec<crate::progression::PacketDescriptor>> =
+        Vec::with_capacity(num_tiles as usize);
+    for (prog_info, position_infos) in &tile_prog {
+        let order = if poc_volumes.is_empty() {
+            match params.progression {
+                ProgressionOrder::Lrcp => lrcp_packet_order(layer_count, prog_info)?,
+                ProgressionOrder::Rlcp => rlcp_packet_order(layer_count, prog_info)?,
+                ProgressionOrder::Rpcl => rpcl_packet_order(layer_count, position_infos)?,
+                ProgressionOrder::Pcrl => pcrl_packet_order(layer_count, position_infos)?,
+                ProgressionOrder::Cprl => cprl_packet_order(layer_count, position_infos)?,
+                ProgressionOrder::Reserved(_) => return Err(Error::NotImplemented),
+            }
+        } else {
+            let order =
+                poc_volume_packet_order(&poc_volumes, layer_count, prog_info, position_infos)?;
+            let total: u64 = prog_info
+                .iter()
+                .map(|ci| {
+                    ci.precincts_per_resolution
+                        .iter()
+                        .map(|&n| u64::from(n))
+                        .sum::<u64>()
+                })
+                .sum::<u64>()
+                * u64::from(layer_count);
+            if order.len() as u64 != total {
+                return Err(Error::NotImplemented);
+            }
+            order
+        };
+        orders.push(order);
+    }
+
+    // -- Assembly: layer split + tier-2 emission + markers -------------
+    //
+    // `trunc` optionally caps each block's included passes (indexed by
+    // block ordinal — the PCRD rate-control choice); `exact` re-encodes
+    // truncated blocks so their emitted codeword segment is exactly
+    // §C.2.9-terminated (the λ search skips that and cuts at R^n, which
+    // has the identical length).
+    //
+    // Layer split (T.800 §B.10.7.1 + Annex J.13.2 guidance): each
+    // code-block's consecutive coding passes are distributed over the L
+    // layers by their coded depth `P + ⌈i / 3⌉` (pass 0 is the first
+    // cleanup, then SP / MR / cleanup triples per plane, §D.3); depth d
+    // lands in layer ⌊d · L / (D + 1)⌋ where D is the deepest coded
+    // depth in the tile. Most-significant planes therefore populate the
+    // early layers across every code-block (the J.13.2 SNR-scalable
+    // shape), and the block's single codeword segment is cut at the
+    // Annex J.13.4 truncation rates R^n captured during tier-1.
+    let layer_of_depth = |depth: u32| -> u16 {
+        let l = u64::from(depth) * u64::from(layer_count) / (u64::from(max_depth) + 1);
+        (l as u16).min(layer_count - 1)
+    };
+    /// One layer's share of a code-block: passes contributed, byte
+    /// range of the chunk, and the §B.10.7 codeword-segment list
+    /// `(passes, bytes)` the packet header signals for that chunk.
+    type LayerShare = (u32, std::ops::Range<usize>, Vec<(u32, u32)>);
+    struct LayeredBlock {
+        zero_bit_planes: u32,
+        per_layer: Vec<LayerShare>,
+        bytes: Vec<u8>,
+        /// T.814 §A.4 MIXED HT-lane block — the packet writer applies
+        /// the §A.4 first-non-zero-segment headroom.
+        mixed_ht: bool,
+    }
+    struct PrecinctLayered {
+        state: PrecinctEncoderState,
+        blocks: Vec<Option<LayeredBlock>>,
+    }
+    let assemble = |trunc: Option<&[u32]>, exact: bool| -> Result<Vec<u8>, Error> {
+        let mut assembled: BTreeMap<(u32, u16, u8, u32), PrecinctLayered> = BTreeMap::new();
+        for (key, raw) in &packets {
+            let mut blocks: Vec<Option<LayeredBlock>> = Vec::with_capacity(raw.blocks.len());
+            // Per-sub-band first-inclusion layers (§B.10.4 tag trees).
+            let mut first_layers: Vec<Vec<u32>> = raw
+                .sub_bands
+                .iter()
+                .map(|(geom, _)| {
+                    vec![u32::from(layer_count); (geom.width as usize) * (geom.height as usize)]
+                })
+                .collect();
+            let mut sb_idx = 0usize;
+            let mut in_band = 0usize;
+            for enc in &raw.blocks {
+                while in_band >= first_layers[sb_idx].len() {
+                    sb_idx += 1;
+                    in_band = 0;
+                }
+                let bi = in_band;
+                in_band += 1;
+                let Some(enc) = enc else {
+                    blocks.push(None);
+                    continue;
+                };
+                let n_eff =
+                    trunc.map_or(enc.coding_passes, |t| t[enc.ordinal].min(enc.coding_passes));
+                if n_eff == 0 {
+                    // Rate control dropped the block entirely.
+                    blocks.push(None);
+                    continue;
+                }
+                // The block's (possibly truncated) codeword segment.
+                let seg: Vec<u8> = if n_eff == enc.coding_passes {
+                    enc.bytes.clone()
+                } else if exact {
+                    // Re-encode with §C.2.9 termination at the chosen
+                    // truncation pass — same emitted bytes, exact tail.
+                    let (o, bw, bh, tg, mb) =
+                        enc.reencode.as_ref().expect("rate control keeps context");
+                    let re = encode_code_block(
+                        *o,
+                        *bw,
+                        *bh,
+                        tg,
+                        *mb,
+                        PassCapture {
+                            max_passes: Some(n_eff),
+                            ..PassCapture::styles(params)
+                        },
+                    )?
+                    .expect("non-empty block re-encodes");
+                    // For a styled block truncated mid-span, the stored
+                    // rate was capped backward to the span-covering
+                    // truncation length, so the re-encode (whose final
+                    // partial-span flush is the uncapped snapshot) may
+                    // run a byte or two longer; elsewhere they agree.
+                    debug_assert!(re.bytes.len() as u32 >= enc.pass_rates[n_eff as usize - 1]);
+                    re.bytes
+                } else {
+                    let cut = (enc.pass_rates[n_eff as usize - 1] as usize).min(enc.bytes.len());
+                    enc.bytes[..cut].to_vec()
+                };
+                if let Some(hm) = &enc.ht_multi {
+                    // T.814 MULTIHT layout: layer ↦ HT set (or
+                    // placeholder triple) is fixed by the plan — no
+                    // rate-driven pass split. Placeholder layers signal
+                    // three coding passes with a single zero-length
+                    // codeword segment; each set layer signals its
+                    // cleanup segment (§B.2: one codeword segment for
+                    // the cleanup pass, covering the placeholder run
+                    // for the first set) plus, when the set is not the
+                    // block's last, a zero-length refinement segment
+                    // for its unused SigProp + MagRef passes.
+                    let k = hm.placeholder_layers as usize;
+                    let num_sets = hm.cleanup_lens.len();
+                    let mut per_layer: Vec<LayerShare> = Vec::with_capacity(layer_count as usize);
+                    let mut off = 0usize;
+                    for l in 0..layer_count as usize {
+                        if l < k {
+                            per_layer.push((3, 0..0, vec![(3, 0)]));
+                        } else if l < k + num_sets {
+                            let len = hm.cleanup_lens[l - k];
+                            let range = off..off + len;
+                            off += len;
+                            if l + 1 == k + num_sets {
+                                per_layer.push((1, range, vec![(1, len as u32)]));
+                            } else {
+                                per_layer.push((3, range, vec![(1, len as u32), (2, 0)]));
+                            }
+                        } else {
+                            per_layer.push((0, 0..0, Vec::new()));
+                        }
+                    }
+                    first_layers[sb_idx][bi] = 0;
+                    blocks.push(Some(LayeredBlock {
+                        zero_bit_planes: enc.zero_bit_planes,
+                        per_layer,
+                        bytes: seg,
+                        // MULTIHT layering never combines with the
+                        // MIXED emission (single layer only).
+                        mixed_ht: false,
+                    }));
+                    continue;
+                }
+                let total = seg.len();
+                // Cumulative byte boundary after each pass (index 0 is
+                // the segment start), clamped monotone with the final
+                // boundary pinned to the real segment length. Every
+                // chunk cut and every signalled §B.10.7 segment length
+                // derives from this one table, so they stay consistent.
+                let mut cum_r = Vec::with_capacity(n_eff as usize + 1);
+                cum_r.push(0usize);
+                for n in 1..=n_eff as usize {
+                    let r = if n == n_eff as usize || enc.pass_rates.is_empty() {
+                        total
+                    } else {
+                        (enc.pass_rates[n - 1] as usize).clamp(cum_r[n - 1], total)
+                    };
+                    cum_r.push(r);
+                }
+                // Count this block's passes per layer.
+                let mut counts = vec![0u32; layer_count as usize];
+                for i in 0..n_eff {
+                    let depth = enc.zero_bit_planes + i.div_ceil(3);
+                    counts[layer_of_depth(depth) as usize] += 1;
+                }
+                // §D.6 bypass without full termination: every layer
+                // contribution's final pass is a codeword-segment end on
+                // the reader's Table D.9 span model, so a layer boundary
+                // may only land where the coder actually terminated.
+                // Snap each boundary down to the nearest terminated
+                // pass (or the block start); the displaced passes move
+                // to the following layer.
+                if params.bypass && !params.terminate_all && layer_count > 1 {
+                    let valid = |c: u32| -> bool {
+                        c == 0 || c == n_eff || crate::packet::bypass_pass_terminated(c - 1, false)
+                    };
+                    let mut cum_b = 0u32;
+                    let mut prev_b = 0u32;
+                    for l in 0..counts.len() - 1 {
+                        cum_b += counts[l];
+                        let mut b = cum_b.min(n_eff);
+                        while !valid(b) && b > prev_b {
+                            b -= 1;
+                        }
+                        let b = b.max(prev_b);
+                        counts[l] = b - prev_b;
+                        prev_b = b;
+                        cum_b = b;
+                    }
+                    *counts.last_mut().expect("layer_count >= 1") = n_eff - prev_b;
+                }
+                // Cut the segment at the per-pass truncation rates and
+                // derive each chunk's codeword-segment list: one §B.10.7
+                // length for the plain single-segment layout, or the
+                // Table D.9 / §D.4.2 spans when a termination style is
+                // signalled (span boundaries land on the terminated
+                // passes, where `cum_r` is exact by construction).
+                let styled = params.bypass || params.terminate_all;
+                let mut per_layer = Vec::with_capacity(layer_count as usize);
+                let mut cum = 0u32;
+                let mut first = None;
+                for (l, &p) in counts.iter().enumerate() {
+                    if p > 0 && first.is_none() {
+                        first = Some(l);
+                    }
+                    let start = cum;
+                    cum += p;
+                    let (b0, b1) = (cum_r[start as usize], cum_r[cum as usize]);
+                    let mut segs: Vec<(u32, u32)> = Vec::new();
+                    if p > 0 {
+                        if let Some(lcup) = enc.ht_cleanup_len {
+                            // T.814 §B.2 codeword segments: the HT
+                            // cleanup pass alone, then (Z_blk = 3) the
+                            // SigProp + MagRef refinement segment.
+                            segs.push((1, lcup as u32));
+                            if p > 1 {
+                                segs.push((p - 1, (b1 - b0) as u32 - lcup as u32));
+                            }
+                        } else if styled {
+                            let spans =
+                                crate::packet::bypass_segment_spans(start, p, params.terminate_all);
+                            let mut at = start;
+                            for (span_passes, _raw) in spans {
+                                let e = at + span_passes;
+                                segs.push((
+                                    span_passes,
+                                    (cum_r[e as usize] - cum_r[at as usize]) as u32,
+                                ));
+                                at = e;
+                            }
+                        } else {
+                            segs.push((p, (b1 - b0) as u32));
+                        }
+                    }
+                    per_layer.push((p, b0..b1, segs));
+                }
+                first_layers[sb_idx][bi] = first.expect("n_eff > 0 has a first layer") as u32;
+                blocks.push(Some(LayeredBlock {
+                    zero_bit_planes: enc.zero_bit_planes,
+                    per_layer,
+                    bytes: seg,
+                    mixed_ht: params.ht_mixed && enc.ht_cleanup_len.is_some(),
+                }));
+            }
+            let sub_band_plans: Vec<SubBandEncoderPlan> = raw
+                .sub_bands
+                .iter()
+                .cloned()
+                .zip(first_layers)
+                .map(|((geom, zbp), fl)| (geom, fl, zbp))
+                .collect();
+            assembled.insert(
+                *key,
+                PrecinctLayered {
+                    state: PrecinctEncoderState::new(&sub_band_plans),
+                    blocks,
+                },
+            );
+        }
+
+        // Tier-2: emit each tile's packets in the §B.12.1 order the COD
+        // signals; each tile's byte stream divides into one or more
+        // tile-part bodies per the §A.4.2 TilePartSplit (a new part
+        // opens whenever the chosen descriptor axis changes).
+        //
+        // Each part keeps its packet headers separate from its packet
+        // data: the in-stream (§B.10) layout interleaves them back
+        // together below, while the §A.7.4 / §A.7.5 relocations move
+        // the headers into PPM / PPT marker segments and leave only the
+        // data (plus any §A.8.1 in-body SOP) in the tile-part body.
+        struct PartStream {
+            /// One byte run per packet header (with its §A.8.2 EPH when
+            /// signalled), in packet order.
+            headers: Vec<Vec<u8>>,
+            /// Packet data (each packet's §A.8.1 SOP, when signalled,
+            /// precedes its data here).
+            body: Vec<u8>,
+            /// §A.7.3 `Iplt` per packet: the packet's whole in-body
+            /// span (SOP + header + EPH + data in-stream; SOP + data
+            /// when the header is relocated).
+            packet_lens: Vec<usize>,
+        }
+        let relocate = params.packed_headers != PackedHeaders::InStream;
+        let mut tile_bodies: Vec<Vec<PartStream>> = Vec::with_capacity(orders.len());
+        for (t, order) in orders.iter().enumerate() {
+            let mut parts: Vec<PartStream> = vec![PartStream {
+                headers: Vec::new(),
+                body: Vec::new(),
+                packet_lens: Vec::new(),
+            }];
+            let mut last_axis: Option<u32> = None;
+            // §A.8.1 Nsop: zero-based per coded tile (continuing across
+            // tile-parts), +1 per packet, rolling over at 65 536.
+            let mut nsop = 0u16;
+            for desc in order {
+                let axis = match params.tile_parts {
+                    TilePartSplit::Single => 0,
+                    TilePartSplit::ByResolution => u32::from(desc.resolution),
+                    TilePartSplit::ByLayer => u32::from(desc.layer),
+                    TilePartSplit::ByComponent => u32::from(desc.component),
+                };
+                if last_axis.is_some_and(|prev| prev != axis) {
+                    parts.push(PartStream {
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                        packet_lens: Vec::new(),
+                    });
+                }
+                last_axis = Some(axis);
+                let part = parts.last_mut().expect("at least one part");
+                let pa = assembled
+                    .get_mut(&(t as u32, desc.component, desc.resolution, desc.precinct))
+                    .ok_or(Error::InvalidPacketHeader)?;
+                let mut plans: Vec<CodeBlockPlan> = Vec::with_capacity(pa.blocks.len());
+                let mut body: Vec<u8> = Vec::new();
+                for b in &pa.blocks {
+                    match b {
+                        None => plans.push(CodeBlockPlan {
+                            included: false,
+                            zero_bit_planes: 0,
+                            coding_passes: 0,
+                            segments: Vec::new(),
+                            mixed_ht: false,
+                        }),
+                        Some(lb) => {
+                            let (p, range, segs) = &lb.per_layer[desc.layer as usize];
+                            if *p == 0 {
+                                plans.push(CodeBlockPlan {
+                                    included: false,
+                                    zero_bit_planes: lb.zero_bit_planes,
+                                    coding_passes: 0,
+                                    segments: Vec::new(),
+                                    mixed_ht: false,
+                                });
+                            } else {
+                                plans.push(CodeBlockPlan {
+                                    included: true,
+                                    zero_bit_planes: lb.zero_bit_planes,
+                                    coding_passes: *p,
+                                    segments: segs.clone(),
+                                    mixed_ht: lb.mixed_ht,
+                                });
+                                body.extend_from_slice(&lb.bytes[range.clone()]);
+                            }
+                        }
+                    }
+                }
+                let mut header = encode_packet_header(&mut pa.state, desc.layer, &plans);
+                let body_start = part.body.len();
+                if params.sop {
+                    // §A.8.1 / Table A.40: SOP, Lsop = 4, Nsop. With
+                    // relocated headers the SOP stays in the body,
+                    // immediately before the packet's data (§A.8.1).
+                    part.body
+                        .extend_from_slice(&crate::packet::MARKER_SOP.to_be_bytes());
+                    part.body.extend_from_slice(&4u16.to_be_bytes());
+                    part.body.extend_from_slice(&nsop.to_be_bytes());
+                }
+                nsop = nsop.wrapping_add(1);
+                if params.eph {
+                    // §A.8.2: EPH immediately after the packet header —
+                    // inside the PPM / PPT payload when relocated.
+                    header.extend_from_slice(&crate::packet::MARKER_EPH.to_be_bytes());
+                }
+                if relocate {
+                    part.headers.push(header);
+                } else {
+                    part.body.extend_from_slice(&header);
+                }
+                part.body.extend_from_slice(&body);
+                part.packet_lens.push(part.body.len() - body_start);
+            }
+            if parts.len() > 255 {
+                // TNsot is an 8-bit field (Table A.6).
+                return Err(Error::NotImplemented);
+            }
+            tile_bodies.push(parts);
+        }
+
+        // Markers.
+        let mut out = Vec::new();
+        out.extend_from_slice(&MARKER_SOC.to_be_bytes());
+
+        // SIZ (Table A.9).
+        let mut siz_payload = Vec::with_capacity(36 + 3 * planes.len());
+        siz_payload.extend_from_slice(&siz.rsiz.to_be_bytes());
+        for v in [
+            siz.x_size,
+            siz.y_size,
+            siz.x_offset,
+            siz.y_offset,
+            siz.tile_width,
+            siz.tile_height,
+            siz.tile_x_offset,
+            siz.tile_y_offset,
+        ] {
+            siz_payload.extend_from_slice(&v.to_be_bytes());
+        }
+        siz_payload.extend_from_slice(&(planes.len() as u16).to_be_bytes());
+        for c in &siz.components {
+            siz_payload.push(c.precision_bits - 1); // Ssiz: unsigned, depth − 1
+            siz_payload.push(c.h_separation);
+            siz_payload.push(c.v_separation);
+        }
+        push_segment(&mut out, MARKER_SIZ, &siz_payload);
+
+        // CAP (T.814 §A.3): required for an HTJ2K codestream — Pcap
+        // signals Part 15 (Pcap15, the 15th most-significant bit) and
+        // Ccap15 describes the stream: bits 14-15 = 00 (HTONLY),
+        // bit 13 = SINGLEHT (0) or MULTIHT (1: with quality layers
+        // each code-block carries one §B.1 HT set per layer, so more
+        // than one HT set can be present, §A.3.3), bit 11 = 0
+        // (HOMOGENEOUS), bit 12 = an RGN marker is present (§A.3.4;
+        // §A.5's SPrgn ≤ 37 holds since the ROI lane bound keeps
+        // s ≤ 15), bit 5 = HTIRV when any component codes HT blocks
+        // over the irreversible transform (§A.3.6), and bits 0-4 carry
+        // the §8.7.3 / §A.3.7 MAGB parameter P for the measured
+        // cleanup-magnitude bound B.
+        if params.high_throughput || params.ht_mixed {
+            let irrev = comp_params
+                .iter()
+                .any(|cp| matches!(cp.kernel, EncodeKernel::Lossy9x7 { .. }));
+            let b = ht_max_bits.max(8);
+            let p_bits: u32 = if b <= 8 {
+                0
+            } else if b <= 27 {
+                b - 8
+            } else {
+                19 + (b - 27).div_ceil(4)
+            };
+            // §A.3.2: bits 15-14 = 11 declare that the codestream may
+            // belong to the MIXED set; 00 (HTONLY) otherwise.
+            let ccap15: u16 = (u16::from(params.ht_mixed) << 15)
+                | (u16::from(params.ht_mixed) << 14)
+                | (u16::from(params.layers > 1) << 13)
+                | (u16::from(params.roi.is_some()) << 12)
+                | (u16::from(irrev) << 5)
+                | (p_bits as u16 & 0x1F);
+            let mut cap_payload = Vec::with_capacity(6);
+            cap_payload.extend_from_slice(&(1u32 << (32 - 15)).to_be_bytes()); // Pcap
+            cap_payload.extend_from_slice(&ccap15.to_be_bytes());
+            push_segment(&mut out, crate::MARKER_CAP, &cap_payload);
+        }
+
+        // COD (Tables A.13 – A.21): Scod bit 0 flags user-defined
+        // precincts (whose Table A.21 bytes then trail SPcod), bits
+        // 1 / 2 the SOP / EPH framing, the signalled progression, the
+        // layer count, MCT
+        // per Table A.17, NL levels, code-block exponents − 2, style 0,
+        // and the Table A.20 kernel byte (1 = 5-3 reversible, 0 = 9-7
+        // irreversible).
+        let transform_byte = match kernel {
+            EncodeKernel::Lossless5x3 => 1u8,
+            EncodeKernel::Lossy9x7 { .. } => 0u8,
+        };
+        // Scod (Table A.13): bit 0 = user-defined precincts, bit 1 =
+        // §A.8.1 SOP markers allowed, bit 2 = §A.8.2 EPH markers used.
+        // Table A.19 code-block style byte: bit 0 §D.6 bypass, bit 1
+        // context reset, bit 2 §D.4.2 per-pass termination, bit 3
+        // §D.7 vertically causal contexts, bit 4 predictable
+        // termination, bit 5 §D.5 segmentation symbols; T.814 §A.4
+        // bit 6 = HT code-blocks, bits 6 + 7 = MIXED.
+        let style_byte = u8::from(params.bypass)
+            | (u8::from(params.reset_probabilities) << 1)
+            | (u8::from(params.terminate_all) << 2)
+            | (u8::from(params.vertically_causal) << 3)
+            | (u8::from(params.predictable_termination) << 4)
+            | (u8::from(params.segmentation_symbols) << 5)
+            | (u8::from(params.high_throughput || params.ht_mixed) << 6)
+            | (u8::from(params.ht_mixed) << 7);
+        let scod = u8::from(!params.precincts.is_empty())
+            | (u8::from(params.sop) << 1)
+            | (u8::from(params.eph) << 2);
+        let mut cod_payload = vec![
+            scod,                       // Scod
+            progression_byte,           // SGcod: progression (Table A.16)
+            (layer_count >> 8) as u8,   // SGcod: layers (16-bit BE)
+            (layer_count & 0xFF) as u8, // SGcod: layers, low byte
+            mct as u8,                  // SGcod: MCT (Table A.17)
+            nl,                         // SPcod: NL
+            xcb - 2,                    // SPcod: xcb − 2
+            ycb - 2,                    // SPcod: ycb − 2
+            // SPcod code-block style (Table A.19): the six Annex D
+            // bits, plus the T.814 §A.4 bit 6 (HT code-blocks) and
+            // bits 6 + 7 together (a MIXED tile-component).
+            style_byte,
+            transform_byte, // SPcod: transform (Table A.20)
+        ];
+        cod_payload.extend_from_slice(&params.precincts); // Table A.21
+        push_segment(&mut out, MARKER_COD, &cod_payload);
+
+        // COC (Table A.23) per overridden component: Ccoc (one byte
+        // when Csiz < 257, two otherwise), Scoc bit 0 = per-component
+        // user-defined precincts, then SPcoc — NL, code-block
+        // exponents − 2, the tile-wide Table A.19 style byte (never
+        // diverging from the COD), the Table A.20 kernel byte, and the
+        // Table A.21 precinct bytes when Scoc bit 0 is set.
+        for ov in &params.component_overrides {
+            let cp = &comp_params[ov.component as usize];
+            let mut coc_payload = Vec::with_capacity(8 + cp.precincts.len());
+            if planes.len() >= 257 {
+                coc_payload.extend_from_slice(&ov.component.to_be_bytes());
+            } else {
+                coc_payload.push(ov.component as u8);
+            }
+            coc_payload.push(u8::from(!cp.precincts.is_empty())); // Scoc
+            coc_payload.push(cp.nl);
+            coc_payload.push(cp.xcb - 2);
+            coc_payload.push(cp.ycb - 2);
+            coc_payload.push(style_byte);
+            coc_payload.push(match cp.kernel {
+                EncodeKernel::Lossless5x3 => 1u8,
+                EncodeKernel::Lossy9x7 { .. } => 0u8,
+            });
+            coc_payload.extend_from_slice(&cp.precincts);
+            push_segment(&mut out, crate::MARKER_COC, &coc_payload);
+        }
+
+        // QCD (Tables A.27 – A.28), one entry per sub-band in the
+        // §F.3.1 order (NLLL then per-level HL, LH, HH from the deepest
+        // level outward). `ri` is the component bit depth the exponents
+        // build on.
+        //
+        // * Lossless: style 0 (no quantization) — one byte per band,
+        //   `εb = RI + gain` in the top 5 bits.
+        // * Lossy: style 2 (scalar expounded) — two bytes per band,
+        //   `εb = Rb + fine_bits` in the top 5 bits, µb = 0
+        //   (Table A.30), giving the uniform Equation E-3 step
+        //   `Δb = 2^(−fine_bits)`.
+        let quant_payload = |ri: u8, q_nl: u8, q_kernel: EncodeKernel| -> Vec<u8> {
+            let mut p = Vec::new();
+            match q_kernel {
+                EncodeKernel::Lossless5x3 => {
+                    p.push(GUARD_BITS << 5); // style 0 | guard bits
+                    p.push(ri << 3); // εb(LL) = RI + 0
+                    for _r in 1..=q_nl {
+                        p.push((ri + 1) << 3); // HL: RI + 1
+                        p.push((ri + 1) << 3); // LH: RI + 1
+                        p.push((ri + 2) << 3); // HH: RI + 2
+                    }
+                }
+                EncodeKernel::Lossy9x7 { fine_bits } => {
+                    p.push((GUARD_BITS << 5) | 2); // style 2 | guard bits
+                    let word = |gain: u8| -> [u8; 2] {
+                        let eps = u16::from(ri + gain + fine_bits);
+                        (eps << 11).to_be_bytes()
+                    };
+                    p.extend_from_slice(&word(0)); // LL
+                    for _r in 1..=q_nl {
+                        p.extend_from_slice(&word(1)); // HL
+                        p.extend_from_slice(&word(1)); // LH
+                        p.extend_from_slice(&word(2)); // HH
+                    }
+                }
+            }
+            p
+        };
+        push_segment(&mut out, MARKER_QCD, &quant_payload(precision, nl, kernel));
+        // QCC (Table A.31, `Main QCC > Main QCD` per §A.6.5) for every
+        // component whose quantisation table differs from the QCD's:
+        // the §G.2 RCT chrominance components carry one extra bit of
+        // dynamic range in their exponents, and a COC that changes a
+        // component's NL (band count) or kernel (style + exponents)
+        // changes its table too.
+        for (ci, cp) in comp_params.iter().enumerate() {
+            // §G.2: RCT chrominance dynamic range grows by one bit.
+            let ri = if use_rct && (ci == 1 || ci == 2) {
+                precision + 1
+            } else {
+                precision
+            };
+            let needs_qcc = ri != precision || cp.nl != nl || cp.kernel != kernel;
+            if !needs_qcc {
+                continue;
+            }
+            let mut qcc_payload = Vec::new();
+            if planes.len() >= 257 {
+                qcc_payload.extend_from_slice(&(ci as u16).to_be_bytes());
+            } else {
+                qcc_payload.push(ci as u8);
+            }
+            qcc_payload.extend_from_slice(&quant_payload(ri, cp.nl, cp.kernel));
+            push_segment(&mut out, crate::MARKER_QCC, &qcc_payload);
+        }
+
+        // RGN (§A.6.3, Table A.25): one implicit-ROI (Maxshift) marker
+        // segment per component — Crgn (8- or 16-bit per Csiz),
+        // Srgn = 0 (the only Part-1 style), SPrgn = s.
+        if params.roi.is_some() {
+            for (ci, &s) in roi_s.iter().enumerate() {
+                let mut rgn_payload = Vec::with_capacity(4);
+                if planes.len() >= 257 {
+                    rgn_payload.extend_from_slice(&(ci as u16).to_be_bytes());
+                } else {
+                    rgn_payload.push(ci as u8);
+                }
+                rgn_payload.push(0); // Srgn — implicit ROI (Maxshift)
+                rgn_payload.push(s as u8); // SPrgn
+                push_segment(&mut out, crate::MARKER_RGN, &rgn_payload);
+            }
+        }
+
+        // POC (§A.6.6, Table A.32): one entry per progression-order
+        // change, after the quantisation markers. CSpoc / CEpoc are one
+        // byte when Csiz < 257, two otherwise; a full-range CEpoc that
+        // does not fit the one-byte form (256) is written as 0 per the
+        // Table A.32 footnote.
+        if !params.poc.is_empty() {
+            let wide = planes.len() >= 257;
+            let mut poc_payload = Vec::with_capacity(params.poc.len() * if wide { 9 } else { 7 });
+            for e in &params.poc {
+                poc_payload.push(e.resolution_start);
+                if wide {
+                    poc_payload.extend_from_slice(&e.component_start.to_be_bytes());
+                } else {
+                    poc_payload.push(e.component_start as u8);
+                }
+                poc_payload.extend_from_slice(&e.layer_end.to_be_bytes());
+                poc_payload.push(e.resolution_end);
+                if wide {
+                    poc_payload.extend_from_slice(&e.component_end.to_be_bytes());
+                } else {
+                    poc_payload.push(if e.component_end == 256 {
+                        0
+                    } else {
+                        e.component_end as u8
+                    });
+                }
+                poc_payload.push(order_byte(e.progression).expect("validated above"));
+            }
+            push_segment(&mut out, MARKER_POC, &poc_payload);
+        }
+
+        // The largest Ippm / Ippt byte run one marker segment holds:
+        // Lppm / Lppt are 16-bit and cover the 2-byte length plus the
+        // 1-byte Zppm / Zppt index (Tables A.38 / A.39).
+        const MAX_PACKED_PAYLOAD: usize = 65_535 - 3;
+
+        // PPM (§A.7.4, Table A.38): the whole codestream's packet
+        // headers, as one (Nppm, Ippm) entry per tile-part in
+        // codestream order, chunked into marker segments in increasing
+        // Zppm order (each ending on a completed packet header).
+        if params.packed_headers == PackedHeaders::Ppm {
+            let mut atoms: Vec<PackedAtom> = Vec::new();
+            for parts in &tile_bodies {
+                for part in parts {
+                    let nppm: usize = part.headers.iter().map(Vec::len).sum();
+                    let nppm = u32::try_from(nppm).map_err(|_| Error::NotImplemented)?;
+                    // The Nppm prefix may not end a segment; a part with
+                    // no packets contributes a bare (legal) Nppm = 0.
+                    atoms.push(PackedAtom {
+                        bytes: nppm.to_be_bytes().to_vec(),
+                        boundary: part.headers.is_empty(),
+                    });
+                    for h in &part.headers {
+                        atoms.push(PackedAtom {
+                            bytes: h.clone(),
+                            boundary: true,
+                        });
+                    }
+                }
+            }
+            let chunks = chunk_packed_headers(&atoms, MAX_PACKED_PAYLOAD)?;
+            if chunks.len() > 256 {
+                // Zppm is an 8-bit index (Table A.38).
+                return Err(Error::NotImplemented);
+            }
+            for (z, chunk) in chunks.iter().enumerate() {
+                let mut payload = Vec::with_capacity(1 + chunk.len());
+                payload.push(z as u8); // Zppm
+                payload.extend_from_slice(chunk);
+                push_segment(&mut out, crate::MARKER_PPM, &payload);
+            }
+        }
+
+        // Tile-part headers (§A.4.2): per tile the §A.7.5 PPT chunks
+        // (first tile-part only — "in the same tile-part header or one
+        // with a lower TPsot value" than any packet data they
+        // describe), per tile-part the §A.7.3 PLT chunks, and each
+        // part's Psot (SOT → end of the part's body). Computed before
+        // emission so a §A.7.1 TLM can announce every Psot up front.
+        struct PartLayout {
+            ppt_chunks: Vec<Vec<u8>>,
+            plt_chunks: Vec<Vec<u8>>,
+            psot: u32,
+        }
+        let mut layouts: Vec<Vec<PartLayout>> = Vec::with_capacity(tile_bodies.len());
+        for parts in &tile_bodies {
+            let mut ppt_chunks: Vec<Vec<u8>> = Vec::new();
+            if params.packed_headers == PackedHeaders::Ppt {
+                let atoms: Vec<PackedAtom> = parts
+                    .iter()
+                    .flat_map(|part| part.headers.iter())
+                    .map(|h| PackedAtom {
+                        bytes: h.clone(),
+                        boundary: true,
+                    })
+                    .collect();
+                ppt_chunks = chunk_packed_headers(&atoms, MAX_PACKED_PAYLOAD)?;
+                if ppt_chunks.len() > 256 {
+                    // Zppt is an 8-bit index (Table A.39).
+                    return Err(Error::NotImplemented);
+                }
+            }
+            let mut tile_layout = Vec::with_capacity(parts.len());
+            for (i, part) in parts.iter().enumerate() {
+                let ppt_chunks = if i == 0 {
+                    std::mem::take(&mut ppt_chunks)
+                } else {
+                    Vec::new()
+                };
+                let plt_chunks = if params.plt {
+                    // Table A.36 Iplt: 7-bit groups, most significant
+                    // first, continuation bit on all but the last.
+                    let atoms: Vec<PackedAtom> = part
+                        .packet_lens
+                        .iter()
+                        .map(|&len| PackedAtom {
+                            bytes: iplt_bytes(len as u64),
+                            boundary: true,
+                        })
+                        .collect();
+                    // Lplt = 2 + 1 (Zplt) + payload ≤ 65 535.
+                    let chunks = chunk_packed_headers(&atoms, 65_535 - 3)?;
+                    if chunks.len() > 256 {
+                        // Zplt is an 8-bit index (Table A.37).
+                        return Err(Error::NotImplemented);
+                    }
+                    chunks
+                } else {
+                    Vec::new()
+                };
+                // Marker + length + Z index + payload per segment.
+                let ppt_bytes: usize = ppt_chunks.iter().map(|c| 5 + c.len()).sum();
+                let plt_bytes: usize = plt_chunks.iter().map(|c| 5 + c.len()).sum();
+                let psot = 12usize + ppt_bytes + plt_bytes + 2 + part.body.len();
+                let psot = u32::try_from(psot).map_err(|_| Error::NotImplemented)?;
+                tile_layout.push(PartLayout {
+                    ppt_chunks,
+                    plt_chunks,
+                    psot,
+                });
+            }
+            layouts.push(tile_layout);
+        }
+
+        // COM (§A.9.2, Tables A.43 / A.44): Rcom = 1, Latin text.
+        if let Some(text) = &params.comment {
+            let mut payload = Vec::with_capacity(2 + text.len());
+            payload.extend_from_slice(&1u16.to_be_bytes());
+            payload.extend_from_slice(text.as_bytes());
+            push_segment(&mut out, crate::MARKER_COM, &payload);
+        }
+
+        // TLM (§A.7.1, Tables A.33 / A.34): one (Ttlm, Ptlm) per
+        // tile-part in codestream order, Ptlm = Psot. ST = 1 while
+        // every Isot fits the 8-bit Ttlm range 0..=254, else ST = 2;
+        // SP = 1 (32-bit Ptlm). Ltlm ≤ 65 535 bounds the entries per
+        // segment; further entries continue in Ztlm-indexed segments.
+        if params.tlm {
+            let entries: Vec<(u16, u32)> = layouts
+                .iter()
+                .enumerate()
+                .flat_map(|(t, parts)| parts.iter().map(move |p| (t as u16, p.psot)))
+                .collect();
+            let st: u8 = if layouts.len() <= 255 { 1 } else { 2 };
+            let entry_len = usize::from(st) + 4;
+            let per_segment = (65_535 - 4) / entry_len;
+            let segments = entries.chunks(per_segment);
+            if segments.len() > 256 {
+                // Ztlm is an 8-bit index (Table A.33).
+                return Err(Error::NotImplemented);
+            }
+            for (z, chunk) in segments.enumerate() {
+                let mut payload = Vec::with_capacity(2 + chunk.len() * entry_len);
+                payload.push(z as u8); // Ztlm
+                payload.push((st << 4) | 0x40); // Stlm: ST, SP = 1
+                for &(tile, psot) in chunk {
+                    if st == 1 {
+                        payload.push(tile as u8);
+                    } else {
+                        payload.extend_from_slice(&tile.to_be_bytes());
+                    }
+                    payload.extend_from_slice(&psot.to_be_bytes());
+                }
+                push_segment(&mut out, crate::MARKER_TLM, &payload);
+            }
+        }
+
+        // SOT + SOD per tile-part (§A.4.2): TPsot counts up in
+        // codestream order and every part carries the tile's final
+        // TNsot; the PPT segments (first part) and PLT segments sit in
+        // the tile-part header before the SOD.
+        for (t, (parts, layout)) in tile_bodies.iter().zip(&layouts).enumerate() {
+            let tnsot = parts.len() as u8;
+            for (i, (part, lay)) in parts.iter().zip(layout).enumerate() {
+                let mut sot_payload = Vec::with_capacity(8);
+                sot_payload.extend_from_slice(&(t as u16).to_be_bytes()); // Isot
+                sot_payload.extend_from_slice(&lay.psot.to_be_bytes());
+                sot_payload.push(i as u8); // TPsot
+                sot_payload.push(tnsot); // TNsot
+                push_segment(&mut out, MARKER_SOT, &sot_payload);
+                for (z, chunk) in lay.ppt_chunks.iter().enumerate() {
+                    let mut payload = Vec::with_capacity(1 + chunk.len());
+                    payload.push(z as u8); // Zppt
+                    payload.extend_from_slice(chunk);
+                    push_segment(&mut out, crate::MARKER_PPT, &payload);
+                }
+                for (z, chunk) in lay.plt_chunks.iter().enumerate() {
+                    let mut payload = Vec::with_capacity(1 + chunk.len());
+                    payload.push(z as u8); // Zplt
+                    payload.extend_from_slice(chunk);
+                    push_segment(&mut out, crate::MARKER_PLT, &payload);
+                }
+                out.extend_from_slice(&MARKER_SOD.to_be_bytes());
+                out.extend_from_slice(&part.body);
+            }
+        }
+
+        out.extend_from_slice(&MARKER_EOC.to_be_bytes());
+        Ok(out)
+    };
+
+    // -- PCRD rate control (T.800 Annex J.13.3) -------------------------
+    enum Objective {
+        Bytes(usize),
+        Psnr(f64),
+    }
+    let objective = match (params.target_bytes, params.target_psnr) {
+        (Some(b), _) => Objective::Bytes(b),
+        (None, Some(p)) => Objective::Psnr(p),
+        (None, None) => return assemble(None, true),
+    };
+    // Decoded PSNR of a candidate stream against the input planes
+    // (all components, in the input sample domain).
+    let psnr_of = |stream: &[u8]| -> Result<f64, Error> {
+        let img = crate::decode::decode_j2k(stream)?;
+        let mut sse = 0.0f64;
+        let mut count = 0usize;
+        for (comp, plane) in img.components.iter().zip(planes) {
+            if comp.samples.len() != plane.len() {
+                return Err(Error::InvalidPacketHeader);
+            }
+            for (i, &got) in comp.samples.iter().enumerate() {
+                let e = f64::from(got - plane.get(i));
+                sse += e * e;
+            }
+            count += plane.len();
+        }
+        let peak = f64::from((1u32 << precision) - 1);
+        if sse == 0.0 || count == 0 {
+            return Ok(f64::INFINITY);
+        }
+        Ok(10.0 * (peak * peak / (sse / count as f64)).log10())
+    };
+    let full = assemble(None, true)?;
+    match objective {
+        Objective::Bytes(target) if full.len() <= target => return Ok(full),
+        Objective::Psnr(target) if psnr_of(&full)? < target => return Ok(full),
+        _ => {}
+    }
+    // Per-block monotone-slope truncation sets N_i (J.13.3): the subset
+    // of pass boundaries whose rate-distortion slopes S = ΔD / ΔR are
+    // strictly decreasing, built from the anchor (R = 0, D = D^0).
+    // Each entry is (passes, rate, weighted slope).
+    let mut hulls: Vec<Vec<(u32, u32, f64)>> = vec![Vec::new(); num_blocks];
+    let mut max_slope = 0.0f64;
+    let mut min_slope = f64::INFINITY;
+    for raw in packets.values() {
+        for enc in raw.blocks.iter().flatten() {
+            // Monotone hull over the (R^n, D^n) points.
+            let mut pts: Vec<(u32, u32, f64)> = vec![(0, 0, enc.d0)];
+            for n in 1..=enc.coding_passes as usize {
+                let r = enc.pass_rates[n - 1];
+                let d = enc.pass_dist[n - 1];
+                if d + 1e-12 >= pts.last().expect("anchor").2 {
+                    continue; // no distortion gain — never a truncation
+                }
+                // Same rate, lower distortion → the newer point wins.
+                while pts.len() > 1 && r <= pts.last().expect("len>1").1 {
+                    pts.pop();
+                }
+                // Keep slopes strictly decreasing along the hull.
+                while pts.len() > 1 {
+                    let last = *pts.last().expect("len>1");
+                    let prev = pts[pts.len() - 2];
+                    let s_last = (prev.2 - last.2) / f64::from(last.1 - prev.1).max(0.5);
+                    let s_new = (last.2 - d) / f64::from(r.saturating_sub(last.1)).max(0.5);
+                    if s_last <= s_new {
+                        pts.pop();
+                    } else {
+                        break;
+                    }
+                }
+                pts.push((n as u32, r, d));
+            }
+            let mut hull = Vec::with_capacity(pts.len().saturating_sub(1));
+            for w in pts.windows(2) {
+                let dr = f64::from(w[1].1.saturating_sub(w[0].1)).max(0.5);
+                let slope = enc.weight * (w[0].2 - w[1].2) / dr;
+                if slope > 0.0 {
+                    max_slope = max_slope.max(slope);
+                    min_slope = min_slope.min(slope);
+                    hull.push((w[1].0, w[1].1, slope));
+                }
+            }
+            hulls[enc.ordinal] = hull;
+        }
+    }
+    // For a slope threshold λ, each block keeps the deepest truncation
+    // point whose slope still exceeds λ (Equation J-13 minimiser).
+    let pick = |lambda: f64| -> Vec<u32> {
+        hulls
+            .iter()
+            .map(|h| {
+                let mut n = 0u32;
+                for &(p, _r, s) in h {
+                    if s > lambda {
+                        n = p;
+                    } else {
+                        break;
+                    }
+                }
+                n
+            })
+            .collect()
+    };
+    if max_slope <= 0.0 || !min_slope.is_finite() {
+        // Nothing coded anywhere — the minimal stream is the answer.
+        return assemble(Some(&vec![0; num_blocks]), true);
+    }
+    // Bisect λ in log space: len(λ) and the decoded quality are both
+    // non-increasing in λ. For a byte budget keep the largest stream
+    // not exceeding it (J.13.3 notes the residual gap is small,
+    // typically well under 100 bytes); for a PSNR floor keep the
+    // smallest stream still reaching it — each candidate assembled
+    // exactly and decoded, so the floor is measured, not modelled.
+    let mut lo = min_slope.ln() - 1.0; // ≈ include everything
+    let mut hi = max_slope.ln() + 1.0; // include nothing
+    let mut best: Option<Vec<u32>> = None;
+    match objective {
+        Objective::Bytes(target) => {
+            for _ in 0..48 {
+                let mid = 0.5 * (lo + hi);
+                let trunc = pick(mid.exp());
+                let s = assemble(Some(&trunc), false)?;
+                if s.len() <= target {
+                    best = Some(trunc);
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+        }
+        Objective::Psnr(target) => {
+            for _ in 0..28 {
+                let mid = 0.5 * (lo + hi);
+                let trunc = pick(mid.exp());
+                let s = assemble(Some(&trunc), true)?;
+                if psnr_of(&s)? >= target {
+                    best = Some(trunc);
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            if best.is_none() {
+                // Only the untruncated stream reaches the floor.
+                return Ok(full);
+            }
+        }
+    }
+    let trunc = best.unwrap_or_else(|| vec![0; num_blocks]);
+    assemble(Some(&trunc), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode::decode_j2k;
+
+    fn lcg(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
+
+    /// Encode `planes`, decode with this crate's decoder, and assert the
+    /// round-trip is bit-exact per component.
+    fn roundtrip(planes: &[&[u8]], w: u32, h: u32, nl: u8, cb: (u8, u8)) {
+        let stream = encode_j2k_lossless(planes, w, h, nl, cb).expect("encode");
+        let img = decode_j2k(&stream).expect("decode own stream");
+        assert_eq!(img.components.len(), planes.len());
+        for (ci, (comp, plane)) in img.components.iter().zip(planes).enumerate() {
+            assert_eq!(comp.width, w, "comp {ci} width");
+            assert_eq!(comp.height, h, "comp {ci} height");
+            assert_eq!(comp.precision_bits, 8);
+            let got: Vec<u8> = comp.samples.iter().map(|&s| s as u8).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples");
+        }
+    }
+
+    fn gradient(w: u32, h: u32) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| (((i % w) * 5 + (i / w) * 3) % 256) as u8)
+            .collect()
+    }
+
+    fn noise(w: u32, h: u32, seed: u32) -> Vec<u8> {
+        let mut s = seed;
+        (0..w * h).map(|_| (lcg(&mut s) >> 13) as u8).collect()
+    }
+
+    #[test]
+    fn lossless_gray_nl0_single_block() {
+        // NL = 0: the LL band is the raw plane; one code-block.
+        let p = gradient(8, 8);
+        roundtrip(&[&p], 8, 8, 0, (4, 4));
+    }
+
+    #[test]
+    fn lossless_gray_nl1() {
+        let p = gradient(16, 16);
+        roundtrip(&[&p], 16, 16, 1, (4, 4));
+    }
+
+    #[test]
+    fn lossless_gray_nl3_odd_dims() {
+        // Odd dimensions exercise the ceil/floor band splits and the
+        // PSEO parity at every cascade level.
+        let p = gradient(37, 23);
+        roundtrip(&[&p], 37, 23, 3, (4, 4));
+    }
+
+    #[test]
+    fn lossless_gray_noise_multi_codeblock() {
+        // 64×48 with 16×16 code-blocks → multi-block grids in every
+        // band; noise stresses every coding-pass branch.
+        let p = noise(64, 48, 0xA5A5_5A5A);
+        roundtrip(&[&p], 64, 48, 2, (4, 4));
+    }
+
+    #[test]
+    fn lossless_gray_extreme_values() {
+        // All-0 / all-255 regions produce large DWT coefficients at the
+        // boundary — exercises the deepest bit-planes and the Mb budget.
+        let w = 32u32;
+        let h = 32u32;
+        let p: Vec<u8> = (0..w * h)
+            .map(|i| if (i % w) < w / 2 { 0 } else { 255 })
+            .collect();
+        roundtrip(&[&p], w, h, 3, (4, 4));
+    }
+
+    #[test]
+    fn lossless_gray_flat_image_empty_packets() {
+        // A flat mid-grey plane: after the DC shift everything is zero,
+        // every high band is all-zero (not-included code-blocks / empty
+        // packets); only the LL DC survives... at value 0, so even the
+        // LL block is excluded and every packet is empty.
+        let p = vec![128u8; 24 * 24];
+        roundtrip(&[&p], 24, 24, 2, (4, 4));
+    }
+
+    #[test]
+    fn lossless_rgb_three_components() {
+        // Three planes, no MCT: each component encodes independently.
+        let r = gradient(21, 17);
+        let g = noise(21, 17, 0x1357_2468);
+        let b = vec![200u8; 21 * 17];
+        roundtrip(&[&r, &g, &b], 21, 17, 2, (4, 4));
+    }
+
+    #[test]
+    fn lossless_tiny_image() {
+        // 1×1 and 2×3 degenerate geometries (empty high bands at some
+        // levels, single-coefficient code-blocks).
+        roundtrip(&[&[77u8]], 1, 1, 1, (4, 4));
+        let p = vec![3u8, 250, 12, 99, 180, 42];
+        roundtrip(&[&p], 2, 3, 2, (4, 4));
+    }
+
+    #[test]
+    fn lossless_small_codeblocks() {
+        // 4×4 code-blocks (the Table A.18 minimum) over a 20×20 noise
+        // image: many small blocks per band.
+        let p = noise(20, 20, 0xBEEF_CAFE);
+        roundtrip(&[&p], 20, 20, 1, (2, 2));
+    }
+
+    #[test]
+    fn encode_rejects_bad_params() {
+        let p = vec![0u8; 16];
+        // Empty planes.
+        assert!(encode_j2k_lossless(&[], 4, 4, 1, (4, 4)).is_err());
+        // Wrong plane size.
+        assert!(encode_j2k_lossless(&[&p], 5, 4, 1, (4, 4)).is_err());
+        // Code-block exponents out of Table A.18 range.
+        assert!(encode_j2k_lossless(&[&p], 4, 4, 1, (1, 4)).is_err());
+        assert!(encode_j2k_lossless(&[&p], 4, 4, 1, (10, 10)).is_err());
+    }
+
+    // -- §G.2 reversible component transform (MCT = 1) ----------------
+
+    /// Encode three planes with the RCT, decode with this crate's
+    /// decoder, and assert bit-exact recovery.
+    fn roundtrip_rct(planes: &[&[u8]; 3], w: u32, h: u32, nl: u8, cb: (u8, u8)) -> usize {
+        let stream = encode_j2k_lossless_rct(planes, w, h, nl, cb).expect("encode rct");
+        let img = decode_j2k(&stream).expect("decode own rct stream");
+        assert_eq!(img.components.len(), 3);
+        for (ci, (comp, plane)) in img.components.iter().zip(planes.iter()).enumerate() {
+            let got: Vec<u8> = comp.samples.iter().map(|&s| s as u8).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples (RCT)");
+        }
+        stream.len()
+    }
+
+    #[test]
+    fn lossless_rct_round_trips() {
+        let r = gradient(40, 32);
+        let g = gradient(40, 32);
+        let b = noise(40, 32, 0x0F0F_F0F0);
+        roundtrip_rct(&[&r, &g, &b], 40, 32, 2, (4, 4));
+    }
+
+    #[test]
+    fn lossless_rct_odd_dims_extremes() {
+        // Saturated channels + odd dims: exercises the widened chroma
+        // budget (QCC RI + 1) and the RCT corner values.
+        let w = 19u32;
+        let h = 27u32;
+        let r = vec![255u8; (w * h) as usize];
+        let g = vec![0u8; (w * h) as usize];
+        let b: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        roundtrip_rct(&[&r, &g, &b], w, h, 3, (4, 4));
+    }
+
+    #[test]
+    fn rct_beats_independent_planes_on_correlated_rgb() {
+        // A natural-ish correlated image: all three channels share the
+        // same busy luminance (noise) while the channel *differences*
+        // are smooth. The RCT moves the noise into one luma component
+        // and leaves two near-flat chroma planes, so the MCT = 1 stream
+        // must be smaller than the three-independent-planes stream.
+        let w = 64u32;
+        let h = 64u32;
+        let luma = noise(w, h, 0x1122_3344);
+        let r: Vec<u8> = luma.iter().map(|&v| v.saturating_add(10)).collect();
+        let g = luma.clone();
+        let b: Vec<u8> = luma.iter().map(|&v| v.saturating_sub(30)).collect();
+        let rct_len = roundtrip_rct(&[&r, &g, &b], w, h, 3, (5, 5));
+        let plain = encode_j2k_lossless(&[&r, &g, &b], w, h, 3, (5, 5)).unwrap();
+        assert!(
+            rct_len < plain.len(),
+            "RCT stream ({rct_len} B) should beat independent planes ({} B)",
+            plain.len()
+        );
+    }
+
+    // -- 9-7 lossy path (Annex E scalar-expounded quantisation) --------
+
+    /// Encode lossy, decode with this crate's decoder, and return the
+    /// maximum absolute per-sample error plus the stream length.
+    fn lossy_roundtrip(
+        planes: &[&[u8]],
+        w: u32,
+        h: u32,
+        nl: u8,
+        cb: (u8, u8),
+        fine_bits: u8,
+    ) -> (u32, usize) {
+        let stream = encode_j2k_lossy(planes, w, h, nl, cb, fine_bits).expect("encode lossy");
+        let img = decode_j2k(&stream).expect("decode own lossy stream");
+        assert_eq!(img.components.len(), planes.len());
+        let mut max_err = 0u32;
+        for (comp, plane) in img.components.iter().zip(planes) {
+            for (&got, &want) in comp.samples.iter().zip(plane.iter()) {
+                let err = (got - i32::from(want)).unsigned_abs();
+                max_err = max_err.max(err);
+            }
+        }
+        (max_err, stream.len())
+    }
+
+    #[test]
+    fn lossy_9x7_near_lossless_within_one() {
+        // fine_bits = 6 (Δb = 1/64): the quantisation error is far below
+        // one sample step, so the decoded plane is within ±1 everywhere.
+        let p = gradient(48, 40);
+        let (max_err, _) = lossy_roundtrip(&[&p], 48, 40, 3, (4, 4), 6);
+        assert!(max_err <= 1, "near-lossless error {max_err} > 1");
+    }
+
+    #[test]
+    fn lossy_9x7_noise_bounded_error() {
+        // Noise at fine_bits = 6 stays within ±1 too (the 9-7 float
+        // pipeline is exact to well below half a step at Δb = 1/64).
+        let p = noise(33, 27, 0x7777_AAAA);
+        let (max_err, _) = lossy_roundtrip(&[&p], 33, 27, 2, (4, 4), 6);
+        assert!(max_err <= 1, "noise error {max_err} > 1");
+    }
+
+    #[test]
+    fn lossy_9x7_coarse_step_compresses_harder() {
+        // Δb = 1 (fine_bits = 0) is a coarse quantiser: the stream must
+        // be much smaller than the near-lossless one and the error still
+        // modest (a few sample steps).
+        let p = noise(64, 64, 0x0DDB_A115);
+        let (err_fine, len_fine) = lossy_roundtrip(&[&p], 64, 64, 2, (5, 5), 6);
+        let (err_coarse, len_coarse) = lossy_roundtrip(&[&p], 64, 64, 2, (5, 5), 0);
+        assert!(err_fine <= 1);
+        assert!(
+            len_coarse < len_fine,
+            "coarse ({len_coarse} B) should be smaller than fine ({len_fine} B)"
+        );
+        assert!(
+            err_coarse <= 8,
+            "coarse-step error {err_coarse} out of expected range"
+        );
+    }
+
+    #[test]
+    fn lossy_9x7_rgb_components() {
+        let r = gradient(25, 31);
+        let g = noise(25, 31, 0x5151_5151);
+        let b = vec![64u8; 25 * 31];
+        let (max_err, _) = lossy_roundtrip(&[&r, &g, &b], 25, 31, 2, (4, 4), 6);
+        assert!(max_err <= 1, "rgb lossy error {max_err} > 1");
+    }
+
+    #[test]
+    fn lossy_rejects_out_of_range_fine_bits() {
+        let p = vec![0u8; 16];
+        assert!(encode_j2k_lossy(&[&p], 4, 4, 1, (4, 4), 9).is_err());
+    }
+
+    // -- §B.12.1 progression orders on encode ---------------------------
+
+    /// Encode `planes` in the given progression order (lossless 5-3),
+    /// decode with this crate's decoder, assert bit-exact recovery and
+    /// the signalled SGcod progression, and return the stream.
+    fn roundtrip_order(
+        planes: &[&[u8]],
+        w: u32,
+        h: u32,
+        nl: u8,
+        order: crate::ProgressionOrder,
+    ) -> Vec<u8> {
+        let stream = encode_j2k(
+            planes,
+            w,
+            h,
+            &EncodeOptions {
+                decomposition_levels: nl,
+                code_block_exp: (4, 4),
+                progression: order,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encode");
+        let header = crate::parse_j2k_header(&stream).expect("own header parses");
+        assert_eq!(header.cod.progression, order, "SGcod progression");
+        let img = decode_j2k(&stream).expect("decode own stream");
+        for (ci, (comp, plane)) in img.components.iter().zip(planes).enumerate() {
+            let got: Vec<u8> = comp.samples.iter().map(|&s| s as u8).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples ({order:?})");
+        }
+        stream
+    }
+
+    #[test]
+    fn all_five_progression_orders_round_trip() {
+        // Multi-resolution RGB: with several resolution levels and three
+        // components every §B.12.1 order produces a distinct packet
+        // sequence, and each must decode bit-exactly.
+        let w = 40u32;
+        let h = 28u32;
+        let r = gradient(w, h);
+        let g = noise(w, h, 0x1357_9BDF);
+        let b: Vec<u8> = gradient(w, h).iter().map(|&v| 255 - v).collect();
+        let planes: [&[u8]; 3] = [&r, &g, &b];
+        use crate::ProgressionOrder::*;
+        let streams: Vec<Vec<u8>> = [Lrcp, Rlcp, Rpcl, Pcrl, Cprl]
+            .into_iter()
+            .map(|o| roundtrip_order(&planes, w, h, 3, o))
+            .collect();
+        // All five orders carry the same packets, merely reordered: the
+        // stream lengths must agree.
+        for i in 0..streams.len() {
+            for j in (i + 1)..streams.len() {
+                assert_eq!(
+                    streams[i].len(),
+                    streams[j].len(),
+                    "same packets, reordered"
+                );
+            }
+        }
+        // With one layer and one precinct per resolution the
+        // resolution-major orders (LRCP / RLCP / RPCL) coincide, but the
+        // §B.12.1.4–5 position/component-major orders walk the packets
+        // component-first — PCRL must differ from LRCP past the COD.
+        assert_ne!(streams[0][60..], streams[3][60..], "PCRL reorders packets");
+    }
+
+    #[test]
+    fn progression_orders_round_trip_odd_dims_gray() {
+        // Odd dimensions push distinct trx0/try0 anchors into the
+        // position-keyed corner projection.
+        let p = noise(37, 23, 0xACE1_ACE1);
+        for o in [
+            crate::ProgressionOrder::Rpcl,
+            crate::ProgressionOrder::Pcrl,
+            crate::ProgressionOrder::Cprl,
+        ] {
+            roundtrip_order(&[&p], 37, 23, 2, o);
+        }
+    }
+
+    #[test]
+    fn reserved_progression_is_rejected() {
+        let p = vec![0u8; 16];
+        let r = encode_j2k(
+            &[&p],
+            4,
+            4,
+            &EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (4, 4),
+                progression: crate::ProgressionOrder::Reserved(9),
+                ..EncodeOptions::default()
+            },
+        );
+        assert!(r.is_err());
+    }
+
+    // -- §B.6 user-defined precinct partitions on encode ---------------
+
+    /// Encode with `params`, decode with this crate's decoder, assert
+    /// bit-exact recovery, and return the stream.
+    fn roundtrip_params(planes: &[&[u8]], w: u32, h: u32, params: &EncodeOptions) -> Vec<u8> {
+        let stream = encode_j2k(planes, w, h, params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode own stream");
+        for (ci, (comp, plane)) in img.components.iter().zip(planes).enumerate() {
+            let got: Vec<u8> = comp.samples.iter().map(|&s| s as u8).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples");
+        }
+        stream
+    }
+
+    #[test]
+    fn multi_precinct_lossless_round_trips() {
+        // 64×48, NL = 2, PP = (2, 3, 3): r = 0 partitions the 16×12 LL
+        // domain into 4×4 cells (4×3 = 12 precincts) and the higher
+        // levels split into effective 2^(3−1) = 4-sample precinct spans,
+        // so every resolution carries several packets.
+        let p = noise(64, 48, 0xFACE_FEED);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (2, 2),
+            precincts: vec![0x22, 0x33, 0x33],
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 64, 48, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert!(header.cod.user_defined_precincts);
+        assert_eq!(header.cod.precincts, vec![0x22, 0x33, 0x33]);
+    }
+
+    #[test]
+    fn multi_precinct_position_orders_round_trip() {
+        // With several precincts per resolution the position-keyed
+        // orders genuinely interleave (resolution, component, corner):
+        // every order must still decode bit-exactly, and RPCL must now
+        // produce a different packet sequence from LRCP.
+        let w = 56u32;
+        let h = 40u32;
+        let r = gradient(w, h);
+        let g = noise(w, h, 0x00C0_FFEE);
+        let b: Vec<u8> = gradient(w, h).iter().map(|&v| v ^ 0x5A).collect();
+        let planes: [&[u8]; 3] = [&r, &g, &b];
+        use crate::ProgressionOrder::*;
+        let mut streams = Vec::new();
+        for o in [Lrcp, Rlcp, Rpcl, Pcrl, Cprl] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (2, 2),
+                progression: o,
+                precincts: vec![0x22, 0x33, 0x44],
+                ..EncodeOptions::default()
+            };
+            streams.push(roundtrip_params(&planes, w, h, &params));
+        }
+        for s in &streams[1..] {
+            assert_eq!(streams[0].len(), s.len(), "same packets, reordered");
+        }
+        assert_ne!(
+            streams[0][70..],
+            streams[2][70..],
+            "RPCL reorders multi-precinct packets"
+        );
+    }
+
+    #[test]
+    fn multi_precinct_lossy_round_trips() {
+        // The 9-7 path over a multi-precinct partition.
+        let p = noise(48, 48, 0x0BAD_CAFE);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            precincts: vec![0x33, 0x44, 0x44],
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 48, 48, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let max_err = img.components[0]
+            .samples
+            .iter()
+            .zip(p.iter())
+            .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 1, "multi-precinct lossy error {max_err} > 1");
+    }
+
+    #[test]
+    fn precinct_validation_rejects_malformed() {
+        let p = vec![0u8; 16 * 16];
+        // Wrong byte count (NL + 1 = 3 required).
+        let bad_len = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (2, 2),
+            precincts: vec![0x33, 0x33],
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad_len).is_err());
+        // Zero PPx nibble above r = 0 (Table A.21 note).
+        let bad_zero = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (2, 2),
+            precincts: vec![0x33, 0x30],
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad_zero).is_err());
+        // A zero nibble at r = 0 alone is fine.
+        let ok_zero = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (2, 2),
+            precincts: vec![0x00, 0x33],
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &ok_zero).is_ok());
+    }
+
+    // -- §B.10 quality layers on encode (J.13.2-guided split) -----------
+
+    #[test]
+    fn multi_layer_lossless_round_trips() {
+        // 3 layers over noisy content: every code-block's passes split
+        // across layers at the J.13.4 truncation rates; decoding all
+        // layers must remain bit-exact.
+        let p = noise(64, 48, 0xD1CE_D1CE);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            layers: 3,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 64, 48, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert_eq!(header.cod.layers, 3);
+    }
+
+    #[test]
+    fn multi_layer_lossy_round_trips() {
+        let p = noise(48, 40, 0xFEED_F00D);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            layers: 4,
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 48, 40, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let max_err = img.components[0]
+            .samples
+            .iter()
+            .zip(p.iter())
+            .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 1, "multi-layer lossy error {max_err} > 1");
+    }
+
+    #[test]
+    fn multi_layer_multi_precinct_position_orders() {
+        // Layers × precincts × the position-keyed orders: the §B.12.1
+        // drivers interleave layers into the sweep and the per-precinct
+        // tag-tree state must persist across the layer packets.
+        let w = 48u32;
+        let h = 32u32;
+        let r = gradient(w, h);
+        let g = noise(w, h, 0x5EED_5EED);
+        let b: Vec<u8> = gradient(w, h).iter().map(|&v| v ^ 0xA5).collect();
+        let planes: [&[u8]; 3] = [&r, &g, &b];
+        for o in [
+            crate::ProgressionOrder::Lrcp,
+            crate::ProgressionOrder::Rpcl,
+            crate::ProgressionOrder::Cprl,
+        ] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (2, 2),
+                progression: o,
+                precincts: vec![0x22, 0x33, 0x44],
+                layers: 3,
+                ..EncodeOptions::default()
+            };
+            roundtrip_params(&planes, w, h, &params);
+        }
+    }
+
+    #[test]
+    fn more_layers_than_coded_depths() {
+        // A smooth gradient codes few bit-planes; with 8 layers several
+        // layers receive no passes anywhere (empty packets) and blocks
+        // skip layers between contributions.
+        let p = gradient(32, 32);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            layers: 8,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&p], 32, 32, &params);
+    }
+
+    #[test]
+    fn multi_layer_flat_image_all_empty() {
+        // Flat mid-grey: every packet of every layer is empty.
+        let p = vec![128u8; 24 * 24];
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            layers: 4,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&p], 24, 24, &params);
+    }
+
+    #[test]
+    fn multi_layer_overhead_is_modest() {
+        // Splitting into layers adds only packet-header overhead: the
+        // 4-layer stream must stay within a few percent (plus a fixed
+        // floor) of the single-layer stream.
+        let p = noise(64, 64, 0x1234_4321);
+        let single = encode_j2k(
+            &[&p],
+            64,
+            64,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+        let layered = encode_j2k(
+            &[&p],
+            64,
+            64,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                layers: 4,
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(layered.len() > single.len(), "layer headers cost bytes");
+        assert!(
+            layered.len() < single.len() + single.len() / 10 + 256,
+            "4-layer overhead too large: {} vs {}",
+            layered.len(),
+            single.len()
+        );
+    }
+
+    #[test]
+    fn zero_layers_rejected() {
+        let p = vec![0u8; 16];
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (2, 2),
+            layers: 0,
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 4, 4, &params).is_err());
+    }
+
+    // -- §B.3 multi-tile encode ------------------------------------------
+
+    #[test]
+    fn multi_tile_lossless_round_trips() {
+        // A 3×2 tile grid (last column/row partial) over noise: every
+        // tile transforms and codes independently; decode is bit-exact.
+        let p = noise(50, 34, 0x71E5_71E5);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            tile_size: Some((20, 17)),
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 50, 34, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert_eq!(header.siz.tile_width, 20);
+        assert_eq!(header.siz.tile_height, 17);
+    }
+
+    #[test]
+    fn multi_tile_odd_anchor_parity() {
+        // Odd tile dimensions put interior tiles at odd reference-grid
+        // corners, exercising the §F.4 lifting parity and the
+        // Table B.1 band-corner splits away from the origin.
+        let p = noise(23, 19, 0x0DDF_00D5);
+        let params = EncodeOptions {
+            decomposition_levels: 3,
+            code_block_exp: (2, 2),
+            tile_size: Some((7, 5)),
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&p], 23, 19, &params);
+    }
+
+    #[test]
+    fn multi_tile_rgb_rct_round_trips() {
+        // Tiles × the §G.2 RCT (per-tile component transform).
+        let w = 40u32;
+        let h = 24u32;
+        let r = gradient(w, h);
+        let g = noise(w, h, 0x1234_ABCD);
+        let b: Vec<u8> = gradient(w, h).iter().map(|&v| 255 - v).collect();
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            tile_size: Some((16, 16)),
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&r, &g, &b], w, h, &params);
+    }
+
+    #[test]
+    fn multi_tile_lossy_layers_round_trip() {
+        // Tiles × 9-7 × quality layers.
+        let p = noise(48, 48, 0x9876_5432);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            layers: 3,
+            tile_size: Some((32, 32)),
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 48, 48, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let max_err = img.components[0]
+            .samples
+            .iter()
+            .zip(p.iter())
+            .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 1, "multi-tile lossy error {max_err} > 1");
+    }
+
+    #[test]
+    fn multi_tile_rate_control_meets_budget() {
+        // PCRD across tiles: the hulls span all tiles' code-blocks.
+        let p = noise(64, 48, 0x1029_3847);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            tile_size: Some((32, 24)),
+            ..EncodeOptions::default()
+        };
+        let full = encode_j2k(&[&p], 64, 48, &base).unwrap();
+        let target = full.len() * 6 / 10;
+        let rc = encode_j2k(
+            &[&p],
+            64,
+            48,
+            &EncodeOptions {
+                target_bytes: Some(target),
+                ..base
+            },
+        )
+        .unwrap();
+        assert!(rc.len() <= target, "budget {target}, got {}", rc.len());
+        let img = decode_j2k(&rc).expect("decode");
+        assert_eq!(img.components[0].samples.len(), 64 * 48);
+    }
+
+    #[test]
+    fn zero_tile_size_rejected() {
+        let p = vec![0u8; 16];
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (2, 2),
+            tile_size: Some((0, 8)),
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 4, 4, &params).is_err());
+    }
+
+    // -- §D.6 bypass + §D.4.2 termination styles on encode ---------------
+
+    #[test]
+    fn terminate_each_pass_round_trips() {
+        // Table A.19 bit 2: every pass its own terminated segment; the
+        // packet header signals one length per pass (§B.10.7.2).
+        let p = noise(48, 40, 0x7E57_7E57);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            terminate_all: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 48, 40, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert!(header
+            .cod
+            .code_block_style_flags()
+            .termination_on_each_coding_pass());
+        // Per-pass termination costs bytes vs the single-segment stream.
+        let plain = encode_j2k(
+            &[&p],
+            48,
+            40,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(stream.len() > plain.len());
+    }
+
+    #[test]
+    fn bypass_round_trips_lossless_and_lossy() {
+        // Table A.19 bit 0: noise codes ~9-10 planes per block, so the
+        // raw region (absolute pass 10 onward) is well exercised on the
+        // SP / MR passes while cleanups stay AC.
+        let p = noise(48, 48, 0xB1FA_55E5);
+        for kernel in [
+            EncodeKernel::Lossless5x3,
+            EncodeKernel::Lossy9x7 { fine_bits: 6 },
+        ] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                kernel,
+                bypass: true,
+                ..EncodeOptions::default()
+            };
+            let stream = encode_j2k(&[&p], 48, 48, &params).expect("encode");
+            let header = crate::parse_j2k_header(&stream).expect("header");
+            assert!(header
+                .cod
+                .code_block_style_flags()
+                .selective_arithmetic_coding_bypass());
+            let img = decode_j2k(&stream).expect("decode bypass stream");
+            let max_err = img.components[0]
+                .samples
+                .iter()
+                .zip(p.iter())
+                .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+                .max()
+                .unwrap();
+            match kernel {
+                EncodeKernel::Lossless5x3 => assert_eq!(max_err, 0, "bypass lossless"),
+                EncodeKernel::Lossy9x7 { .. } => {
+                    assert!(max_err <= 1, "bypass lossy error {max_err}")
+                }
+            }
+        }
+    }
+
+    // -- §A.9.2 COM ----------------------------------------------------
+
+    #[test]
+    fn comment_lands_in_the_main_header_with_rcom_1() {
+        let p = noise(16, 16, 5);
+        let params = EncodeOptions {
+            comment: Some("oxideav-jpeg2000 r452".into()),
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 16, 16, &params);
+        let off = stream
+            .windows(2)
+            .position(|x| x == [0xFF, 0x64])
+            .expect("COM");
+        let sot = stream
+            .windows(2)
+            .position(|x| x == [0xFF, 0x90])
+            .expect("SOT");
+        assert!(off < sot, "main header");
+        let lcom = usize::from(u16::from_be_bytes([stream[off + 2], stream[off + 3]]));
+        assert_eq!(lcom, 2 + 2 + "oxideav-jpeg2000 r452".len());
+        assert_eq!(&stream[off + 4..off + 6], &[0, 1], "Rcom = 1");
+        assert_eq!(&stream[off + 6..off + 2 + lcom], b"oxideav-jpeg2000 r452");
+        for bad in ["", "caf\u{e9}"] {
+            let params = EncodeOptions {
+                comment: Some(bad.into()),
+                ..EncodeOptions::default()
+            };
+            assert!(matches!(
+                encode_j2k(&[&p], 16, 16, &params),
+                Err(Error::NotImplemented)
+            ));
+        }
+    }
+
+    // -- JP2 / JPH wrapping --------------------------------------------
+
+    #[test]
+    fn encode_jp2_wraps_the_codestream_the_container_decoder_reads_back() {
+        let (w, h) = (24u32, 20u32);
+        let r = noise(w, h, 31);
+        let g = noise(w, h, 32);
+        let b = noise(w, h, 33);
+        let a = noise(w, h, 34);
+        for (planes, mct) in [
+            (vec![&r[..]], false),
+            (vec![&r[..], &a[..]], false),
+            (vec![&r[..], &g[..], &b[..]], true),
+            (vec![&r[..], &g[..], &b[..], &a[..]], true),
+        ] {
+            let params = EncodeOptions {
+                mct: Some(mct),
+                plt: true,
+                ..EncodeOptions::default()
+            };
+            let file = encode_jp2(&planes, w, h, &params).expect("jp2");
+            assert!(crate::probe(&file) && crate::info(&file).expect("info").jp2);
+            let img = crate::jp2::decode_jp2(&file).expect("decode container");
+            assert_eq!(img.components.len(), planes.len());
+            for (c, p) in img.components.iter().zip(&planes) {
+                let got: Vec<u8> = c.samples.iter().map(|&v| v as u8).collect();
+                assert_eq!(&got[..], *p);
+            }
+            // The contract entry point takes the container too.
+            let img = crate::decode(&file).expect("contract decode");
+            assert_eq!(img.components(), planes.len());
+            assert_eq!(img.into_raw().len(), (w * h) as usize * planes.len());
+        }
+        // 16-bit depth through the u16 path.
+        let p16: Vec<u16> = (0..w * h).map(|k| (k * 977 % 4096) as u16).collect();
+        let file = encode_jp2_u16(
+            &[&p16],
+            w,
+            h,
+            12,
+            &EncodeOptions::default(),
+            &crate::jp2::Jp2WriteOptions::for_components(1),
+        )
+        .expect("jp2 u16");
+        let c = crate::jp2::parse_jp2(&file).expect("parse");
+        assert_eq!(c.header.ihdr.bit_depth(), 12);
+        let img = crate::jp2::decode_jp2(&file).expect("decode");
+        let got: Vec<u16> = img.components[0]
+            .samples
+            .iter()
+            .map(|&v| v as u16)
+            .collect();
+        assert_eq!(got, p16);
+    }
+
+    // -- PCRD PSNR floor -------------------------------------------------
+
+    fn psnr_db(img: &crate::DecodedImage, planes: &[&[u8]]) -> f64 {
+        let mut sse = 0.0f64;
+        let mut n = 0usize;
+        for (c, p) in img.components.iter().zip(planes) {
+            for (&g, &w) in c.samples.iter().zip(p.iter()) {
+                sse += f64::from(g - i32::from(w)).powi(2);
+            }
+            n += p.len();
+        }
+        if sse == 0.0 {
+            return f64::INFINITY;
+        }
+        10.0 * (255.0 * 255.0 / (sse / n as f64)).log10()
+    }
+
+    #[test]
+    fn target_psnr_yields_smallest_stream_reaching_the_floor() {
+        // Rising floors cost monotonically more bytes, each decoded
+        // stream really reaches its floor, and the next-coarser λ step
+        // would not (the search is tight to one truncation step).
+        let (w, h) = (48u32, 48u32);
+        let p = noise(w, h, 0x2B5A_3A11);
+        for kernel in [
+            EncodeKernel::Lossless5x3,
+            // Δb = 1: genuinely lossy on noise (finer steps reconstruct
+            // this 8-bit input exactly after rounding, which would make
+            // every floor reachable).
+            EncodeKernel::Lossy9x7 { fine_bits: 0 },
+        ] {
+            let base = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                kernel,
+                layers: 2,
+                ..EncodeOptions::default()
+            };
+            let full = encode_j2k(&[&p], w, h, &base).expect("full");
+            let mut prev_len = 0usize;
+            for target in [22.0, 30.0, 38.0] {
+                let params = EncodeOptions {
+                    target_psnr: Some(target),
+                    ..base.clone()
+                };
+                let stream = encode_j2k(&[&p], w, h, &params).expect("psnr encode");
+                let img = decode_j2k(&stream).expect("decode");
+                let got = psnr_db(&img, &[&p]);
+                assert!(got >= target, "{kernel:?} target {target}: got {got}");
+                assert!(
+                    got < target + 6.0,
+                    "{kernel:?} target {target}: loose {got}"
+                );
+                assert!(stream.len() < full.len(), "truncated below full rate");
+                assert!(stream.len() > prev_len, "more bytes for a higher floor");
+                prev_len = stream.len();
+            }
+            // A floor the 9-7 quantiser cannot reach hands back the full
+            // stream; the reversible kernel reaches any finite floor —
+            // still bit-exact, never longer than the full stream (a
+            // trailing pass that changes no reconstructed sample may go).
+            let params = EncodeOptions {
+                target_psnr: Some(200.0),
+                ..base.clone()
+            };
+            let stream = encode_j2k(&[&p], w, h, &params).expect("200 dB floor");
+            match kernel {
+                EncodeKernel::Lossy9x7 { .. } => {
+                    assert!(psnr_db(&decode_j2k(&full).expect("decode"), &[&p]).is_finite());
+                    assert_eq!(stream, full);
+                }
+                EncodeKernel::Lossless5x3 => {
+                    assert!(stream.len() <= full.len());
+                    let img = decode_j2k(&stream).expect("decode");
+                    assert!(psnr_db(&img, &[&p]).is_infinite());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn target_psnr_composes_with_rct_tiles_styles_and_rejects_conflicts() {
+        let (w, h) = (40u32, 36u32);
+        let r = noise(w, h, 11);
+        let g = noise(w, h, 12);
+        let b = noise(w, h, 13);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            tile_size: Some((24, 20)),
+            bypass: true,
+            terminate_all: true,
+            sop: true,
+            plt: true,
+            target_psnr: Some(32.0),
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&r, &g, &b], w, h, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let got = psnr_db(&img, &[&r, &g, &b]);
+        assert!((32.0..40.0).contains(&got), "{got}");
+        for bad in [
+            EncodeOptions {
+                target_bytes: Some(1000),
+                ..params.clone()
+            },
+            EncodeOptions {
+                target_psnr: Some(0.0),
+                ..params.clone()
+            },
+            EncodeOptions {
+                target_psnr: Some(f64::NAN),
+                ..params.clone()
+            },
+            EncodeOptions {
+                mct: Some(false),
+                tile_size: None,
+                bypass: false,
+                terminate_all: false,
+                high_throughput: true,
+                ..params.clone()
+            },
+        ] {
+            assert!(matches!(
+                encode_j2k(&[&r, &g, &b], w, h, &bad),
+                Err(Error::NotImplemented)
+            ));
+        }
+    }
+
+    #[test]
+    fn predictable_termination_with_layers_keeps_prefix_decodes_alive() {
+        // Fuzz regression (roundtrip_encode, r452): reset + predictable
+        // + segmentation symbols over 3 quality layers WITHOUT per-pass
+        // termination — the layer cuts land mid-segment, so their rates
+        // are §D.4.3 length estimates and must use the §C.2.9 FLUSH
+        // length (the §D.4.2 predictable length can run a byte short
+        // and starve the layer-1 prefix decode).
+        let (w, h) = (31u32, 32u32);
+        let mut seed = 0u8;
+        let p: Vec<u8> = (0..w * h)
+            .map(|k| {
+                seed = seed.wrapping_mul(197).wrapping_add(k as u8);
+                seed
+            })
+            .collect();
+        let params = EncodeOptions {
+            decomposition_levels: 3,
+            code_block_exp: (5, 5),
+            progression: ProgressionOrder::Rlcp,
+            layers: 3,
+            reset_probabilities: true,
+            predictable_termination: true,
+            segmentation_symbols: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], w, h, &params);
+        for l in 1..=3 {
+            crate::decode_j2k_layers(&stream, l).expect("layer-limited decode");
+        }
+        crate::decode_j2k_reduced(&stream, 1).expect("reduced decode");
+    }
+
+    // -- §A.7.1 TLM / §A.7.3 PLT pointer markers on encode ---------------
+
+    #[test]
+    fn iplt_encoding_follows_table_a36() {
+        // Table A.36 worked examples: 128 → 1000 0001 0000 0000, 512 →
+        // 1000 0100 0000 0000; a zero length is one clear byte.
+        assert_eq!(iplt_bytes(0), vec![0x00]);
+        assert_eq!(iplt_bytes(0x7F), vec![0x7F]);
+        assert_eq!(iplt_bytes(128), vec![0x81, 0x00]);
+        assert_eq!(iplt_bytes(512), vec![0x84, 0x00]);
+        assert_eq!(iplt_bytes(0x3FFF), vec![0xFF, 0x7F]);
+        assert_eq!(iplt_bytes(0x4000), vec![0x81, 0x80, 0x00]);
+    }
+
+    /// Every tile-part header carries a PLT, every main header a TLM
+    /// whose entries mirror the SOT chain — and the decoder's §A.7.1 /
+    /// §A.7.3 cross-validation accepts the stream.
+    fn assert_pointer_markers(stream: &[u8], expect_plt: bool, expect_tlm: bool) {
+        let cs = crate::parse_codestream(stream).expect("parse");
+        for tp in &cs.tile_parts {
+            let has_plt = tp
+                .markers
+                .iter()
+                .any(|m| matches!(m, crate::TilePartMarker::Plt(_)));
+            assert_eq!(has_plt, expect_plt, "PLT presence per tile-part");
+        }
+        let tlm =
+            crate::collect_main_header_tlm(stream, cs.header.bytes_consumed).expect("TLM parses");
+        assert_eq!(tlm.is_some(), expect_tlm, "TLM presence");
+        if let Some(entries) = tlm {
+            assert_eq!(entries.len(), cs.tile_parts.len());
+            for (e, tp) in entries.iter().zip(&cs.tile_parts) {
+                assert_eq!(e.tile, Some(tp.sot.tile_index));
+                assert_eq!(e.length, tp.sot.psot);
+            }
+        }
+    }
+
+    #[test]
+    fn plt_and_tlm_round_trip_across_framings_and_relocations() {
+        // In-stream / PPT / PPM headers × SOP / EPH: the Iplt spans
+        // SOP + header + EPH + data in-stream and SOP + data once the
+        // headers are relocated (Table A.36 note); the TLM lists every
+        // tile-part's Psot across a tile grid split by resolution.
+        let (w, h) = (48u32, 40u32);
+        let p = noise(w, h, 0x9A17_0D0D);
+        for packed in [
+            PackedHeaders::InStream,
+            PackedHeaders::Ppt,
+            PackedHeaders::Ppm,
+        ] {
+            for (sop, eph) in [(false, false), (true, false), (false, true), (true, true)] {
+                let params = EncodeOptions {
+                    decomposition_levels: 2,
+                    code_block_exp: (3, 3),
+                    layers: 2,
+                    tile_size: Some((32, 24)),
+                    tile_parts: TilePartSplit::ByResolution,
+                    packed_headers: packed,
+                    sop,
+                    eph,
+                    plt: true,
+                    tlm: true,
+                    ..EncodeOptions::default()
+                };
+                let stream = roundtrip_params(&[&p], w, h, &params);
+                assert_pointer_markers(&stream, true, true);
+                // The pointers are load-bearing: a corrupted Iplt or
+                // Ptlm is rejected by the decoder's cross-check.
+                let mut bad = stream.clone();
+                let plt_off = bad.windows(2).position(|x| x == [0xFF, 0x58]).expect("PLT");
+                bad[plt_off + 5] ^= 0x01;
+                assert!(matches!(decode_j2k(&bad), Err(Error::PltMismatch)));
+                let mut bad = stream.clone();
+                let tlm_off = bad.windows(2).position(|x| x == [0xFF, 0x55]).expect("TLM");
+                bad[tlm_off + 9] ^= 0x01;
+                assert!(matches!(decode_j2k(&bad), Err(Error::TlmMismatch)));
+            }
+        }
+        // Each pointer marker alone.
+        for (plt, tlm) in [(true, false), (false, true)] {
+            let params = EncodeOptions {
+                plt,
+                tlm,
+                ..EncodeOptions::default()
+            };
+            let stream = roundtrip_params(&[&p], w, h, &params);
+            assert_pointer_markers(&stream, plt, tlm);
+        }
+    }
+
+    #[test]
+    fn tlm_switches_to_16_bit_ttlm_past_255_tiles() {
+        // 32×32 over 2×2 tiles = 256 tiles: Ttlm no longer fits 8 bits
+        // (Table A.33: 0..=254), so ST = 2.
+        let p = noise(32, 32, 0x7117_E5E5);
+        let params = EncodeOptions {
+            decomposition_levels: 0,
+            tile_size: Some((2, 2)),
+            plt: true,
+            tlm: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 32, 32, &params);
+        let tlm_off = stream
+            .windows(2)
+            .position(|x| x == [0xFF, 0x55])
+            .expect("TLM");
+        assert_eq!(stream[tlm_off + 5], 0x60, "Stlm: ST = 2, SP = 1");
+        assert_pointer_markers(&stream, true, true);
+    }
+
+    #[test]
+    fn plt_composes_with_styles_layers_pcrd_roi_and_ht() {
+        // PLT / TLM are packet-layout pointers, independent of what the
+        // packets carry: Annex D styles + PCRD, the Annex H ROI, and the
+        // T.814 lanes (HT, MULTIHT, MIXED) all keep the cross-check
+        // satisfied.
+        let (w, h) = (40u32, 40u32);
+        let p = noise(w, h, 0x1E77_A11A);
+        let shapes = [
+            EncodeOptions {
+                bypass: true,
+                terminate_all: true,
+                segmentation_symbols: true,
+                layers: 3,
+                target_bytes: Some(900),
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                roi: Some(RoiRegion {
+                    x0: 4,
+                    y0: 4,
+                    x1: 20,
+                    y1: 24,
+                }),
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                high_throughput: true,
+                ht_refinement: true,
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                high_throughput: true,
+                layers: 2,
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                ht_mixed: true,
+                sop: true,
+                eph: true,
+                ..EncodeOptions::default()
+            },
+        ];
+        for shape in shapes {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (3, 3),
+                plt: true,
+                tlm: true,
+                ..shape
+            };
+            let stream = encode_j2k(&[&p], w, h, &params).expect("encode");
+            decode_j2k(&stream).expect("decode with pointer cross-check");
+            assert_pointer_markers(&stream, true, true);
+        }
+    }
+
+    // -- Table A.19 bits 1 / 3 / 4 / 5 on encode ------------------------
+
+    /// Clear one Table A.19 bit in the main-header COD of `stream`
+    /// (single COD, no COC) so the decoder reads the block data under
+    /// the wrong style — a presence probe for the coded style.
+    fn clear_cod_style_bit(stream: &[u8], bit: u8) -> Vec<u8> {
+        let mut out = stream.to_vec();
+        let mut i = 2usize;
+        loop {
+            let marker = u16::from_be_bytes([out[i], out[i + 1]]);
+            let len = usize::from(u16::from_be_bytes([out[i + 2], out[i + 3]]));
+            if marker == MARKER_COD {
+                // Scod, SGcod (4), NL, xcb, ycb, style.
+                let style = i + 4 + 1 + 4 + 3;
+                assert_ne!(out[style] & (1 << bit), 0, "bit {bit} signalled");
+                out[style] &= !(1 << bit);
+                return out;
+            }
+            i += 2 + len;
+        }
+    }
+
+    fn style_params(bit: u8) -> EncodeOptions {
+        EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            reset_probabilities: bit == 1,
+            vertically_causal: bit == 3,
+            predictable_termination: bit == 4,
+            segmentation_symbols: bit == 5,
+            ..EncodeOptions::default()
+        }
+    }
+
+    #[test]
+    fn coder_style_bits_round_trip_individually_and_are_load_bearing() {
+        // Each of Table A.19 bits 1 (context reset), 3 (§D.7 vertically
+        // causal), 4 (§D.4.2 predictable termination) and 5 (§D.5
+        // segmentation symbols) round-trips bit-exactly on its own and
+        // is signalled in the COD; the bits that change the coded
+        // decisions (1, 3, 5) are proven present by mis-signalling
+        // them — the decoder then cannot reproduce the samples.
+        let p = noise(48, 40, 0x5EED_5EED);
+        for bit in [1u8, 3, 4, 5] {
+            let params = style_params(bit);
+            let stream = roundtrip_params(&[&p], 48, 40, &params);
+            let flags = crate::parse_j2k_header(&stream)
+                .expect("header")
+                .cod
+                .code_block_style_flags();
+            assert_eq!(flags.raw(), 1 << bit, "bit {bit} alone in the style byte");
+            assert_eq!(flags.reset_context_probabilities(), bit == 1);
+            assert_eq!(flags.vertically_causal_context(), bit == 3);
+            assert_eq!(flags.predictable_termination(), bit == 4);
+            assert_eq!(flags.segmentation_symbols(), bit == 5);
+            if bit == 4 {
+                // Predictable termination changes only how the tail of
+                // each segment is produced; the decoder needs no
+                // signalling to consume it.
+                continue;
+            }
+            let wrong = clear_cod_style_bit(&stream, bit);
+            let exact = decode_j2k(&wrong).is_ok_and(|img| {
+                img.components[0]
+                    .samples
+                    .iter()
+                    .zip(p.iter())
+                    .all(|(&g, &w)| g == i32::from(w))
+            });
+            assert!(!exact, "bit {bit} must be load-bearing");
+        }
+    }
+
+    #[test]
+    fn all_six_annex_d_style_bits_compose_with_layers_and_pcrd() {
+        // All Table A.19 bits 0–5 together, both kernels, across layers
+        // and under a PCRD budget: every segment (AC and raw) then
+        // terminates through the §D.4.2 predictable procedure with a
+        // §D.5 symbol per plane and Table D.7 resets per pass.
+        let p = noise(56, 48, 0xA11B_1755);
+        for kernel in [
+            EncodeKernel::Lossless5x3,
+            EncodeKernel::Lossy9x7 { fine_bits: 6 },
+        ] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (3, 4),
+                kernel,
+                layers: 3,
+                bypass: true,
+                terminate_all: true,
+                reset_probabilities: true,
+                vertically_causal: true,
+                predictable_termination: true,
+                segmentation_symbols: true,
+                ..EncodeOptions::default()
+            };
+            let stream = encode_j2k(&[&p], 56, 48, &params).expect("encode");
+            let flags = crate::parse_j2k_header(&stream)
+                .expect("header")
+                .cod
+                .code_block_style_flags();
+            assert_eq!(flags.raw(), 0x3F);
+            let img = decode_j2k(&stream).expect("decode");
+            let max_err = img.components[0]
+                .samples
+                .iter()
+                .zip(p.iter())
+                .map(|(&g, &w)| (g - i32::from(w)).unsigned_abs())
+                .max()
+                .unwrap();
+            match kernel {
+                EncodeKernel::Lossless5x3 => assert_eq!(max_err, 0),
+                EncodeKernel::Lossy9x7 { .. } => assert!(max_err <= 1, "{max_err}"),
+            }
+            // Layer-limited decodes stay decodable and improve.
+            let mse = |img: &crate::DecodedImage| -> f64 {
+                img.components[0]
+                    .samples
+                    .iter()
+                    .zip(p.iter())
+                    .map(|(&g, &w)| f64::from(g - i32::from(w)).powi(2))
+                    .sum::<f64>()
+                    / p.len() as f64
+            };
+            let l1 = mse(&crate::decode_j2k_layers(&stream, 1).expect("layer 1"));
+            let l2 = mse(&crate::decode_j2k_layers(&stream, 2).expect("layer 2"));
+            assert!(l1 >= l2, "layer 1 mse {l1} >= layer 2 mse {l2}");
+            // PCRD under the full style set.
+            let target = stream.len() / 2;
+            let budget = EncodeOptions {
+                target_bytes: Some(target),
+                ..params
+            };
+            let cut = encode_j2k(&[&p], 56, 48, &budget).expect("encode budget");
+            assert!(cut.len() <= target, "{} > {target}", cut.len());
+            decode_j2k(&cut).expect("decode budget");
+        }
+    }
+
+    #[test]
+    fn coder_style_bits_compose_with_rct_tiles_and_ht_rejects_them() {
+        // Bits 1 / 3 / 4 / 5 with the RCT over a tile grid stay
+        // bit-exact; the T.814 lanes reject them like the other Annex
+        // D styles.
+        let (w, h) = (40u32, 36u32);
+        let r = noise(w, h, 1);
+        let g = noise(w, h, 2);
+        let b = noise(w, h, 3);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            tile_size: Some((24, 20)),
+            reset_probabilities: true,
+            vertically_causal: true,
+            predictable_termination: true,
+            segmentation_symbols: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&r, &g, &b], w, h, &params);
+        for ht in [true, false] {
+            let bad = EncodeOptions {
+                mct: Some(false),
+                tile_size: None,
+                high_throughput: ht,
+                ht_mixed: !ht,
+                ..params.clone()
+            };
+            assert!(matches!(
+                encode_j2k(&[&r], w, h, &bad),
+                Err(Error::NotImplemented)
+            ));
+        }
+    }
+
+    #[test]
+    fn bypass_composes_with_terminate_all() {
+        // §D.6 prose: with bit 2 set every pass terminates, including
+        // both raw passes.
+        let p = noise(40, 32, 0xC0DE_C0DE);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            bypass: true,
+            terminate_all: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&p], 40, 32, &params);
+    }
+
+    #[test]
+    fn bypass_with_layers_and_tiles_round_trips() {
+        // Layer cuts land after cleanup passes — terminated boundaries
+        // in the bypass region — across a 2x2 tile grid.
+        let p = noise(64, 64, 0x600D_600D);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            bypass: true,
+            layers: 3,
+            tile_size: Some((32, 32)),
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&p], 64, 64, &params);
+    }
+
+    #[test]
+    fn bypass_tiny_blocks_exact_segment_attribution() {
+        // Fuzz regression (roundtrip_encode harness): §D.6 bypass with
+        // 4×4 code-blocks. A mid-span Annex J.13.4 flush snapshot
+        // exceeded the exact rate of its span's terminated end (a
+        // §C.2.9 flush can shrink as more decisions arrive), and the
+        // assembly's monotone clamp then inflated the exact boundary —
+        // the AC segment was signalled one byte long, starving the
+        // following raw span, whose §D.4.1 fill fabricated 1-bits on
+        // decode. The layer count is irrelevant (the original finding
+        // used 4 layers; a single layer reproduces identically).
+        let mut s = 0u8;
+        let p: Vec<u8> = (0..41u32 * 11)
+            .map(|k| {
+                s = s.wrapping_mul(197).wrapping_add(k as u8);
+                s
+            })
+            .collect();
+        for layers in [1u16, 4] {
+            let params = EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (2, 2),
+                bypass: true,
+                layers,
+                ..EncodeOptions::default()
+            };
+            roundtrip_params(&[&p], 41, 11, &params);
+        }
+        // The 4×4-image distillation: one 2×2 block per band; the LL
+        // block's pass-9 boundary is the one the clamp used to inflate.
+        let tiny: Vec<u8> = vec![
+            45, 171, 162, 182, 223, 206, 186, 87, 58, 254, 211, 189, 130, 143, 145, 28,
+        ];
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (2, 2),
+            bypass: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&tiny], 4, 4, &params);
+    }
+
+    #[test]
+    fn terminate_all_with_rate_control() {
+        // Termination styles compose with PCRD truncation (every
+        // boundary is exactly terminated).
+        let p = noise(64, 48, 0x0FF5_0FF5);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            terminate_all: true,
+            ..EncodeOptions::default()
+        };
+        let full = encode_j2k(&[&p], 64, 48, &base).unwrap();
+        let target = full.len() * 6 / 10;
+        let rc = encode_j2k(
+            &[&p],
+            64,
+            48,
+            &EncodeOptions {
+                target_bytes: Some(target),
+                ..base
+            },
+        )
+        .unwrap();
+        assert!(rc.len() <= target);
+        let img = decode_j2k(&rc).expect("decode");
+        assert_eq!(img.components[0].samples.len(), 64 * 48);
+    }
+
+    // -- Annex J.13.3 PCRD rate control ---------------------------------
+
+    fn mse_of(stream: &[u8], plane: &[u8]) -> f64 {
+        let img = decode_j2k(stream).expect("decode rate-controlled stream");
+        let mut acc = 0.0f64;
+        for (&got, &want) in img.components[0].samples.iter().zip(plane.iter()) {
+            let e = f64::from(got - i32::from(want));
+            acc += e * e;
+        }
+        acc / plane.len() as f64
+    }
+
+    #[test]
+    fn rate_control_meets_budget_and_uses_it() {
+        let p = noise(64, 64, 0x7A57_7A57);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            ..EncodeOptions::default()
+        };
+        let full = encode_j2k(&[&p], 64, 64, &base).unwrap();
+        let target = full.len() * 6 / 10;
+        let rc = encode_j2k(
+            &[&p],
+            64,
+            64,
+            &EncodeOptions {
+                target_bytes: Some(target),
+                ..base
+            },
+        )
+        .unwrap();
+        assert!(rc.len() <= target, "budget {target}, got {}", rc.len());
+        // J.13.3: the residual gap to the budget is small.
+        assert!(
+            rc.len() + 150 >= target,
+            "budget {target} under-used: {}",
+            rc.len()
+        );
+    }
+
+    #[test]
+    fn rate_control_quality_monotone_in_budget() {
+        let p = noise(64, 64, 0x0DD5_0DD5);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            ..EncodeOptions::default()
+        };
+        let full_len = encode_j2k(&[&p], 64, 64, &base).unwrap().len();
+        let mut last_mse = f64::INFINITY;
+        for frac in [3usize, 5, 8] {
+            let target = full_len * frac / 10;
+            let rc = encode_j2k(
+                &[&p],
+                64,
+                64,
+                &EncodeOptions {
+                    target_bytes: Some(target),
+                    ..base.clone()
+                },
+            )
+            .unwrap();
+            assert!(rc.len() <= target);
+            let mse = mse_of(&rc, &p);
+            assert!(
+                mse <= last_mse,
+                "MSE must not increase with budget: {mse} > {last_mse}"
+            );
+            last_mse = mse;
+        }
+        // At 80% of lossless the truncation error must be mild.
+        assert!(last_mse < 60.0, "80%-budget MSE too large: {last_mse}");
+    }
+
+    #[test]
+    fn rate_control_generous_budget_stays_lossless() {
+        let p = gradient(48, 32);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            ..EncodeOptions::default()
+        };
+        let full = encode_j2k(&[&p], 48, 32, &base).unwrap();
+        let rc = encode_j2k(
+            &[&p],
+            48,
+            32,
+            &EncodeOptions {
+                target_bytes: Some(full.len() + 100),
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(rc, full, "roomy budget must not truncate");
+        let img = decode_j2k(&rc).expect("decode");
+        let got: Vec<u8> = img.components[0].samples.iter().map(|&s| s as u8).collect();
+        assert_eq!(got, p);
+    }
+
+    #[test]
+    fn rate_control_tiny_budget_yields_minimal_stream() {
+        // A budget below the marker + empty-packet floor: the encoder
+        // returns the smallest legal stream (everything truncated away)
+        // and it still decodes (to a flat plane).
+        let p = noise(32, 32, 0xBEE5_BEE5);
+        let rc = encode_j2k(
+            &[&p],
+            32,
+            32,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                target_bytes: Some(30),
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(rc.len() < 120, "minimal stream unexpectedly large");
+        let img = decode_j2k(&rc).expect("minimal stream decodes");
+        assert_eq!(img.components[0].samples.len(), 32 * 32);
+    }
+
+    #[test]
+    fn rate_control_composes_with_layers_and_97() {
+        let p = noise(64, 48, 0xCAB1_CAB1);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            layers: 3,
+            ..EncodeOptions::default()
+        };
+        let full_len = encode_j2k(&[&p], 64, 48, &base).unwrap().len();
+        let target = full_len * 7 / 10;
+        let rc = encode_j2k(
+            &[&p],
+            64,
+            48,
+            &EncodeOptions {
+                target_bytes: Some(target),
+                ..base
+            },
+        )
+        .unwrap();
+        assert!(rc.len() <= target);
+        let header = crate::parse_j2k_header(&rc).expect("header");
+        assert_eq!(header.cod.layers, 3);
+        let mse = mse_of(&rc, &p);
+        assert!(mse < 100.0, "layered rate-controlled MSE too large: {mse}");
+    }
+
+    // -- §G.3.1 irreversible component transform (MCT = 1, 9-7) --------
+
+    /// Encode three planes lossy with the ICT, decode with this crate's
+    /// decoder, and return (max abs error, stream length).
+    fn lossy_ict_roundtrip(
+        planes: &[&[u8]; 3],
+        w: u32,
+        h: u32,
+        nl: u8,
+        cb: (u8, u8),
+        fine_bits: u8,
+    ) -> (u32, usize) {
+        let stream = encode_j2k_lossy_ict(planes, w, h, nl, cb, fine_bits).expect("encode ict");
+        let img = decode_j2k(&stream).expect("decode own ict stream");
+        assert_eq!(img.components.len(), 3);
+        let mut max_err = 0u32;
+        for (comp, plane) in img.components.iter().zip(planes.iter()) {
+            for (&got, &want) in comp.samples.iter().zip(plane.iter()) {
+                max_err = max_err.max((got - i32::from(want)).unsigned_abs());
+            }
+        }
+        (max_err, stream.len())
+    }
+
+    #[test]
+    fn lossy_ict_near_lossless_within_one() {
+        // fine_bits = 6 (Δb = 1/64): the ICT rows have bounded gain, so
+        // the composed §G.3.1 → 9-7 → §G.3.2 error stays within ±1.
+        let r = gradient(48, 40);
+        let g = noise(48, 40, 0x2468_ACE0);
+        let b: Vec<u8> = gradient(48, 40).iter().map(|&v| 255 - v).collect();
+        let (max_err, _) = lossy_ict_roundtrip(&[&r, &g, &b], 48, 40, 3, (4, 4), 6);
+        assert!(max_err <= 1, "ict near-lossless error {max_err} > 1");
+    }
+
+    #[test]
+    fn lossy_ict_odd_dims_extremes() {
+        // Saturated channels + odd dims: the G-9..G-11 corner values
+        // (Y1 / Y2 at ±half range) with the PSEO parity paths.
+        let w = 19u32;
+        let h = 27u32;
+        let r = vec![255u8; (w * h) as usize];
+        let g = vec![0u8; (w * h) as usize];
+        let b: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        let (max_err, _) = lossy_ict_roundtrip(&[&r, &g, &b], w, h, 2, (4, 4), 6);
+        assert!(max_err <= 1, "ict extremes error {max_err} > 1");
+    }
+
+    #[test]
+    fn ict_beats_independent_planes_on_correlated_rgb() {
+        // Shared busy luminance, smooth channel differences: the ICT
+        // concentrates the noise into Y0 and leaves near-flat chroma,
+        // so the MCT = 1 stream must beat three independent planes at
+        // the same quantisation step.
+        let w = 64u32;
+        let h = 64u32;
+        let luma = noise(w, h, 0x9E37_79B9);
+        let r: Vec<u8> = luma.iter().map(|&v| v.saturating_add(12)).collect();
+        let g = luma.clone();
+        let b: Vec<u8> = luma.iter().map(|&v| v.saturating_sub(25)).collect();
+        let (err, ict_len) = lossy_ict_roundtrip(&[&r, &g, &b], w, h, 3, (5, 5), 4);
+        assert!(err <= 2, "ict correlated error {err} > 2");
+        let plain = encode_j2k_lossy(&[&r, &g, &b], w, h, 3, (5, 5), 4).unwrap();
+        assert!(
+            ict_len < plain.len(),
+            "ICT stream ({ict_len} B) should beat independent planes ({} B)",
+            plain.len()
+        );
+    }
+
+    #[test]
+    fn ict_signals_mct_and_9x7() {
+        // Wire shape: SGcod MCT = 1 and the Table A.20 9-7 kernel byte.
+        let r = gradient(16, 16);
+        let g = gradient(16, 16);
+        let b = gradient(16, 16);
+        let stream = encode_j2k_lossy_ict(&[&r, &g, &b], 16, 16, 1, (4, 4), 6).unwrap();
+        let header = crate::parse_j2k_header(&stream).expect("own header parses");
+        assert_eq!(header.cod.multi_component_transform, 1);
+        assert_eq!(
+            header.cod.transform,
+            crate::WaveletTransform::Irreversible9x7
+        );
+    }
+
+    // -- §A.8.1 SOP / §A.8.2 EPH packet framing on encode ---------------
+
+    /// Count `Nsop`-consecutive SOP segments in a stream's tile bodies
+    /// (crude scan: SOP has a fixed shape, `FF 91 00 04 nn nn`).
+    fn count_sops(stream: &[u8]) -> usize {
+        stream
+            .windows(4)
+            .filter(|w| w[0] == 0xFF && w[1] == 0x91 && w[2] == 0x00 && w[3] == 0x04)
+            .count()
+    }
+
+    #[test]
+    fn sop_framing_round_trips_and_numbers_packets() {
+        // NL = 2, single component, LRCP → NL + 1 = 3 packets. Every
+        // packet gets a 6-byte SOP with sequential Nsop.
+        let p = noise(32, 24, 0x5011_5011);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            sop: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 32, 24, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert!(header.cod.sop_marker_allowed, "Scod bit 1");
+        assert!(!header.cod.eph_marker_used);
+        assert_eq!(count_sops(&stream), 3, "one SOP per packet");
+        // The three Nsop values are 0, 1, 2 in stream order.
+        let nsops: Vec<u16> = stream
+            .windows(6)
+            .filter(|w| w[0] == 0xFF && w[1] == 0x91 && w[2] == 0x00 && w[3] == 0x04)
+            .map(|w| u16::from_be_bytes([w[4], w[5]]))
+            .collect();
+        assert_eq!(nsops, vec![0, 1, 2]);
+        // The plain stream is exactly 6 bytes per packet smaller.
+        let plain = roundtrip_params(
+            &[&p],
+            32,
+            24,
+            &EncodeOptions {
+                sop: false,
+                ..params
+            },
+        );
+        assert_eq!(stream.len(), plain.len() + 3 * 6);
+    }
+
+    #[test]
+    fn eph_framing_round_trips() {
+        let p = noise(32, 24, 0xE9E9_0101);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            eph: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 32, 24, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert!(header.cod.eph_marker_used, "Scod bit 2");
+        assert!(!header.cod.sop_marker_allowed);
+        // 2 packets → exactly 2 EPH markers more than the plain stream.
+        let plain = roundtrip_params(
+            &[&p],
+            32,
+            24,
+            &EncodeOptions {
+                eph: false,
+                ..params
+            },
+        );
+        assert_eq!(stream.len(), plain.len() + 2 * 2);
+    }
+
+    #[test]
+    fn sop_eph_with_layers_precincts_and_tiles() {
+        // Both framings together across 4 tiles, 3 layers, and a real
+        // precinct partition — Nsop restarts at 0 in every tile and the
+        // walker (SopAndEph mode) must resynchronise on each marker.
+        let w = 48u32;
+        let h = 32u32;
+        let p = noise(w, h, 0xF00D_F00D);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (3, 3),
+            precincts: vec![0x33, 0x44],
+            layers: 3,
+            tile_size: Some((24, 16)),
+            sop: true,
+            eph: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], w, h, &params);
+        let nsops: Vec<u16> = stream
+            .windows(6)
+            .filter(|w| w[0] == 0xFF && w[1] == 0x91 && w[2] == 0x00 && w[3] == 0x04)
+            .map(|w| u16::from_be_bytes([w[4], w[5]]))
+            .collect();
+        // 4 tiles × (2 resolutions summed precincts) × 3 layers packets;
+        // each tile's sequence restarts at zero and increments by one.
+        assert_eq!(nsops.iter().filter(|&&n| n == 0).count(), 4);
+        let mut per_tile_max = Vec::new();
+        let mut cur = None::<u16>;
+        for n in &nsops {
+            match cur {
+                Some(prev) if *n == prev + 1 => cur = Some(*n),
+                Some(prev) => {
+                    assert_eq!(*n, 0, "Nsop restarts per tile");
+                    per_tile_max.push(prev);
+                    cur = Some(0);
+                }
+                None => {
+                    assert_eq!(*n, 0);
+                    cur = Some(0);
+                }
+            }
+        }
+        per_tile_max.push(cur.expect("some packets"));
+        assert_eq!(per_tile_max.len(), 4, "four tiles");
+    }
+
+    #[test]
+    fn sop_eph_with_bypass_styles_round_trips() {
+        // Framing composes with the §D.6 / §D.4.2 styled segments.
+        let p = noise(40, 40, 0xBEEF_0808);
+        for (bypass, term) in [(true, false), (false, true), (true, true)] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                bypass,
+                terminate_all: term,
+                sop: true,
+                eph: true,
+                ..EncodeOptions::default()
+            };
+            roundtrip_params(&[&p], 40, 40, &params);
+        }
+    }
+
+    // -- >8-bit input (encode_j2k_u16, Table A.11 Ssiz depths) ----------
+
+    fn noise16(w: u32, h: u32, bits: u8, seed: u32) -> Vec<u16> {
+        let mut s = seed;
+        (0..w * h)
+            .map(|_| (lcg(&mut s) >> 10) as u16 & ((1u32 << bits) - 1) as u16)
+            .collect()
+    }
+
+    /// Encode u16 planes at `bits`, decode, assert bit-exact + depth.
+    fn roundtrip_u16(
+        planes: &[&[u16]],
+        w: u32,
+        h: u32,
+        bits: u8,
+        params: &EncodeOptions,
+    ) -> Vec<u8> {
+        let stream = encode_j2k_u16(planes, w, h, bits, params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode own stream");
+        assert_eq!(img.components.len(), planes.len());
+        for (ci, (comp, plane)) in img.components.iter().zip(planes).enumerate() {
+            assert_eq!(comp.precision_bits, bits, "comp {ci} Ssiz");
+            let got: Vec<u16> = comp.samples.iter().map(|&s| s as u16).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples");
+        }
+        stream
+    }
+
+    #[test]
+    fn deep_lossless_12_and_16_bit_round_trip() {
+        for bits in [9u8, 12, 16] {
+            let p = noise16(33, 27, bits, 0x1000 + u32::from(bits));
+            roundtrip_u16(
+                &[&p],
+                33,
+                27,
+                bits,
+                &EncodeOptions {
+                    decomposition_levels: 3,
+                    code_block_exp: (4, 4),
+                    ..EncodeOptions::default()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn deep_lossless_extremes_hit_full_range() {
+        // Saturated 16-bit step edge: the deepest coefficient magnitudes
+        // the εb = RI + gain budget must still represent (Mb headroom).
+        let w = 32u32;
+        let h = 16u32;
+        let p: Vec<u16> = (0..w * h)
+            .map(|i| if (i % w) < w / 2 { 0 } else { 0xFFFF })
+            .collect();
+        roundtrip_u16(&[&p], w, h, 16, &EncodeOptions::default());
+    }
+
+    #[test]
+    fn deep_rct_16_bit_round_trips_and_signals_qcc() {
+        // §G.2 RCT over 16-bit RGB: chroma QCC exponents build on 17.
+        let w = 24u32;
+        let h = 20u32;
+        let r = noise16(w, h, 16, 0xAAAA_0001);
+        let g: Vec<u16> = r.iter().map(|&v| v.wrapping_add(500)).collect();
+        let b: Vec<u16> = r.iter().map(|&v| v ^ 0x0123).collect();
+        let stream = roundtrip_u16(
+            &[&r, &g, &b],
+            w,
+            h,
+            16,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                mct: Some(true),
+                ..EncodeOptions::default()
+            },
+        );
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert_eq!(header.cod.multi_component_transform, 1);
+    }
+
+    #[test]
+    fn deep_lossy_12_bit_step_bound_holds() {
+        // 9-7 at fine_bits = 6 keeps the same absolute step Δb = 1/64
+        // regardless of depth → the reconstruction error stays within
+        // ±1 sample units on 12-bit input too.
+        let w = 40u32;
+        let h = 32u32;
+        let p = noise16(w, h, 12, 0xD00D_1212);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k_u16(&[&p], w, h, 12, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        assert_eq!(img.components[0].precision_bits, 12);
+        let max_err = img.components[0]
+            .samples
+            .iter()
+            .zip(p.iter())
+            .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 1, "12-bit lossy error {max_err} > 1");
+    }
+
+    #[test]
+    fn deep_ict_16_bit_near_lossless() {
+        // §G.3.1 ICT over 16-bit RGB at Δb = 1/64.
+        let w = 32u32;
+        let h = 24u32;
+        let y = noise16(w, h, 16, 0x1C70_C7C7);
+        let r: Vec<u16> = y.iter().map(|&v| v.saturating_add(900)).collect();
+        let g = y.clone();
+        let b: Vec<u16> = y.iter().map(|&v| v.saturating_sub(1200)).collect();
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            mct: Some(true),
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k_u16(&[&r, &g, &b], w, h, 16, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        for (comp, plane) in img.components.iter().zip([&r, &g, &b]) {
+            let max_err = comp
+                .samples
+                .iter()
+                .zip(plane.iter())
+                .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+                .max()
+                .unwrap();
+            assert!(max_err <= 2, "16-bit ICT error {max_err} > 2");
+        }
+    }
+
+    #[test]
+    fn deep_input_composes_with_layers_tiles_and_framing() {
+        // The full wire-shape stack at 12 bits: multi-tile, 2 layers,
+        // SOP + EPH, RPCL.
+        let w = 40u32;
+        let h = 24u32;
+        let p = noise16(w, h, 12, 0xFEED_0C0C);
+        roundtrip_u16(
+            &[&p],
+            w,
+            h,
+            12,
+            &EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (3, 3),
+                progression: crate::ProgressionOrder::Rpcl,
+                layers: 2,
+                tile_size: Some((20, 24)),
+                sop: true,
+                eph: true,
+                ..EncodeOptions::default()
+            },
+        );
+    }
+
+    // -- §B.2 component sub-sampling on encode (SIZ XRsiz / YRsiz) ------
+
+    /// Encode sub-sampled planes, decode, assert bit-exact per plane
+    /// with the expected §B.2 sub-sampled dimensions.
+    fn roundtrip_subsampled(planes: &[&[u8]], w: u32, h: u32, params: &EncodeOptions) -> Vec<u8> {
+        let stream = encode_j2k(planes, w, h, params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode own stream");
+        assert_eq!(img.components.len(), planes.len());
+        for (ci, (comp, plane)) in img.components.iter().zip(planes).enumerate() {
+            let (xr, yr) = params.sub_sampling.get(ci).copied().unwrap_or((1, 1));
+            assert_eq!(comp.width, w.div_ceil(u32::from(xr)), "comp {ci} width");
+            assert_eq!(comp.height, h.div_ceil(u32::from(yr)), "comp {ci} height");
+            let got: Vec<u8> = comp.samples.iter().map(|&s| s as u8).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples");
+        }
+        stream
+    }
+
+    #[test]
+    fn subsampled_420_round_trips() {
+        // Y at 1:1, Cb/Cr at 2:2 (the 4:2:0 layout), odd dims so the
+        // ceil grid extents differ from w/2 × h/2.
+        let w = 37u32;
+        let h = 23u32;
+        let y = noise(w, h, 0x0420_0420);
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let cb = noise(cw, ch, 0x0420_0001);
+        let cr = gradient(cw, ch);
+        let stream = roundtrip_subsampled(
+            &[&y, &cb, &cr],
+            w,
+            h,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                sub_sampling: vec![(1, 1), (2, 2), (2, 2)],
+                ..EncodeOptions::default()
+            },
+        );
+        // Wire shape: the SIZ carries the separations.
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert_eq!(header.siz.components[0].h_separation, 1);
+        assert_eq!(header.siz.components[1].h_separation, 2);
+        assert_eq!(header.siz.components[2].v_separation, 2);
+    }
+
+    #[test]
+    fn subsampled_422_and_asymmetric_round_trip() {
+        let w = 41u32;
+        let h = 19u32;
+        // 4:2:2 (x only) plus a deliberately weird (3, 1) third plane.
+        let a = noise(w, h, 0x0422_0422);
+        let b = noise(w.div_ceil(2), h, 0x0422_0002);
+        let c = noise(w.div_ceil(3), h, 0x0422_0003);
+        roundtrip_subsampled(
+            &[&a, &b, &c],
+            w,
+            h,
+            &EncodeOptions {
+                decomposition_levels: 3,
+                code_block_exp: (3, 3),
+                sub_sampling: vec![(1, 1), (2, 1), (3, 1)],
+                ..EncodeOptions::default()
+            },
+        );
+    }
+
+    #[test]
+    fn subsampled_multi_tile_round_trips() {
+        // Tile edges at reference-grid 20 / 40: with XRsiz = 2 the §B.3
+        // Equation B-12 tile-component regions split at ceil boundaries
+        // (10, 20) on the component grid, and odd tile corners give
+        // every lifting-parity combination.
+        let w = 50u32;
+        let h = 30u32;
+        let y = noise(w, h, 0x7117_2233);
+        let c = noise(w.div_ceil(2), h.div_ceil(2), 0x7117_4455);
+        roundtrip_subsampled(
+            &[&y, &c],
+            w,
+            h,
+            &EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (3, 3),
+                tile_size: Some((20, 16)),
+                sub_sampling: vec![(1, 1), (2, 2)],
+                ..EncodeOptions::default()
+            },
+        );
+    }
+
+    #[test]
+    fn subsampled_position_orders_round_trip() {
+        // RPCL / PCRL / CPRL key packet positions off XRsiz·2^(...)
+        // multiples (§B.12.1.3–.5) — the separation must flow into the
+        // position computation on encode exactly as the decoder walks
+        // it.
+        let w = 32u32;
+        let h = 32u32;
+        let y = noise(w, h, 0x9051_1111);
+        let c = noise(16, 16, 0x9051_2222);
+        use crate::ProgressionOrder::*;
+        for o in [Rpcl, Pcrl, Cprl] {
+            roundtrip_subsampled(
+                &[&y, &c],
+                w,
+                h,
+                &EncodeOptions {
+                    decomposition_levels: 2,
+                    code_block_exp: (3, 3),
+                    progression: o,
+                    precincts: vec![0x22, 0x33, 0x33],
+                    sub_sampling: vec![(1, 1), (2, 2)],
+                    ..EncodeOptions::default()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn subsampled_lossy_step_bound_holds() {
+        let w = 36u32;
+        let h = 28u32;
+        let y = noise(w, h, 0x1055_1055);
+        let c = noise(18, 14, 0x1055_0002);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            sub_sampling: vec![(1, 1), (2, 2)],
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&y, &c], w, h, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        for (comp, plane) in img.components.iter().zip([&y, &c]) {
+            let max_err = comp
+                .samples
+                .iter()
+                .zip(plane.iter())
+                .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+                .max()
+                .unwrap();
+            assert!(max_err <= 1, "sub-sampled lossy error {max_err} > 1");
+        }
+    }
+
+    #[test]
+    fn subsampled_16_bit_round_trips() {
+        // Sub-sampling composes with the deep-input path.
+        let w = 25u32;
+        let h = 17u32;
+        let y = noise16(w, h, 12, 0x1216_0001);
+        let c = noise16(13, 9, 12, 0x1216_0002);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            sub_sampling: vec![(1, 1), (2, 2)],
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k_u16(&[&y, &c], w, h, 12, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        for (ci, (comp, plane)) in img.components.iter().zip([&y, &c]).enumerate() {
+            let got: Vec<u16> = comp.samples.iter().map(|&s| s as u16).collect();
+            assert_eq!(&got[..], &plane[..], "comp {ci} samples");
+        }
+    }
+
+    #[test]
+    fn subsampled_mct_shared_factors_round_trips() {
+        // §G.2: the RCT inputs share their separation — all three at
+        // (2, 2) is legal and co-located.
+        let w = 30u32;
+        let h = 22u32;
+        let cw = 15u32;
+        let ch = 11u32;
+        let r = noise(cw, ch, 0x2222_0001);
+        let g: Vec<u8> = r.iter().map(|&v| v.wrapping_add(9)).collect();
+        let b: Vec<u8> = r.iter().map(|&v| v ^ 0x33).collect();
+        roundtrip_subsampled(
+            &[&r, &g, &b],
+            w,
+            h,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                mct: Some(true),
+                sub_sampling: vec![(2, 2), (2, 2), (2, 2)],
+                ..EncodeOptions::default()
+            },
+        );
+    }
+
+    #[test]
+    fn subsampled_validation() {
+        let y = vec![0u8; 16 * 16];
+        let c = vec![0u8; 8 * 8];
+        // Wrong pair count.
+        assert!(encode_j2k(
+            &[&y, &c],
+            16,
+            16,
+            &EncodeOptions {
+                sub_sampling: vec![(1, 1)],
+                ..EncodeOptions::default()
+            }
+        )
+        .is_err());
+        // Zero factor.
+        assert!(encode_j2k(
+            &[&y, &c],
+            16,
+            16,
+            &EncodeOptions {
+                sub_sampling: vec![(1, 1), (0, 2)],
+                ..EncodeOptions::default()
+            }
+        )
+        .is_err());
+        // Plane size must match the sub-sampled extent.
+        assert!(encode_j2k(
+            &[&y, &y],
+            16,
+            16,
+            &EncodeOptions {
+                sub_sampling: vec![(1, 1), (2, 2)],
+                ..EncodeOptions::default()
+            }
+        )
+        .is_err());
+        // MCT requires shared factors across components 0-2.
+        let g = vec![0u8; 16 * 16];
+        assert!(encode_j2k(
+            &[&y, &g, &c],
+            16,
+            16,
+            &EncodeOptions {
+                mct: Some(true),
+                sub_sampling: vec![(1, 1), (1, 1), (2, 2)],
+                ..EncodeOptions::default()
+            }
+        )
+        .is_err());
+    }
+
+    // -- §A.4.2 multi-tile-part emission (TPsot > 0) --------------------
+
+    /// Encode with a tile-part split, decode bit-exactly, and return
+    /// the parsed (Isot, TPsot, TNsot) sequence in codestream order.
+    fn roundtrip_tile_parts(
+        planes: &[&[u8]],
+        w: u32,
+        h: u32,
+        params: &EncodeOptions,
+    ) -> Vec<(u16, u8, u8)> {
+        let stream = roundtrip_params(planes, w, h, params);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        cs.tile_parts
+            .iter()
+            .map(|tp| {
+                (
+                    tp.sot.tile_index,
+                    tp.sot.tile_part_index,
+                    tp.sot.num_tile_parts,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tile_parts_by_resolution_shape_and_round_trip() {
+        // NL = 2, single layer, RLCP (resolution-major) → each tile
+        // carries 3 tile-parts, one per resolution.
+        let p = noise(48, 40, 0x7BA7_0001);
+        let sots = roundtrip_tile_parts(
+            &[&p],
+            48,
+            40,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                progression: crate::ProgressionOrder::Rlcp,
+                tile_parts: TilePartSplit::ByResolution,
+                ..EncodeOptions::default()
+            },
+        );
+        assert_eq!(sots, vec![(0, 0, 3), (0, 1, 3), (0, 2, 3)]);
+    }
+
+    #[test]
+    fn tile_parts_by_layer_shape_and_round_trip() {
+        // 3 layers, LRCP (layer-major) → 3 tile-parts per tile.
+        let p = noise(48, 40, 0x7BA7_0002);
+        let sots = roundtrip_tile_parts(
+            &[&p],
+            48,
+            40,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                layers: 3,
+                tile_parts: TilePartSplit::ByLayer,
+                ..EncodeOptions::default()
+            },
+        );
+        assert_eq!(sots, vec![(0, 0, 3), (0, 1, 3), (0, 2, 3)]);
+    }
+
+    #[test]
+    fn tile_parts_axis_cycles_open_new_parts() {
+        // LRCP with 2 layers splitting by resolution: within each layer
+        // the resolution axis runs 0, 1, 2 — every change opens a part,
+        // so the cycle across layers yields 2 × 3 = 6 tile-parts.
+        let p = noise(32, 32, 0x7BA7_0003);
+        let sots = roundtrip_tile_parts(
+            &[&p],
+            32,
+            32,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                layers: 2,
+                tile_parts: TilePartSplit::ByResolution,
+                ..EncodeOptions::default()
+            },
+        );
+        assert_eq!(sots.len(), 6);
+        assert_eq!(sots.first(), Some(&(0, 0, 6)));
+        assert_eq!(sots.last(), Some(&(0, 5, 6)));
+    }
+
+    #[test]
+    fn tile_parts_by_component_cprl() {
+        // CPRL (component-major) over 3 components → 3 parts per tile.
+        let r = noise(24, 24, 0x7BA7_0004);
+        let g = noise(24, 24, 0x7BA7_0005);
+        let b = noise(24, 24, 0x7BA7_0006);
+        let sots = roundtrip_tile_parts(
+            &[&r, &g, &b],
+            24,
+            24,
+            &EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (4, 4),
+                progression: crate::ProgressionOrder::Cprl,
+                tile_parts: TilePartSplit::ByComponent,
+                ..EncodeOptions::default()
+            },
+        );
+        assert_eq!(
+            sots,
+            vec![(0, 0, 3), (0, 1, 3), (0, 2, 3)],
+            "one part per component"
+        );
+    }
+
+    #[test]
+    fn tile_parts_compose_with_tiles_framing_and_subsampling() {
+        // The full stack: 4 tiles × per-resolution parts, SOP + EPH
+        // (Nsop continues across a tile's parts), 4:2:0 sub-sampling.
+        let w = 40u32;
+        let h = 24u32;
+        let y = noise(w, h, 0x7BA7_0007);
+        let c = noise(20, 12, 0x7BA7_0008);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (3, 3),
+            progression: crate::ProgressionOrder::Rlcp,
+            tile_size: Some((20, 12)),
+            sub_sampling: vec![(1, 1), (2, 2)],
+            sop: true,
+            eph: true,
+            tile_parts: TilePartSplit::ByResolution,
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&y, &c], w, h, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode own stream");
+        let got0: Vec<u8> = img.components[0].samples.iter().map(|&s| s as u8).collect();
+        let got1: Vec<u8> = img.components[1].samples.iter().map(|&s| s as u8).collect();
+        assert_eq!(got0, y);
+        assert_eq!(got1, c);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        // 4 tiles × 2 resolutions = 8 tile-parts.
+        assert_eq!(cs.tile_parts.len(), 8);
+        for tp in &cs.tile_parts {
+            assert_eq!(tp.sot.num_tile_parts, 2);
+        }
+    }
+
+    #[test]
+    fn tile_parts_with_rate_control() {
+        // PCRD accounts the extra SOT + SOD framing of every part.
+        let p = noise(64, 64, 0x7BA7_0009);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            progression: crate::ProgressionOrder::Rlcp,
+            target_bytes: Some(1600),
+            tile_parts: TilePartSplit::ByResolution,
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 64, 64, &params).expect("encode");
+        assert!(stream.len() <= 1600, "budget binds: {} B", stream.len());
+        decode_j2k(&stream).expect("decode rate-controlled multi-part stream");
+    }
+
+    #[test]
+    fn tile_parts_reject_tnsot_overflow() {
+        // 300 layers split by layer → 300 > 255 tile-parts (Table A.6
+        // TNsot is 8-bit).
+        let p = noise(64, 64, 0x7BA7_000A);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            layers: 300,
+            tile_parts: TilePartSplit::ByLayer,
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 64, 64, &params).is_err());
+    }
+
+    // -- §A.6.6 POC emission (progression-order changes) ----------------
+
+    fn poc_entry(
+        rs: u8,
+        re: u8,
+        cs: u16,
+        ce: u16,
+        ly: u16,
+        o: crate::ProgressionOrder,
+    ) -> crate::PocProgression {
+        crate::PocProgression {
+            resolution_start: rs,
+            resolution_end: re,
+            component_start: cs,
+            component_end: ce,
+            layer_end: ly,
+            progression: o,
+        }
+    }
+
+    #[test]
+    fn poc_two_resolution_volumes_round_trip() {
+        // Volume 1: resolutions 0..1 in LRCP; volume 2: 1..3 in CPRL —
+        // together they cover all NL + 1 = 3 resolutions once.
+        use crate::ProgressionOrder::*;
+        let p = noise(48, 40, 0x90C0_0001);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            poc: vec![
+                poc_entry(0, 1, 0, 1, 1, Lrcp),
+                poc_entry(1, 3, 0, 1, 1, Cprl),
+            ],
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 48, 40, &params);
+        // Wire shape: a main-header POC with both entries.
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        let poc = crate::collect_main_header_poc(&stream, cs.header.bytes_consumed, 1)
+            .expect("collect poc")
+            .expect("poc present");
+        assert_eq!(poc.progressions.len(), 2);
+        assert_eq!(poc.progressions[0].resolution_end, 1);
+        assert_eq!(poc.progressions[1].progression, Cprl);
+    }
+
+    #[test]
+    fn poc_layer_then_component_volumes_round_trip() {
+        // 3 components, 2 layers: volume 1 emits layer 0 of everything
+        // (LRCP), volume 2 the remaining layer component-by-component
+        // (CPRL). The §B.12.2 layer cursors keep the second volume from
+        // re-emitting layer 0.
+        use crate::ProgressionOrder::*;
+        let r = noise(32, 24, 0x90C0_0002);
+        let g = noise(32, 24, 0x90C0_0003);
+        let b = noise(32, 24, 0x90C0_0004);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            layers: 2,
+            poc: vec![
+                poc_entry(0, 2, 0, 3, 1, Lrcp),
+                poc_entry(0, 2, 0, 3, 2, Cprl),
+            ],
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&r, &g, &b], 32, 24, &params);
+    }
+
+    #[test]
+    fn poc_with_position_order_and_precincts() {
+        // A POC volume in RPCL over a real precinct partition, plus an
+        // LRCP tail volume — positions must agree with the decoder.
+        use crate::ProgressionOrder::*;
+        let p = noise(56, 40, 0x90C0_0005);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (2, 2),
+            precincts: vec![0x22, 0x33, 0x44],
+            poc: vec![
+                poc_entry(0, 2, 0, 1, 1, Rpcl),
+                poc_entry(2, 3, 0, 1, 1, Lrcp),
+            ],
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&p], 56, 40, &params);
+    }
+
+    #[test]
+    fn poc_composes_with_tiles_framing_and_tile_parts() {
+        // POC + multi-tile + SOP/EPH + per-resolution tile-parts.
+        use crate::ProgressionOrder::*;
+        let p = noise(40, 32, 0x90C0_0006);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (3, 3),
+            tile_size: Some((20, 32)),
+            sop: true,
+            eph: true,
+            tile_parts: TilePartSplit::ByResolution,
+            poc: vec![
+                poc_entry(0, 1, 0, 1, 1, Lrcp),
+                poc_entry(1, 2, 0, 1, 1, Rlcp),
+            ],
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 40, 32, &params);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        assert_eq!(cs.tile_parts.len(), 4, "2 tiles x 2 resolution parts");
+    }
+
+    #[test]
+    fn poc_incomplete_coverage_rejected() {
+        // The single volume stops at resolution 2 of 3 — packets of the
+        // top resolution would never be emitted.
+        use crate::ProgressionOrder::*;
+        let p = noise(32, 32, 0x90C0_0007);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            poc: vec![poc_entry(0, 2, 0, 1, 1, Lrcp)],
+            ..EncodeOptions::default()
+        };
+        assert!(encode_j2k(&[&p], 32, 32, &params).is_err());
+    }
+
+    #[test]
+    fn poc_invalid_entries_rejected() {
+        use crate::ProgressionOrder::*;
+        let p = noise(16, 16, 0x90C0_0008);
+        let base = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            ..EncodeOptions::default()
+        };
+        // REpoc <= RSpoc.
+        let bad1 = EncodeOptions {
+            poc: vec![poc_entry(1, 1, 0, 1, 1, Lrcp)],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad1).is_err());
+        // CEpoc <= CSpoc.
+        let bad2 = EncodeOptions {
+            poc: vec![poc_entry(0, 2, 1, 1, 1, Lrcp)],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad2).is_err());
+        // LYEpoc == 0.
+        let bad3 = EncodeOptions {
+            poc: vec![poc_entry(0, 2, 0, 1, 0, Lrcp)],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad3).is_err());
+        // Reserved Ppoc.
+        let bad4 = EncodeOptions {
+            poc: vec![poc_entry(
+                0,
+                2,
+                0,
+                1,
+                1,
+                crate::ProgressionOrder::Reserved(9),
+            )],
+            ..base
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad4).is_err());
+    }
+
+    // -- §A.6.2 / §A.6.5 per-component COC / QCC overrides on encode ----
+
+    fn ov(component: u16) -> ComponentOverride {
+        ComponentOverride {
+            component,
+            decomposition_levels: None,
+            code_block_exp: None,
+            precincts: None,
+            kernel: None,
+        }
+    }
+
+    #[test]
+    fn override_nl_per_component_round_trips() {
+        // Component 1 decomposes 1 level against a tile-wide NL = 3;
+        // its COC carries NL and its QCC the shorter band list.
+        let a = noise(40, 32, 0xC0C0_0001);
+        let b = noise(40, 32, 0xC0C0_0002);
+        let params = EncodeOptions {
+            decomposition_levels: 3,
+            code_block_exp: (4, 4),
+            component_overrides: vec![ComponentOverride {
+                decomposition_levels: Some(1),
+                ..ov(1)
+            }],
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&a, &b], 40, 32, &params);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        let cocs = crate::collect_main_header_coc(&stream, cs.header.bytes_consumed, 2)
+            .expect("collect coc");
+        assert_eq!(cocs.len(), 1);
+        assert_eq!(cocs[0].component_index, 1);
+        assert_eq!(cocs[0].decomposition_levels, 1);
+        let qccs = crate::collect_main_header_qcc(&stream, cs.header.bytes_consumed, 2)
+            .expect("collect qcc");
+        assert_eq!(qccs.len(), 1, "NL change implies a QCC band-list change");
+    }
+
+    #[test]
+    fn override_code_block_size_round_trips() {
+        let a = noise(48, 32, 0xC0C0_0003);
+        let b = noise(48, 32, 0xC0C0_0004);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (5, 5),
+            component_overrides: vec![ComponentOverride {
+                code_block_exp: Some((2, 3)),
+                ..ov(0)
+            }],
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&a, &b], 48, 32, &params);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        let cocs = crate::collect_main_header_coc(&stream, cs.header.bytes_consumed, 2)
+            .expect("collect coc");
+        assert_eq!(cocs[0].code_block_width_exp, 0, "xcb − 2 on the wire");
+        assert_eq!(cocs[0].code_block_height_exp, 1);
+        let qccs = crate::collect_main_header_qcc(&stream, cs.header.bytes_consumed, 2)
+            .expect("collect qcc");
+        assert!(qccs.is_empty(), "code-block size alone changes no QCC");
+    }
+
+    #[test]
+    fn override_precincts_per_component_round_trips() {
+        // Tile-wide partition, component 1 opts into a different one
+        // and component 2 forces maximum precincts (Some(vec![])).
+        let a = noise(64, 48, 0xC0C0_0005);
+        let b = noise(64, 48, 0xC0C0_0006);
+        let c = noise(64, 48, 0xC0C0_0007);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (2, 2),
+            precincts: vec![0x22, 0x33, 0x33],
+            component_overrides: vec![
+                ComponentOverride {
+                    precincts: Some(vec![0x33, 0x44, 0x44]),
+                    ..ov(1)
+                },
+                ComponentOverride {
+                    precincts: Some(Vec::new()),
+                    ..ov(2)
+                },
+            ],
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&a, &b, &c], 64, 48, &params);
+    }
+
+    #[test]
+    fn override_mixed_kernels_no_mct() {
+        // Component 0 stays reversible 5-3 (bit-exact), component 1
+        // codes through the 9-7 with Annex E quantisation (±1 at
+        // fine_bits = 6) — different kernels per component, MCT off.
+        let a = noise(40, 40, 0xC0C0_0008);
+        let b = noise(40, 40, 0xC0C0_0009);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            component_overrides: vec![ComponentOverride {
+                kernel: Some(EncodeKernel::Lossy9x7 { fine_bits: 6 }),
+                ..ov(1)
+            }],
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&a, &b], 40, 40, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let got0: Vec<u8> = img.components[0].samples.iter().map(|&s| s as u8).collect();
+        assert_eq!(got0, a, "5-3 component stays bit-exact");
+        let max_err = img.components[1]
+            .samples
+            .iter()
+            .zip(b.iter())
+            .map(|(&got, &want)| (got - i32::from(want)).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 1, "9-7 component within step bound: {max_err}");
+        // Wire shape: the COC flips the Table A.20 kernel byte and a
+        // QCC switches component 1 to the scalar-expounded style.
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        let cocs = crate::collect_main_header_coc(&stream, cs.header.bytes_consumed, 2)
+            .expect("collect coc");
+        assert_eq!(cocs[0].transform, crate::WaveletTransform::Irreversible9x7);
+        let qccs = crate::collect_main_header_qcc(&stream, cs.header.bytes_consumed, 2)
+            .expect("collect qcc");
+        assert_eq!(qccs.len(), 1);
+    }
+
+    #[test]
+    fn override_composes_with_stack() {
+        // NL + cb + kernel overrides across 4 tiles, 2 layers, SOP/EPH,
+        // sub-sampled component, RLCP.
+        let w = 48u32;
+        let h = 32u32;
+        let a = noise(w, h, 0xC0C0_000A);
+        let b = noise(24, 16, 0xC0C0_000B);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            progression: crate::ProgressionOrder::Rlcp,
+            layers: 2,
+            tile_size: Some((24, 16)),
+            sub_sampling: vec![(1, 1), (2, 2)],
+            sop: true,
+            eph: true,
+            component_overrides: vec![ComponentOverride {
+                decomposition_levels: Some(1),
+                code_block_exp: Some((3, 3)),
+                ..ov(1)
+            }],
+            ..EncodeOptions::default()
+        };
+        roundtrip_subsampled(&[&a, &b], w, h, &params);
+    }
+
+    #[test]
+    fn override_with_rct_composes() {
+        // §G.2 RCT plus an NL override on component 2: the chroma QCC
+        // must carry both the +1 dynamic-range exponents *and* the
+        // overridden band count.
+        let w = 32u32;
+        let h = 24u32;
+        let r = noise(w, h, 0xC0C0_000C);
+        let g: Vec<u8> = r.iter().map(|&v| v.wrapping_add(7)).collect();
+        let b: Vec<u8> = r.iter().map(|&v| v ^ 0x21).collect();
+        let params = EncodeOptions {
+            decomposition_levels: 3,
+            code_block_exp: (4, 4),
+            mct: Some(true),
+            component_overrides: vec![ComponentOverride {
+                decomposition_levels: Some(1),
+                ..ov(2)
+            }],
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&r, &g, &b], w, h, &params);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        let qccs = crate::collect_main_header_qcc(&stream, cs.header.bytes_consumed, 3)
+            .expect("collect qcc");
+        // Components 1 and 2 (RCT chroma), component 2 with 1 level.
+        assert_eq!(qccs.len(), 2);
+    }
+
+    #[test]
+    fn override_validation() {
+        let p = vec![0u8; 16 * 16];
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            ..EncodeOptions::default()
+        };
+        // Component index out of range.
+        let bad1 = EncodeOptions {
+            component_overrides: vec![ov(1)],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad1).is_err());
+        // Two overrides for one component.
+        let bad2 = EncodeOptions {
+            component_overrides: vec![ov(0), ov(0)],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad2).is_err());
+        // Kernel override diverging under MCT.
+        let bad3 = EncodeOptions {
+            mct: Some(true),
+            component_overrides: vec![ComponentOverride {
+                kernel: Some(EncodeKernel::Lossy9x7 { fine_bits: 6 }),
+                ..ov(1)
+            }],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p, &p, &p], 16, 16, &bad3).is_err());
+        // NL override with an inherited tile-wide partition that no
+        // longer fits the component's NL + 1 byte count.
+        let bad4 = EncodeOptions {
+            precincts: vec![0x22, 0x33, 0x33],
+            component_overrides: vec![ComponentOverride {
+                decomposition_levels: Some(1),
+                ..ov(0)
+            }],
+            ..base.clone()
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad4).is_err());
+        // Override precincts of the wrong length for the effective NL.
+        let bad5 = EncodeOptions {
+            component_overrides: vec![ComponentOverride {
+                precincts: Some(vec![0x33, 0x33]),
+                ..ov(0)
+            }],
+            ..base
+        };
+        assert!(encode_j2k(&[&p], 16, 16, &bad5).is_err());
+    }
+
+    #[test]
+    fn deep_input_validation() {
+        let p = vec![0u16; 16];
+        // Depth outside 1..=16.
+        assert!(matches!(
+            encode_j2k_u16(&[&p], 4, 4, 0, &EncodeOptions::default()),
+            Err(Error::InvalidSamplePrecision)
+        ));
+        assert!(matches!(
+            encode_j2k_u16(&[&p], 4, 4, 17, &EncodeOptions::default()),
+            Err(Error::InvalidSamplePrecision)
+        ));
+        // A sample that does not fit the declared depth.
+        let too_big = vec![1u16 << 12; 16];
+        assert!(matches!(
+            encode_j2k_u16(&[&too_big], 4, 4, 12, &EncodeOptions::default()),
+            Err(Error::InvalidSamplePrecision)
+        ));
+        // Exactly at the depth limit is fine.
+        let at_limit = vec![(1u16 << 12) - 1; 16];
+        assert!(encode_j2k_u16(&[&at_limit], 4, 4, 12, &EncodeOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn sop_eph_with_rate_control_round_trips() {
+        // PCRD accounts the 6 + 2 framing bytes per packet: the budget
+        // still binds on the framed stream.
+        let p = noise(64, 64, 0x7777_1234);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            target_bytes: Some(1500),
+            sop: true,
+            eph: true,
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 64, 64, &params).expect("encode");
+        assert!(stream.len() <= 1500, "budget binds: {} B", stream.len());
+        decode_j2k(&stream).expect("decode rate-controlled framed stream");
+    }
+
+    // -- §A.7.4 / §A.7.5 packed packet headers on encode ----------------
+
+    /// Count the PPM marker segments in the main header and the PPT
+    /// marker segments per tile-part, via the crate's own parser.
+    fn packed_marker_shape(stream: &[u8]) -> (usize, Vec<usize>) {
+        let cs = crate::parse_codestream(stream).expect("parse");
+        // PPM: length-walk the main header for 0xFF60 segments.
+        let mut ppm = 0usize;
+        let mut pos = 2usize;
+        let header_end = cs.header.bytes_consumed;
+        while pos + 4 <= header_end {
+            let marker = u16::from_be_bytes([stream[pos], stream[pos + 1]]);
+            let len = u16::from_be_bytes([stream[pos + 2], stream[pos + 3]]) as usize;
+            if marker == crate::MARKER_PPM {
+                ppm += 1;
+            }
+            pos += 2 + len;
+        }
+        let ppt = cs
+            .tile_parts
+            .iter()
+            .map(|tp| {
+                tp.markers
+                    .iter()
+                    .filter(|m| matches!(m, crate::TilePartMarker::Ppt(_)))
+                    .count()
+            })
+            .collect();
+        (ppm, ppt)
+    }
+
+    /// The three header placements (§B.10 in-stream, §A.7.5 PPT,
+    /// §A.7.4 PPM) reconstruct identically — and the relocated streams
+    /// actually carry the relocation markers.
+    #[test]
+    fn ppt_and_ppm_relocations_round_trip() {
+        let p = noise(64, 48, 0xA7A7_0001);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            precincts: vec![0x22, 0x33, 0x33],
+            layers: 3,
+            ..EncodeOptions::default()
+        };
+        let in_stream = roundtrip_params(&[&p], 64, 48, &base);
+        for mode in [PackedHeaders::Ppt, PackedHeaders::Ppm] {
+            let params = EncodeOptions {
+                packed_headers: mode,
+                ..base.clone()
+            };
+            let stream = roundtrip_params(&[&p], 64, 48, &params);
+            let (ppm, ppt) = packed_marker_shape(&stream);
+            match mode {
+                PackedHeaders::Ppt => {
+                    assert_eq!(ppm, 0);
+                    assert!(ppt.iter().sum::<usize>() >= 1, "PPT emitted");
+                }
+                PackedHeaders::Ppm => {
+                    assert!(ppm >= 1, "PPM emitted");
+                    assert_eq!(ppt.iter().sum::<usize>(), 0);
+                }
+                PackedHeaders::InStream => unreachable!(),
+            }
+            // Relocation moves bytes around but codes the same packets.
+            assert_ne!(stream, in_stream);
+        }
+        let (ppm, ppt) = packed_marker_shape(&in_stream);
+        assert_eq!((ppm, ppt.iter().sum::<usize>()), (0, 0));
+    }
+
+    /// PPT composes with multiple tiles, multiple tile-parts per tile,
+    /// SOP + EPH framing and the RCT: the headers of *all* of a tile's
+    /// parts ride in its first tile-part header.
+    #[test]
+    fn ppt_composes_with_tiles_parts_and_framing() {
+        let r = noise(48, 40, 0xBEEF_0011);
+        let g = noise(48, 40, 0xBEEF_0022);
+        let b = noise(48, 40, 0xBEEF_0033);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            tile_size: Some((32, 32)),
+            tile_parts: TilePartSplit::ByResolution,
+            sop: true,
+            eph: true,
+            packed_headers: PackedHeaders::Ppt,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&r, &g, &b], 48, 40, &params);
+        let cs = crate::parse_codestream(&stream).expect("parse");
+        // 2×2 tiles, 3 resolutions → parts split by resolution.
+        assert!(cs.tile_parts.len() > 4, "multiple parts per tile");
+        for tp in &cs.tile_parts {
+            let ppts = tp
+                .markers
+                .iter()
+                .filter(|m| matches!(m, crate::TilePartMarker::Ppt(_)))
+                .count();
+            if tp.sot.tile_part_index == 0 {
+                assert!(ppts >= 1, "tile {}: PPT in first part", tp.sot.tile_index);
+            } else {
+                assert_eq!(ppts, 0, "later parts carry no PPT");
+            }
+        }
+    }
+
+    /// PPM composes with multiple tiles, tile-part splits, framing and
+    /// PCRD rate control (the budget binds on the relocated stream).
+    #[test]
+    fn ppm_composes_with_tiles_parts_framing_and_pcrd() {
+        let p = noise(64, 64, 0xC0DE_5150);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            tile_size: Some((32, 64)),
+            tile_parts: TilePartSplit::ByResolution,
+            sop: true,
+            eph: true,
+            target_bytes: Some(2200),
+            packed_headers: PackedHeaders::Ppm,
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 64, 64, &params).expect("encode");
+        assert!(stream.len() <= 2200, "budget binds: {} B", stream.len());
+        let (ppm, _) = packed_marker_shape(&stream);
+        assert!(ppm >= 1);
+        decode_j2k(&stream).expect("decode relocated rate-controlled stream");
+    }
+
+    // -- Annex H Maxshift region of interest on encode -------------------
+
+    /// Parse back the emitted main-header RGN markers.
+    fn rgn_markers(stream: &[u8]) -> Vec<crate::Rgn> {
+        let header = crate::parse_j2k_header(stream).expect("header");
+        crate::collect_main_header_rgn(
+            stream,
+            header.bytes_consumed,
+            header.siz.components.len() as u16,
+        )
+        .expect("RGN parse")
+    }
+
+    /// A lossless ROI stream decodes bit-exactly (the §H.1 de-scaling
+    /// re-anchors ROI and background alike) and carries one Srgn = 0
+    /// RGN per component with the §H.2.2 scaling value.
+    #[test]
+    fn roi_lossless_round_trips_bit_exact() {
+        let p = noise(64, 48, 0x0510_ACE5);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            roi: Some(RoiRegion {
+                x0: 16,
+                y0: 12,
+                x1: 40,
+                y1: 30,
+            }),
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 64, 48, &params);
+        let rgn = rgn_markers(&stream);
+        assert_eq!(rgn.len(), 1);
+        assert_eq!(rgn[0].component_index, 0);
+        assert_eq!(rgn[0].srgn, 0);
+        // s = G + (RI + gain_HH) − 1 = 2 + (8 + 2) − 1 = 11 for 8-bit.
+        assert_eq!(rgn[0].sprgn, 11);
+    }
+
+    /// The lossy 9-7 ROI stream keeps a small full-decode error bound
+    /// everywhere (ROI scaling must not disturb full decodes). The
+    /// §H.2.2 `s` grows with `fine_bits`, so the deepest lossy step
+    /// that fits the magnitude lane for 8-bit input is `fine_bits = 4`
+    /// (`s = 15`, `M'b = 30`); a finer step is cleanly rejected.
+    #[test]
+    fn roi_lossy_round_trips_within_bound() {
+        let p = noise(48, 40, 0x0510_BEE5);
+        let roi = RoiRegion {
+            x0: 8,
+            y0: 8,
+            x1: 24,
+            y1: 24,
+        };
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 4 },
+            roi: Some(roi),
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&p], 48, 40, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let max_err = img.components[0]
+            .samples
+            .iter()
+            .zip(&p)
+            .map(|(&got, &want)| (got - i32::from(want)).abs())
+            .max()
+            .unwrap();
+        assert!(max_err <= 3, "9-7 fine_bits=4 with ROI: err {max_err}");
+        assert_eq!(rgn_markers(&stream).len(), 1);
+        // fine_bits = 6 would need M'b = 34 — over the magnitude lane.
+        assert!(matches!(
+            encode_j2k(
+                &[&p],
+                48,
+                40,
+                &EncodeOptions {
+                    kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+                    roi: Some(roi),
+                    ..EncodeOptions::default()
+                },
+            ),
+            Err(Error::NotImplemented)
+        ));
+    }
+
+    /// Under PCRD rate control the Maxshift scaling puts every ROI
+    /// bit-plane above the background, so a tight budget reconstructs
+    /// the region far more faithfully than the rest.
+    #[test]
+    fn roi_prioritises_region_under_rate_control() {
+        let (w, h) = (64u32, 64u32);
+        let p = noise(w, h, 0x0510_C0DE);
+        let roi = RoiRegion {
+            x0: 16,
+            y0: 16,
+            x1: 48,
+            y1: 48,
+        };
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            ..EncodeOptions::default()
+        };
+        let full_len = encode_j2k(&[&p], w, h, &base).unwrap().len();
+        let stream = encode_j2k(
+            &[&p],
+            w,
+            h,
+            &EncodeOptions {
+                roi: Some(roi),
+                target_bytes: Some(full_len * 45 / 100),
+                ..base
+            },
+        )
+        .expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        let (mut se_roi, mut n_roi, mut se_bg, mut n_bg) = (0f64, 0u32, 0f64, 0u32);
+        for y in 0..h {
+            for x in 0..w {
+                let got = img.components[0].samples[(y * w + x) as usize];
+                let want = i32::from(p[(y * w + x) as usize]);
+                let e = f64::from(got - want);
+                if (roi.x0..roi.x1).contains(&x) && (roi.y0..roi.y1).contains(&y) {
+                    se_roi += e * e;
+                    n_roi += 1;
+                } else {
+                    se_bg += e * e;
+                    n_bg += 1;
+                }
+            }
+        }
+        let mse_roi = se_roi / f64::from(n_roi);
+        let mse_bg = se_bg / f64::from(n_bg);
+        assert!(
+            mse_roi * 8.0 < mse_bg,
+            "ROI must lead: mse_roi {mse_roi:.2} vs mse_bg {mse_bg:.2}"
+        );
+    }
+
+    /// ROI composes with the RCT, tiles and sub-sampling: bit-exact,
+    /// with one RGN per component (the chroma s grows by the §G.2
+    /// dynamic-range bit).
+    #[test]
+    fn roi_composes_with_rct_tiles_and_subsampling() {
+        let r = noise(48, 40, 0x0510_0001);
+        let g = noise(48, 40, 0x0510_0002);
+        let b = noise(48, 40, 0x0510_0003);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            tile_size: Some((32, 32)),
+            roi: Some(RoiRegion {
+                x0: 10,
+                y0: 6,
+                x1: 30,
+                y1: 26,
+            }),
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&r, &g, &b], 48, 40, &params);
+        let rgn = rgn_markers(&stream);
+        assert_eq!(rgn.len(), 3);
+        assert_eq!(rgn[0].sprgn, 11); // luma: 2 + (8 + 2) − 1
+        assert_eq!(rgn[1].sprgn, 12); // chroma: RCT adds one bit
+        assert_eq!(rgn[2].sprgn, 12);
+
+        // Sub-sampled (no MCT) shape, odd dimensions.
+        let half = noise(24, 20, 0x0510_0004);
+        let full = noise(47, 39, 0x0510_0005);
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (3, 3),
+            sub_sampling: vec![(1, 1), (2, 2)],
+            roi: Some(RoiRegion {
+                x0: 5,
+                y0: 5,
+                x1: 20,
+                y1: 20,
+            }),
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&full, &half], 47, 39, &params);
+    }
+
+    /// A coded budget `M'b = 2s` that overflows the magnitude lane is
+    /// rejected rather than mis-encoded (deep inputs).
+    #[test]
+    fn roi_rejects_overdeep_budget() {
+        let p = vec![0u16; 16 * 16];
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            roi: Some(RoiRegion {
+                x0: 0,
+                y0: 0,
+                x1: 8,
+                y1: 8,
+            }),
+            ..EncodeOptions::default()
+        };
+        // 16-bit: s = 2 + (16 + 2) − 1 = 19, M'b = 38 > 30.
+        assert!(matches!(
+            encode_j2k_u16(&[&p], 16, 16, 16, &params),
+            Err(Error::NotImplemented)
+        ));
+        // 12-bit: s = 15, M'b = 30 — still encodable.
+        assert!(encode_j2k_u16(&[&p], 16, 16, 12, &params).is_ok());
+    }
+
+    // -- T.814 HTJ2K codestream assembly on encode -----------------------
+
+    /// Parse back the CAP marker payload (Pcap, Ccap15) from the main
+    /// header.
+    fn cap_marker(stream: &[u8]) -> Option<(u32, u16)> {
+        let header = crate::parse_j2k_header(stream).expect("header");
+        let mut pos = 2usize;
+        while pos + 4 <= header.bytes_consumed {
+            let marker = u16::from_be_bytes([stream[pos], stream[pos + 1]]);
+            let len = u16::from_be_bytes([stream[pos + 2], stream[pos + 3]]) as usize;
+            if marker == crate::MARKER_CAP {
+                let pcap = u32::from_be_bytes([
+                    stream[pos + 4],
+                    stream[pos + 5],
+                    stream[pos + 6],
+                    stream[pos + 7],
+                ]);
+                let ccap15 = u16::from_be_bytes([stream[pos + 8], stream[pos + 9]]);
+                return Some((pcap, ccap15));
+            }
+            pos += 2 + len;
+        }
+        None
+    }
+
+    /// HT lossless encode round-trips bit-exactly and the codestream
+    /// carries the full T.814 Annex A signalling set: Rsiz bit 14, a
+    /// CAP with Pcap15 + HTONLY/SINGLEHT Ccap15, SPcod bit 6.
+    #[test]
+    fn ht_lossless_round_trips_with_signalling() {
+        for (w, h, nl, cb) in [
+            (32u32, 32u32, 0u8, (5u8, 5u8)),
+            (32, 32, 2, (4, 4)),
+            (64, 64, 3, (6, 6)),
+            (64, 48, 2, (4, 4)),
+        ] {
+            let p = noise(w, h, 0x4854_0001 ^ u32::from(nl));
+            let params = EncodeOptions {
+                decomposition_levels: nl,
+                code_block_exp: cb,
+                high_throughput: true,
+                ..EncodeOptions::default()
+            };
+            let stream = roundtrip_params(&[&p], w, h, &params);
+            let header = crate::parse_j2k_header(&stream).expect("header");
+            assert_eq!(header.siz.rsiz & 0x4000, 0x4000, "Rsiz bit 14");
+            assert!(
+                header.cod.code_block_style_flags().high_throughput(),
+                "SPcod bit 6"
+            );
+            let (pcap, ccap15) = cap_marker(&stream).expect("CAP present");
+            assert_eq!(pcap, 1 << (32 - 15), "only Pcap15");
+            // HTONLY / SINGLEHT / RGNFREE / HOMOGENEOUS / HTREV: all
+            // upper flags clear; only the MAGB bits may be set.
+            assert_eq!(ccap15 & !0x1F, 0, "Ccap15 upper flags: {ccap15:#06x}");
+        }
+    }
+
+    /// The ht_refinement mode (Z_blk = 3 where lossless) still decodes
+    /// bit-exactly and actually engages on dense content.
+    #[test]
+    fn ht_refinement_mode_round_trips() {
+        let p = noise(64, 64, 0x4854_0002);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        let plain = roundtrip_params(&[&p], 64, 64, &base);
+        let refined = roundtrip_params(
+            &[&p],
+            64,
+            64,
+            &EncodeOptions {
+                ht_refinement: true,
+                ..base
+            },
+        );
+        // The pass structure differs, so the streams must too (the
+        // refinement mode re-shapes every dense block into Z_blk = 3).
+        assert_ne!(plain, refined, "refinement mode engaged");
+    }
+
+    /// HT composes with RGB / RCT, the 9-7 kernel (HTIRV flagged),
+    /// precincts, position progression orders, tiles and framing.
+    #[test]
+    fn ht_composes_with_mct_kernels_tiles_and_orders() {
+        let r = noise(48, 40, 0x4854_0011);
+        let g = noise(48, 40, 0x4854_0012);
+        let b = noise(48, 40, 0x4854_0013);
+        // Lossless RCT, RLCP, multi-precinct.
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            progression: ProgressionOrder::Rlcp,
+            precincts: vec![0x22, 0x33, 0x33],
+            high_throughput: true,
+            ht_refinement: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&r, &g, &b], 48, 40, &params);
+        let (_, ccap15) = cap_marker(&stream).expect("CAP");
+        assert_eq!(ccap15 & (1 << 5), 0, "reversible → HTREV");
+
+        // Lossy 9-7 ICT with tiles + SOP/EPH + RPCL: bounded error and
+        // the HTIRV bit set.
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 6 },
+            mct: Some(true),
+            tile_size: Some((32, 32)),
+            progression: ProgressionOrder::Rpcl,
+            sop: true,
+            eph: true,
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        let stream = encode_j2k(&[&r, &g, &b], 48, 40, &params).expect("encode");
+        let img = decode_j2k(&stream).expect("decode");
+        for (ci, plane) in [&r, &g, &b].iter().enumerate() {
+            let max_err = img.components[ci]
+                .samples
+                .iter()
+                .zip(plane.iter())
+                .map(|(&got, &want)| (got - i32::from(want)).abs())
+                .max()
+                .unwrap();
+            assert!(max_err <= 1, "comp {ci}: 9-7 fine=6 err {max_err}");
+        }
+        let (_, ccap15) = cap_marker(&stream).expect("CAP");
+        assert_eq!(ccap15 & (1 << 5), 1 << 5, "irreversible → HTIRV");
+    }
+
+    /// HT composes with the §A.7.4 / §A.7.5 packed-header relocations.
+    #[test]
+    fn ht_composes_with_packed_headers() {
+        let p = noise(64, 48, 0x4854_0021);
+        for mode in [PackedHeaders::Ppt, PackedHeaders::Ppm] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                high_throughput: true,
+                ht_refinement: true,
+                packed_headers: mode,
+                ..EncodeOptions::default()
+            };
+            roundtrip_params(&[&p], 64, 48, &params);
+        }
+    }
+
+    /// The Annex-D-only knobs (styles, PCRD) are rejected in
+    /// combination with HT rather than mis-encoded, as is the
+    /// layers + ht_refinement segment-shape combination.
+    #[test]
+    fn ht_rejects_annex_d_only_combinations() {
+        let p = noise(16, 16, 0x4854_0031);
+        let ht = EncodeOptions {
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        for params in [
+            EncodeOptions {
+                bypass: true,
+                ..ht.clone()
+            },
+            EncodeOptions {
+                terminate_all: true,
+                ..ht.clone()
+            },
+            EncodeOptions {
+                layers: 2,
+                ht_refinement: true,
+                ..ht.clone()
+            },
+            EncodeOptions {
+                target_bytes: Some(500),
+                ..ht.clone()
+            },
+            // ht_refinement without high_throughput is meaningless.
+            EncodeOptions {
+                high_throughput: false,
+                ht_refinement: true,
+                ..ht.clone()
+            },
+        ] {
+            assert!(matches!(
+                encode_j2k(&[&p], 16, 16, &params),
+                Err(Error::NotImplemented)
+            ));
+        }
+    }
+
+    /// The Annex H Maxshift ROI composes with HT block coding
+    /// (T.814 §A.5): bit-exact lossless round-trip, RGN markers
+    /// emitted, and Ccap15 bit 12 flags the RGN presence.
+    #[test]
+    fn ht_composes_with_roi() {
+        let p = noise(64, 48, 0x4854_0041);
+        for refine in [false, true] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                high_throughput: true,
+                ht_refinement: refine,
+                roi: Some(RoiRegion {
+                    x0: 16,
+                    y0: 12,
+                    x1: 40,
+                    y1: 30,
+                }),
+                ..EncodeOptions::default()
+            };
+            let stream = roundtrip_params(&[&p], 64, 48, &params);
+            let rgn = rgn_markers(&stream);
+            assert_eq!(rgn.len(), 1);
+            assert_eq!(rgn[0].sprgn, 11);
+            let (_, ccap15) = cap_marker(&stream).expect("CAP");
+            assert_eq!(ccap15 & (1 << 12), 1 << 12, "Ccap15 RGN flag");
+        }
+    }
+
+    // -- T.814 MULTIHT (quality layers over HT) ---------------------------
+
+    /// Quality layers compose with HT block coding as a T.814 MULTIHT
+    /// codestream: each layer carries one §B.1 HT set per code-block
+    /// (each set re-coding the block one magnitude bit-plane finer,
+    /// §B.3), the full decode stays bit-exact through this crate's own
+    /// §B.1 / §B.3 set grouping, and Ccap15 bit 13 signals MULTIHT.
+    #[test]
+    fn ht_multiht_layers_round_trip_with_signalling() {
+        let p = noise(64, 48, 0x4854_0051);
+        for layers in [2u16, 4, 7] {
+            let params = EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (4, 4),
+                layers,
+                high_throughput: true,
+                ..EncodeOptions::default()
+            };
+            let stream = roundtrip_params(&[&p], 64, 48, &params);
+            let header = crate::parse_j2k_header(&stream).expect("header");
+            assert_eq!(header.cod.layers, layers);
+            let (_, ccap15) = cap_marker(&stream).expect("CAP");
+            assert_eq!(ccap15 & (1 << 13), 1 << 13, "Ccap15 MULTIHT flag");
+        }
+    }
+
+    /// §B.1 placeholder passes: a block too shallow for the early
+    /// layers fills them with placeholder triples (three coding
+    /// passes, one zero-length codeword segment) so its first HT set
+    /// still lands on the layer whose bit-plane depth it codes. The
+    /// decoder pins `3·P0` from the first cleanup segment's length
+    /// (§B.3) and the round trip stays bit-exact.
+    #[test]
+    fn ht_multiht_placeholder_passes_round_trip() {
+        // Every block shallow: 2-bit magnitudes under 5 layers force a
+        // placeholder run in front of every code-block's first set.
+        let shallow: Vec<u8> = noise(48, 32, 0x4854_0061).iter().map(|&v| v & 3).collect();
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            layers: 5,
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&shallow], 48, 32, &params);
+
+        // Mixed depth: a flat-ish half and a full-range half, so
+        // placeholder and non-placeholder blocks coexist in one
+        // precinct and the per-block `P0` state stays independent.
+        let full = noise(64, 32, 0x4854_0062);
+        let mut mixed = full.clone();
+        for y in 0..32usize {
+            for x in 0..32usize {
+                mixed[y * 64 + x] = full[y * 64 + x] & 3;
+            }
+        }
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            layers: 6,
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&mixed], 64, 32, &params);
+    }
+
+    /// A hand-assembled MULTIHT codestream with a **bit-plane-skip HT
+    /// set** (§B.3 NOTE 2) decodes from the last non-empty set: 8×8
+    /// gray, NL = 0, three layers carrying set 0 (two planes coarse),
+    /// a skip set (all zero-length segments), and set 2 (full
+    /// precision) — with set 0's unused refinement passes riding the
+    /// skip-set contribution. The decoder must pick set 2 with
+    /// `S_blk = P + S_skip = P + 2` and reconstruct bit-exactly.
+    #[test]
+    fn ht_multiht_skip_set_decodes_last_set() {
+        use crate::packet::{
+            encode_packet_header, CodeBlockPlan, PrecinctEncoderState, SubBandGeometry,
+        };
+        let pixels = noise(8, 8, 0x4854_0081);
+        // NL = 0: the single LL band holds the DC-shifted pixels
+        // (T.800 §G.1.2), reversible, unquantized. Mb = G + ε − 1 =
+        // 2 + 8 − 1 = 9; the final set at S_blk = Mb − 1 = 8 needs
+        // P = Mb − 3 = 6 under S_skip = 2.
+        let mb = 9u32;
+        let p_signalled = mb - 3;
+        let mag: Vec<u32> = pixels
+            .iter()
+            .map(|&v| (i32::from(v) - 128).unsigned_abs())
+            .collect();
+        let sgn: Vec<bool> = pixels.iter().map(|&v| i32::from(v) < 128).collect();
+        let coarse: Vec<u32> = mag.iter().map(|&m| m >> 2).collect();
+        let set0 = crate::htenc::encode_ht_codeblock(&coarse, &sgn, 8, 8, false).unwrap();
+        let set2 = crate::htenc::encode_ht_codeblock(&mag, &sgn, 8, 8, false).unwrap();
+
+        // Three LRCP packets over the one-block precinct.
+        let geom = SubBandGeometry {
+            width: 1,
+            height: 1,
+        };
+        let mut st = PrecinctEncoderState::new(&[(geom, vec![0u32], vec![p_signalled])]);
+        let plan = |passes: u32, segments: Vec<(u32, u32)>| CodeBlockPlan {
+            included: true,
+            zero_bit_planes: p_signalled,
+            coding_passes: passes,
+            segments,
+            mixed_ht: false,
+        };
+        // L0: set-0 cleanup. L1: set 0's unused SigProp + MagRef
+        // (zero-length refinement) then the whole skip set. L2: set-2
+        // cleanup.
+        type LayerShape<'a> = (u32, Vec<(u32, u32)>, &'a [u8]);
+        let shapes: [LayerShape<'_>; 3] = [
+            (1, vec![(1, set0.cleanup.len() as u32)], &set0.cleanup),
+            (5, vec![(2, 0), (1, 0), (2, 0)], &[]),
+            (1, vec![(1, set2.cleanup.len() as u32)], &set2.cleanup),
+        ];
+        let mut body = Vec::new();
+        for (l, (passes, segs, data)) in shapes.iter().enumerate() {
+            body.extend_from_slice(&encode_packet_header(
+                &mut st,
+                l as u16,
+                &[plan(*passes, segs.clone())],
+            ));
+            body.extend_from_slice(data);
+        }
+
+        // Main header (T.800 Annex A / T.814 Annex A).
+        let mut out = Vec::new();
+        out.extend_from_slice(&crate::MARKER_SOC.to_be_bytes());
+        let mut siz = Vec::new();
+        siz.extend_from_slice(&0x4000u16.to_be_bytes()); // Rsiz bit 14
+        for v in [8u32, 8, 0, 0, 8, 8, 0, 0] {
+            siz.extend_from_slice(&v.to_be_bytes());
+        }
+        siz.extend_from_slice(&1u16.to_be_bytes()); // Csiz
+        siz.extend_from_slice(&[7, 1, 1]); // Ssiz (8-bit), XRsiz, YRsiz
+        push_segment(&mut out, MARKER_SIZ, &siz);
+        let mut cap = Vec::new();
+        cap.extend_from_slice(&(1u32 << (32 - 15)).to_be_bytes());
+        cap.extend_from_slice(&(1u16 << 13).to_be_bytes()); // MULTIHT
+        push_segment(&mut out, crate::MARKER_CAP, &cap);
+        // COD: LRCP, 3 layers, no MCT; NL = 0, 8×8 blocks, style
+        // bit 6 (HT), 5-3 kernel.
+        push_segment(&mut out, MARKER_COD, &[0, 0, 0, 3, 0, 0, 1, 1, 0x40, 1]);
+        // QCD: no quantization (Table A.28 style 0), 2 guard bits,
+        // ε = 8 for the lone LL band.
+        push_segment(&mut out, MARKER_QCD, &[0x40, 8 << 3]);
+        // One tile-part.
+        let psot = 12 + 2 + body.len() as u32;
+        let mut sot = Vec::new();
+        sot.extend_from_slice(&0u16.to_be_bytes()); // Isot
+        sot.extend_from_slice(&psot.to_be_bytes());
+        sot.extend_from_slice(&[0, 1]); // TPsot, TNsot
+        push_segment(&mut out, crate::MARKER_SOT, &sot);
+        out.extend_from_slice(&crate::MARKER_SOD.to_be_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crate::MARKER_EOC.to_be_bytes());
+
+        let img = decode_j2k(&out).expect("MULTIHT skip-set decode");
+        let want: Vec<i32> = pixels.iter().map(|&v| i32::from(v)).collect();
+        assert_eq!(img.components[0].samples, want, "last set is bit-exact");
+    }
+
+    /// MULTIHT composes with RCT, precincts, position progression
+    /// orders, tiles and SOP / EPH framing.
+    #[test]
+    fn ht_multiht_composes_with_rct_tiles_and_orders() {
+        let r = noise(48, 40, 0x4854_0071);
+        let g = noise(48, 40, 0x4854_0072);
+        let b = noise(48, 40, 0x4854_0073);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            mct: Some(true),
+            layers: 3,
+            progression: ProgressionOrder::Rlcp,
+            precincts: vec![0x22, 0x33, 0x33],
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&r, &g, &b], 48, 40, &params);
+
+        let params = EncodeOptions {
+            decomposition_levels: 1,
+            code_block_exp: (4, 4),
+            mct: Some(true),
+            layers: 4,
+            tile_size: Some((32, 32)),
+            progression: ProgressionOrder::Pcrl,
+            sop: true,
+            eph: true,
+            high_throughput: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&r, &g, &b], 48, 40, &params);
+    }
+
+    /// Odd, non-power-of-two dimensions run the HT block coder over
+    /// truncated edge blocks and quad remainders — both Z_blk shapes
+    /// stay bit-exact through the full codestream path.
+    #[test]
+    fn ht_odd_dimensions_round_trip() {
+        for (w, h) in [(47u32, 39u32), (33, 17), (13, 9)] {
+            let p = noise(w, h, 0x4854_0061 ^ w ^ (h << 8));
+            for refine in [false, true] {
+                let params = EncodeOptions {
+                    decomposition_levels: 2,
+                    code_block_exp: (4, 4),
+                    high_throughput: true,
+                    ht_refinement: refine,
+                    ..EncodeOptions::default()
+                };
+                roundtrip_params(&[&p], w, h, &params);
+            }
+        }
+    }
+
+    /// HT composes with component sub-sampling and per-component
+    /// COC / QCC overrides (the COC style byte carries bit 6 too).
+    #[test]
+    fn ht_composes_with_subsampling_and_overrides() {
+        let full = noise(48, 40, 0x4854_0051);
+        let half = noise(24, 20, 0x4854_0052);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (4, 4),
+            sub_sampling: vec![(1, 1), (2, 2)],
+            component_overrides: vec![ComponentOverride {
+                component: 1,
+                decomposition_levels: Some(1),
+                code_block_exp: Some((3, 3)),
+                precincts: Some(vec![]),
+                kernel: None,
+            }],
+            high_throughput: true,
+            ht_refinement: true,
+            ..EncodeOptions::default()
+        };
+        roundtrip_params(&[&full, &half], 48, 40, &params);
+    }
+
+    /// The §A.7.4 chunker cuts only after completed packet headers and
+    /// never exceeds the payload budget.
+    #[test]
+    fn chunk_packed_headers_respects_boundaries() {
+        // Atoms: [4-byte Nppm, no cut] [3-byte header, cut] [2-byte
+        // Nppm, no cut] [5-byte header, cut] [1-byte header, cut].
+        let atoms = vec![
+            PackedAtom {
+                bytes: vec![0; 4],
+                boundary: false,
+            },
+            PackedAtom {
+                bytes: vec![1; 3],
+                boundary: true,
+            },
+            PackedAtom {
+                bytes: vec![2; 2],
+                boundary: false,
+            },
+            PackedAtom {
+                bytes: vec![3; 5],
+                boundary: true,
+            },
+            PackedAtom {
+                bytes: vec![4; 1],
+                boundary: true,
+            },
+        ];
+        // Budget 8: group1 (4+3=7) fits; group2 (2+5=7) opens a new
+        // chunk; group3 (1) still fits chunk 2.
+        let chunks = chunk_packed_headers(&atoms, 8).expect("chunk");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 7);
+        assert_eq!(chunks[1].len(), 8);
+        // A budget smaller than an indivisible group is rejected.
+        assert!(matches!(
+            chunk_packed_headers(&atoms, 6),
+            Err(Error::NotImplemented)
+        ));
+        // A huge budget yields one chunk carrying everything.
+        let one = chunk_packed_headers(&atoms, 1 << 16).expect("chunk");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].len(), 15);
+    }
+
+    // -- T.814 §8.2 MIXED-set emission ---------------------------------
+
+    /// A half-noise / half-flat plane: the noisy blocks favour the HT
+    /// cleanup lane, the flat blocks the Annex D lane — the shape that
+    /// makes the per-block choice genuinely mixed.
+    fn mixed_content(w: u32, h: u32, seed: u32) -> Vec<u8> {
+        let mut p = noise(w, h, seed);
+        for y in 0..h as usize {
+            for x in (w as usize / 2)..w as usize {
+                p[y * w as usize + x] = if x % 16 == 0 { 3 } else { 0 };
+            }
+        }
+        p
+    }
+
+    /// MIXED emission round-trips bit-exactly through this crate's own
+    /// MIXED decoder, and the codestream signals the set per T.814:
+    /// `Rsiz` bit 14, `Ccap15` bits 15-14 = `11`, `SPcod` bits 6 + 7.
+    #[test]
+    fn mixed_emission_lossless_round_trips_and_signals() {
+        let p = mixed_content(64, 64, 0xA5A5_0001);
+        let params = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            ht_mixed: true,
+            ..EncodeOptions::default()
+        };
+        let stream = roundtrip_params(&[&p], 64, 64, &params);
+        let header = crate::parse_j2k_header(&stream).expect("header");
+        assert_eq!(header.siz.rsiz & 0x4000, 0x4000, "Rsiz bit 14");
+        assert_eq!(header.cod.code_block_style & 0xC0, 0xC0, "SPcod bits 6 + 7");
+        let (_, ccap15) = cap_marker(&stream).expect("CAP present");
+        assert_eq!(ccap15 >> 14, 0b11, "MIXED-permitted Ccap15");
+        assert_eq!(ccap15 & (1 << 13), 0, "SINGLEHT");
+    }
+
+    /// The per-block choice is genuinely mixed — proven from the
+    /// emitted stream itself: re-signalling the MIXED tile-component
+    /// as all-HT (`SPcod` bit 6 only) or as all-Annex-D (`SPcod`
+    /// bits 6 / 7 clear) must break the parse, which is only possible
+    /// when the packet bodies genuinely interleave both block-coding
+    /// layouts. The Annex D lane also shows as the MIXED stream
+    /// undercutting the all-HT encoding of the same image.
+    #[test]
+    fn mixed_emission_uses_both_lanes() {
+        let p = mixed_content(64, 64, 0xBEEF_0007);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            ..EncodeOptions::default()
+        };
+        let htonly = encode_j2k(
+            &[&p],
+            64,
+            64,
+            &EncodeOptions {
+                high_throughput: true,
+                ..base.clone()
+            },
+        )
+        .expect("ht only");
+        let mixed = encode_j2k(
+            &[&p],
+            64,
+            64,
+            &EncodeOptions {
+                ht_mixed: true,
+                ..base
+            },
+        )
+        .expect("mixed");
+        assert!(
+            mixed.len() < htonly.len(),
+            "MQ-favoured blocks must stay Annex D: mixed {} vs ht-only {}",
+            mixed.len(),
+            htonly.len()
+        );
+        // Locate the COD style byte (marker + Lcod + Scod + SGcod(4) +
+        // NL + xcb + ycb → offset 12 into the segment).
+        let mut pos = 2usize;
+        let mut style_at = None;
+        while pos + 4 <= mixed.len() {
+            let m = u16::from_be_bytes([mixed[pos], mixed[pos + 1]]);
+            if m == MARKER_COD {
+                style_at = Some(pos + 12);
+                break;
+            }
+            let len = u16::from_be_bytes([mixed[pos + 2], mixed[pos + 3]]) as usize;
+            pos += 2 + len;
+        }
+        let style_at = style_at.expect("COD present");
+        assert_eq!(mixed[style_at], 0xC0, "MIXED style byte");
+        // A single-set HT contribution and an Annex D contribution
+        // share the same K = 1 packet-header layout, so re-signalling
+        // the lane does not desync tier-2 — it sends every block's
+        // bytes through the wrong tier-1. The truth decode must
+        // survive while each single-lane re-signalling either fails
+        // outright (the HT decoder's framing checks) or reconstructs
+        // different samples (MQ over HT cleanup bytes) — which is
+        // only possible when both lanes are genuinely present.
+        let truth = decode_j2k(&mixed).expect("true MIXED decode");
+        let mut as_ht = mixed.clone();
+        as_ht[style_at] = 0x40;
+        match decode_j2k(&as_ht) {
+            Err(_) => {}
+            Ok(img) => assert_ne!(
+                img.components[0].samples, truth.components[0].samples,
+                "all-HT re-signalling reproduced the image: no T.800-lane blocks present"
+            ),
+        }
+        let mut as_d = mixed.clone();
+        as_d[style_at] = 0x00;
+        match decode_j2k(&as_d) {
+            Err(_) => {}
+            Ok(img) => assert_ne!(
+                img.components[0].samples, truth.components[0].samples,
+                "all-Annex-D re-signalling reproduced the image: no HT-lane blocks present"
+            ),
+        }
+    }
+
+    /// MIXED emission composes with the RCT, multi-tile grids, custom
+    /// precincts, the position-keyed progressions, sub-sampling and
+    /// SOP / EPH framing — every shape lossless through the MIXED
+    /// decode path.
+    #[test]
+    fn mixed_emission_composes() {
+        let r = mixed_content(48, 40, 1);
+        let g = mixed_content(48, 40, 2);
+        let b = mixed_content(48, 40, 3);
+        // RCT + RPCL + precincts.
+        roundtrip_params(
+            &[&r, &g, &b],
+            48,
+            40,
+            &EncodeOptions {
+                decomposition_levels: 2,
+                code_block_exp: (3, 3),
+                mct: Some(true),
+                progression: ProgressionOrder::Rpcl,
+                precincts: vec![0x33, 0x44, 0x44],
+                ht_mixed: true,
+                ..EncodeOptions::default()
+            },
+        );
+        // Multi-tile + SOP/EPH + PCRL.
+        roundtrip_params(
+            &[&r],
+            48,
+            40,
+            &EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (3, 3),
+                tile_size: Some((17, 19)),
+                sop: true,
+                eph: true,
+                progression: ProgressionOrder::Pcrl,
+                ht_mixed: true,
+                ..EncodeOptions::default()
+            },
+        );
+        // Sub-sampled chroma, CPRL.
+        let half = mixed_content(24, 20, 9);
+        roundtrip_params(
+            &[&r, &half, &half],
+            48,
+            40,
+            &EncodeOptions {
+                decomposition_levels: 1,
+                code_block_exp: (3, 3),
+                sub_sampling: vec![(1, 1), (2, 2), (2, 2)],
+                progression: ProgressionOrder::Cprl,
+                ht_mixed: true,
+                ..EncodeOptions::default()
+            },
+        );
+    }
+
+    /// The irreversible 9-7 MIXED stream reconstructs identically to
+    /// the plain Annex D stream of the same parameters — both lanes
+    /// are lossless transports of the same quantized coefficients, so
+    /// the lane choice must never change a single sample.
+    #[test]
+    fn mixed_emission_9x7_matches_annex_d_reconstruction() {
+        let p = mixed_content(64, 48, 0x9797_0001);
+        let base = EncodeOptions {
+            decomposition_levels: 2,
+            code_block_exp: (3, 3),
+            kernel: EncodeKernel::Lossy9x7 { fine_bits: 3 },
+            ..EncodeOptions::default()
+        };
+        let plain = encode_j2k(&[&p], 64, 48, &base).expect("annex d");
+        let mixed = encode_j2k(
+            &[&p],
+            64,
+            48,
+            &EncodeOptions {
+                ht_mixed: true,
+                ..base
+            },
+        )
+        .expect("mixed");
+        let a = decode_j2k(&plain).expect("decode plain");
+        let b = decode_j2k(&mixed).expect("decode mixed");
+        assert_eq!(
+            a.components[0].samples, b.components[0].samples,
+            "9-7 reconstruction must not depend on the lane choice"
+        );
+    }
+
+    /// The barred combinations reject cleanly (§A.4 / scope): layers,
+    /// the §D.6 / §D.4.2 styles, PCRD, ROI, and the all-HT mode.
+    #[test]
+    fn mixed_emission_rejects_barred_combinations() {
+        let p = noise(16, 16, 5);
+        for params in [
+            EncodeOptions {
+                ht_mixed: true,
+                layers: 2,
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                ht_mixed: true,
+                bypass: true,
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                ht_mixed: true,
+                terminate_all: true,
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                ht_mixed: true,
+                target_bytes: Some(200),
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                ht_mixed: true,
+                high_throughput: true,
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                ht_mixed: true,
+                ht_refinement: true,
+                high_throughput: true,
+                ..EncodeOptions::default()
+            },
+        ] {
+            assert!(
+                encode_j2k(&[&p], 16, 16, &params).is_err(),
+                "combination must be rejected"
+            );
+        }
+    }
+}

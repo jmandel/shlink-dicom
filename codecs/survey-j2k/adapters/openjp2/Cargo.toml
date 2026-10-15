@@ -1,0 +1,9 @@
+[package]
+name = "a-openjp2"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+openjp2 = "=0.6.1"
+survey-common = { path = "../../common" }

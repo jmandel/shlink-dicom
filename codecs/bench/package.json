@@ -1,0 +1,12 @@
+{
+  "name": "shl-codec-bench",
+  "private": true,
+  "type": "module",
+  "description": "codecs/bench: C/C++ codecs compiled to wasm (Cornerstone), run in the browser next to our decoder. See README.md.",
+  "dependencies": {
+    "@cornerstonejs/codec-charls": "1.2.7",
+    "@cornerstonejs/codec-libjpeg-turbo-8bit": "1.2.8",
+    "@cornerstonejs/codec-openjpeg": "1.3.6",
+    "@cornerstonejs/codec-openjph": "2.4.11"
+  }
+}

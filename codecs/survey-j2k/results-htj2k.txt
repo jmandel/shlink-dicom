@@ -1,0 +1,240 @@
+htj2k    hayro    gen-synth-rgb8-60x40-openjph-q                error      d=     0 t=0.002 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-rgb8-60x40-openjph-q                wrong      d=   225 t=0.003 
+htj2k    j2k      gen-synth-rgb8-60x40-openjph-q                exact      d=     0 t=0.003 
+htj2k    openjp2  gen-synth-rgb8-60x40-openjph-q                exact      d=     0 t=0.003 
+htj2k    ojpure   gen-synth-rgb8-60x40-openjph-q                exact      d=     0 t=0.004 
+htj2k    oxideav  gen-synth-rgb8-60x40-openjph-q                tol        d=     1 t=0.007 
+htj2k    rustj2k  gen-synth-rgb8-60x40-openjph-q                error      d=     0 t=0.002 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-rgb8-60x40-openjph-q                error      d=     0 t=0.002 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-rgb8-60x40-openjph-q                wrong      d=   225 t=0.003 
+htj2k    ndic     gen-synth-rgb8-60x40-openjph-q                error      d=     0 t=0.001 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  gen-synth-rgb8-60x40-openjph-q                error      d=     0 t=0.001 decode error: Unsupported("only single-component images supported (Csiz = 3)")
+htj2k    oxigdal  gen-synth-rgb8-60x40-openjph-q                error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-rgb8-60x40-openjph-rev              error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-rgb8-60x40-openjph-rev              wrong      d=   255 t=0.002 
+htj2k    j2k      gen-synth-rgb8-60x40-openjph-rev              exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-rgb8-60x40-openjph-rev              exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-rgb8-60x40-openjph-rev              exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-rgb8-60x40-openjph-rev              exact      d=     0 t=0.004 
+htj2k    rustj2k  gen-synth-rgb8-60x40-openjph-rev              error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-rgb8-60x40-openjph-rev              error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-rgb8-60x40-openjph-rev              wrong      d=   255 t=0.002 
+htj2k    ndic     gen-synth-rgb8-60x40-openjph-rev              exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-rgb8-60x40-openjph-rev              error      d=     0 t=0.001 decode error: Unsupported("only single-component images supported (Csiz = 3)")
+htj2k    oxigdal  gen-synth-rgb8-60x40-openjph-rev              error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-rgb8-60x40-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-rgb8-60x40-openjph-rev-rpcl         wrong      d=   255 t=0.002 
+htj2k    j2k      gen-synth-rgb8-60x40-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-rgb8-60x40-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-rgb8-60x40-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-rgb8-60x40-openjph-rev-rpcl         exact      d=     0 t=0.004 
+htj2k    rustj2k  gen-synth-rgb8-60x40-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-rgb8-60x40-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-rgb8-60x40-openjph-rev-rpcl         wrong      d=   255 t=0.002 
+htj2k    ndic     gen-synth-rgb8-60x40-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-rgb8-60x40-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: Unsupported("only single-component images supported (Csiz = 3)")
+htj2k    oxigdal  gen-synth-rgb8-60x40-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u12-65x31-openjph-q                 error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u12-65x31-openjph-q                 tol        d=     1 t=0.002 
+htj2k    j2k      gen-synth-u12-65x31-openjph-q                 exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u12-65x31-openjph-q                 exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u12-65x31-openjph-q                 exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u12-65x31-openjph-q                 tol        d=     1 t=0.002 
+htj2k    rustj2k  gen-synth-u12-65x31-openjph-q                 error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u12-65x31-openjph-q                 error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u12-65x31-openjph-q                 tol        d=     1 t=0.002 
+htj2k    ndic     gen-synth-u12-65x31-openjph-q                 error      d=     0 t=0.001 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  gen-synth-u12-65x31-openjph-q                 error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x0B)")
+htj2k    oxigdal  gen-synth-u12-65x31-openjph-q                 error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u12-65x31-openjph-rev               error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.002 
+htj2k    rustj2k  gen-synth-u12-65x31-openjph-rev               error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u12-65x31-openjph-rev               error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.001 
+htj2k    ndic     gen-synth-u12-65x31-openjph-rev               exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u12-65x31-openjph-rev               error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x0B)")
+htj2k    oxigdal  gen-synth-u12-65x31-openjph-rev               error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u12-65x31-openjph-rev-rpcl          error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.002 
+htj2k    rustj2k  gen-synth-u12-65x31-openjph-rev-rpcl          error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u12-65x31-openjph-rev-rpcl          error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.001 
+htj2k    ndic     gen-synth-u12-65x31-openjph-rev-rpcl          exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u12-65x31-openjph-rev-rpcl          error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x0B)")
+htj2k    oxigdal  gen-synth-u12-65x31-openjph-rev-rpcl          error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u16-128x96-openjph-q                error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u16-128x96-openjph-q                tol        d=     1 t=0.002 
+htj2k    j2k      gen-synth-u16-128x96-openjph-q                tol        d=     1 t=0.001 
+htj2k    openjp2  gen-synth-u16-128x96-openjph-q                exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u16-128x96-openjph-q                exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u16-128x96-openjph-q                tol        d=     1 t=0.011 
+htj2k    rustj2k  gen-synth-u16-128x96-openjph-q                error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u16-128x96-openjph-q                error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u16-128x96-openjph-q                tol        d=     1 t=0.002 
+htj2k    ndic     gen-synth-u16-128x96-openjph-q                error      d=     0 t=0.001 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  gen-synth-u16-128x96-openjph-q                error      d=     0 t=0.001 decode error: InvalidData("unexpected marker 0xFF50 in main header")
+htj2k    oxigdal  gen-synth-u16-128x96-openjph-q                error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u16-128x96-openjph-rev              error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.002 
+htj2k    j2k      gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.002 
+htj2k    oxideav  gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.011 
+htj2k    rustj2k  gen-synth-u16-128x96-openjph-rev              error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u16-128x96-openjph-rev              error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.002 
+htj2k    ndic     gen-synth-u16-128x96-openjph-rev              exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u16-128x96-openjph-rev              error      d=     0 t=0.001 decode error: InvalidData("unexpected marker 0xFF50 in main header")
+htj2k    oxigdal  gen-synth-u16-128x96-openjph-rev              error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u16-128x96-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.002 
+htj2k    j2k      gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.010 
+htj2k    rustj2k  gen-synth-u16-128x96-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u16-128x96-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.002 
+htj2k    ndic     gen-synth-u16-128x96-openjph-rev-rpcl         exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u16-128x96-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: InvalidData("unexpected marker 0xFF50 in main header")
+htj2k    oxigdal  gen-synth-u16-128x96-openjph-rev-rpcl         error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u16-3frame-32x32-openjph-q          error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u16-3frame-32x32-openjph-q          tol        d=     2 t=0.004 
+htj2k    j2k      gen-synth-u16-3frame-32x32-openjph-q          tol        d=     1 t=0.003 
+htj2k    openjp2  gen-synth-u16-3frame-32x32-openjph-q          exact      d=     0 t=0.003 
+htj2k    ojpure   gen-synth-u16-3frame-32x32-openjph-q          exact      d=     0 t=0.003 
+htj2k    oxideav  gen-synth-u16-3frame-32x32-openjph-q          tol        d=     2 t=0.004 
+htj2k    rustj2k  gen-synth-u16-3frame-32x32-openjph-q          error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u16-3frame-32x32-openjph-q          error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u16-3frame-32x32-openjph-q          tol        d=     2 t=0.004 
+htj2k    ndic     gen-synth-u16-3frame-32x32-openjph-q          error      d=     0 t=0.001 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  gen-synth-u16-3frame-32x32-openjph-q          error      d=     0 t=0.001 decode error: InvalidData("unexpected marker 0xFF50 in main header")
+htj2k    oxigdal  gen-synth-u16-3frame-32x32-openjph-q          error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u16-3frame-32x32-openjph-rev        error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.004 
+htj2k    j2k      gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.003 
+htj2k    openjp2  gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.003 
+htj2k    ojpure   gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.003 
+htj2k    oxideav  gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.005 
+htj2k    rustj2k  gen-synth-u16-3frame-32x32-openjph-rev        error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u16-3frame-32x32-openjph-rev        error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.005 
+htj2k    ndic     gen-synth-u16-3frame-32x32-openjph-rev        exact      d=     0 t=0.002 
+htj2k    purej2k  gen-synth-u16-3frame-32x32-openjph-rev        error      d=     0 t=0.001 decode error: InvalidData("unexpected marker 0xFF50 in main header")
+htj2k    oxigdal  gen-synth-u16-3frame-32x32-openjph-rev        error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u16-3frame-32x32-openjph-rev-rpcl   error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.004 
+htj2k    j2k      gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.004 
+htj2k    openjp2  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.003 
+htj2k    ojpure   gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.003 
+htj2k    oxideav  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.004 
+htj2k    rustj2k  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.004 
+htj2k    ndic     gen-synth-u16-3frame-32x32-openjph-rev-rpcl   exact      d=     0 t=0.002 
+htj2k    purej2k  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   error      d=     0 t=0.001 decode error: InvalidData("unexpected marker 0xFF50 in main header")
+htj2k    oxigdal  gen-synth-u16-3frame-32x32-openjph-rev-rpcl   error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u8-1x1-openjph-q                    exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u8-1x1-openjph-q                    exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u8-1x1-openjph-q                    exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: DecodeFailed
+htj2k    oxideav  gen-synth-u8-1x1-openjph-q                    exact      d=     0 t=0.001 
+htj2k    rustj2k  gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u8-1x1-openjph-q                    exact      d=     0 t=0.001 
+htj2k    ndic     gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x07)")
+htj2k    oxigdal  gen-synth-u8-1x1-openjph-q                    error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u8-1x1-openjph-rev                  error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u8-1x1-openjph-rev                  exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u8-1x1-openjph-rev                  exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u8-1x1-openjph-rev                  exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u8-1x1-openjph-rev                  error      d=     0 t=0.001 decode error: DecodeFailed
+htj2k    oxideav  gen-synth-u8-1x1-openjph-rev                  exact      d=     0 t=0.001 
+htj2k    rustj2k  gen-synth-u8-1x1-openjph-rev                  error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u8-1x1-openjph-rev                  error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u8-1x1-openjph-rev                  exact      d=     0 t=0.001 
+htj2k    ndic     gen-synth-u8-1x1-openjph-rev                  exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u8-1x1-openjph-rev                  error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x07)")
+htj2k    oxigdal  gen-synth-u8-1x1-openjph-rev                  error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u8-1x1-openjph-rev-rpcl             error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u8-1x1-openjph-rev-rpcl             exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u8-1x1-openjph-rev-rpcl             exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u8-1x1-openjph-rev-rpcl             exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u8-1x1-openjph-rev-rpcl             error      d=     0 t=0.001 decode error: DecodeFailed
+htj2k    oxideav  gen-synth-u8-1x1-openjph-rev-rpcl             exact      d=     0 t=0.001 
+htj2k    rustj2k  gen-synth-u8-1x1-openjph-rev-rpcl             error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u8-1x1-openjph-rev-rpcl             error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u8-1x1-openjph-rev-rpcl             exact      d=     0 t=0.002 
+htj2k    ndic     gen-synth-u8-1x1-openjph-rev-rpcl             exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u8-1x1-openjph-rev-rpcl             error      d=     0 t=0.002 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x07)")
+htj2k    oxigdal  gen-synth-u8-1x1-openjph-rev-rpcl             error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u8-64x48-openjph-q                  error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u8-64x48-openjph-q                  tol        d=     1 t=0.001 
+htj2k    j2k      gen-synth-u8-64x48-openjph-q                  exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u8-64x48-openjph-q                  exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u8-64x48-openjph-q                  exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u8-64x48-openjph-q                  tol        d=     1 t=0.002 
+htj2k    rustj2k  gen-synth-u8-64x48-openjph-q                  error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u8-64x48-openjph-q                  error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u8-64x48-openjph-q                  tol        d=     1 t=0.002 
+htj2k    ndic     gen-synth-u8-64x48-openjph-q                  error      d=     0 t=0.001 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  gen-synth-u8-64x48-openjph-q                  error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x07)")
+htj2k    oxigdal  gen-synth-u8-64x48-openjph-q                  error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u8-64x48-openjph-rev                error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.002 
+htj2k    ojpure   gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.002 
+htj2k    rustj2k  gen-synth-u8-64x48-openjph-rev                error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u8-64x48-openjph-rev                error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.001 
+htj2k    ndic     gen-synth-u8-64x48-openjph-rev                exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u8-64x48-openjph-rev                error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x07)")
+htj2k    oxigdal  gen-synth-u8-64x48-openjph-rev                error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    gen-synth-u8-64x48-openjph-rev-rpcl           error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.001 
+htj2k    j2k      gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.001 
+htj2k    openjp2  gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.001 
+htj2k    ojpure   gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.001 
+htj2k    oxideav  gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.003 
+htj2k    rustj2k  gen-synth-u8-64x48-openjph-rev-rpcl           error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  gen-synth-u8-64x48-openjph-rev-rpcl           error      d=     0 t=0.001 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.002 
+htj2k    ndic     gen-synth-u8-64x48-openjph-rev-rpcl           exact      d=     0 t=0.001 
+htj2k    purej2k  gen-synth-u8-64x48-openjph-rev-rpcl           error      d=     0 t=0.001 decode error: Unsupported("only unsigned 16-bit samples supported (Ssiz = 0x07)")
+htj2k    oxigdal  gen-synth-u8-64x48-openjph-rev-rpcl           error      d=     0 t=0.001 decode error: InvalidMarker(65360)
+htj2k    hayro    pydicom-HTJ2KLossless_08_RGB                  error      d=     0 t=0.001 decode error: Marker(Unsupported)
+htj2k    dtk      pydicom-HTJ2KLossless_08_RGB                  wrong      d=   186 t=0.020 
+htj2k    j2k      pydicom-HTJ2KLossless_08_RGB                  exact      d=     0 t=0.038 
+htj2k    openjp2  pydicom-HTJ2KLossless_08_RGB                  exact      d=     0 t=0.024 
+htj2k    ojpure   pydicom-HTJ2KLossless_08_RGB                  exact      d=     0 t=0.022 
+htj2k    oxideav  pydicom-HTJ2KLossless_08_RGB                  exact      d=     0 t=0.920 
+htj2k    rustj2k  pydicom-HTJ2KLossless_08_RGB                  error      d=     0 t=0.001 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  pydicom-HTJ2KLossless_08_RGB                  error      d=     0 t=0.002 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  pydicom-HTJ2KLossless_08_RGB                  wrong      d=   186 t=0.028 
+htj2k    ndic     pydicom-HTJ2KLossless_08_RGB                  exact      d=     0 t=0.020 
+htj2k    purej2k  pydicom-HTJ2KLossless_08_RGB                  error      d=     0 t=0.002 decode error: Unsupported("only single-component images supported (Csiz = 3)")
+htj2k    oxigdal  pydicom-HTJ2KLossless_08_RGB                  error      d=     0 t=0.002 decode error: InvalidMarker(65360)
+htj2k    hayro    pydicom-HTJ2K_08_RGB                          error      d=     0 t=0.002 decode error: Marker(Unsupported)
+htj2k    dtk      pydicom-HTJ2K_08_RGB                          wrong      d=   162 t=0.029 
+htj2k    j2k      pydicom-HTJ2K_08_RGB                          tol        d=     1 t=0.038 
+htj2k    openjp2  pydicom-HTJ2K_08_RGB                          exact      d=     0 t=0.024 
+htj2k    ojpure   pydicom-HTJ2K_08_RGB                          exact      d=     0 t=0.021 
+htj2k    oxideav  pydicom-HTJ2K_08_RGB                          tol        d=     1 t=0.761 
+htj2k    rustj2k  pydicom-HTJ2K_08_RGB                          error      d=     0 t=0.002 decode error: unsupported: marker CAP (0xFF50) is outside the decoded subset
+htj2k    justjp2  pydicom-HTJ2K_08_RGB                          error      d=     0 t=0.002 decode error: InvalidData("encoded tile header truncated")
+htj2k    openjph  pydicom-HTJ2K_08_RGB                          wrong      d=   162 t=0.042 
+htj2k    ndic     pydicom-HTJ2K_08_RGB                          error      d=     0 t=0.002 decode error: Unsupported { message: "irreversible (9/7) codestreams" }
+htj2k    purej2k  pydicom-HTJ2K_08_RGB                          error      d=     0 t=0.002 decode error: Unsupported("only single-component images supported (Csiz = 3)")
+htj2k    oxigdal  pydicom-HTJ2K_08_RGB                          error      d=     0 t=0.001 decode error: InvalidMarker(65360)

@@ -1,0 +1,597 @@
+{
+ "version": 1,
+ "about": "Benchmark cases for codecs/bench. Each entry names a codec-corpus case (<format>/<case id>). Pixel metadata, max_abs and the oracle come from the corpus at run time; sample_sha256 pins the file so results stay comparable. Bump version when the set changes. sample_sha256 and oracle_sha256 pin the file and the expected pixels; the runner warns when either differs (regenerated synthetic files get new UIDs, so their sample hash changes while the pixels do not).",
+ "defaults": {
+  "warmup": 2,
+  "min_runs": 5,
+  "max_runs": 30,
+  "budget_ms": 300
+ },
+ "cases": [
+  {
+   "id": "uncompressed/pydicom-CT_small",
+   "label": "CT 128² s16, small",
+   "tags": [
+    "real",
+    "small",
+    "16-bit"
+   ],
+   "sample_sha256": "3dd31e5cc835b3f2cdd46c9da1982f59251e78518fefa8163d914631c66437d6",
+   "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926"
+  },
+  {
+   "id": "uncompressed/gen-bench-ct512-u16",
+   "label": "CT 512² u16 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "c1c306545a6f43196bd13746d6f27bc948e57fd1fc824eb133493f2290257ff2",
+   "oracle_sha256": "e3437f38a446f2677270567e8f53a303a79bc9f6522c0aa3a49cce2db7c643ae"
+  },
+  {
+   "id": "uncompressed/gen-bench-dx2048-u12",
+   "label": "DX 2048² u12 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "fb3c3e5e3ec1bc02607ec78a97013e56a0ef7e972aa27f67f3c1cf73bfb9e11e",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "uncompressed/gen-bench-cine-rgb8-640x480x30",
+   "label": "RGB cine 640×480×30 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "6e1f5b0c30781cae7bfa9f6c854281bbf6214388425e09798122e24055810a88",
+   "oracle_sha256": "6f92c45830f0867fbdd0ff26385f425aaf89ffdc204726028c692803ebc6d18e"
+  },
+  {
+   "id": "uncompressed/ext-fodicom-GH1049_planar_0",
+   "label": "YBR_FULL_422 planar 576×456×24",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "648c6140de4779895904c63003fe6ebe47d8e7b2541a82aaaf9b07c1fc0aedc9",
+   "oracle_sha256": "fa5e5c0b080c96da5d68b7db0603ae37c5ce89f68f928cd5c4f13894adecfd84"
+  },
+  {
+   "id": "uncompressed/idc-defl-mono2-u8of8-mf-seg-qiicr-158f3cd5",
+   "label": "Deflated SEG 512²×72",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "8-bit"
+   ],
+   "sample_sha256": "642a2fdc9e13a77bfb2adae4c0c4c6484f8801f1f7abf3a706230b9df345b527",
+   "oracle_sha256": "71489d4fb8046ab4906e4078a47ede15e89d3a4858b13a87cbf8920889b452a4"
+  },
+  {
+   "id": "rle/gen-pydicom-CT_small-pydicom-rle",
+   "label": "CT 128² s16, small",
+   "tags": [
+    "generated",
+    "small",
+    "16-bit"
+   ],
+   "sample_sha256": "03acb3bb9ef8f0689ecd917779065a4f6e00b9221879c1dd90b68296c97378b4",
+   "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926"
+  },
+  {
+   "id": "rle/gen-bench-ct512-u16-pydicom-rle",
+   "label": "CT 512² u16 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "c104075b0e7f1780dbb072cd7583b50d156708fbef9992985c3b23040c1182c0",
+   "oracle_sha256": "e3437f38a446f2677270567e8f53a303a79bc9f6522c0aa3a49cce2db7c643ae"
+  },
+  {
+   "id": "rle/gen-bench-dx2048-u12-pydicom-rle",
+   "label": "DX 2048² u12 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "34ed4693fcd00c7c911fef44cd7f99c8868e2d68a0ab7549d7959c62f67be61e",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "rle/gen-bench-cine-rgb8-640x480x30-pydicom-rle",
+   "label": "RGB cine 640×480×30 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "e7dba16ae33f1cd491698636d4ce4447f5db01d20250e1ad9181c82cf0689296",
+   "oracle_sha256": "6f92c45830f0867fbdd0ff26385f425aaf89ffdc204726028c692803ebc6d18e"
+  },
+  {
+   "id": "rle/ext-gdcm-LEADTOOLS_FLOWERS-16-MONO2-RLE",
+   "label": "16-bit photo 800×535",
+   "tags": [
+    "real",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "36642fc4111ca75c44342060d65125b4ad7ad679150a2ba397a292831e5d39c8",
+   "oracle_sha256": "958eea569c0ca6f7cbea15dbd51697495245dbeed085bf5e53e30a1a22479936"
+  },
+  {
+   "id": "rle/ext-orthanc-2022-11-14-RLEPlanarConfiguration",
+   "label": "RGB 1475² planar",
+   "tags": [
+    "real",
+    "medium",
+    "colour"
+   ],
+   "sample_sha256": "5870389bbe17fe9e493007fc81ba54f631e8e5b5fde456e26036bca01ed72098",
+   "oracle_sha256": "904db606b1edc2450ed5d301ffa89948ac7e55c75149d8653e27932d32c8c4a5"
+  },
+  {
+   "id": "jpeg-dct/gen-synth-u8-64x48-ijg-baseline",
+   "label": "u8 64×48, small",
+   "tags": [
+    "generated",
+    "small",
+    "8-bit"
+   ],
+   "sample_sha256": "f8a5faf37d330b2445a029d02a412c71e253c4f8457841a6ee5fac2f845e5aff",
+   "oracle_sha256": "67526c06d3cc17b4a67d26e5927172cec8306e5be98e44ad27f46abb8fc0cb9e"
+  },
+  {
+   "id": "jpeg-dct/gen-bench-dx2048-u12-ijg-extended",
+   "label": "DX 2048² 12-bit extended (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "d1fdbd2619653060d38f171eb70d25c48f032f15ef9bed6545cd5e1288f327b6",
+   "oracle_sha256": "359a222e41dc1c43dd7cfd5d65dd75e04c803c5b61954193772c99d81e24f999"
+  },
+  {
+   "id": "jpeg-dct/gen-bench-photo-rgb8-2048-ijg-baseline",
+   "label": "RGB 2048² baseline 4:2:2 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "3717d9b2175c5f1155595664492d74c290efb9ce7300583391507d8014c13a21",
+   "oracle_sha256": "903d765b9768013c2be7713d0218c89b971263bf9451133d813fe36080dcb550"
+  },
+  {
+   "id": "jpeg-dct/gen-bench-cine-rgb8-640x480x30-ijg-baseline",
+   "label": "RGB cine 640×480×30 baseline (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "33792e2827ea2bb5eca583e4ae6d7111e85711d362e271f8ef8f6a8a14a56e9b",
+   "oracle_sha256": "955223a9071a01f513effb2282ab1feaf277a0ba9b6a07a37830d8e37da0e846"
+  },
+  {
+   "id": "jpeg-dct/pydicom-color3d_jpeg_baseline",
+   "label": "RGB cine 640×480×120 baseline",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "c8798b8abf8ae0a18e8c9952e7c7f75f3cc8465234b1b63f9e3ba3bebb9d5625",
+   "oracle_sha256": "2701df1f19ab67d8c31d8d34ed31c14ebe8964677d5a641e71688856ba05f0fd"
+  },
+  {
+   "id": "jpeg-dct/local-wrist-oblique",
+   "label": "CR 2460×2970 12-bit extended",
+   "tags": [
+    "real",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "6d8d5819bcf4ee9bb961c14cc46b1e9936e030bf4d852ffdaf2343ac824d42b1",
+   "oracle_sha256": "6aac8ed418a8d69ca313476371991b352a580974c4fd400ec3d26466aedc495e"
+  },
+  {
+   "id": "jpeg-dct/idc-jpgbase-ybr422-u8of8-p0-mf-sm-mirax-6fc896a9",
+   "label": "Slide tiles 1024²×8 baseline",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "9e58d0a70e969dbff0676822b144d0f9a15f7461a9cdacace67702cd6c3abd8f",
+   "oracle_sha256": "55fa1ce404c53a959c832aeb929d2549f422e6b85b611436e04bea6ec93a815c"
+  },
+  {
+   "id": "jpeg-lossless/gen-pydicom-CT_small-ijg-lossless-sv1",
+   "label": "CT 128² s16 SV1, small",
+   "tags": [
+    "generated",
+    "small",
+    "16-bit"
+   ],
+   "sample_sha256": "f2603e30b0094eabc3c6dbecdcde6086da73538c889e93e9eb8b4d5827a26b3b",
+   "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926"
+  },
+  {
+   "id": "jpeg-lossless/gen-pydicom-CT_small-ijg-lossless-p14-sv7",
+   "label": "CT 128² s16 predictor 7, small",
+   "tags": [
+    "generated",
+    "small",
+    "16-bit"
+   ],
+   "sample_sha256": "ec9bf56fedc9b97d68916f7c875a05747de69e49b7420f4e89c578c699b60196",
+   "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926"
+  },
+  {
+   "id": "jpeg-lossless/gen-bench-ct512-u16-ijg-lossless-sv1",
+   "label": "CT 512² u16 SV1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "0ae8f86bc0fedb3efa4a69433bfaac7ded86e28b77e1a2b4a321de106e31a67a",
+   "oracle_sha256": "e3437f38a446f2677270567e8f53a303a79bc9f6522c0aa3a49cce2db7c643ae"
+  },
+  {
+   "id": "jpeg-lossless/gen-bench-dx2048-u12-ijg-lossless-sv1",
+   "label": "DX 2048² u12 SV1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "a8e4bfaf17bd9e550cd7267e8215c635e0bb76c7b860effe847b296497196843",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "jpeg-lossless/idc-jpgsv1-mono2-u12of16-sf-dx-midrcricor-10f1e4b4",
+   "label": "DX 3032×2520 12-bit SV1",
+   "tags": [
+    "real",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "01773d66274799aef3df592e8ada7fa1fce4654a43029a4fe17a32c862e2701a",
+   "oracle_sha256": "f464d11880f50607fac89652766b4f2311aabc2ea0db3aae56d5109628071e6a"
+  },
+  {
+   "id": "jpeg-lossless/ext-gdcm-GE_DLX-8-MONO2-Multiframe-Jpeg_Lossless",
+   "label": "XA 512²×67 8-bit",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "8-bit"
+   ],
+   "sample_sha256": "e69a897ff0aa2ceedf0e930b799fe69593ab5921cf168b844608a8aa1e97fbdb",
+   "oracle_sha256": "25572bf966c208627be8c6033f2ef34bcddce09f040450c195426c419d311d05"
+  },
+  {
+   "id": "jpeg-lossless/ext-cs3d-ColorImage.dcm_JPEGProcess14TransferSyntax_1.2.840.10008.1.2.4.57",
+   "label": "RGB 768×512",
+   "tags": [
+    "real",
+    "medium",
+    "colour"
+   ],
+   "sample_sha256": "2c32e3b97f2d6473fce794311ffcf7fcc0865622e2f06a89d9bb4f5df0223510",
+   "oracle_sha256": "81992a83592267e69125666f3e3e04c1819529b4c4c1e55fde0a6a741bac4219"
+  },
+  {
+   "id": "jpeg-ls/gen-pydicom-CT_small-charls-ls",
+   "label": "CT 128² s16, small",
+   "tags": [
+    "generated",
+    "small",
+    "16-bit"
+   ],
+   "sample_sha256": "c387e2418da8df3a19e4ad5d70b707c508be563095e82a4c131482e5d8d20a99",
+   "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926"
+  },
+  {
+   "id": "jpeg-ls/gen-bench-ct512-u16-charls-ls",
+   "label": "CT 512² u16 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "ac795b8ae528d4c90799483063e58fbb6f105892d9d68fca108658d593b2c8ec",
+   "oracle_sha256": "e3437f38a446f2677270567e8f53a303a79bc9f6522c0aa3a49cce2db7c643ae"
+  },
+  {
+   "id": "jpeg-ls/gen-bench-dx2048-u12-charls-ls",
+   "label": "DX 2048² u12 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "0276b3d2b073708eb0b05d7afc44c6cf06e22fbe4a0592b84703e8f91cc7e48a",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "jpeg-ls/gen-bench-dx2048-u12-charls-nl3",
+   "label": "DX 2048² u12 near-lossless 3 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "fe8e4d4ea9015a73fc6424ad66940dcd0cb01e026d9cb868a7189e4ee8318c08",
+   "oracle_sha256": "7e3bcbc7681a2a60df6120b1b02632601970041e5bfad1115331cb4e0ae30df7"
+  },
+  {
+   "id": "jpeg-ls/gen-bench-cine-rgb8-640x480x30-charls-ls",
+   "label": "RGB cine 640×480×30 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "25bb39eb6c5feb06e0eb3dc10ce1093c6a6f0c904693e8f9b5b9a9782a0a8798",
+   "oracle_sha256": "6f92c45830f0867fbdd0ff26385f425aaf89ffdc204726028c692803ebc6d18e"
+  },
+  {
+   "id": "jpeg-ls/ext-pylibjpeg-RG1_JLSL",
+   "label": "CR 1841×1955 15-bit",
+   "tags": [
+    "real",
+    "medium",
+    "15-bit"
+   ],
+   "sample_sha256": "ab2e7eb94e53f68352ed4d4569417cf07917c96ec7deb1710c381a5f607e0ce1",
+   "oracle_sha256": "26721b2112d94887b0feae345f1b7c1c8148e1710eaf27283d8c3e650682d252"
+  },
+  {
+   "id": "jpeg-ls/idc-jls-mono2-u8of8-mf-seg-ncifnlcr-395ded29",
+   "label": "SEG 240²×308 8-bit",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "8-bit"
+   ],
+   "sample_sha256": "c6d9c71d5a7ed5389f0b7b835c5e0f63bb9ed99005f77f0385bce94c34caa3f8",
+   "oracle_sha256": "f306ab69ac52da0364c9e5514a2205d01bfa5e4e8ac61127ca0fd68d2d2c23d4"
+  },
+  {
+   "id": "jpeg-ls/ext-cs3d-ColorImage.dcm_JPEGLSLosslessTransferSyntax_1.2.840.10008.1.2.4.80",
+   "label": "RGB 768×512",
+   "tags": [
+    "real",
+    "medium",
+    "colour"
+   ],
+   "sample_sha256": "5d6cf980c99cc87e659f602b625274d62885f4e6cbe4b414ff72381510b3da58",
+   "oracle_sha256": "81992a83592267e69125666f3e3e04c1819529b4c4c1e55fde0a6a741bac4219"
+  },
+  {
+   "id": "jpeg2000/gen-pydicom-CT_small-openjpeg-rev",
+   "label": "CT 128² s16 lossless, small",
+   "tags": [
+    "generated",
+    "small",
+    "16-bit"
+   ],
+   "sample_sha256": "ebb578377afac842ba1e558bb50c4152802d9b39b0a7142d5debeb6793263144",
+   "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926"
+  },
+  {
+   "id": "jpeg2000/gen-bench-ct512-u16-openjpeg-rev",
+   "label": "CT 512² u16 lossless (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "3dfc934c8302d4e1d9ed8476034386e1c4a2b630784482f5811064f2fc133c4c",
+   "oracle_sha256": "e3437f38a446f2677270567e8f53a303a79bc9f6522c0aa3a49cce2db7c643ae"
+  },
+  {
+   "id": "jpeg2000/gen-bench-ct512-u16-openjpeg-cr20",
+   "label": "CT 512² u16 lossy 20:1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "8375a294372e8b5032b53849895f7a372a3fabc22c1748fbddb6ff5653579878",
+   "oracle_sha256": "96c5322cae69794764419f0f9f557aab75170a214a3d5ea696edd01ba2486ae3"
+  },
+  {
+   "id": "jpeg2000/gen-bench-dx2048-u12-openjpeg-rev",
+   "label": "DX 2048² u12 lossless (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "fc391026feff4c14257afb9e9cc18ddd5e9e1c352c146ba11ae1fe5b48204aa9",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "jpeg2000/gen-bench-dx2048-u12-openjpeg-cr20",
+   "label": "DX 2048² u12 lossy 20:1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "51b6e8144ac00ca432b1f2a86475fc41cd6046b1e53ac86674c799eb038aaa81",
+   "oracle_sha256": "9a0b45834b1a016dd2985ec2ba9d31b3a1d38553199a9d2033bf2593757276bf"
+  },
+  {
+   "id": "jpeg2000/gen-bench-photo-rgb8-2048-openjpeg-cr20",
+   "label": "RGB 2048² lossy ICT (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "0eff801abc24b070f3eaa8eab3a551be8f2e70745fb6af6d0ecb4d5de2fc13e8",
+   "oracle_sha256": "64e6b255ef8d76cd4ae341a32b789f1c46381e5eca5afeba75ed25c226547076"
+  },
+  {
+   "id": "jpeg2000/gen-bench-cine-rgb8-640x480x30-openjpeg-rev",
+   "label": "RGB cine 640×480×30 lossless (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "124e11fa9278df1a352fdd34ad93f60602f8a7babf412fee8e96d4150d65eb7c",
+   "oracle_sha256": "6f92c45830f0867fbdd0ff26385f425aaf89ffdc204726028c692803ebc6d18e"
+  },
+  {
+   "id": "jpeg2000/ext-gdcm-NM_Kakadu44_SOTmarkerincons",
+   "label": "2048×2500 12-bit (Kakadu)",
+   "tags": [
+    "real",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "f57571a153d22cc0ce8c66177f52466a0a3f3aaeff427f5225ada3364c9ab8dd",
+   "oracle_sha256": "918859fe30bfe0b095d7e665d3a6a96a39357fad967a0e3e1bf9a84d0207f300"
+  },
+  {
+   "id": "jpeg2000/ext-fodicom-VL5_J2KI",
+   "label": "RGB 2670×3340 lossy ICT",
+   "tags": [
+    "real",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "b1ce311af7dfe6194929328b6988082d67cae6fa71ef4235f2885f0eace7a6d6",
+   "oracle_sha256": "6509ccb4e6ec3f710b4530016f4a3511697fe39b14a938a9befba9fba11b77db"
+  },
+  {
+   "id": "jpeg2000/idc-j2k-ict-u8of8-p0-mf-sm-bioimagene-e9647081",
+   "label": "Slide tiles 256²×88 ICT",
+   "tags": [
+    "real",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "d44a145953561288a0f77f23006db1687227b822faa2c17e6055b532f47e5a60",
+   "oracle_sha256": "6a764ad02b6c07d4060069f2cb57fd0f5e797e5264ae1b946bdb61c34a8a278c"
+  },
+  {
+   "id": "htj2k/gen-synth-u8-64x48-openjph-rev",
+   "label": "u8 64×48 lossless, small",
+   "tags": [
+    "generated",
+    "small",
+    "8-bit"
+   ],
+   "sample_sha256": "7cfcc6a6958ab9343d52d80d5b4794a5863b0fec1abcda542cc0bf6aa5563fe2",
+   "oracle_sha256": "3039cf2ba2bb1395f0af5667de90dd64a7b57217d9b574811f6e581bec792978"
+  },
+  {
+   "id": "htj2k/gen-bench-ct512-u16-openjph-rev",
+   "label": "CT 512² u16 lossless (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "0b4d3266beeb431c6d9c1cbdb57ad9dca9a74a60b6f085e61c402e7106204b78",
+   "oracle_sha256": "e3437f38a446f2677270567e8f53a303a79bc9f6522c0aa3a49cce2db7c643ae"
+  },
+  {
+   "id": "htj2k/gen-bench-dx2048-u12-openjph-rev",
+   "label": "DX 2048² u12 lossless (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "fc2988e63fe0661fac809e2546f6ffc58d6294197b5ff03d802049ae9b88553c",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "htj2k/gen-bench-dx2048-u12-openjph-q",
+   "label": "DX 2048² u12 lossy (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "272c74697787af81e9655bc2fd8de7465f15562e85ab968452a99b8cda5968c0",
+   "oracle_sha256": "d1ac65167ffd6155dddb98591310d97f51423f4f0843bf9f2ffb617337579a44"
+  },
+  {
+   "id": "htj2k/gen-bench-photo-rgb8-2048-openjph-q",
+   "label": "RGB 2048² lossy (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "f2c127aa8635d0f110c15d37b50227280db50fc2626c261ddd778ae785d00ec3",
+   "oracle_sha256": "3986867bb7f2e3c7ab2be05bda650324e11b17947f816576cb129b5fa67098aa"
+  },
+  {
+   "id": "htj2k/gen-bench-cine-rgb8-640x480x30-openjph-rev",
+   "label": "RGB cine 640×480×30 lossless (synthetic)",
+   "tags": [
+    "synthetic",
+    "medium",
+    "multiframe",
+    "colour"
+   ],
+   "sample_sha256": "2412f94a9109862dc2b38639e7a6c488c367e35957e9ec4d3099342a75beb2b6",
+   "oracle_sha256": "6f92c45830f0867fbdd0ff26385f425aaf89ffdc204726028c692803ebc6d18e"
+  },
+  {
+   "id": "htj2k/ext-cs3d-CTImage.dcm_HTJ2KLosslessTransferSyntax_1.2.840.10008.1.2.4.201",
+   "label": "CT 512² s16 lossless",
+   "tags": [
+    "real",
+    "medium",
+    "16-bit"
+   ],
+   "sample_sha256": "09dcd2b90373826277f70a44ff73db414b445b191bf5de68e3d91cb1208b5e41",
+   "oracle_sha256": "1bee432808f49770bbc30d904e3e744082b0ba41704d4943e7de5bcb3e3d72f9"
+  },
+  {
+   "id": "htj2k/pydicom-HTJ2KLossless_08_RGB",
+   "label": "RGB 640×480 lossless",
+   "tags": [
+    "real",
+    "medium",
+    "colour"
+   ],
+   "sample_sha256": "38f8e8adf46b928a12f1905df1405bc8a32c10286733c47562c75be84ceae00e",
+   "oracle_sha256": "9d87240604f5d7522c6a8056ace6cefc2c8d6d0b07bd6e7303d5e5b21af9a49e"
+  }
+ ]
+}

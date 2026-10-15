@@ -1,0 +1,1 @@
+adapter=rustj2k execs=12278 {'err': 9559, 'ok': 2719, 'skipped(wrapper rejects SIZ)': 2014}

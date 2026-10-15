@@ -6,7 +6,7 @@ Status: draft proposal, October 2026. Reference code and a test vector are in `r
 
 A patient or a provider should be able to share a complete imaging study, with every original DICOM file, by handing over one SMART Health Link. The files may be hosted on a server that cannot read them, including a static file host, and the receiver should be able to show the first images before the whole study has downloaded.
 
-This proposal adds no new link type. The link resolves, as any SMART Health Link does, to an encrypted FHIR Bundle. The Bundle holds an `ImagingStudy` that lists every series and instance and gives each series a random file id. Each series is one file alongside the Bundle (`{fileId}.bin`): the original DICOM files laid end to end, encrypted in fixed-size records with a key derived from the link's key. A client that does not know this convention still gets a valid FHIR description of the study. A client that does can fetch any series, or any byte range within one, and decrypt and verify it.
+This proposal adds no new link type. The link resolves, as any SMART Health Link does, to an encrypted FHIR Bundle. The Bundle holds an `ImagingStudy` that lists every series and instance and gives each series a random file id and a random 32-byte key. Each series is one file alongside the Bundle (`{fileId}.bin`): the original DICOM files laid end to end, encrypted in fixed-size records under that series' key. A client that does not know this convention still gets a valid FHIR description of the study. A client that does can fetch any series, or any byte range within one, and decrypt and verify it.
 
 ## 2. Background: SMART Health Links in brief
 
@@ -53,7 +53,7 @@ SHLs already let a patient share FHIR data with anyone, without prior arrangemen
 5. **Partial and progressive access.** A client can fetch one series, one instance or one frame without downloading the rest, and can stream a series and show images as they arrive.
 6. **Integrity.** The client detects any change, truncation, reordering or substitution of the files.
 7. **Still a Plain SHL.** A client that knows only the core SHL specification can still resolve the link and read a valid FHIR description of the study.
-8. **Small to implement.** A browser client needs only WebCrypto (HKDF, AES-GCM) and `fetch`. No new cryptographic primitive and no new container format.
+8. **Small to implement.** A browser client needs only WebCrypto (`AES-GCM`) and `fetch`. No new cryptographic primitive and no new container format.
 
 ## 5. Non-goals
 
@@ -62,14 +62,15 @@ SHLs already let a patient share FHIR data with anyone, without prior arrangemen
 - Querying across studies. The link shares the studies its Bundle lists.
 - A viewer. Section 11 sketches how an existing DICOMweb viewer can be used.
 - Authenticating the receiver beyond what SHLs already offer (possession of the link, optional passcode, the `recipient` string).
+- Verifying who produced the study or the Bundle. Any DICOM Digital Signatures inside the files pass through untouched; signing the Bundle itself is left to future SHL signing profiles.
 
 ## 6. Design principles
 
 - **Reuse the units DICOM and FHIR already have.** DICOM organizes every instance into exactly one series. FHIR `ImagingStudy` already lists series and instances by UID. The series is the unit of storage and retrieval, and `ImagingStudy` is the index. No new container, segment or chunk concept is visible to the client.
 - **One way to do each thing.** There are no modes or options in the file format: no optional compression, no optional framing. A client has one code path.
 - **Do not touch the DICOM files.** Any compression a source applied lives inside the DICOM files and is described by their own Transfer Syntax UID. The format neither adds compression nor removes it.
-- **The authenticated Bundle carries everything the client must trust.** Lengths, file identifiers and key-derivation inputs come from the encrypted Bundle, never from the series files. A series file is only ciphertext.
-- **Stay inside the core SHL specification.** The link, the manifest, the Bundle encryption and the flags are used exactly as specified. Everything new lives in two FHIR extensions on `ImagingStudy`, which clients that do not understand them ignore.
+- **The authenticated Bundle carries everything the client must trust.** Lengths, file identifiers and series keys come from the encrypted Bundle, never from the series files. A series file is only ciphertext.
+- **Stay inside the core SHL specification.** The link, the manifest, the Bundle encryption and the flags are used exactly as specified. Everything new lives in a profile and two FHIR extensions on `ImagingStudy`, which clients that do not understand them ignore.
 
 ## 7. Overview
 
@@ -78,7 +79,7 @@ Sharer                                  Host (cannot decrypt)                  R
 ------                                  ---------------------                  --------
 read DICOM files, group by series
 for each series:
-  random 16-byte file id
+  random 16-byte file id, 32-byte key
   concatenate instances
   encrypt in 64 KiB records  ───────►  {fileId}.bin  (one file/series)
 build Bundle: Patient, ImagingStudy,
@@ -87,7 +88,7 @@ encrypt Bundle as JWE (SHL key) ─────►  SHL file (U) or manifest ent
 make SHL (url, key, flags, label)  ─────── link / QR ──────────────────────►  resolve SHL, decrypt Bundle
                                                                               read ImagingStudy
                                         GET/Range {fileId}.bin  ◄───────────  fetch series or byte range
-                                                                              derive key, decrypt records,
+                                                                              decrypt records with series key,
                                                                               verify, hand DICOM to viewer
 ```
 
@@ -103,17 +104,20 @@ The SHL resolves to one `application/fhir+json` file whose plaintext is a FHIR R
 
 Standard R4 `ImagingStudy`, with these rules:
 
+- `meta.profile` includes `"https://example.org/shl-dicom/v1"` (placeholder namespace, see §15), so a client can recognize the convention and its version without scanning extensions.
 - `identifier` carries the Study Instance UID as `{ system: "urn:dicom:uid", value: "urn:oid:<StudyInstanceUID>" }`.
 - `subject` references the `Patient` in the Bundle.
-- `numberOfSeries` and `numberOfInstances` are populated and match the lists.
+- `numberOfSeries` and `numberOfInstances` are populated and count the series and instances **shared in this Bundle**. If the link shares only a subset of a study's series, `ImagingStudy.note` SHOULD state that the shared study is partial. The series is the smallest unit of sharing; sharing a small selection of key images means packing them as a series or including a Key Object Selection series.
 - Every shared series appears in `series`, and every shared instance in `series.instance`. Each `series.instance` has `uid` (SOP Instance UID), `sopClass` (`urn:ietf:rfc:3986` / `urn:oid:<SOP Class UID>`) and, if known, `number` (Instance Number).
 - **The order of `series.instance` is the order of the bytes in the series file.**
 
-Two extensions:
+Two extensions (one complex extension on `series`, one simple extension on `series.instance`):
 
-| Extension | On | Type | Meaning |
+| Extension / Sub-extension | On | Type | Meaning |
 |---|---|---|---|
-| `https://example.org/shl-dicom/file` | `ImagingStudy.series` | `valueString` | The series file id: 16 random bytes, base64url-encoded without padding (22 characters). Names the file (`{fileId}.bin`) and is the salt for its key. |
+| `https://example.org/shl-dicom/series-file` | `ImagingStudy.series` | complex | Groups the series file identifier and encryption key: |
+| ↳ `id` | `series-file` | `valueString` | The series file id: 16 random bytes, base64url-encoded without padding (22 characters). Names the immutable file (`{id}.bin`). |
+| ↳ `key` | `series-file` | `valueString` | The series encryption key: 32 random bytes, base64url-encoded without padding (43 characters). |
 | `https://example.org/shl-dicom/length` | `ImagingStudy.series.instance` | `valueDecimal` (a non-negative integer) | Length in bytes of this instance's DICOM file. |
 
 `valueDecimal` is used because R4 `integer` is 32-bit, and a single whole-slide image instance can exceed 2 GB.
@@ -128,6 +132,7 @@ A one-series CT with two instances (UIDs shortened). Appendix A has a complete B
 {
   "resourceType": "ImagingStudy",
   "id": "ct1",
+  "meta": { "profile": ["https://example.org/shl-dicom/v1"] },
   "status": "available",
   "identifier": [{ "system": "urn:dicom:uid", "value": "urn:oid:1.2.840.113619.2.55.3.604688119" }],
   "subject": { "reference": "Patient/p1" },
@@ -135,7 +140,13 @@ A one-series CT with two instances (UIDs shortened). Appendix A has a complete B
   "numberOfSeries": 1,
   "numberOfInstances": 2,
   "series": [{
-    "extension": [{ "url": "https://example.org/shl-dicom/file", "valueString": "AAECAwQFBgcICQoLDA0ODw" }],
+    "extension": [{
+      "url": "https://example.org/shl-dicom/series-file",
+      "extension": [
+        { "url": "id", "valueString": "AAECAwQFBgcICQoLDA0ODw" },
+        { "url": "key", "valueString": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8" }
+      ]
+    }],
     "uid": "1.2.840.113619.2.55.3.604688119.971",
     "number": 2,
     "modality": { "system": "http://dicom.nema.org/resources/ontology/DCM", "code": "CT" },
@@ -155,7 +166,7 @@ A one-series CT with two instances (UIDs shortened). Appendix A has a complete B
 }
 ```
 
-For scale: a 2,000-instance series listed this way is about 470 KB of minified JSON. Under the SHL file's DEFLATE it is about 60 KB.
+For scale: a 2,000-instance series listed this way is about 470 KB of minified JSON (the `series-file` extension adds about 100 bytes per series). Under the SHL file's DEFLATE it is about 60 KB.
 
 ## 9. Series files
 
@@ -165,30 +176,25 @@ A series file's plaintext is the series' instances, each a complete DICOM Part 1
 
 ### 9.2 Encryption
 
-Inputs:
-- the SHL key *K* (32 bytes, the base64url-decoded `key` from the SHL payload);
-- the series file id *S* (16 bytes, the base64url-decoded `file` extension).
+Input:
+- the series key *K_s* (32 bytes, the base64url-decoded `key` sub-extension of `series-file` on `ImagingStudy.series`).
 
 ```
-key   = HKDF-SHA-256(IKM = K, salt = S, info = "shl-dicom-v1 key",   L = 32)
-nonce = HKDF-SHA-256(IKM = K, salt = S, info = "shl-dicom-v1 nonce", L = 12)
-
 R = 65,520                               plaintext bytes per record
 n = max(1, ceil(P / R))                  records, where P = plaintext length
 chunk_i = plaintext[i·R, min(P, (i+1)·R))
-record_i = AES-256-GCM-Encrypt(key, nonce XOR i, chunk_i, no additional data)    ciphertext || 16-byte tag
+nonce_i = uint96_be(i)                   record index i as a 12-byte big-endian unsigned integer
+record_i = AES-256-GCM-Encrypt(K_s, nonce_i, chunk_i, no additional data)    ciphertext || 16-byte tag
 file  = record_0 || record_1 || … || record_{n−1}
 ```
 
-- HKDF is RFC 5869.
-- `nonce XOR i` treats *i* as a 96-bit big-endian unsigned integer.
 - Every record except the last is exactly 65,536 bytes; the last is its chunk length plus 16.
 - The ciphertext length is `P + 16·n`.
 
 There is no header, no padding and no end marker:
-- **Key inputs:** the file id and the SHL key both come from authenticated sources, the Bundle and the link.
+- **Key:** the series key *K_s* comes from the authenticated Bundle.
 - **Length:** the expected length follows from the Bundle's instance lengths, so truncation and extension are detected by comparing lengths.
-- **Order:** each record's nonce depends on its index, so moving a record to another position makes its tag fail.
+- **Order:** each record's nonce is its index *i*, so moving a record to another position makes its tag fail.
 
 This is the STREAM construction for online authenticated encryption, with the length known in advance instead of signalled by a final-record flag.
 
@@ -212,7 +218,7 @@ Plaintext byte *p* lives in record ⌊*p* / 65,520⌋, which starts at ciphertex
 first = floor(a / 65520),  last = floor((b − 1) / 65520)
 fetch ciphertext bytes [65536·first, min(C, 65536·(last+1)))      C = ciphertext length
 for each record i in first..last:
-  verify tag and decrypt record i with (key, nonce XOR i)
+  verify tag and decrypt record i with (K_s, uint96_be(i))
 concatenate decrypted records, then slice from (a − 65520·first), length b − a
 ```
 
@@ -220,8 +226,8 @@ Because each 65,536-byte record carries its own 16-byte GCM tag and binds its re
 
 ### 9.4 Why these choices
 
-- **AES-256-GCM** matches the A256GCM the SHL specification already uses, so the images are not protected more weakly than the Bundle.
-- **HKDF with a per-file salt** separates the series keys from the SHL key, which is also used directly for JWE. It also gives every series file its own key and base nonce, so a fixed counter nonce scheme is safe.
+- **AES-256-GCM** matches the A256GCM the SHL specification already uses, so the images are not protected more weakly than the Bundle, and needs no other cryptographic primitive.
+- **A random 32-byte key per series** separates the series keys from the SHL key (which is used only for the Bundle JWE) and from each other, so a simple sequential counter nonce (`uint96_be(i)`) is safe. It also lets the same encrypted series files be shared across multiple links—each with its own SHL key, passcode, expiry, or subset of series—by encrypting only a new Bundle.
 - **64 KiB records** keep the overhead to 16 bytes per 64 KiB (0.02%). They also keep the over-fetch on a range read small, and fit comfortably in memory for streaming.
 
 ## 10. Fetch contract
@@ -230,7 +236,10 @@ Series files sit alongside the Bundle. The URL of a series file is `{fileId}.bin
 - in **U mode**, `baseUrl` is the SHL's `url`;
 - in **manifest mode**, the Bundle MUST be delivered via `location` (not `embedded`), and `baseUrl` is that `location` URL.
 
-`baseUrl` MUST end in `/` or a file name within the share's own directory (for example `https://host.example/s/abc/bundle.jwe`), so that `{fileId}.bin` resolves to `https://host.example/s/abc/{fileId}.bin` and does not collide with other shares in a parent path. Because standard relative resolution drops any query string on `baseUrl`, access tokens MUST live in the URL path (not in query-string signatures such as `?sas=…` or `?X-Amz-Signature=…`, which also sign only a single object). Because the Bundle carries only the relative `fileId`, the encrypted Bundle and `.bin` files can be generated offline and placed on any host without knowing the final URL in advance.
+`baseUrl` MUST end in `/` or a file name within the link's own directory (for example `https://host.example/s/abc/bundle.jwe`), so that `{fileId}.bin` resolves to `https://host.example/s/abc/{fileId}.bin` and does not collide with other shares in a parent path. Because standard relative resolution drops any query string on `baseUrl`, access tokens MUST live in the URL path (not in query-string signatures such as `?sas=…` or `?X-Amz-Signature=…`, which also sign only a single object). Because the Bundle carries only the relative `fileId`, the encrypted Bundle and `.bin` files can be generated offline and placed on any host without knowing the final URL in advance.
+
+- **Immutability and caching:** A `fileId` always names the exact same ciphertext bytes, encrypted under the same series key, and MUST NOT be reused for different content. Receivers MAY cache `{fileId}.bin` (or verified plaintext records) indefinitely by `fileId`, including across link updates and across different links.
+- **Sharing files across links:** When a server hosts multiple links over the same study, each link resolves files under its own path (for example `/shl/{linkId}/{fileId}.bin`), backed by the same underlying `.bin` files on disk or object storage, so each link can be revoked independently. On a static host with no server routing, links either use separate folders (via copies or symlinks) for independent revocation, or share one folder and are revoked together.
 
 ### 10.1 Server (the host of series files)
 
@@ -244,9 +253,10 @@ Series files sit alongside the Bundle. The URL of a series file is `{fileId}.bin
 
 ### 10.2 Client
 
-1. Resolve the SHL as the core specification describes, decrypt the Bundle, and find each `ImagingStudy.series` that carries the `https://example.org/shl-dicom/file` extension. The rest of the Bundle is used as ordinary FHIR.
+1. Resolve the SHL as the core specification describes, decrypt the Bundle, and find each `ImagingStudy` declaring `https://example.org/shl-dicom/v1` (or carrying the `https://example.org/shl-dicom/series-file` extension on `series`). The rest of the Bundle is used as ordinary FHIR.
 2. For each series to fetch, compute:
    - the URL `new URL(fileId + ".bin", baseUrl)`;
+   - the 32-byte series key *K_s* by base64url-decoding `key` (browser clients SHOULD import *K_s* into WebCrypto with `extractable: false`);
    - the plaintext length *P* as the sum of instance lengths;
    - the expected ciphertext length *C* = *P* + 16·*n*.
 3. **Whole series:** GET the file and decrypt record by record as bytes arrive, passing each completed instance on as soon as its last byte is decrypted. Check that exactly *C* bytes arrived.
@@ -258,9 +268,9 @@ Series files sit alongside the Bundle. The URL of a series file is `{fileId}.bin
 
 A long-lived link may gain studies, series or instances (for example a new prior study, or an amended report).
 
-- **New or changed series:** a series whose content changes is written to a new file with a **new random file id**, and the Bundle is re-encrypted (with a fresh random 12-byte JWE IV, as JWE requires) referencing the new id. File ids MUST NOT be reused with different content, because reusing one would reuse the derived key and nonce sequence.
-- **Old files:** the old file may be deleted once the new Bundle is published.
-- **Clients:** a client that polls the SHL sees the new Bundle and fetches only series whose file id it has not seen.
+- **New or changed series:** a series whose content changes is written to a new file with a **new random file id and a new random 32-byte series key**, and the Bundle is re-encrypted (with a fresh random 12-byte JWE IV, as JWE requires) referencing the new file id and key. Neither file ids nor series keys may be reused with different content.
+- **Publish order:** upload all new `{fileId}.bin` files first, then publish the new Bundle, and delete any replaced `.bin` files last, so a receiver never sees a Bundle naming a file that is not yet present.
+- **Detecting changes cheaply:** the sharer SHOULD populate `Bundle.meta.lastUpdated`. In manifest mode, the manifest entry's `lastUpdated` already signals changes; in U mode, servers SHOULD send an `ETag` on the Bundle and answer `If-None-Match` with `304 Not Modified`. Clients SHOULD honour `Retry-After` when polling, as the SHL specification recommends, and fetch only series whose `fileId` they have not yet cached.
 
 ## 11. Building and using series files
 
@@ -273,7 +283,7 @@ A long-lived link may gain studies, series or instances (for example a new prior
    - **Bare data set.** A file that is a bare data set without Part 10 wrapping is given the Part 10 preamble and file meta header. This is the only change a sharer makes to file bytes.
 4. Order each series by Instance Number, then by SOP Instance UID for ties or missing numbers.
 5. For each series:
-   - draw a random 16-byte file id;
+   - draw a random 16-byte file id and a random 32-byte series key;
    - concatenate the files;
    - encrypt (§9.2) and upload, using a resumable or multipart upload for large files.
 6. Build the Bundle (§8), encrypt it as the SHL file or manifest entry, and create the link.
@@ -297,20 +307,21 @@ To save a study to disk, the receiver writes each instance as its own file, or b
 
 ## 12. Relationship to Plain SHLs
 
-A client implementing only the core SHL specification can parse the link, retrieve the Bundle (in U or manifest mode) and decrypt it. The Bundle is valid FHIR R4. Such a client sees the patient, the study and series structure, and any `DiagnosticReport`. It ignores the two extensions on `ImagingStudy` as the specification requires, and does not fetch the series files.
+A client implementing only the core SHL specification can parse the link, retrieve the Bundle (in U or manifest mode) and decrypt it. The Bundle is valid FHIR R4. Such a client sees the patient, the study and series structure, and any `DiagnosticReport`. It ignores the profile and the two extensions on `ImagingStudy` as the specification requires, and does not fetch the series files.
 
 This proposal therefore treats these links as Plain SHLs. The counter-argument is that for imaging the pixels are the fundamental data, and a client that cannot get them has not fully processed the link. If the SHL community takes that view, the convention would need its own URI scheme (for example `shlink-dicom:/`) and an entry on the SHL extensions registry, with no change to anything else in this proposal.
 
 ## 13. Security and privacy
 
-- **Confidentiality from the host.** Series files and the Bundle are encrypted under keys derived from the SHL key, which the host never sees.
+- **Confidentiality from the host.** The Bundle is encrypted under the SHL key, and each series file is encrypted under its own random 32-byte key carried inside the Bundle; the host sees neither.
   - **What the host can see:** the number of series files and their sizes, the request times and ranges, the `recipient` strings, and the file ids (which are random).
   - **What it can't see:** DICOM UIDs, which do not appear in URLs, or anything in the Bundle.
 
   File sizes and the pattern of range requests can hint at modality and study shape.
-- **Integrity.** Every record is authenticated, and its position is bound through the nonce. The total length comes from the authenticated Bundle, and the key depends on the file id in the Bundle. A host cannot alter, truncate, extend, reorder or swap files, or serve an older version, without detection.
-- **Possession of the link is the credential.** As with every SHL, anyone with the link can decrypt. U mode cannot be combined with a passcode. Sharers should use `exp`, revocation and passcodes (manifest mode) as the sensitivity of the study warrants. Section 10.1 makes series files expire and be revoked together with the link.
-- **Nonce safety.** The SHL key *K* is used directly only for the Bundle JWE, which draws a fresh random 12-byte IV each time the Bundle is encrypted. Each series file derives an independent AES-256 key and base nonce from *K* and its 16-byte `fileId` via HKDF, and uses a sequential counter (`base_nonce XOR i`) per record. Because each `fileId` is used for at most one plaintext, no (key, nonce) pair is ever reused. A sharer MUST draw file ids from a cryptographically secure random source and MUST NOT reuse one, including when re-encrypting a changed series. With 16-byte random ids, collisions are not a practical concern.
+- **Integrity, not origin identity.** Every record is authenticated, and its position is bound through the nonce. The total length and the series key come from the authenticated Bundle. A host cannot alter, truncate, extend, reorder or swap files, or serve an older version, without detection. This proves the files match what the Bundle's creator packed, but does not verify who created the Bundle.
+- **Treat the decrypted Bundle as secret.** Anyone with the link can decrypt the Bundle, and the decrypted Bundle holds the keys for the series it lists (and no others). Forwarding or storing the decrypted Bundle therefore forwards the ability to decrypt those series files wherever their ciphertext is reachable. A receiver that imports the `ImagingStudy` into an EHR or FHIR server SHOULD strip the `series-file` extension (or its `key` sub-extension) first, or keep the keys only in its image cache. U mode cannot be combined with a passcode; sharers should use `exp`, revocation and passcodes (manifest mode) as the sensitivity of the study warrants.
+- **Correlation across recipients.** When two links share the same underlying `.bin` file, both Bundles carry the same `id` and `key`, so recipients who compare decrypted Bundles can tell they received identical series data. When that matters, the sharer can re-encrypt the series with a fresh `id` and `key` for each link.
+- **Nonce safety.** The SHL key is used only for the Bundle JWE, which draws a fresh random 12-byte IV each time the Bundle is encrypted. Each series file is encrypted under its own random 32-byte key *K_s* and uses a sequential counter (`uint96_be(i)`) per record. Because each *K_s* is used for at most one immutable series file, no `(K_s, nonce)` pair is ever reused. A sharer MUST draw series keys and file ids from a cryptographically secure random source and MUST NOT reuse either for different content.
 - **The `recipient` string** is supplied by the client and is not authenticated. It is an access log hint, not access control.
 - **DICOM content is sensitive throughout.** Headers carry names, identifiers and dates, and some images carry burned-in text. Nothing in this proposal removes them; the receiver gets the study as exported.
 
@@ -324,12 +335,12 @@ This proposal therefore treats these links as Plain SHLs. The counter-argument i
 | One file per instance | Thousands of files and requests per CT, more upload overhead, and it shows the host each instance's size. Kept in mind only as a fallback for hosts without Range support. |
 | ZIP container inside the encrypted file | The Bundle already gives offsets, and the encryption already authenticates, so ZIP's directory and CRCs add a second offset scheme and nothing else. Receivers can build a ZIP for download themselves. |
 | Optional compression of series files (deflate when it helps) | Gives the client two code paths, and a compressed file can't be range-read. Compression that matters for DICOM belongs inside the DICOM files, where the transfer syntax already describes it. |
-| RFC 8188 (`aes128gcm` content coding) as-is | Uses AES-128, has a header and a final-record delimiter, and is built for when the length isn't known in advance. Here the length and salt come from the authenticated Bundle, so the simpler construction in §9 suffices. |
-| File URL derived from the Series Instance UID | Simple, but it exposes UIDs to the host (UIDs often embed an organization's OID root), and a changed series would keep the same URL. A random file id avoids both, and doubles as the key salt. |
+| RFC 8188 (`aes128gcm` content coding) as-is | Uses AES-128, has a header and a final-record delimiter, and is built for when the length isn't known in advance. Here the length and key come from the authenticated Bundle, so the simpler construction in §9 suffices. |
+| File URL derived from the Series Instance UID | Simple, but it exposes UIDs to the host (UIDs often embed an organization's OID root), and a changed series would keep the same URL. A random file id avoids both. |
 
 ## 15. Open questions
 
-1. **Extension URLs.** The two `ImagingStudy` extension URLs (`file` and `length`) need a permanent namespace, for example under the SHL implementation guide or an extensions registry entry. `https://example.org/shl-dicom` is a placeholder.
+1. **Profile and extension URLs.** The `ImagingStudy` profile URL (`v1`) and the two extension URLs (`series-file` and `length`) need a permanent namespace, for example under the SHL implementation guide or an extensions registry entry. `https://example.org/shl-dicom` is a placeholder.
 2. **Plain or not.** Whether the SHL community accepts §12's reading.
 3. **FHIR version.** The proposal targets R4, as the SHL guide does. In R5, `length` could use `integer64`.
 4. **Frame offsets.** Whether to add an optional per-instance list of frame offsets to the Bundle, so viewers can fetch a frame without first reading the instance header. The cost is a larger Bundle for multi-frame studies.
@@ -342,6 +353,7 @@ This proposal therefore treats these links as Plain SHLs. The counter-argument i
 ```json
 {
   "resourceType": "Bundle",
+  "meta": { "lastUpdated": "2026-09-30T15:00:00Z" },
   "type": "collection",
   "entry": [
     { "fullUrl": "urn:uuid:7b1d0f7e-3c9e-4b0a-9a51-0d8a4f0c2e11",
@@ -355,6 +367,7 @@ This proposal therefore treats these links as Plain SHLs. The counter-argument i
       "resource": {
         "resourceType": "ImagingStudy",
         "id": "ct1",
+        "meta": { "profile": ["https://example.org/shl-dicom/v1"] },
         "status": "available",
         "identifier": [{ "system": "urn:dicom:uid", "value": "urn:oid:1.2.840.113619.2.55.3.604688119" }],
         "subject": { "reference": "Patient/p1" },
@@ -362,7 +375,13 @@ This proposal therefore treats these links as Plain SHLs. The counter-argument i
         "numberOfSeries": 1,
         "numberOfInstances": 2,
         "series": [{
-          "extension": [{ "url": "https://example.org/shl-dicom/file", "valueString": "AAECAwQFBgcICQoLDA0ODw" }],
+          "extension": [{
+            "url": "https://example.org/shl-dicom/series-file",
+            "extension": [
+              { "url": "id", "valueString": "AAECAwQFBgcICQoLDA0ODw" },
+              { "url": "key", "valueString": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8" }
+            ]
+          }],
           "uid": "1.2.840.113619.2.55.3.604688119.971",
           "number": 2,
           "modality": { "system": "http://dicom.nema.org/resources/ontology/DCM", "code": "CT" },
@@ -398,22 +417,19 @@ The patient, UIDs and report are made up. The two instance lengths match the tes
 
 ## Appendix B. Test vector
 
-Produced by `bun reference/test-vector.ts`. The key derivation and ciphertext were reproduced independently in Python, using `hmac`/`hashlib` for HKDF and `cryptography` for AES-GCM.
+Produced by `bun reference/test-vector.ts`. The ciphertext and tags were reproduced independently in Python using `cryptography.hazmat.primitives.ciphers.aead.AESGCM`.
 
 | Input | Value |
 |---|---|
-| SHL key | `rxTgYlOaKJPFtcEd0qcceN8wEU4p94SqAwIWQe6uX7Q` (the key in the SHL specification's example) |
-| File id | `AAECAwQFBgcICQoLDA0ODw`, i.e. bytes `00 01 02 … 0f` |
+| Series key | `ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8` (bytes `20 21 22 … 3f`) |
 | Plaintext | 150,000 bytes, byte *k* = *k* mod 251. Two "instances" of 70,000 and 80,000 bytes. |
 
 | Output | Value |
 |---|---|
-| Derived key | `b3e20142420ea346ea7ef9e2566898d8a6da288286effd5a5cc5b83751b7bd6a` |
-| Base nonce | `7788c63b6d2d28d0b22cef64` |
 | Plaintext SHA-256 | `02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b` |
-| Ciphertext length | 150,048 (records of 65,536, 65,536 and 18,976 bytes) |
-| Ciphertext SHA-256 | `328ceb3e26bdf196e0c9242fb827a6170bd46d12a2b212ec315577d3068101eb` |
-| Record tags | `ac52237da59e5d39d541ac0dc36f75fa`, `21f0e1bb3f4c50ce865569e0d9af6e0f`, `681a79be4551c54427f9a869d841aeb6` |
+| Ciphertext length | 150,048 (records of 65,536, 65,536 and 18,976 bytes, with nonces `00…00`, `00…01` and `00…02`) |
+| Ciphertext SHA-256 | `f3205658d3fee29b343d3ba3ef20f52b3e66c2cb05974a93b65504866665fc4e` |
+| Record tags | `9a8421bd6740aeac5eb211cf59511b2f`, `4cd810f700957e87ae68edc29e40caf9`, `cf980ddc661684644fa17e5b00b08819` |
 | Instance 2 | Plaintext bytes 70,000–149,999, in records 1–2, which are ciphertext bytes 65,536–150,047 |
 
 The script also checks that:
@@ -421,7 +437,7 @@ The script also checks that:
 - a flipped bit is rejected;
 - swapped records are rejected;
 - a truncated file is rejected;
-- a file encrypted under a different file id is rejected.
+- a file encrypted under a different series key is rejected.
 
 ## Appendix C. Hosting notes
 

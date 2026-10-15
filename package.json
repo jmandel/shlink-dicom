@@ -1,0 +1,17 @@
+{
+  "name": "shlink-dicom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:web": "mkdir -p dist/web && bun build web/main.ts --outdir dist/web --target browser && bun build web/sw-dicomweb.ts --outdir dist/web --target browser && cp web/index.html web/styles.css crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm dist/web/",
+    "test:vector": "bun reference/test-vector.ts",
+    "test:wasm": "bun test test/wasm.test.ts"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1"
+  },
+  "dependencies": {
+    "qrcode-generator": "1.4.4"
+  }
+}

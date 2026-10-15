@@ -1,0 +1,9 @@
+[package]
+name = "a-purej2k"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pure_jpeg2k = "=2.0.0"
+survey-common = { path = "../../common" }
