@@ -12,7 +12,7 @@ import { initSync, WasmPacker } from "../../../crates/shl-dicom-wasm/pkg/shl_dic
 const args = process.argv.slice(2);
 const bi = args.indexOf("--base");
 const base = bi >= 0 ? args[bi + 1] : "http://localhost:3333";
-const slides = args.filter((a, i) => a.includes("=") && i !== bi + 1).map((a) => a.split("=") as [string, string]);
+const slides = args.filter((a, i) => a.includes("=") && (bi < 0 || i !== bi + 1)).map((a) => a.split("=") as [string, string]);
 const j = async (r: Response) => {
   if (!r.ok) throw new Error(`${r.url}: ${r.status} ${await r.text()}`);
   return r.json();

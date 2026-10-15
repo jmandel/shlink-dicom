@@ -429,11 +429,11 @@ pub fn decode_frames_scaled(bytes: &[u8], first: usize, count: usize, scale: u8)
     let little = ts != TS_EXPLICIT_BE;
     let reparsed;
     let (basic_offsets, fragments) = match attrs.pixel.as_ref() {
-        Some(PixelValue::Encapsulated { basic_offsets, fragments }) => (*basic_offsets, fragments),
+        Some(PixelValue::Encapsulated { basic_offsets, fragments, .. }) => (*basic_offsets, fragments),
         Some(PixelValue::Native { data, .. }) => {
             reparsed = parse::parse_items(data, little)?;
             match &reparsed {
-                PixelValue::Encapsulated { basic_offsets, fragments } => (*basic_offsets, fragments),
+                PixelValue::Encapsulated { basic_offsets, fragments, .. } => (*basic_offsets, fragments),
                 PixelValue::Native { .. } => return Err(Error::Invalid("Pixel Data is not encapsulated".into())),
             }
         }

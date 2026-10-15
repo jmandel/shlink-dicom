@@ -59,6 +59,8 @@ export interface SlideHeader {
   firstFragmentOffset: number;
   /** True when the parse reached Pixel Data (and, if encapsulated, past the BOT item). */
   complete: boolean;
+  /** When not complete: bytes from the instance start needed to parse further. */
+  needBytes: number;
 }
 
 /** The header was cut short: read at least `needBytes` from the instance start and parse again. */
@@ -147,7 +149,7 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     highBit: 7, pixelRepresentation: 0, numberOfFrames: 1, totalColumns: 0, totalRows: 0, dimensionOrganization: "",
     focalPlanes: 1, opticalPaths: 1, pixelSpacing: null, planePositions: null, extendedOffsets: null, extendedLengths: null,
     pixelDataValueOffset: -1, encapsulated: false, pixelDataLength: -1, basicOffsets: null, firstFragmentOffset: -1,
-    complete: false,
+    complete: false, needBytes: 0,
   };
   const str = (vo: number, len: number) => {
     let s = "";
@@ -156,7 +158,7 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
   };
   const ascii2 = (p: number) => String.fromCharCode(bytes[p], bytes[p + 1]);
   const need = (n: number) => {
-    if (n > end) throw new NeedMoreBytes(Math.max(n, end * 2));
+    if (n > end) throw new NeedMoreBytes(n);
   };
 
   let explicit = true;
@@ -351,6 +353,7 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     }
   } catch (e) {
     if (!(e instanceof NeedMoreBytes) || !o.partial) throw e;
+    h.needBytes = e.needBytes;
   }
   h.flavor = h.imageType[2] ?? "";
   if (!h.totalColumns) h.totalColumns = h.columns;

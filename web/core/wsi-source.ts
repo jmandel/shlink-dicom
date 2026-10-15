@@ -20,7 +20,6 @@ import {
   FragmentWalker,
   frameTableFromHeader,
   instanceJson,
-  NeedMoreBytes,
   parseFrameIndexExtension,
   parseSlideHeader,
   singleFrameFile,
@@ -71,6 +70,8 @@ export class SeriesReader {
     cachedRecords: 0,
     cachedBytes: 0,
   };
+  /** The last 5,000 requests: purpose, record range, ciphertext bytes, ms. */
+  readonly log: { purpose: ReadPurpose; first: number; last: number; bytes: number; ms: number; t: number }[] = [];
   /** Called after every response (for live counters). */
   onStats: (() => void) | null = null;
   private cache = new Map<number, Uint8Array>();
@@ -218,7 +219,9 @@ export class SeriesReader {
     const plan = planBytes(s, a, b);
     this.o.onRecords?.(s.fileId, plan.firstRecord, plan.lastRecord, "fetching");
     try {
+      const t0 = performance.now();
       const ct = await this.resolver.fetchRange(plan);
+      if (this.log.length < 5000) this.log.push({ purpose: job.purpose, first: job.first, last: job.last, bytes: ct.byteLength, ms: Math.round(performance.now() - t0), t: Math.round(t0) });
       this.stats.requests++;
       this.stats.bytes += ct.byteLength;
       this.stats.byPurpose[job.purpose].requests++;
@@ -292,6 +295,15 @@ export interface WalkState {
 /** Largest instance whose pixels are decoded in one piece (label, overview, thumbnail). */
 export const WHOLE_DECODE_LIMIT = 48 * 1024 * 1024;
 
+interface Walker {
+  w: FragmentWalker;
+  running: boolean;
+  /** locate() calls waiting on this walk. */
+  waiting: number;
+  listeners: Set<() => void>;
+  error: unknown;
+}
+
 export class SlideSource {
   readonly reader: SeriesReader;
   headers: (SlideHeader | null)[] = [];
@@ -302,7 +314,7 @@ export class SlideSource {
   openMs = 0;
   /** Called when walking makes progress. */
   onWalk: ((w: WalkState) => void) | null = null;
-  private walkers = new Map<number, { w: FragmentWalker; running: Promise<void> | null; wake: Set<() => void>; error: unknown }>();
+  private walkers = new Map<number, Walker>();
 
   private constructor(
     readonly share: SlideShare,
@@ -343,23 +355,21 @@ export class SlideSource {
     let table: FrameTable | null = null;
     for (;;) {
       const bytes = await this.reader.read(inst.offset, inst.offset + n, sig);
-      try {
-        h = parseSlideHeader(bytes, { partial: !!json });
-      } catch (e) {
-        if (e instanceof NeedMoreBytes && n < inst.length) {
-          n = Math.min(inst.length, Math.max(e.needBytes, n + RECORD_PLAINTEXT));
-          continue;
-        }
-        throw e;
-      }
+      h = parseSlideHeader(bytes, { partial: true });
+      if (h.complete && !json) break;
+      // Label, overview and thumbnail images are read whole when shown, so their attributes are
+      // enough here; Pixel Data's position is not needed.
+      if (["LABEL", "OVERVIEW", "THUMBNAIL"].includes(h.flavor) && h.rows && h.columns && h.transferSyntax) break;
       if (json && h.totalColumns && h.rows && h.photometric && h.transferSyntax) {
         if (!h.complete) h.encapsulated = true;
         table = await parseFrameIndexExtension(json, h.numberOfFrames);
         if (table || h.complete) break;
       } else if (h.complete) break;
-      // The partial header was not enough: read on.
       if (n >= inst.length) break;
-      n = Math.min(inst.length, n * 2);
+      // Read on, to the end of the record holding the byte needed, growing by at least 2.5× so a
+      // long header (an ICC profile, say) takes two or three reads rather than one per record.
+      const want = inst.offset + Math.max((h.needBytes || n) + 1024, Math.ceil(n * 2.5));
+      n = Math.min(inst.length, (Math.floor(want / RECORD_PLAINTEXT) + 1) * RECORD_PLAINTEXT - inst.offset);
     }
     this.headers[i] = h;
     this.tables[i] = table ?? (h && h.complete ? frameTableFromHeader(h, inst.length) : null);
@@ -391,60 +401,79 @@ export class SlideSource {
     if (!h) return null;
     let wk = this.walkers.get(instance);
     if (!wk) {
-      wk = { w: new FragmentWalker(h, this.series.instances[instance].length), running: null, wake: new Set(), error: null };
+      wk = { w: new FragmentWalker(h, this.series.instances[instance].length), running: false, waiting: 0, listeners: new Set(), error: null };
       this.walkers.set(instance, wk);
     }
-    for (;;) {
-      const r = wk.w.frameRange(k);
-      if (r) return r;
-      if (wk.w.done) return null;
-      if (wk.error) throw wk.error;
-      if (o.signal?.aborted) throw abortError();
-      // Wait for the next chunk (registering first, so the walk sees someone waiting).
-      await new Promise<void>((res, rej) => {
-        const wake = () => {
-          o.signal?.removeEventListener("abort", onAbort);
-          res();
-        };
-        const onAbort = () => {
-          wk!.wake.delete(wake);
-          rej(abortError());
-        };
-        wk!.wake.add(wake);
-        o.signal?.addEventListener("abort", onAbort, { once: true });
-        if (!wk!.running) wk!.running = this.walk(instance, wk!).finally(() => (wk!.running = null));
-      });
+    wk.waiting++;
+    try {
+      for (;;) {
+        const r = wk.w.frameRange(k);
+        if (r) return r;
+        if (wk.w.done) return null;
+        if (wk.error) throw wk.error;
+        if (o.signal?.aborted) throw abortError();
+        if (!wk.running) this.walk(instance, wk);
+        // Wait for the walk's next step.
+        await new Promise<void>((res, rej) => {
+          const wake = () => {
+            o.signal?.removeEventListener("abort", onAbort);
+            res();
+          };
+          const onAbort = () => {
+            wk!.listeners.delete(wake);
+            rej(abortError());
+          };
+          wk!.listeners.add(wake);
+          o.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    } finally {
+      wk.waiting--;
     }
   }
 
-  /** Walks fragment headers in growing chunks while anyone is waiting. */
-  private async walk(instance: number, wk: { w: FragmentWalker; wake: Set<() => void>; error: unknown }) {
+  /**
+   * Walks fragment item headers in growing chunks (256 KiB up to 4 MiB, the next chunk requested
+   * while this one is parsed) for as long as some locate() is waiting.
+   */
+  private walk(instance: number, wk: Walker) {
+    wk.running = true;
     const inst = this.series.instances[instance];
-    let chunk = 4 * RECORD_PLAINTEXT;
-    try {
-      while (!wk.w.done && wk.wake.size > 0) {
-        const a = wk.w.pos;
-        const b = Math.min(inst.length, a + chunk);
-        if (b <= a) break;
-        const bytes = await this.reader.read(inst.offset + a, inst.offset + b, { priority: 0, purpose: "walk", signal: this.opts.signal });
-        wk.w.feed(bytes, a);
-        if (b >= inst.length) wk.w.done = true;
-        chunk = Math.min(chunk * 2, 64 * RECORD_PLAINTEXT);
-        const waiting = [...wk.wake];
-        wk.wake.clear();
-        for (const f of waiting) f();
-        this.onWalk?.(this.walkState(instance));
-        if (wk.w.done) {
-          const w = wk.w;
-          this.tables[instance] = { source: "walk", range: (k) => w.frameRange(k) };
+    const notify = () => {
+      const ls = [...wk.listeners];
+      wk.listeners.clear();
+      for (const f of ls) f();
+    };
+    void (async () => {
+      let chunk = 4 * RECORD_PLAINTEXT;
+      try {
+        while (!wk.w.done && wk.waiting > 0) {
+          const a = wk.w.pos;
+          const b = Math.min(inst.length, a + chunk);
+          if (b <= a) {
+            wk.w.done = true;
+            break;
+          }
+          const read = this.reader.read(inst.offset + a, inst.offset + b, { priority: 0, purpose: "walk", signal: this.opts.signal });
+          chunk = Math.min(chunk * 2, 64 * RECORD_PLAINTEXT);
+          // Read ahead: the next item header is almost always in the next chunk.
+          if (b < inst.length) void this.reader.read(inst.offset + b, inst.offset + Math.min(inst.length, b + chunk), { priority: 0, purpose: "walk", signal: this.opts.signal }).catch(() => {});
+          wk.w.feed(await read, a);
+          if (b >= inst.length) wk.w.done = true;
+          if (wk.w.done) {
+            const w = wk.w;
+            this.tables[instance] = { source: "walk", range: (k) => w.frameRange(k) };
+          }
+          this.onWalk?.(this.walkState(instance));
+          notify();
         }
+      } catch (e) {
+        if ((e as any)?.name !== "AbortError") wk.error = e;
+      } finally {
+        wk.running = false;
+        notify();
       }
-    } catch (e) {
-      if ((e as any)?.name !== "AbortError") wk.error = e;
-      const waiting = [...wk.wake];
-      wk.wake.clear();
-      for (const f of waiting) f();
-    }
+    })();
   }
 
   /** The bytes of frame `k` of an instance (fragment items for encapsulated data). */

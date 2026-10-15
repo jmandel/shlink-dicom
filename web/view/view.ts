@@ -32,6 +32,8 @@ import { drawThumbnail, Viewport } from "../core/render";
 import { autoWindow, presetsFor, type WindowPreset } from "../core/wl";
 import { exportBaseName, exportInstance, exportSize, exportZip, type ExportScope } from "../core/export";
 import { openSaveTarget, saveBlob } from "../core/save";
+import { isSlideSeries } from "../core/wsi";
+import { drawSlideThumbnail, slideSession, SlideView, type SlideSession } from "./wsi-view";
 
 // ------------------------------------------------------------------------------------- metrics
 
@@ -100,9 +102,32 @@ let viewport: Viewport | null = null;
 let seriesAbort = new AbortController();
 let studyAbort = new AbortController();
 let shownKey = "";
+/** Whole-slide (SM) series are shown by a tiled deep-zoom view instead of the slice viewer. */
+let slideView: SlideView | null = null;
+/** ?frameindex=0 ignores the Bundle's frame index (prototype extension), for measurements. */
+const useFrameIndex = new URLSearchParams(location.search).get("frameindex") !== "0";
 
 const study = (): StudyEntry => share!.index.studies[studyIdx];
 const series = (): SeriesEntry => study().series[seriesIdx];
+
+// ------------------------------------------------------------------------------------- slides
+
+function slideFor(se: SeriesEntry): Promise<SlideSession> {
+  return slideSession(share!, se, images!.pool, {
+    useBundleFrameIndex: useFrameIndex,
+    onRecords: (_f, a, b, state) => {
+      if (state === "verified") verifiedRecords += b - a + 1;
+      if (state === "failed") failedRecords += b - a + 1;
+    },
+  });
+}
+
+/** Thumbnail of a series: the middle image, or for a slide its coarsest pyramid level. */
+function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority: number, signal?: AbortSignal): Promise<void> {
+  if (isSlideSeries(se)) return slideFor(se).then((ss) => drawSlideThumbnail(canvas, ss, signal));
+  const mid = Math.floor(se.instances.length / 2);
+  return images!.get(se, mid, { priority, signal }).then((img) => drawThumbnail(canvas, img, Math.floor(img.frames / 2)));
+}
 
 // ------------------------------------------------------------------------------------- boot
 
@@ -315,13 +340,8 @@ function renderOverview() {
 
     // Thumbnail: middle slice of the series the study opens on (also warms the viewer).
     const se = st.series[pickInitialSeries(st)];
-    const mid = Math.floor(se.instances.length / 2);
-    images!
-      .get(se, mid, { priority: Priority.Visible })
-      .then((img) => {
-        drawThumbnail(thumb, img, Math.floor(img.frames / 2));
-        mark("first-thumb");
-      })
+    seriesThumb(thumb, se, Priority.Visible)
+      .then(() => mark("first-thumb"))
       .catch(() => {});
   });
   // Reports not tied to a study.
@@ -355,6 +375,7 @@ function showOverview() {
   $("top-title").textContent = sharedLine;
   seriesAbort.abort();
   studyAbort.abort();
+  leaveSlide();
   window.scrollTo(0, 0);
 }
 
@@ -399,7 +420,7 @@ function buildStrip() {
     c.width = c.height = Math.round(80 * dpr);
     const t = el("span", "s-text");
     t.append(el("span", "s-name", se.description ?? `${modalityName(se.modality)} ${se.number ?? k + 1}`));
-    t.append(el("span", "s-count", plural(se.instances.length, "image")));
+    t.append(el("span", "s-count", isSlideSeries(se) ? "Whole slide" : plural(se.instances.length, "image")));
     b.append(c, t);
     b.addEventListener("click", () => selectSeries(k));
     strip.append(b);
@@ -412,19 +433,15 @@ function loadStripThumbs() {
   st.series.forEach((se, k) => {
     const c = $("strip").querySelector<HTMLCanvasElement>(`[data-series="${k}"] canvas`);
     if (!c || c.dataset.drawn) return;
-    const mid = Math.floor(se.instances.length / 2);
-    images!
-      .get(se, mid, { priority: Priority.Near, signal })
-      .then((img) => {
-        drawThumbnail(c, img, Math.floor(img.frames / 2));
-        c.dataset.drawn = "1";
-      })
+    seriesThumb(c, se, Priority.Near, signal)
+      .then(() => (c.dataset.drawn = "1"))
       .catch(() => {});
   });
 }
 
 function selectSeries(k: number) {
   if (k === seriesIdx && shownKey.startsWith(series()?.fileId ?? "-")) return;
+  if (k === seriesIdx && slideView?.active && slideView.ss?.src.series === series()) return;
   seriesAbort.abort();
   seriesAbort = new AbortController();
   const prevFile = seriesIdx >= 0 ? study()?.series[seriesIdx]?.fileId : undefined;
@@ -444,6 +461,11 @@ function selectSeries(k: number) {
     if (br.left < sr.left || br.right > sr.right) strip.scrollLeft += br.left - sr.left - (sr.width - br.width) / 2;
     if (br.top < sr.top || br.bottom > sr.bottom) strip.scrollTop += br.top - sr.top - (sr.height - br.height) / 2;
   }
+  if (isSlideSeries(se)) {
+    showSlide(se);
+    return;
+  }
+  leaveSlide();
   sliceCount = se.instances.length;
   presetId = "auto";
   wc = 0;
@@ -468,6 +490,72 @@ function selectSeries(k: number) {
   slider.max = String(Math.max(0, sliceCount - 1));
   slider.disabled = sliceCount <= 1;
   showSlice(Math.floor(sliceCount / 2), true);
+}
+
+/** Opens a whole-slide series in the tiled view. */
+function showSlide(se: SeriesEntry) {
+  const t0 = performance.now();
+  shownKey = "";
+  slideView ??= new SlideView($("stage"));
+  document.body.classList.add("slide-mode");
+  $("stage-msg").classList.add("hidden");
+  $("stage-busy").classList.remove("hidden");
+  $("hud-tl").textContent = `${se.description ?? "Slide"}\nSlide microscopy`;
+  $("hud-tr").textContent = "";
+  $("hud-bl").textContent = "";
+  $("btn-label").classList.add("hidden");
+  slideFor(se)
+    .then((ss) => {
+      if (series() !== se) return;
+      $("stage-busy").classList.add("hidden");
+      const p = ss.pyramid;
+      $("hud-tl").textContent = `${se.description ?? "Slide"}\n${p.width.toLocaleString()} × ${p.height.toLocaleString()} · ${p.levels.length} levels`;
+      $("btn-label").classList.toggle("hidden", p.label === null && p.overview === null);
+      $("btn-label").textContent = p.label !== null ? "Label" : "Glass slide";
+      $("label-title").textContent = p.label !== null && p.overview !== null ? "Slide label and glass slide" : p.label !== null ? "Slide label" : "Glass slide";
+      slideView!.show(ss, t0);
+      shownKey = `${se.fileId}/slide`;
+      if (!metrics.marks["first-slice"]) {
+        mark("first-slice");
+        setTimeout(loadStripThumbs, 0);
+      }
+    })
+    .catch((e) => {
+      if (series() !== se) return;
+      sliceError(e);
+    });
+}
+
+function leaveSlide() {
+  if (!slideView?.active) return;
+  slideView.close();
+  document.body.classList.remove("slide-mode");
+}
+
+async function openLabelSheet() {
+  const ss = slideView?.ss;
+  if (!ss) return;
+  const box = $("label-images");
+  box.textContent = "";
+  const p = ss.pyramid;
+  const items: [string, number | null][] = [["Slide label", p.label], ["Whole glass slide", p.overview]];
+  openSheet("sheet-label");
+  for (const [caption, inst] of items) {
+    if (inst === null) continue;
+    const fig = el("figure", "label-fig");
+    const c = el("canvas");
+    const cap = el("figcaption", "small muted", `${caption} · loading ${formatBytes(ss.src.series.instances[inst].length)}…`);
+    fig.append(c, cap);
+    box.append(fig);
+    ss.image(inst)
+      .then((bmp) => {
+        c.width = bmp.width;
+        c.height = bmp.height;
+        c.getContext("2d")!.drawImage(bmp, 0, 0);
+        cap.textContent = `${caption} · ${bmp.width} × ${bmp.height}`;
+      })
+      .catch((e) => (cap.textContent = `${caption}: could not be shown (${(e as Error).message})`));
+  }
 }
 
 /** Slice i → (instance, frame). Many instances: one slice each. One multi-frame instance: its frames. */
@@ -663,7 +751,7 @@ function wireGestures() {
   };
 
   stage.addEventListener("pointerdown", (e) => {
-    if (!viewport) return;
+    if (!viewport || slideView?.active) return;
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, type: e.pointerType, button: e.button });
     carry = 0;
@@ -704,6 +792,7 @@ function wireGestures() {
   });
 
   stage.addEventListener("pointermove", (e) => {
+    if (slideView?.active) return;
     const p = pts.get(e.pointerId);
     if (!p || !viewport) return;
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
@@ -768,12 +857,14 @@ function wireGestures() {
   stage.addEventListener("pointerup", end);
   stage.addEventListener("pointercancel", end);
   stage.addEventListener("contextmenu", (e) => e.preventDefault());
-  stage.addEventListener("dblclick", () => resetView());
+  stage.addEventListener("dblclick", () => {
+    if (!slideView?.active) resetView();
+  });
   stage.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
-      if (!viewport) return;
+      if (!viewport || slideView?.active) return;
       if (e.ctrlKey || e.metaKey) {
         const [px, py] = canvasPoint(e.clientX, e.clientY);
         zoomAt(Math.exp(-e.deltaY * 0.01), px, py);
@@ -785,6 +876,10 @@ function wireGestures() {
     { passive: false },
   );
   stage.addEventListener("keydown", (e) => {
+    if (slideView?.active) {
+      if (slideView.key(e)) e.preventDefault();
+      return;
+    }
     const k = e.key;
     if (k === "ArrowDown" || k === "ArrowRight" || k === "PageDown") stepSlice(k === "PageDown" ? 5 : 1);
     else if (k === "ArrowUp" || k === "ArrowLeft" || k === "PageUp") stepSlice(k === "PageUp" ? -5 : -1);
@@ -977,8 +1072,9 @@ function wireStatic() {
     const p = presetsFor(series().modality).find((x) => x.id === (e.target as HTMLSelectElement).value);
     if (p) applyPreset(p);
   });
-  $("btn-reset").addEventListener("click", resetView);
-  $("btn-download").addEventListener("click", () => openDownloadSheet({ kind: "series", study: study(), series: series() }, true));
+  $("btn-reset").addEventListener("click", () => (slideView?.active ? slideView.fit() : resetView()));
+  $("btn-label").addEventListener("click", () => void openLabelSheet());
+  $("btn-download").addEventListener("click", () => openDownloadSheet({ kind: "series", study: study(), series: series() }, !isSlideSeries(series())));
   $("btn-trust").addEventListener("click", openTrustSheet);
   $("sheet-backdrop").addEventListener("click", closeSheet);
   document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeSheet));
@@ -1003,6 +1099,35 @@ function closeSheetForce() {
   /** Slices of the current series already decoded and cached. */
   cached: () => (share && seriesIdx >= 0 ? series().instances.filter((_, i) => images!.peek(series(), i)).length : 0),
   saveBlob,
+};
+
+/** Slide view hooks for scripted checks. */
+(globalThis as any).__wsi = {
+  active: () => !!slideView?.active,
+  idle: () => !!slideView?.active && slideView.idle,
+  stats: () => slideView?.stats() ?? null,
+  view: () => (slideView ? { cx: slideView.cx, cy: slideView.cy, scale: slideView.scale, level: slideView.level, dpr: slideView.dpr, w: slideView.canvas.width, h: slideView.canvas.height } : null),
+  setView: (cx: number, cy: number, scale: number) => slideView?.setView(cx, cy, scale),
+  pyramid: () => {
+    const p = slideView?.ss?.pyramid;
+    return p && { width: p.width, height: p.height, label: p.label, overview: p.overview, levels: p.levels.map((l) => ({ instance: l.instance, width: l.width, height: l.height, tileWidth: l.tileWidth, tileHeight: l.tileHeight, tilesAcross: l.tilesAcross, tilesDown: l.tilesDown, downsample: l.downsample, frames: l.header.numberOfFrames, source: slideView!.ss!.src.frameSource(l.instance) })) };
+  },
+  marks: () => slideView?.ss?.metrics.marks ?? null,
+  log: () => slideView?.ss?.src.reader.log ?? [],
+  instances: () => slideView?.ss?.src.series.instances.map((i) => [i.offset, i.length]) ?? [],
+  /** Decodes tile (level, tx, ty) again and returns its pixels as base64, with the frame number. */
+  tilePixels: async (level: number, tx: number, ty: number) => {
+    const ss = slideView?.ss;
+    if (!ss) return null;
+    const L = ss.pyramid.levels[level];
+    const file = await ss.src.tileFile(level, tx, ty, { priority: 0 });
+    if (!file) return null;
+    const img = await ss.pool.decode(file, { priority: 0 });
+    const u8 = new Uint8Array(img.pixels, img.frameOffsets[0], img.frameBytes);
+    let bin = "";
+    for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+    return { frame: L.frameOf(tx, ty), instance: L.instance, uid: ss.src.series.instances[L.instance].uid, rows: img.rows, columns: img.columns, spp: img.samplesPerPixel, photometric: img.photometric, b64: btoa(bin) };
+  },
 };
 
 void boot();

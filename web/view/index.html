@@ -94,6 +94,7 @@
         <div class="tool-btns">
           <label for="preset" class="sr-only">Window</label>
           <select id="preset" class="preset hidden"></select>
+          <button id="btn-label" class="btn hidden" type="button" aria-haspopup="dialog">Label</button>
           <button id="btn-reset" class="btn" type="button" title="Reset window, zoom and pan">Reset</button>
         </div>
       </div>
@@ -112,6 +113,13 @@
       <p id="dl-status" class="small"></p>
       <button id="btn-dl-cancel" class="btn" type="button">Cancel</button>
     </div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-label" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="label-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="label-title">Slide label and glass slide</h2>
+    <div id="label-images" class="label-images"></div>
     <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
   </section>
 
