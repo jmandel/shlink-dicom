@@ -1,0 +1,268 @@
+# Blog post outline: sharing a whole imaging study with a link
+
+## How to write this post
+
+- **Plain, clear language.** Write the way Josh writes: first person, short sentences, concrete nouns, numbers with units. Say what happened and what it means; stop when the point is made.
+- **No AI slop.** None of the telltale signs:
+  - no hype words ("revolutionary", "seamless", "game-changer", "unlock", "powerful", "robust", "cutting-edge");
+  - no false contrasts ("It's not X, it's Y"), no rhetorical questions as transitions, no "Here's the thing";
+  - no triplets for rhythm, no "In today's world…", no summary paragraph that repeats the post;
+  - no headings that count things ("3 lessons"); no em-dash chains; no emoji.
+- **Headings name content.** "How the files are encrypted", not "The magic under the hood".
+- **Every claim is true and checked.**
+  - Re-measure every number from the live sites, the corpus or git, and record where it came from in the figure's source line.
+  - Claims about how imaging sharing works today need a source or first-hand knowledge. Don't use strawmen.
+- **Captions are one plain sentence** saying what to look at, plus a source line where it applies.
+- **Lead with the story.** Problem, then idea, then one example traced end to end. The detail comes after.
+- **Visual consistency.** Charts match the house style of the recent posts: inline SVG, light surface, thin rules, tabular numbers, one accent colour per series.
+
+Markers used below:
+- **[FIGURE Fn]**: an image or chart to produce. The description is detailed enough to use as a generation prompt or a chart spec.
+- **[SCREENSHOT Sn]**: a capture of the live sites. The full list is at the end. Take them after all the sites are finished.
+
+---
+
+## 1. Opening
+
+- **The problem, first person.** Getting your imaging to another clinician still usually means a CD, or a portal that shows the pictures but won't hand over the originals. Check this against current sources and Josh's own experience: CDs, portal viewers, DICOMweb behind provider walls.
+- **The existing tool.** SMART Health Links already carry clinical data as a QR code or link, encrypted end to end.
+- **What I wanted.** The same for full imaging: every original DICOM file, readable in a browser, without downloading the whole study first.
+- **One line on what exists now.** A spec, a reference implementation, a share site, a viewer, and a sandbox portal.
+
+**[FIGURE F1] Cover image.**
+- **Scene:** a phone on a wooden desk shows a QR code. Beside it, a laptop shows an MRI viewer: a dark UI, an axial T2 brain slice in the middle, a strip of series thumbnails along the bottom, and a small green "Verified · encrypted end to end" badge top right.
+- **Style:** natural light, a slightly elevated three-quarter view, a realistic but clean photographic look, muted colours, no brand logos, no visible text other than the badge.
+- **Aspect and safe area:** 1.91:1 for the LinkedIn and blog banner. Leave the left third calmer for a title overlay.
+- **Alternative:** compose it from real screenshots S3 and S5 on device frames if generated images look fake.
+
+## 2. TL;DR and links
+
+- One short paragraph with links: try the sample, share your own, how it works, the code.
+- One line of thanks, if anyone contributed: Argonaut SMART Imaging authors, IDC.
+
+## 3. One study, traced end to end
+
+- **The example:** Josh Example's brain MRI from the public sample.
+- **Narrate the steps, with the real numbers measured on the live site:**
+  1. Open the link.
+  2. The viewer fetches and decrypts the Bundle, which is a few KB.
+  3. It reads the ImagingStudy index.
+  4. It asks the host for exactly the byte range of one slice.
+  5. It decrypts the 64 KiB records covering that range.
+  6. It decodes and draws the slice.
+- **Report:** time to first image, and bytes fetched compared with the size of the study.
+
+**[FIGURE F2] Request waterfall for opening the sample.**
+- **Chart:** horizontal timeline in ms (0 to about 1,500 ms). One row per network request, in order:
+  - the Bundle (JWE);
+  - then the first series' range requests, labelled "bytes 65,564–131,127 (1 record)" and so on.
+- **Bar encoding:** each bar splits into wait, download and decrypt+decode segments, in three tints of one hue.
+- **Markers:** "first thumbnail" and "first full slice" as vertical dashed lines with labels.
+- **Right margin:** bytes per request, in tabular numbers.
+- **Source line:** "Measured in Chromium on <device>, <network>, <date>, against shlink-dicom.exe.xyz."
+- **Data:** capture with a scripted run (Playwright plus PerformanceResourceTiming), three runs; show the median run.
+
+**[FIGURE F3] Bytes fetched versus study size.**
+- **Chart:** grouped horizontal bars on a log scale, one group per study (brain MRI, CT abdomen/pelvis, lung slide).
+  - **Grey bar:** total size of the study's encrypted files.
+  - **Accent bar:** bytes actually fetched to (a) show the first image and (b) page through one series, or, for the slide, pan and zoom to full resolution in six moves.
+- **Labels:** the percentage at the end of each accent bar.
+- **Caption:** "The viewer fetches only the bytes it draws."
+- **Data:** a scripted session per study; record the exact steps in the source line.
+
+**[SCREENSHOT S5]** The viewer on the MRI, desktop, T2 axial mid-brain, series strip visible.
+**[SCREENSHOT S6]** The same on a phone, portrait.
+
+## 4. How the files are encrypted and found
+
+- **Files:** one encrypted file per series, in 64 KiB AES-256-GCM records. Each record's nonce is its index, so any record decrypts on its own.
+- **Keys:** a random key per series, carried only inside the link's encrypted Bundle.
+- **Index:** the Bundle's ImagingStudy lists each instance's offset and length, so a byte range maps straight to records.
+- **The host** stores and serves opaque files. It sees random file names, sizes and byte ranges, and nothing else.
+- **What it deliberately leaves out:** compression and ZIP. Say why in one line each.
+
+**[FIGURE F4] How one slice is found and decrypted.**
+- **Diagram, top to bottom:**
+  1. A link card ("shlink:/…", with `url`, `key`, `flag` and `label` called out).
+  2. An arrow to a Bundle card listing ImagingStudy → series → instances, with one instance highlighted showing "offset 1,234,567, length 524,800".
+  3. An arrow to a long horizontal strip representing the series file, divided into 64 KiB cells numbered 0…N. The cells covering the highlighted instance are shaded, and a bracket under them reads "records 18–26".
+  4. An arrow to a small padlock with "AES-256-GCM, nonce = record index".
+  5. An arrow to a thumbnail of the slice.
+- **Style:** flat, two colours plus grey, monospace for values, no 3D.
+
+**[FIGURE F5] What the host sees and what the browser sees.**
+- **Two panes side by side, the same moment in time.**
+  - **Left, "Host log":** five lines of a plain access log, e.g. `GET /shl/4IbM…/3sdT1FnMe0yjQq7hU7AlkA.bin  Range: bytes=65564-131127  206  65,564 B`. Only random names and numbers.
+  - **Right, "Browser":** the same requests resolved: "Brain MRI 29 Jul 2020 › T2 FSE AX › slice 11 of 20", with the slice thumbnail.
+- **Caption:** "The host serves bytes it cannot read."
+- Build it from a real capture (S9 is the How page's version of this).
+
+**[SCREENSHOT S9]** The How page's "What the host sees" widget, live.
+**[SCREENSHOT S10]** The How page's record map widget, with a slider on an instance and its Range header shown.
+**[SCREENSHOT S11]** The How page's tamper switch, showing a refused record.
+
+## 5. Sharing
+
+- **Sources:**
+  - files, a folder or a CD, ZIP or TGZ;
+  - a link from a provider;
+  - a SMART Imaging portal. The demo uses our sandbox built to the Argonaut SMART Imaging Access IG; mention the two issues filed against the IG in one line.
+- **Review step:** what's in the study, thumbnails, and an optional frame offset table for slides.
+- **Hand-over:** the link, QR code, an optional passcode and an expiry.
+- **Manage link,** with no accounts: open counts, revoke, extend, and a new link for someone else.
+
+**[FIGURE F6] The share flow.**
+- **Diagram, left to right.**
+  - **Three source icons stacked on the left:** "Files or CD", "Patient portal (SMART Imaging)", "Link from provider".
+  - **A box "In your browser":** read → choose studies → encrypt, with a lock icon.
+  - **An arrow labelled "ciphertext only"** to a box "Host".
+  - **From the browser box,** a second arrow to a phone with a QR code: "Link + key, never sent to the host".
+  - **Below the host:** a small "Manage link" card with "Opened 2 times · Revoke · Extend".
+- **Style:** thin strokes and a single accent colour.
+
+**[SCREENSHOT S12–S17]** The share steps on a phone:
+- S12: add imaging;
+- S13: SMART portal login on the sandbox;
+- S14: review, with study cards;
+- S15: encrypt and upload in progress;
+- S16: hand over, with the QR code;
+- S17: the manage page.
+
+## 6. Reports beside the images
+
+- **The real-world split:** the imaging system and the clinical record are separate. DICOM rarely contains the report; reports are FHIR DiagnosticReports from the clinical side.
+- **What the viewer does:** it shows them together, says where each part came from, and doesn't pretend they came from one place.
+- **The sample's reports:** synthetic and labelled as such, written for the de-identified studies.
+
+**[FIGURE F7] Two sources, one view.**
+- **Two source boxes at top:** "Imaging system (DICOM, WADO-RS)" and "Clinical record (FHIR DiagnosticReport)".
+- **Arrows** into one "Bundle" card in the middle.
+- **Below it,** a schematic viewer with the image on the left and the report text on the right, each part tagged with a small source label in matching colours.
+
+**[SCREENSHOT S7]** The viewer with the CT and its report side by side, desktop.
+**[SCREENSHOT S8]** The report as a sheet on a phone.
+
+## 7. Decoding everything in the browser
+
+- **Decoders:** pure Rust, compiled to wasm, for every compressed format clinical systems write: JPEG (all modes), JPEG-LS, JPEG 2000, HTJ2K, RLE and JPEG XL. Update the list after the coverage work lands.
+- **How we know they're right:** the oracle-first corpus. Every case is checked against reference decoders, with written rulings where the references disagree.
+- **Real-world check:** a stratified sweep of the NCI Imaging Data Commons.
+  - Random control: 1,000 of 1,000 pass.
+  - All 9,537 instances: 99.84% pass, and what the rest were.
+- **Speed:** against the C libraries, in the browser and natively.
+- **Whole-slide images:** tiles stream on demand, and offset tables make it cheap.
+
+**[FIGURE F8] Corpus coverage by format.**
+- **Chart:** horizontal stacked bars, one per format (uncompressed, RLE, JPEG baseline/extended, JPEG lossless, JPEG-LS, JPEG 2000, HTJ2K, plus the new ones). Bar length is the number of corpus cases; segments show passing (accent) and refused-as-invalid (grey).
+- **Annotation:** the count of reference decoders used per format, at the right.
+- **Source line:** the check.py report name and date.
+
+**[FIGURE F9] The IDC sweep.**
+- **Left panel:** a single bar "Random control: 1,000 / 1,000", with the 95% interval (99.62–100%) as a whisker.
+- **Right panel:** the 9,537 stratified instances as a waffle of small squares, nearly all accent-coloured. The non-passing ones are highlighted in four colours by cause, with a legend: missing Planar Configuration (now inferred), Leica 4:2:2 tolerance, float pixel data, and empty frames.
+- **Caption:** "The sweep picked rare combinations on purpose; the random control shows the typical case."
+
+**[FIGURE F10] Decode speed versus the C libraries.**
+- **Chart:** dot plot, one row per format.
+  - **Points:** our wasm, our native, and the reference C library (wasm and native), as time per megapixel on a log axis.
+  - **Labels:** the ratio, e.g. "2.4× faster", in tabular numbers at the right.
+- **Source line:** machine, load conditions, and the benchmark run id. Re-run on a quiet machine first.
+
+**[FIGURE F11] A slide, streamed.**
+- **Visual:** the 1.2 GB lung slide shown as a pyramid of three stacked, offset rectangles (levels). On the finest level, only a small cluster of tiles is filled, marking what the session fetched; the rest is an empty grid.
+- **Inset numbers:** "Fetched 13.8 MB of 1,206 MB (1.15%)".
+- **A second, smaller pyramid beside it,** labelled "without offset tables", has most of the finest level shaded, with "379 MB to the first full-resolution screen".
+
+**[SCREENSHOT S18]** The slide viewer at full resolution with the live stats panel, desktop.
+**[SCREENSHOT S19]** The slide viewer on a phone.
+**[SCREENSHOT S20]** The How page's codec coverage section.
+**[SCREENSHOT S21]** The benchmark report page.
+
+## 8. Sample data
+
+- **Source:** the sample is Josh's own MRI, CT and X-rays, de-identified as "Josh Example" and published in my-health-data, plus a CC BY slide from IDC.
+- **What changed:** names and identifiers removed or replaced. Screens that showed identity (a dose report, viewer captures, a scanned document) were rebuilt with fake names instead of being dropped.
+- **Why it's real data:** a sample that behaves like real exports.
+
+**[SCREENSHOT S22]** The my-health-data `imaging/` folder on GitHub.
+**[SCREENSHOT S23]** The sandbox's patient picker or login, showing Josh Example.
+
+## 9. Caveats
+
+- **What's not done,** taken from docs/COVERAGE-PLAN.md at the time of writing. The three formats refused by design, and why.
+- **Status:** not a product. The servers are demos, and quotas apply.
+- **Security model limits:** link possession grants access, and so do passcodes. Keep it short and accurate.
+
+## 10. Building it with Claude Code
+
+Same form as the PFS comments post. Every number is measured.
+
+- **Josh's attention:** messages, words written, estimated reading and writing time. Use the same method as before and state the reading and writing rates.
+- **Work time:** wall time with agents working, including time Josh was away.
+- **The agents:**
+  - how many subagents, and what each owned (codecs, corpus, viewer, share, sandbox, slides, sweep, deploy);
+  - the pi (Gemini) agent, which worked alongside with its own journal; one paragraph on what each was good at;
+  - the coordinator's role: verify, commit, keep the coordination file.
+- **The code:** commits, and lines added and deleted. Exclude vendored code (hayro), generated data (cases.json, benchmark JSON) and lockfiles, and say so.
+- **Josh's steering, quoted:** e.g. "Detect what we can in order to have the most robust behavior"; "keep our code clean and to the point"; "Rather than dropping data … create a synthetic equivalent"; the coverage push ("come back at the proposal that addresses everything we plausibly can").
+- **Problems Josh caught,** listed plainly. Sources: docs/PROCESS-NOTES.md and the transcript.
+
+**[FIGURE F12] Hours.** Stacked horizontal bars: total agent-working hours, Josh's attention hours, and hours while Josh was away. Same style as `hours.svg` in the PFS post.
+
+**[FIGURE F13] Words, as areas.** Squares with area proportional to Josh's words, Claude's words, and tool output read. Same method as `words.svg` in the PFS post.
+
+**[FIGURE F14] Agent timeline.**
+- **Chart:** swimlanes over the project's days, one lane per subagent plus one for pi and one for the coordinator. Bars show when each was working.
+- **Shading:** bands for Josh's sittings.
+- **Annotations,** small labels at the points they happened: "SSH outage", "de-identification", "coverage plan".
+
+**[FIGURE F15] Lines added and deleted,** by area: codecs, corpus, web, crates, sandbox, docs. Paired bars, with vendored and generated files excluded and noted.
+
+## 11. Links
+
+- the sample, the share site, the How page, the sandbox;
+- the spec (PROPOSAL.md), the code, the corpus;
+- my-health-data `imaging/`;
+- the Argonaut SMART Imaging IG, and issues #2 and #3.
+
+---
+
+## Possible companion post: an oracle-first corpus for AI-written decoders
+
+- How the corpus, the reference decoders and the rulings let agents write codecs that can be trusted.
+- **[FIGURE C1]:** the loop "case → oracle → candidate → compare → ruling".
+- **[FIGURE C2]:** pass rate over time per format as agents worked.
+
+---
+
+## Screenshot list (take when the sites are finished)
+
+Defaults: desktop at 1440×900 and phone at 390×844, light mode, the public sample unless noted. Capture with the scripted browser so the shots can be retaken.
+
+| ID | Where | State |
+|---|---|---|
+| S1 | shlink-dicom.exe.xyz `/` | Landing, desktop |
+| S2 | `/` | Landing, phone |
+| S3 | `/view` (sample) | Study overview with all studies and report summaries, desktop |
+| S4 | `/view` (sample) | Study overview, phone |
+| S5 | `/view` MRI | T2 axial mid-brain, series strip, desktop |
+| S6 | `/view` MRI | Same, phone |
+| S7 | `/view` CT | CT slice with the report side by side, desktop |
+| S8 | `/view` CT | Report sheet open, phone |
+| S9 | `/how` | "What the host sees" widget, live log |
+| S10 | `/how` | Record map with Range header |
+| S11 | `/how` | Tamper switch, refused record |
+| S12 | `/share` | Step 1, add imaging, phone |
+| S13 | smart-imaging-sandbox.exe.xyz | SMART login and patient picker, phone |
+| S14 | `/share` | Review, study cards with thumbnails |
+| S15 | `/share` | Encrypting and uploading, progress |
+| S16 | `/share` | Hand-over, QR code |
+| S17 | `/share/manage` | Links, open counts, revoke |
+| S18 | `/view` slide | Full resolution with stats panel, desktop |
+| S19 | `/view` slide | Phone |
+| S20 | `/how` | Codec coverage section |
+| S21 | `/how/bench.html` | Benchmark report |
+| S22 | github.com/jmandel/my-health-data/tree/master/imaging | Folder listing |
+| S23 | sandbox | Patient Josh Example in the portal |
+| S24 | `/view` | Passcode prompt (passcode demo link), phone |
+| S25 | `/view` | An object type from the coverage work (SR, SEG overlay, video), chosen when it lands |
