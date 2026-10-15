@@ -7,3 +7,5 @@ profiles/*.trace.json
 profiles/*.cpuprofile
 node_modules/
 .build.lock
+# /how bakes its benchmark page from this full run, so the site builds from git.
+!results/2026-10-15-08-57-26-full.json
