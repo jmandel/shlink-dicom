@@ -64,4 +64,9 @@ fn fuzz_findings_are_errors_not_panics() {
     let _ = decode(&data("fuzz-ht-p0-past-passes.j2c"), &Options::default());
     // Damaged code-blocks with 31-bit coefficients, whose 5/3 synthesis overflows i32.
     let _ = decode(&data("fuzz-53-overflow.j2c"), &Options::default());
+    // A MIXED tile whose readings all fail: the search gives up after a few attempts (this
+    // took 2 s with a bound of 4,096).
+    let t = std::time::Instant::now();
+    let _ = decode(&data("fuzz-mixed-search.j2c"), &Options::default());
+    assert!(t.elapsed().as_secs_f64() < 1.0);
 }

@@ -76,7 +76,9 @@ struct Decoder<'c, 'a> {
     ht_sets: Vec<(usize, usize)>,
 }
 
-const MAX_MIXED_ATTEMPTS: u32 = 4096;
+/// Readings of a MIXED tile to try before giving up. Every stream seen so far needs one; the
+/// bound keeps a hostile stream from forcing an exponential search.
+const MAX_MIXED_ATTEMPTS: u32 = 64;
 
 impl<'c, 'a> Decoder<'c, 'a> {
     fn new(cs: &'c Codestream<'a>, options: &Options) -> Result<Self> {
