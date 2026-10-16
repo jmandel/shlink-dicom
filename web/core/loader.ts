@@ -27,6 +27,13 @@ export type RecordState = "fetching" | "verified" | "failed";
 
 /** Most records one request carries after queued neighbours join it (2 MiB of ciphertext). */
 export const MERGE_RECORDS = 32;
+/**
+ * Prefetch: a new read starts only while the prefetch and background reads running have fewer
+ * than this many ciphertext bytes still to arrive, and a prefetch read carries at most half of it,
+ * so a jump's request shares the connection with little else. (Downloads, at background priority,
+ * are not held back by it.)
+ */
+export const BULK_BYTES = 1 << 20;
 
 export interface LoaderOptions {
   /** Range requests in flight at once (default 6). Prefetch and background reads leave two of them free. */
@@ -103,6 +110,7 @@ export class InstanceLoader {
   private queue: Span[] = [];
   private running = 0;
   private runningBulk = 0;
+  private bulkSpans = new Set<Span>();
   private seq = 0;
   /** Records on their way: `${fileId}:${record}` → the span fetching it. */
   private pending = new Map<string, Span>();
@@ -327,29 +335,42 @@ export class InstanceLoader {
     s.waiting.clear();
   }
 
+  /** Ciphertext bytes the running prefetch and background reads have still to receive. */
+  private bulkPending(): number {
+    let n = 0;
+    for (const s of this.bulkSpans) n += Math.max(0, this.spanBytes(s) - s.received);
+    return n;
+  }
+
+  private spanBytes(s: Span): number {
+    return Math.min(s.series.file.ciphertextLength, (s.last + 1) * RECORD_CIPHERTEXT) - s.first * RECORD_CIPHERTEXT;
+  }
+
   private isBulk(s: Span) {
     return s.priority >= FetchPriority.Prefetch;
   }
 
   private pump() {
-    while (this.running < this.concurrency && this.queue.length) {
+    while (this.queue.length) {
       let best = -1;
       for (let k = 0; k < this.queue.length; k++) {
         const a = this.queue[k];
-        if (this.isBulk(a) && this.runningBulk >= this.concurrency - 2) continue;
+        if (this.isBulk(a) && (this.runningBulk >= this.concurrency - 2 || (a.priority === FetchPriority.Prefetch && this.bulkPending() >= BULK_BYTES))) continue;
         const b = best >= 0 ? this.queue[best] : null;
         if (!b || a.priority < b.priority || (a.priority === b.priority && a.seq < b.seq)) best = k;
       }
       if (best < 0) return;
+      // The image on screen may go past the limit by two: it never waits behind thumbnails and neighbours.
+      if (this.running >= this.concurrency + (this.queue[best].priority === FetchPriority.Visible ? 2 : 0)) return;
       const span = this.queue.splice(best, 1)[0];
       if (span.cache) this.merge(span);
       span.running = true;
       this.running++;
       const bulk = this.isBulk(span);
-      if (bulk) this.runningBulk++;
+      if (bulk) this.runningBulk++, this.bulkSpans.add(span);
       void this.runSpan(span).finally(() => {
         this.running--;
-        if (bulk) this.runningBulk--;
+        if (bulk) this.runningBulk--, this.bulkSpans.delete(span);
         this.pump();
       });
     }
@@ -357,14 +378,15 @@ export class InstanceLoader {
 
   /** Queued spans of the same series next to `s` in its file join it. */
   private merge(s: Span) {
+    const most = s.priority === FetchPriority.Prefetch ? Math.floor(BULK_BYTES / 2 / RECORD_CIPHERTEXT) : MERGE_RECORDS;
     for (;;) {
-      if (s.last - s.first + 1 >= MERGE_RECORDS) return;
+      if (s.last - s.first + 1 >= most) return;
       const k = this.queue.findIndex(
         (q) =>
           q.cache && q.fileId === s.fileId && q.seriesId === s.seriesId &&
-          ((q.first === s.last + 1 && q.last - s.first + 1 <= MERGE_RECORDS) ||
+          ((q.first === s.last + 1 && q.last - s.first + 1 <= most) ||
             // Before it only when at least as urgent: its bytes would arrive first.
-            (q.last === s.first - 1 && q.priority <= s.priority && s.last - q.first + 1 <= MERGE_RECORDS)),
+            (q.last === s.first - 1 && q.priority <= s.priority && s.last - q.first + 1 <= most)),
       );
       if (k < 0) return;
       const q = this.queue.splice(k, 1)[0];
@@ -421,6 +443,8 @@ export class InstanceLoader {
         s.received = received;
         if (buf) deliver(buf, received);
         for (const l of s.listeners) l();
+        // A prefetch read nearing its end makes room for the next.
+        if (this.bulkSpans.has(s) && this.queue.length) this.pump();
       });
       s.received = ct.byteLength;
       deliver(ct, ct.byteLength);

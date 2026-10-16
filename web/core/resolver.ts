@@ -285,8 +285,10 @@ export class LinkResolver {
         headers,
         body: o.body,
         signal: o.signal,
-        // Encrypted files are immutable (§10), so the HTTP cache may keep them; manifests and Bundles may change.
-        cache: o.purpose === "file" ? "default" : "no-store",
+        // Not through the HTTP cache. The server lets nothing be cached, and while a request may be
+        // cached the browser holds every other request for the same URL until its headers arrive
+        // (Chromium's cache lock): concurrent Range reads of one file went one round trip apart.
+        cache: "no-store",
       });
     } catch (e) {
       if ((e as any)?.name === "AbortError") throw e;
