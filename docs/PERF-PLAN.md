@@ -17,7 +17,7 @@ Our time ÷ the reference's time, single-threaded, same frames; below 1 means we
 | JPEG 2000 | OpenJPEG 2.5.4 | about 0.9–1.2 (Leica 4:2:2 tile 2.0) | 0.76–0.79 |
 | HTJ2K | OpenJPH 0.32 | 1.7–3.3 | 1.2–1.25 large frames; faster on small |
 | JPEG XL lossless | libjxl 0.12 | 0.73–1.47 | 0.96–2.14 |
-| JPEG XL lossy | libjxl 0.12 | 1.9–2.6 | 1.14–2.12 |
+| JPEG XL lossy | libjxl 0.12 | 1.8–2.2 | 1.12–1.31 at distance 1 (after T6) |
 
 | Encoder, MB/s (higher is better) | Ours native | Reference native | Ours wasm | Reference wasm |
 |---|---|---|---|---|
