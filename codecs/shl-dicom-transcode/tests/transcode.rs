@@ -126,6 +126,7 @@ fn declines_leave_reasons() {
     assert!(transcode_part10(&input[132..], JPEG_LOSSLESS_SV1).is_err());
     // Unknown target.
     assert!(transcode_part10(&input, "1.2.840.10008.1.2.4.50").is_err());
+    assert_eq!(shl_dicom_transcode::SUPPORTED_TRANSFER_SYNTAXES, [JPEG_LOSSLESS_SV1, "1.2.840.10008.1.2.4.90"]);
     // Garbage never panics.
     for cut in (0..input.len()).step_by(7) {
         let _ = transcode_part10(&input[..cut], JPEG_LOSSLESS_SV1);
@@ -133,7 +134,8 @@ fn declines_leave_reasons() {
 }
 
 /// Mutated files never panic. Seeds: the files under $SHL_TRANSCODE_FUZZ_DIR (for example the
-/// corpus's uncompressed samples) plus the files built here; $SHL_TRANSCODE_FUZZ_ITERS rounds.
+/// corpus's uncompressed samples) plus the files built here; $SHL_TRANSCODE_FUZZ_ITERS rounds,
+/// alternating between the two output syntaxes.
 #[test]
 fn mutated_files_never_panic() {
     let mut seeds = vec![file("1.2.840.10008.1.2", false, 3, 1, 2, 9, 7), file("1.2.840.10008.1.2.1", true, 1, 0, 2, 9, 7)];
@@ -170,6 +172,23 @@ fn mutated_files_never_panic() {
                 }
             }
         }
-        let _ = transcode_part10(&f, JPEG_LOSSLESS_SV1);
+        let ts = if i % 2 == 0 { JPEG_LOSSLESS_SV1 } else { shl_dicom_transcode::JPEG_2000_LOSSLESS };
+        let _ = transcode_part10(&f, ts);
+    }
+}
+
+#[test]
+fn jpeg2000_output() {
+    for (ts, explicit) in [("1.2.840.10008.1.2.1", true), ("1.2.840.10008.1.2", false)] {
+        for (spp, planar) in [(1, 0), (3, 1)] {
+            let input = file(ts, explicit, spp, planar, 2, 33, 47);
+            let out = transcode_part10(&input, shl_dicom_transcode::JPEG_2000_LOSSLESS).unwrap();
+            assert_eq!(meta_value(&out, 0x10).as_deref(), Some(shl_dicom_transcode::JPEG_2000_LOSSLESS));
+            assert_eq!(meta_value(&out, 0x13).as_deref(), Some(shl_dicom_transcode::IMPLEMENTATION_VERSION_NAME_J2K));
+            assert_eq!(out, transcode_part10(&input, shl_dicom_transcode::JPEG_2000_LOSSLESS).unwrap());
+            let a = shl_dicom_decode::decode_file(&input).unwrap();
+            let b = shl_dicom_decode::decode_file(&out).unwrap();
+            assert_eq!((a.frames, a.data), (b.frames, b.data));
+        }
     }
 }

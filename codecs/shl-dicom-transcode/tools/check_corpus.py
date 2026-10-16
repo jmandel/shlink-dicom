@@ -1,9 +1,9 @@
-"""Re-encode corpus files as JPEG Lossless SV1 and decode the results with the reference decoders.
+"""Re-encode corpus files (JPEG Lossless SV1, or with --ts JPEG 2000 Lossless) and decode the
+results with independent reference decoders.
 
 For every expect=decode case of the given formats (default: uncompressed), or every file under
---dir, the `transcode` example re-encodes the file. Each encoded file is then decoded by pydicom with pylibjpeg (Richter's
-libjpeg), by pydicom with GDCM, and by dcmtk's dcmdjpeg, and every result must equal the original
-case's oracle exactly. Declines are listed with their reasons. Writes a JSON report.
+--dir, the `transcode` example re-encodes the file. Each encoded file is then decoded by the references in REFS, and every result
+must equal the original case's oracle exactly. Declines are listed with their reasons. Writes a JSON report.
 
     cd codec-corpus
     uv run python ../codecs/shl-dicom-transcode/tools/check_corpus.py \
@@ -27,14 +27,19 @@ sys.path.insert(0, str(CORPUS / "scripts"))
 from common import load_cases, oracle_paths, sample_path  # noqa: E402
 from ref_decode import decode as ref_decode  # noqa: E402
 
-REFS = ["pydicom:pylibjpeg", "pydicom:gdcm", "dcmtk"]
+# Independent decoders per output syntax: libjpeg (Richter), GDCM's IJG and dcmtk for SV1;
+# OpenJPEG through pylibjpeg and through opj_decompress, and GDCM (also OpenJPEG) for JPEG 2000.
+REFS = {
+    "1.2.840.10008.1.2.4.70": ["pydicom:pylibjpeg", "pydicom:gdcm", "dcmtk"],
+    "1.2.840.10008.1.2.4.90": ["pydicom:pylibjpeg", "pydicom:gdcm", "openjpeg-cli"],
+}
 
 
-def run(case: dict, fmt: str, tool: str, work: Path) -> dict:
+def run(case: dict, fmt: str, tool: str, work: Path, ts: str) -> dict:
     src = Path(case["path"]) if fmt == "dir" else sample_path(fmt, case["id"])
     out = work / f"{case['id']}.sv1.dcm"
     r = {"case": case["id"], "format": fmt}
-    p = subprocess.run([tool, str(src), str(out)], capture_output=True, timeout=600)
+    p = subprocess.run([tool, str(src), str(out), ts], capture_output=True, timeout=600)
     line = p.stdout.decode().strip()
     if p.returncode != 0:
         r.update(outcome="crash", detail=f"exit {p.returncode} {p.stderr.decode()[-200:]}")
@@ -48,7 +53,7 @@ def run(case: dict, fmt: str, tool: str, work: Path) -> dict:
     # The original's pixels: the corpus oracle, or for --dir files pydicom's own decode.
     oracle = ref_decode(src, "pydicom:pydicom") if fmt == "dir" else np.load(oracle_paths(fmt, case["id"])[0], mmap_mode="r")
     refs = {}
-    for ref in REFS:
+    for ref in REFS[ts]:
         q = subprocess.run([sys.executable, str(CORPUS / "scripts" / "ref_decode.py"), "--ref", ref, str(out), str(work / f"{case['id']}.{ref.replace(':', '_')}.raw")],
                            capture_output=True, timeout=600)
         raw = work / f"{case['id']}.{ref.replace(':', '_')}.raw"
@@ -74,6 +79,7 @@ def main() -> int:
     ap.add_argument("--case")
     ap.add_argument("--dir", type=Path, help="check every file under this directory instead of the corpus")
     ap.add_argument("--jobs", type=int, default=6)
+    ap.add_argument("--ts", default="1.2.840.10008.1.2.4.70", choices=sorted(REFS))
     ap.add_argument("--report", type=Path)
     a = ap.parse_args()
     a.work.mkdir(parents=True, exist_ok=True)
@@ -84,7 +90,7 @@ def main() -> int:
         work = [(f, c) for f in (a.format or ["uncompressed"]) for c in load_cases(f)
                 if c.get("expect") == "decode" and sample_path(f, c["id"]).exists() and (not a.case or a.case in c["id"])]
     with ThreadPoolExecutor(a.jobs) as ex:
-        results = list(ex.map(lambda fc: run(fc[1], fc[0], a.transcode, a.work), work))
+        results = list(ex.map(lambda fc: run(fc[1], fc[0], a.transcode, a.work, a.ts), work))
     counts = Counter(r["outcome"] for r in results)
     for r in results:
         if r["outcome"] in ("crash", "reference-mismatch"):

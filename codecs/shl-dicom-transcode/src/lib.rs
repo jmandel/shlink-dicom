@@ -1,14 +1,20 @@
-//! Lossless re-encoding of uncompressed DICOM files as JPEG Lossless, Non-Hierarchical,
-//! First-Order Prediction (Process 14, Selection Value 1; 1.2.840.10008.1.2.4.70), the lossless
-//! syntax every reader of the PS3.11 compressed-media profiles must decode.
+//! Lossless re-encoding of uncompressed DICOM files, as either
+//! - JPEG Lossless, Non-Hierarchical, First-Order Prediction (Process 14, Selection Value 1;
+//!   1.2.840.10008.1.2.4.70), the lossless syntax every reader of the PS3.11 compressed-media
+//!   profiles must decode; or
+//! - JPEG 2000 Lossless (1.2.840.10008.1.2.4.90): smaller, slower to write
+//!   (`shl-codec-jpeg2000-encode`).
 //!
-//! [`transcode_part10`] takes a Part 10 file and a target transfer syntax and returns the re-encoded file, or [`Declined`]
-//! with the reason; a caller that gets `Declined` keeps the input as it is. What changes:
-//! - the file meta: Transfer Syntax UID, Implementation Class UID and Implementation Version
-//!   Name ([`IMPLEMENTATION_CLASS_UID`], [`IMPLEMENTATION_VERSION_NAME`]), and its group length;
+//! [`transcode_part10`] takes a Part 10 file and a target transfer syntax
+//! ([`SUPPORTED_TRANSFER_SYNTAXES`]) and returns the re-encoded file, or [`Declined`] with the
+//! reason; a caller that gets `Declined` keeps the input as it is. What changes:
+//! - the file meta: Transfer Syntax UID, Implementation Class UID ([`IMPLEMENTATION_CLASS_UID`])
+//!   and Implementation Version Name ([`IMPLEMENTATION_VERSION_NAME`] or
+//!   [`IMPLEMENTATION_VERSION_NAME_J2K`], naming the codec), and its group length;
 //! - Pixel Data, now encapsulated: one fragment per frame and a filled Basic Offset Table (an
 //!   Extended Offset Table instead if an offset would pass 4 GiB);
-//! - Planar Configuration 1 becomes 0, which PS3.5 8.2.1 requires for JPEG;
+//! - Planar Configuration becomes 0, which PS3.5 8.2.1 requires for JPEG: changed from 1, or added
+//!   when it was missing on colour data and the decoder settled the layout from the pixels;
 //! - an Implicit VR Little Endian data set is written as Explicit VR Little Endian, with VRs from
 //!   the PS3.6 dictionary (UN for unknown private elements), and any group length elements are
 //!   recomputed.
@@ -18,8 +24,17 @@
 //! failure of either declines: the output decodes with this repository's decoder to exactly the
 //! input's canonical pixels, and re-reading the output gives every non-pixel value byte for byte.
 //!
-//! The output depends only on the input: Huffman tables come from the image's own statistics with
-//! fixed tie-breaking, and nothing reads a clock or a random source.
+//! Declined: data sets in Big Endian or deflated, already encapsulated pixel data, Float and
+//! Double Float Pixel Data, Bits Allocated 1 or 32 (JPEG 2000 could cover 32-bit RT Dose later; the
+//! encoder here stops at 16 bits), overlays kept in the pixel data's high bits, photometric
+//! interpretations other than MONOCHROME1/2, PALETTE COLOR and RGB (YBR_FULL keeps its samples,
+//! but dcmdjpeg converts YCbCr lossless JPEG to RGB by default with integer arithmetic that differs
+//! from the standard conversion; YBR_FULL_422 would need subsampled components), attributes the
+//! decoder had to infer other than Planar Configuration, and results that are not smaller.
+//!
+//! The output depends only on the input: Huffman tables and JPEG 2000 coding come from the image
+//! alone, with fixed tie-breaking; threads (outside wasm) split independent work and do not change
+//! the bytes; nothing reads a clock or a random source.
 #![forbid(unsafe_code)]
 
 mod dict;
@@ -36,6 +51,12 @@ pub const JPEG_LOSSLESS_SV1: &str = "1.2.840.10008.1.2.4.70";
 pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.222098624467184222580709298353105703221";
 /// (0002,0013) of a file this crate re-encoded as JPEG Lossless SV1.
 pub const IMPLEMENTATION_VERSION_NAME: &str = "SHLDICOM_SV1_1";
+/// JPEG 2000 Image Compression (Lossless Only).
+pub const JPEG_2000_LOSSLESS: &str = "1.2.840.10008.1.2.4.90";
+/// (0002,0013) of a file this crate re-encoded as JPEG 2000 Lossless.
+pub const IMPLEMENTATION_VERSION_NAME_J2K: &str = "SHLDICOM_J2K_1";
+/// The transfer syntaxes [`transcode_part10`] writes.
+pub const SUPPORTED_TRANSFER_SYNTAXES: [&str; 2] = [JPEG_LOSSLESS_SV1, JPEG_2000_LOSSLESS];
 
 const TS_IMPLICIT_LE: &str = "1.2.840.10008.1.2";
 const TS_EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
@@ -79,7 +100,7 @@ pub fn transcode_part10(input: &[u8], ts_uid: &str) -> Result<Vec<u8>, Declined>
 pub fn transcode_part10_report(input: &[u8], ts_uid: &str) -> (Result<Vec<u8>, Declined>, Report) {
     let mut report = Report { input_bytes: input.len(), output_bytes: input.len(), ..Report::default() };
     let r = match ts_uid {
-        JPEG_LOSSLESS_SV1 => transcode(input, &mut report),
+        JPEG_LOSSLESS_SV1 | JPEG_2000_LOSSLESS => transcode(input, ts_uid, &mut report),
         other => Err(no(format!("transfer syntax {other} is not one this encoder writes"))),
     };
     if let Ok(out) = &r {
@@ -236,7 +257,11 @@ struct Prepared<'a> {
 /// here), so a build of this crate carries no other codec.
 fn decode(bytes: &[u8]) -> Result<shl_dicom_decode::Canonical, shl_dicom_decode::Error> {
     shl_dicom_decode::decode_file_with(bytes, |ts| {
-        (ts == JPEG_LOSSLESS_SV1).then_some(shl_codec_jpeg::decode_frame as shl_codec_common::DecodeFn)
+        match ts {
+            JPEG_LOSSLESS_SV1 => Some(shl_codec_jpeg::decode_frame as shl_codec_common::DecodeFn),
+            JPEG_2000_LOSSLESS => Some(shl_codec_jpeg2000::decode_frame as shl_codec_common::DecodeFn),
+            _ => None,
+        }
     })
 }
 
@@ -265,6 +290,9 @@ fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
         _ => return Err(no("Pixel Data is not native")),
     };
     let photometric = bytes_of(&elems, 0x0028_0004).map(text).unwrap_or_default();
+    // YBR_FULL is declined: the samples survive, but dcmdjpeg converts YCbCr lossless JPEG to RGB
+    // by default with IJG's integer arithmetic, which differs from the standard conversion
+    // (±1 on some pixels), so a dcmtk reader would not get the original image back.
     if !matches!(photometric.as_str(), "MONOCHROME1" | "MONOCHROME2" | "PALETTE COLOR" | "RGB") {
         return Err(no(format!("photometric interpretation {photometric:?} is not encoded (MONOCHROME1/2, PALETTE COLOR and RGB are)")));
     }
@@ -277,8 +305,11 @@ fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
     }
     // The canonical pixels: what is encoded, and the reference for the self-check.
     let before = decode(input).map_err(|e| no(format!("input does not decode: {e}")))?;
-    if !before.inferred.is_empty() {
-        let what: Vec<String> = before.inferred.iter().map(|i| format!("{} ({})", i.attribute, i.reason)).collect();
+    // A missing Planar Configuration the decoder settled from the pixels is fine: the output
+    // states it (0, as JPEG requires) and the pixel self-check guards the reading.
+    let unsettled: Vec<_> = before.inferred.iter().filter(|i| i.attribute != "PlanarConfiguration").collect();
+    if !unsettled.is_empty() {
+        let what: Vec<String> = unsettled.iter().map(|i| format!("{} ({})", i.attribute, i.reason)).collect();
         return Err(no(format!("the decoder had to infer {}", what.join("; "))));
     }
     if before.float {
@@ -303,11 +334,12 @@ fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
 fn version_name(ts: &str) -> Option<&'static str> {
     match ts {
         JPEG_LOSSLESS_SV1 => Some(IMPLEMENTATION_VERSION_NAME),
+        JPEG_2000_LOSSLESS => Some(IMPLEMENTATION_VERSION_NAME_J2K),
         _ => None,
     }
 }
 
-fn transcode(input: &[u8], report: &mut Report) -> Result<Vec<u8>, Declined> {
+fn transcode(input: &[u8], ts: &str, report: &mut Report) -> Result<Vec<u8>, Declined> {
     let p = prepare(input)?;
     report.pixel_bytes_in = p.pixel_len;
     report.frames = p.before.frames;
@@ -320,6 +352,17 @@ fn transcode(input: &[u8], report: &mut Report) -> Result<Vec<u8>, Declined> {
     let frame_samples = b.rows as usize * b.columns as usize * usize::from(b.samples_per_pixel);
     let frame_bytes = frame_samples * bps;
     let encode = |frame: &[u8]| -> Result<Vec<u8>, Declined> {
+        if ts == JPEG_2000_LOSSLESS {
+            // JPEG 2000 takes the values: unsigned below 2^P, signed sign-extended.
+            let samples: Vec<i32> = match (bps, b.signed) {
+                (1, false) => frame.iter().map(|&v| i32::from(v) & i32::from(mask)).collect(),
+                (1, true) => frame.iter().map(|&v| i32::from(v as i8)).collect(),
+                (_, false) => frame.chunks_exact(2).map(|v| i32::from(u16::from_le_bytes([v[0], v[1]]) & mask)).collect(),
+                (_, true) => frame.chunks_exact(2).map(|v| i32::from(i16::from_le_bytes([v[0], v[1]]))).collect(),
+            };
+            return shl_codec_jpeg2000_encode::encode_lossless(&samples, b.columns, b.rows, b.samples_per_pixel, precision, b.signed)
+                .map_err(|e| no(format!("encoder: {e}")));
+        }
         let samples: Vec<u16> = if bps == 1 {
             frame.iter().map(|&v| u16::from(v) & mask).collect()
         } else {
@@ -334,7 +377,7 @@ fn transcode(input: &[u8], report: &mut Report) -> Result<Vec<u8>, Declined> {
     }
     let fragments = encode_all(&chunks, encode)?;
     let refs: Vec<&[u8]> = fragments.iter().map(Vec::as_slice).collect();
-    wrap(p, JPEG_LOSSLESS_SV1, refs, report)
+    wrap(p, ts, refs, report)
 }
 
 /// Encode every frame; outside wasm, large multi-frame images on several threads. The result is the
@@ -401,11 +444,17 @@ fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -
         value: Value::Encapsulated { bot, fragments: fragments.iter().map(|f| f.to_vec()).collect() },
     };
     drop(fragments);
+    // Planar Configuration 0, which JPEG requires: changed from 1, or added where it was missing
+    // and the decoder settled the layout from the pixels.
     let planar_changed = us(&elems, 0x0028_0006) == Some(1);
+    let planar_added = before.samples_per_pixel == 3 && find(&elems, 0x0028_0006).is_none();
     if planar_changed {
         if let Some(e) = elems.iter_mut().find(|e| e.tag == 0x0028_0006) {
             e.value = Value::Owned(vec![0, 0]);
         }
+    } else if planar_added {
+        let at = elems.iter().position(|e| e.tag > 0x0028_0006).unwrap_or(elems.len());
+        elems.insert(at, Elem { tag: 0x0028_0006, vr: *b"US", value: Value::Owned(vec![0, 0]) });
     }
     let mut out = Vec::with_capacity(meta.end + report.pixel_bytes_out + ds.len().saturating_sub(pixel_len));
     write_meta(&mut out, &meta, ts, name);
@@ -426,7 +475,7 @@ fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -
     if ds::flatten(&in_elems, &skip) != ds::flatten(&out_elems, &skip) {
         return Err(no("self-check mismatch: a non-pixel value changed"));
     }
-    if !planar_changed && bytes_of(&in_elems, 0x0028_0006) != bytes_of(&out_elems, 0x0028_0006) {
+    if !planar_changed && !planar_added && bytes_of(&in_elems, 0x0028_0006) != bytes_of(&out_elems, 0x0028_0006) {
         return Err(no("self-check mismatch: Planar Configuration changed"));
     }
     drop((in_elems, out_elems));

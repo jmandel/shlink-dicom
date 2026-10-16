@@ -77,8 +77,26 @@ pub fn transcode_part10(input: &[u8], ts_uid: &str) -> TranscodeResult {
     }
 }
 
+/// The transfer syntaxes `transcode_part10` writes.
+#[wasm_bindgen]
+pub fn supported_transfer_syntaxes() -> Vec<String> {
+    shl_dicom_transcode::SUPPORTED_TRANSFER_SYNTAXES.iter().map(|s| s.to_string()).collect()
+}
+
 /// `transcode_part10(input, "1.2.840.10008.1.2.4.70")`.
 #[wasm_bindgen]
 pub fn transcode_part10_sv1(input: &[u8]) -> TranscodeResult {
     transcode_part10(input, shl_dicom_transcode::JPEG_LOSSLESS_SV1)
+}
+
+/// Benchmark builds only: encode `samples` (16-bit little-endian, one component) as JPEG 2000 and
+/// return the codestream length, to time the encoder without parsing or self-checks.
+#[cfg(feature = "bench")]
+#[wasm_bindgen]
+pub fn encode_only_j2k(samples: &[u8], columns: u32, rows: u32, precision: u8, signed: bool) -> usize {
+    let s: Vec<i32> = samples
+        .chunks_exact(2)
+        .map(|b| if signed { i32::from(i16::from_le_bytes([b[0], b[1]])) } else { i32::from(u16::from_le_bytes([b[0], b[1]])) })
+        .collect();
+    shl_codec_jpeg2000_encode::encode_lossless(&s, columns, rows, 1, precision, signed).map_or(0, |v| v.len())
 }

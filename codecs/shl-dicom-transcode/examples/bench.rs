@@ -1,4 +1,4 @@
-//! `bench DIR [REPEAT]`: transcode every file under DIR in one process and print the throughput
+//! `bench DIR [REPEAT] [TS]`: transcode every file under DIR in one process and print the throughput
 //! (native pixel MB per second, both self-checks included) and the compression ratio.
 fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -15,6 +15,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = std::path::Path::new(args.get(1).map(String::as_str).unwrap_or("."));
     let repeat: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let ts = args.get(3).map(String::as_str).unwrap_or(shl_dicom_transcode::JPEG_LOSSLESS_SV1);
     let mut paths = Vec::new();
     files(dir, &mut paths);
     paths.sort();
@@ -23,7 +24,7 @@ fn main() {
     let t0 = std::time::Instant::now();
     for _ in 0..repeat {
         for b in &inputs {
-            let (r, rep) = shl_dicom_transcode::transcode_part10_sv1_report(b);
+            let (r, rep) = shl_dicom_transcode::transcode_part10_report(b, ts);
             if r.is_ok() {
                 pin += rep.pixel_bytes_in;
                 pout += rep.pixel_bytes_out;
