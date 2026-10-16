@@ -21,7 +21,7 @@ import { cwasmPackages, simdInstructions } from "./lib/cwasm-info.mjs";
 import { compare, findBaseline, terminalSummary, writeReport } from "./report.mjs";
 
 const HELP = `node codecs/bench/run.mjs [options]
-  --format F        only this corpus format (repeatable): uncompressed rle jpeg-dct jpeg-lossless jpeg-ls jpeg2000 htj2k
+  --format F        only this corpus format (repeatable): uncompressed rle jpeg-dct jpeg-lossless jpeg-ls jpeg2000 htj2k jpeg-xl
   --case S          only manifest ids containing S
   --tag T           only cases with this tag (repeatable): small medium large synthetic real colour multiframe ...
   --runners LIST    comma list of native,node,chromium-worker,chromium-cwasm,chromium-main,ref (default: all)

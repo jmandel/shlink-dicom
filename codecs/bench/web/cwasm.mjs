@@ -11,13 +11,20 @@ export const CWASM = {
   charls: { dir: `${NM}/codec-charls/dist/`, js: "charlswasm_decode.js", cls: "JpegLSDecoder", formats: ["jpeg-ls"] },
   openjpeg: { dir: `${NM}/codec-openjpeg/dist/`, js: "openjpegwasm_decode.js", cls: "J2KDecoder", formats: ["jpeg2000", "htj2k"] },
   openjph: { dir: `${NM}/codec-openjph/dist/`, js: "openjphjs.js", cls: "HTJ2KDecoder", formats: ["htj2k"] },
+  // Built locally by reference/libjxl-wasm/build.sh (no Cornerstone package decodes JPEG XL);
+  // skipped when it has not been built.
+  libjxl: { dir: "/bench/reference/libjxl-wasm/dist/", js: "libjxlwasm_decode.js", cls: "JxlDecoder", formats: ["jpeg-xl"], optional: true },
 };
 
 const sources = new Map();
 /** A fresh Emscripten module instance (after an error the old one may be in an aborted state). */
 async function load(name) {
   const p = CWASM[name];
-  if (!sources.has(name)) sources.set(name, await (await fetch(p.dir + p.js)).text());
+  if (!sources.has(name)) {
+    const r = await fetch(p.dir + p.js);
+    if (!r.ok) throw new Error(`${p.dir + p.js}: HTTP ${r.status}`);
+    sources.set(name, await r.text());
+  }
   // The packages are UMD scripts; give them a CommonJS `module` and take module.exports.
   const m = { exports: {} };
   new Function("module", "exports", sources.get(name))(m, m.exports);
@@ -70,6 +77,7 @@ export async function runCwasm(c, frames, npy, opts) {
   const recs = [];
   for (const [name, p] of Object.entries(CWASM)) {
     if (!p.formats.includes(c.fmt)) continue;
+    if (p.optional && !(await fetch(p.dir + p.js, { method: "HEAD" })).ok) continue;
     const rec = { case: c.id, build: name };
     let mod = null;
     try {

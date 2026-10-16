@@ -63,7 +63,7 @@ The wasm module comes from `codecs/shl-dicom-wasm-bench`, which exposes a few ra
 | `chromium-worker` | headless Chromium; each build runs in a fresh dedicated Web Worker, so main-thread work cannot interfere. The page is cross-origin isolated, which gives `performance.now()` 5 µs resolution. |
 | `chromium-cwasm` | C/C++ codecs compiled to wasm, in the same worker, right after our builds on each case. These are the Cornerstone packages that a browser viewer would otherwise use (versions pinned in `package.json`): `@cornerstonejs/codec-libjpeg-turbo-8bit`, `codec-charls`, `codec-openjpeg`, `codec-openjph`. They decode the frame codestreams produced by our own frame splitter (`bench_extract_frames`), and only their `decode()` call is timed. |
 | `chromium-main` | the same loop on the page's main thread (simd build only), for comparison |
-| `ref` | native C/C++ libraries timed in-process from Python (`reference/ref_bench.py`): libjpeg-turbo (Pillow and imagecodecs), libjpeg (pylibjpeg), CharLS (pyjpegls), OpenJPEG (pylibjpeg), OpenJPH (imagecodecs), pylibjpeg-rle and GDCM |
+| `ref` | native C/C++ libraries timed in-process from Python (`reference/ref_bench.py`): libjpeg-turbo (Pillow and imagecodecs), libjpeg (pylibjpeg), CharLS (pyjpegls), OpenJPEG (pylibjpeg), OpenJPH (imagecodecs), libjxl (imagecodecs, one thread), pylibjpeg-rle and GDCM |
 
 **Per case.** Each runner does the following:
 
@@ -100,6 +100,9 @@ Which package covers which format:
 | CharLS | JPEG-LS | no |
 | OpenJPEG | JPEG 2000 and HTJ2K | no |
 | OpenJPH | HTJ2K | yes |
+| libjxl 0.12.0 | JPEG XL | yes |
+
+No Cornerstone package decodes JPEG XL, so libjxl is built locally: `codecs/bench/reference/libjxl-wasm/build.sh` (needs the Emscripten SDK) compiles libjxl 0.12.0 with simd128, single-threaded, and a small wrapper with the same interface as the packages into `reference/libjxl-wasm/dist/`. It asks libjxl for integers at the codestream's bit depth, as our DICOM wrapper returns them. Until it has been built, `chromium-cwasm` skips JPEG XL.
 
 RLE and uncompressed have no package. Each package's SIMD use is measured with `wasm-tools` and recorded in the results.
 

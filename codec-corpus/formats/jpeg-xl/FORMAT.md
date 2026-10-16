@@ -65,6 +65,7 @@ There is no reduced-resolution decode: the CLI decodes in full and box-downsampl
 | Generated .110 | `gen-<seed>-cjxl-lossless-e1`, `-e7`: 8, 12 and 16-bit, signed 12 and 16-bit, RGB, 3 frames, 1×1, pydicom CT_small and MR_small | corpus seeds; cjxl 0.12.0 |
 | Generated .112 | `gen-<seed>-cjxl-d1`, `-d3`, `-d1-modular` on the unsigned seeds (colour declared XYB) | corpus seeds; cjxl 0.12.0 |
 | Generated .111 | `gen-synth-*-ijg-baseline-cjxl-jpeg`: `cjxl --lossless_jpeg=1` of the corpus's JPEG Baseline cases | corpus jpeg-dct cases; cjxl 0.12.0 |
+| Benchmark (.110, .112) | `gen-bench-photo-rgb8-2048-cjxl-*` (d1, d3, lossless e1, e7), `gen-bench-dx2048-u12-cjxl-*` (d1, lossless e1, e7), `gen-idc-midrcricor-10f1e4b4-cjxl-*` (d1, lossless e1) from a real 3032×2520 DX radiograph | bench seeds; IDC MIDRC-RICORD-1C (CC BY-NC 4.0); cjxl 0.12.0; `scripts/sources/jpegxl.py --bench-only` |
 
 ## Rulings
 
@@ -74,7 +75,7 @@ None needed. Lossy frames (.112, and .111 decoded to pixels) are within 1 of lib
 
 2026-10-16, with `shl-jpegxl`.
 
-- **Corpus:** 40/40 pass: 21 lossless (.110; 19 from seeds, 2 real) exact, 15 .112 and 4 .111 within 1 of libjxl.
+- **Corpus:** 49/49 pass: 26 lossless (.110; 24 generated, 2 real) exact, 19 .112 and 4 .111 within 1 of libjxl.
 - **Fuzz:** `cargo-fuzz`, no sanitizer, overflow checks on (`RUSTC_BOOTSTRAP=1 cargo-fuzz run -O -a -s none`), on the final code. No crashes, timeouts or out-of-memory in any run.
   - `codecs/shl-jpegxl/fuzz`, target `decode` (images capped at 2^20 pixels), seeded with the corpus frames, the conformance files and earlier fuzz corpora: 30 minutes, 4 processes, 2,425,609 inputs.
   - same crate, target `reconstruct` (JPEG reconstruction), seeded with the 44 recompressed JPEGs above: 30 minutes, 2 processes, 2,801,726 inputs.

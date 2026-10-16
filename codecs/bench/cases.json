@@ -1,5 +1,5 @@
 {
- "version": 1,
+ "version": 2,
  "about": "Benchmark cases for codecs/bench. Each entry names a codec-corpus case (<format>/<case id>). Pixel metadata, max_abs and the oracle come from the corpus at run time; sample_sha256 pins the file so results stay comparable. Bump version when the set changes. sample_sha256 and oracle_sha256 pin the file and the expected pixels; the runner warns when either differs (regenerated synthetic files get new UIDs, so their sample hash changes while the pixels do not).",
  "defaults": {
   "warmup": 2,
@@ -593,6 +593,105 @@
    ],
    "sample_sha256": "38f8e8adf46b928a12f1905df1405bc8a32c10286733c47562c75be84ceae00e",
    "oracle_sha256": "9d87240604f5d7522c6a8056ace6cefc2c8d6d0b07bd6e7303d5e5b21af9a49e"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-photo-rgb8-2048-cjxl-d1",
+   "label": "RGB 2048² lossy d1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "63f5ff73569f90248a0d1f4f5db98cf0d8ed17c37633fe9efc3b00e64a97af46",
+   "oracle_sha256": "3f1e5e61e969a1db5a475bf0117dc1d0414f7675c94d10c2273970144c712649"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-photo-rgb8-2048-cjxl-d3",
+   "label": "RGB 2048² lossy d3 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "05cbfd13dc469b100b1734f84821718e17fd598ed2f9040adcb2090287348226",
+   "oracle_sha256": "0d4a9c2b209abad8705ef2351287f2886f47302a6d75e2a3e0541384bf4faa6c"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-photo-rgb8-2048-cjxl-lossless-e1",
+   "label": "RGB 2048² lossless e1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "4c3127ceeb366a2a10c44b81a6f6eb4fd4f50242a0624b927116211d54912f77",
+   "oracle_sha256": "ecb60566e609ad4987317d7fe11c4afd85845067195f4fdf85be081fc6f9e14b"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-photo-rgb8-2048-cjxl-lossless-e7",
+   "label": "RGB 2048² lossless e7 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "colour"
+   ],
+   "sample_sha256": "67536181e025be63e9ab0c69c86b97f48ddbdf300aa1b7b15bff3b25b2f25d49",
+   "oracle_sha256": "ecb60566e609ad4987317d7fe11c4afd85845067195f4fdf85be081fc6f9e14b"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-dx2048-u12-cjxl-d1",
+   "label": "DX 2048² u12 lossy d1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "1379bcfe6c77706ccdad7dfbc019dc611e978f658c9b97ccb2da50101689422b",
+   "oracle_sha256": "b2c7a2911b178d413a529ba4274a0f9daafa01a7d2b35081e1271ccc84246850"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-dx2048-u12-cjxl-lossless-e1",
+   "label": "DX 2048² u12 lossless e1 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "cabe61e243fb82269be38c6fd73ea00c84d74254b233ec2e7c1192271ef3e37f",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "jpeg-xl/gen-bench-dx2048-u12-cjxl-lossless-e7",
+   "label": "DX 2048² u12 lossless e7 (synthetic)",
+   "tags": [
+    "synthetic",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "94f3639ad29d4f6df84418a9fb5d17bb69df4a016d3790c61cb2a7acb4e2ed94",
+   "oracle_sha256": "ccadcc0548f7bc238a6bb117c829641ce7baa980af14963c24cda8042e403ad4"
+  },
+  {
+   "id": "jpeg-xl/gen-idc-midrcricor-10f1e4b4-cjxl-d1",
+   "label": "DX 3032×2520 12-bit lossy d1",
+   "tags": [
+    "real",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "438b7e1215bcc57397eaf75c1d3908bb5258c638a8ce3b9558c06b0d9e086ced",
+   "oracle_sha256": "8879e9298839999a474d97a5f15058694b80dc4784cfde0ed58bcaec799e2d97"
+  },
+  {
+   "id": "jpeg-xl/gen-idc-midrcricor-10f1e4b4-cjxl-lossless-e1",
+   "label": "DX 3032×2520 12-bit lossless e1",
+   "tags": [
+    "real",
+    "large",
+    "12-bit"
+   ],
+   "sample_sha256": "9869a4396ddcc8066c242cdbaaadad023614e01bd4104ac01025722e08e689bc",
+   "oracle_sha256": "f464d11880f50607fac89652766b4f2311aabc2ea0db3aae56d5109628071e6a"
   }
  ]
 }

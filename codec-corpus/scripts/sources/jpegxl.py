@@ -14,7 +14,13 @@ libjxl's cjxl and wrapped in DICOM, one fragment per frame:
         modular); oracle from the references.
   .111  cjxl --lossless_jpeg=1 of the 8-bit JPEG Baseline corpus cases made from the seeds.
 
-Usage:  uv run python scripts/sources/jpegxl.py [--cache DIR]
+Benchmark cases (codecs/bench), from the large bench seeds (codecs/bench/scripts/make_cases.py)
+and one real IDC radiograph, at the settings in BENCH and BENCH_FROM_CASES:
+  bench-photo-rgb8-2048, bench-dx2048-u12   cjxl -d 1, -d 3 (photo only), -d 0 -e 1, -d 0 -e 7
+  jpeg-lossless/idc-…-dx-midrcricor-…        its pixels (the case's oracle), cjxl -d 1 and -d 0 -e 1;
+                                             CC BY-NC 4.0, like its source (MIDRC-RICORD-1C)
+
+Usage:  uv run python scripts/sources/jpegxl.py [--cache DIR] [--bench-only]
 """
 
 from __future__ import annotations
@@ -47,6 +53,12 @@ for _uid, _name in [("1.2.840.10008.1.2.4.110", "JPEG XL Lossless"),
 FMT = "jpeg-xl"
 SEEDS = ["synth-u8-64x48", "synth-u12-65x31", "synth-u16-128x96", "synth-s16-64x64", "synth-s12-40x40",
          "synth-rgb8-60x40", "synth-u16-3frame-32x32", "synth-u8-1x1", "pydicom-CT_small", "pydicom-MR_small"]
+
+# Bench seeds -> the variants of generated() to make for them.
+BENCH = {"bench-photo-rgb8-2048": ["d1", "d3", "lossless-e1", "lossless-e7"],
+         "bench-dx2048-u12": ["d1", "lossless-e1", "lossless-e7"]}
+# Real frames from other formats' cases (their oracle is the pixel source) -> variants.
+BENCH_FROM_CASES = {("jpeg-lossless", "idc-jpgsv1-mono2-u12of16-sf-dx-midrcricor-10f1e4b4"): ["d1", "lossless-e1"]}
 
 REAL = [
     ("cs3d", "cs3d/packages/dicomImageLoader/testImages/CTImage.dcm_JPEGXLLosslessTransferSyntax_1.2.840.10008.1.2.4.110.dcm",
@@ -104,9 +116,20 @@ def cjxl(td: Path, data: bytes, ext: str, args: list[str]) -> bytes:
     return out.read_bytes()
 
 
-def generated() -> None:
+def variants_for(signed: bool, spp: int) -> list[tuple[str, str, list[str], str | None]]:
+    v = [("lossless-e1", "1.2.840.10008.1.2.4.110", ["-d", "0", "-e", "1"], None),
+         ("lossless-e7", "1.2.840.10008.1.2.4.110", ["-d", "0", "-e", "7"], None)]
+    if not signed:
+        xyb = "XYB" if spp == 3 else None
+        v += [("d1", "1.2.840.10008.1.2.4.112", ["-d", "1"], xyb),
+              ("d3", "1.2.840.10008.1.2.4.112", ["-d", "3"], xyb),
+              ("d1-modular", "1.2.840.10008.1.2.4.112", ["-d", "1", "-m", "1"], xyb)]
+    return v
+
+
+def generated(seed_ids: list[str] = SEEDS, only: dict[str, list[str]] | None = None) -> None:
     seeds = ROOT / "seeds"
-    for sid in SEEDS:
+    for sid in seed_ids:
         npy, dcm = seeds / f"{sid}.npy", seeds / f"{sid}.dcm"
         if not npy.exists():
             print(f"{FMT:10} seed {sid} missing; run generate.py")
@@ -117,13 +140,9 @@ def generated() -> None:
         frames = [(arr[k].astype(np.int64) & ((1 << bits) - 1)) for k in range(arr.shape[0])]
         frames = [f[..., 0] if spp == 1 else f for f in frames]
         ext = "ppm" if spp == 3 else "pgm"
-        variants = [("lossless-e1", "1.2.840.10008.1.2.4.110", ["-d", "0", "-e", "1"], None),
-                    ("lossless-e7", "1.2.840.10008.1.2.4.110", ["-d", "0", "-e", "7"], None)]
-        if not signed:
-            xyb = "XYB" if spp == 3 else None
-            variants += [("d1", "1.2.840.10008.1.2.4.112", ["-d", "1"], xyb),
-                         ("d3", "1.2.840.10008.1.2.4.112", ["-d", "3"], xyb),
-                         ("d1-modular", "1.2.840.10008.1.2.4.112", ["-d", "1", "-m", "1"], xyb)]
+        variants = variants_for(signed, spp)
+        if only is not None:
+            variants = [v for v in variants if v[0] in only[sid]]
         for name, ts, args, photometric in variants:
             if min(arr.shape[1:3]) < 8 and name != "lossless-e7":
                 continue                         # one tiny case is enough
@@ -135,6 +154,34 @@ def generated() -> None:
             wrap(dcm, streams, ts, dst, photometric)
             add(cid, dst, {"kind": "generated", "seed": sid, "encoder": f"cjxl {' '.join(args)} (libjxl 0.12.0)"},
                 ts == "1.2.840.10008.1.2.4.110")
+
+
+def from_cases() -> None:
+    """Bench cases from real frames of other formats' cases (BENCH_FROM_CASES)."""
+    for (fmt, src_id), wanted in BENCH_FROM_CASES.items():
+        src = sample_path(fmt, src_id)
+        npy = ROOT / "formats" / fmt / "oracle" / f"{src_id}.npy"
+        if not (src.exists() and npy.exists()):
+            print(f"{FMT:10} {fmt}/{src_id} or its oracle missing")
+            continue
+        arr = np.load(npy)                       # (frames, rows, cols, spp)
+        ds = pydicom.dcmread(src)
+        bits, spp = int(ds.BitsStored), arr.shape[3]
+        frames = [(arr[k].astype(np.int64) & ((1 << bits) - 1)) for k in range(arr.shape[0])]
+        frames = [f[..., 0] if spp == 1 else f for f in frames]
+        ext = "ppm" if spp == 3 else "pgm"
+        short = src_id.split("-")[-2] + "-" + src_id.split("-")[-1]
+        for name, ts, args, photometric in variants_for(int(ds.PixelRepresentation) == 1, spp):
+            if name not in wanted:
+                continue
+            cid = f"gen-idc-{short}-cjxl-{name}"
+            dst = sample_path(FMT, cid)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir="/media/barracuda") as td:
+                streams = [cjxl(Path(td), pnm(f, bits), ext, args) for f in frames]
+            wrap(src, streams, ts, dst, photometric)
+            add(cid, dst, {"kind": "generated", "from_case": f"{fmt}/{src_id}",
+                           "encoder": f"cjxl {' '.join(args)} (libjxl 0.12.0)", "license": "CC BY-NC 4.0"}, False)
 
 
 def recompressed() -> None:
@@ -178,12 +225,16 @@ def real(cache: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", type=Path, default=Path.home() / ".cache" / "shl-quirks")
+    ap.add_argument("--bench-only", action="store_true", help="make only the benchmark cases")
     a = ap.parse_args()
     if shutil.which("cjxl") is None:
         sys.exit("cjxl not installed")
-    real(a.cache)
-    generated()
-    recompressed()
+    if not a.bench_only:
+        real(a.cache)
+        generated()
+        recompressed()
+    generated(list(BENCH), BENCH)
+    from_cases()
 
 
 if __name__ == "__main__":

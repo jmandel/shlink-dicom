@@ -3,7 +3,7 @@
 For each case the frames are split out once with pydicom (not timed); one "run" is the decode of
 every frame's codestream, so the number is comparable with our `codec` stage. GDCM is timed on
 the whole file (parse + decode), comparable with our `total`. All libraries run single-threaded
-(OpenJPEG through imagecodecs is asked for one thread; the others do not thread).
+(OpenJPEG and libjxl through imagecodecs are asked for one thread; the others do not thread).
 
 Checks: each library's output must have the expected number of samples per frame. Pixel values
 are not compared (these are the references); a size mismatch marks the record failed.
@@ -68,9 +68,12 @@ def libraries(fmt: str, case: dict):
     elif fmt == "htj2k":
         out.append(("OpenJPH (imagecodecs)", "openjph", "frame", lambda cs: imagecodecs.htj2k_decode(cs)))
         out.append(("OpenJPEG (pylibjpeg)", "openjpeg", "frame", lambda cs: openjpeg.decode(cs)))
+    elif fmt == "jpeg-xl":
+        # Single-threaded; integer output at the codestream's bit depth, as the DICOM wrapper gives.
+        out.append(("libjxl (imagecodecs)", "libjxl", "frame", lambda cs: imagecodecs.jpegxl_decode(cs, numthreads=1)))
     elif fmt == "rle":
         out.append(("pylibjpeg-rle (Rust)", "pylibjpeg-rle", "frame-ds", lambda cs, ds: rle.decode_pixel_data(cs, ds)))
-    if fmt != "uncompressed":
+    if fmt not in ("uncompressed", "jpeg-xl"):   # GDCM has no JPEG XL
         out.append(("GDCM (whole file)", "gdcm", "file", gdcm_decode))
     return out
 
