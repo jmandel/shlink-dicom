@@ -164,6 +164,17 @@ impl<'a> Reader<'a> {
 fn scan_end(d: &[u8], start: usize) -> usize {
     let mut p = start;
     while p < d.len() {
+        // Skip eight bytes at a time while none is 0xFF (a zero byte in the complement).
+        while let Some(c) = d.get(p..p + 8) {
+            let nw = !u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+            if nw.wrapping_sub(0x0101_0101_0101_0101) & !nw & 0x8080_8080_8080_8080 != 0 {
+                break;
+            }
+            p += 8;
+        }
+        if p >= d.len() {
+            break;
+        }
         if d[p] != 0xFF {
             p += 1;
             continue;

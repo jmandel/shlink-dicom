@@ -366,6 +366,29 @@ fn decode_rows(
     psv: u8,
     initial: i32,
 ) -> Result<()> {
+    // One copy of the row loop per predictor, so the predictor is not chosen per sample.
+    match psv {
+        1 => decode_rows_p::<1>(r, tabs, planes, cw, ch, ri, initial),
+        2 => decode_rows_p::<2>(r, tabs, planes, cw, ch, ri, initial),
+        3 => decode_rows_p::<3>(r, tabs, planes, cw, ch, ri, initial),
+        4 => decode_rows_p::<4>(r, tabs, planes, cw, ch, ri, initial),
+        5 => decode_rows_p::<5>(r, tabs, planes, cw, ch, ri, initial),
+        6 => decode_rows_p::<6>(r, tabs, planes, cw, ch, ri, initial),
+        _ => decode_rows_p::<7>(r, tabs, planes, cw, ch, ri, initial),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_rows_p<const PSV: u8>(
+    r: &mut BitReader,
+    tabs: &[&HuffTable],
+    planes: &mut [&mut Plane],
+    cw: usize,
+    ch: usize,
+    ri: usize,
+    initial: i32,
+) -> Result<()> {
+    let psv = PSV;
     let n = planes.len();
     let mut start = LineStart { row: 0, col: 0 };
     for y in 0..ch {
@@ -402,9 +425,14 @@ fn decode_rows(
                     cur[0] = (i32::from(up[0]).wrapping_add(diff_b(r, &mut b, t)?) & 0xFFFF) as u16;
                     xx = 1;
                 }
-                for xx in xx..end {
-                    let pred = predict(psv, i32::from(cur[xx - 1]), i32::from(up[xx]), i32::from(up[xx - 1]));
-                    cur[xx] = (pred.wrapping_add(diff_b(r, &mut b, t)?) & 0xFFFF) as u16;
+                // Left (a) and above-left (c) carried in registers.
+                let (mut ra, mut rc) = (i32::from(cur[xx - 1]), i32::from(up[xx - 1]));
+                for (c, &u) in cur[xx..end].iter_mut().zip(&up[xx..end]) {
+                    let rb = i32::from(u);
+                    let v = (predict(psv, ra, rb, rc).wrapping_add(diff_b(r, &mut b, t)?) & 0xFFFF) as u16;
+                    *c = v;
+                    ra = i32::from(v);
+                    rc = rb;
                 }
             } else {
                 for xx in x..end {
