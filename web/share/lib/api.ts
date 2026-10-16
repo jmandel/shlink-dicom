@@ -249,7 +249,9 @@ export class ShareApi {
       };
       x.onabort = () => clearTimeout(timer);
       arm();
-      x.send(bytes as unknown as XMLHttpRequestBodyInit);
+      // As a Blob: Chromium sends a typed-array body through a slow path (about 14 MB/s, and
+      // 120 ms of main thread per 8 MiB); a Blob of the same bytes goes at 170+ MB/s.
+      x.send(new Blob([bytes as BlobPart]));
     });
   }
 }
