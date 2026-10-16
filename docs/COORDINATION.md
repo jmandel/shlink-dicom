@@ -111,6 +111,12 @@ Related docs:
   - **Storage:** rusty-s3 + reqwest; refcounted blobs.
   - **Who:** pi (tmux session 1) wrote the plan. Part 1 is one new Claude agent once web/view is quiet; Part 2 is the Share agent after its current items; pi reviews Part 1 against the plan.
 
+- **Compression and transfer syntax (Josh, 15 Oct evening).**
+  - SMART Imaging Access: servers SHOULD be able to transcode to a lossless compressed transfer syntax. Document a proper negotiation: apps list preferred syntaxes in `Accept`, with `transfer-syntax=*` as the fallback everyone can handle. Clients then decide whether to re-encode what they get, or keep it large. Push this upstream (draft for Josh before anything is posted).
+  - shlink-dicom's protocol doesn't change. Only the share page's packing defaults may: what it asks the SMART source for, and whether it re-encodes uncompressed images before encrypting.
+  - Candidate encodings: those IHE PDI's DVD/USB options require readers to handle (JPEG Lossless SV1, JPEG 2000 lossless).
+  - The measurement agent (a18873dede250f0de) is gathering ratios and speed on the Josh Example studies. Then: the issue draft, the packing defaults, PROPOSAL §11.1 (it still says HTJ2K/JPEG-LS), and whether the sandbox should serve precomputed compressed copies so the negotiation is exercised.
+
 ## Decisions pending (ask Josh)
 
 - **PROPOSAL §8, DiagnosticReport** (Share agent's suggestion, not yet written into the spec):
