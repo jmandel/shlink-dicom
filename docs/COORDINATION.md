@@ -135,6 +135,8 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **16 Oct, about 11:00: performance phase 2 planned** ([PERF-PLAN.md](PERF-PLAN.md), 854ad43). T0 (measurement, stale PERF pages, regression check, small-HTJ2K wasm slowdown) went to the decoder agent a4b3a594727c938f4 on branch perf-t0; it does its quiet full run only once e2e-perf's timing matrices stop. T6 continues in a26e1d2aaf1165705. Next: T1/T3/T4 (decoder agent), T2 (encoder agent a5b9622823f9139f4); at most two benchmarking agents at once.
+
 - **16 Oct, about 10:45: three branches landed and deployed (f522017).**
   - **decoder-perf (a4b3a594727c938f4), 12 commits, byte-identical:** SV1 −25–30%, J2K lossless about −20%, J2K lossy 6–9% faster natively, RLE, Bits Stored masking. Small HTJ2K frames are 3–7% slower in wasm. **Follow-up:** htj2k/PERF.md (broken SCALED table) and the jpeg-dct/PERF.md lossless rows are stale.
   - **jxl-primaries (a26e1d2aaf1165705):** wide-gamut XYB output in the image's own primaries with Bradford adaptation, and the HLG inverse OOTF fix. Gap 2 (ICC-tagged lossy decoding to linear sRGB) stays documented.
