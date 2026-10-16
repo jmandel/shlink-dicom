@@ -426,7 +426,11 @@ impl<'c, 'a> Decoder<'c, 'a> {
             // Placeholder passes only (or never included): zero.
             return Ok(false);
         };
-        let avail = block.passes - p0;
+        // A packet header that failed after the first cleanup pass was found leaves p0 past
+        // the passes received.
+        let Some(avail) = block.passes.checked_sub(p0) else {
+            return Err(invalid("HT code-block with a truncated packet header"));
+        };
         if avail > 3 * mb || p0 > 3 * mb {
             return Err(invalid("HT code-block with more passes than bit-planes"));
         }
