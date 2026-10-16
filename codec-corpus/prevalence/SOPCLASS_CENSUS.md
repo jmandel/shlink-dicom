@@ -4,11 +4,11 @@ Every SOP class in NCI Imaging Data Commons, release v25 (26 September 2026), co
 
 ## Headline
 
-- **38 SOP classes, 58.8 million instances.** CT and MR make up 82% of instances; Raw Data (Siemens and GE scanner raw files, 8.0 million) is third.
+- **38 SOP classes, 58.8 million instances.** CT and MR make up 81% of instances; Raw Data (Siemens and GE scanner raw files, 8.0 million) is third.
 - **No Enhanced or Legacy Converted Enhanced CT, MR or PET.** The viewer's per-frame functional-group geometry (`web/core/geometry.ts`) is still exercised in IDC by the classes built on the same multi-frame modules: Segmentation (193,844 multi-frame instances), Whole Slide Microscopy, Breast Tomosynthesis (26,301), Breast Projection X-Ray, Parametric Map and Label Map Segmentation.
 - **Earlier IDC releases held a few Enhanced objects** (counted with [sql/sopclass_older_releases.sql](sql/sopclass_older_releases.sql); see "Retired" below): 52 Enhanced PET (ACRIN-FMISO-Brain), 6 Enhanced MR (ACRIN-DSC-MR-Brain) and 206 Deformable Spatial Registration (Head-Neck-PET-CT). They are gone from v14 on, and their files no longer download from the IDC buckets.
 - **Per-slice rescale is the norm for PET:** 3,941 of 5,885 PET series (67%) have a Rescale Slope or Intercept that differs between instances; so do 1,439 CT series (0.5%) and 135 MR series (0.1%) ([sql/sopclass_rescale_varies.sql](sql/sopclass_rescale_varies.sql), 8.0 GB).
-- **Multi-frame:** all Segmentation, Whole Slide, Tomosynthesis, Breast Projection, RT Dose, US Multi-frame and Multi-frame Byte SC instances; 7 PET, 97 NM and 7 RF instances; no CT, MR, CR, DX or MG instance.
+- **Multi-frame:** every RT Dose, US Multi-frame, Breast Projection, Label Map Segmentation and Multi-frame Byte SC instance; nearly every Tomosynthesis instance (26,301 of 26,649); most Segmentation (193,844 of 216,097) and Whole Slide (264,923 of 391,939) instances; 7 PET, 97 NM and 7 RF instances; no CT, MR, CR, DX or MG instance.
 - **Documents and annotations:** Enhanced SR (262,883, all TID 1500 measurement reports from QIICR), Comprehensive 3D SR (5,408), Comprehensive SR (2,118), Microscopy Bulk Simple Annotations (7,448), Encapsulated STL (2,328), 40 Key Object Selection documents, 1 X-Ray Radiation Dose SR. **No encapsulated PDF or CDA, no waveforms and no video.**
 
 ## Every SOP class
