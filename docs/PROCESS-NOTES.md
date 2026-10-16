@@ -452,3 +452,25 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
 - **Josh: "align everything to latest designs."** The coordinator had proposed redoing the blog visuals after the deploy. Josh wanted them aligned at once, so the visuals agent recomputed the trace diagram from the branch's real files. It verified the computed Range request by decrypting those records back to the identical slice.
 - **The white X-ray.** On his phone, Josh found his oblique hand X-ray rendered almost white while its thumbnail looked fine. The file is MONOCHROME1 with only a VOI LUT, whose descriptor claims 16-bit output but whose data stops at 4095. Our LUT reader corrected data wider than the descriptor, but not narrower. The thumbnail looked right only because some thumbnail paths never received the header and auto-windowed from the pixels. Josh: don't spot-fix it for his files. The brief became one display pipeline for every pixel path, a two-way bit-depth rule with citations, and a conformance check against dcmtk and pydicom across the corpus, the IDC files that use LUTs, and synthetic edge cases.
 - **Blog edits from Josh's LinkedIn read-through.** He cut the "What went wrong" section and reworded the standards paragraph ("I think it would be very interesting to bring this approach into the standards ecosystem…"). LinkedIn edits are made in place, scripted against the editor. Focus emulation over CDP avoids stealing the tab Josh is using, and every sync starts with a diff to catch his own edits.
+
+## 15–16 Oct, night: compression, our own encoders and decoder, interaction, and the post scheduled
+
+- **Lossless compression by default.** Josh asked why patient apps would download bloated uncompressed CD data. The measurement on his real studies (733 images) gave SV1 2.46×, JPEG 2000 2.96×, JPEG-LS 2.98×, HTJ2K 2.80× and Deflate/gzip 1.82×.
+  - **Defaults:** JPEG Lossless SV1, with a JPEG 2000 option, both chosen because DICOM's DVD/USB profiles require readers to decode them.
+  - **Upstream:** Josh opened smart-imaging PR #5, transfer syntax negotiation with `*` as the fallback, by branching in the repo rather than forking, and the measured ratios were posted there.
+  - **Sandbox:** it became the reference server, with dcmtk/OpenJPEG copies.
+- **"We wrote our own decoder, are we not writing an encoder?"** OpenJPEG was dropped before it landed. Both encoders are pure Rust, with a mandatory bit-exact self-check and deterministic output.
+  - **Performance pass:** memory fell sharply (165 → 25 MB for a cine) with byte-identical output.
+  - **Then the decoder:** Josh saw the poster's code map and asked "we're not using our own code??". The vendored hayro/oxideav JPEG 2000 decoders were replaced by our own (shl-jpeg2000) once every gate passed, removing about 89,600 lines. Only jxl-oxide remains.
+- **Synthetic numbers stay out of print.** A synthetic 3.36 GB CT compressed 9×. Josh: test with it, don't cite it. Footnote 3 was cut, and the generator was made realistic (2.7×).
+- **Object-type sweep.**
+  - **Census:** 38 SOP classes and 58.8M instances in IDC, with no Enhanced or Legacy Converted CT/MR/PET.
+  - **Results:** 156 cases, which found 7 defects: PET rescale in reformats, frame order, upside-down NLST SEGs (138,665 in IDC), GSPS, a black breast projection, per-frame decoding, and deflated SEG ingest. All are fixed and live.
+- **Viewer interaction.** Josh disagreed with deferring it ("we can and should make it great").
+  - **Desktop:** OHIF mappings.
+  - **Touch:** Photos-app gestures, with an explicit Adjust mode replacing hidden gestures.
+  - **Coverage:** one model across slices, MPR, video and slides.
+- **The post.** Josh's edits made it first person throughout, with agents as tools, and protocol-first ("any client can follow these steps"). The post message was redone with pi after Josh called Claude's drafts slop. The article was scheduled for Fri 16 Oct, 9 am ET, through LinkedIn's own scheduler.
+- **Process lessons.**
+  - **Commits:** `git add` followed by a bare `git commit` swept another agent's staged rename into a commit and broke a deploy. Now commits take a pathspec, and agents never touch the index.
+  - **Rules from Josh:** short-lived branches that land promptly; never characterize the Ditch the Disk working group's scope.
