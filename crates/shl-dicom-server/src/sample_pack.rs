@@ -2,7 +2,8 @@
 //! one record and one header in memory: each archive member is written to a scratch file while its
 //! header is read, then every study is encrypted record by record (PROPOSAL.md §9.2, §11.1: one
 //! file per study, its series in order) from those files into a staged file, which goes into the blob store.
-//! Instances are kept byte for byte.
+//! Uncompressed images are re-encoded without loss first (compress.rs), as the Share page does;
+//! every other instance is kept byte for byte.
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -14,7 +15,10 @@ use shl_dicom_core::{
     crypto::{b64url_encode, encrypt_file_stream, random_bytes},
     dicom_io::{parse_dicom_header_reader, ParsedDicomInstance},
 };
-use crate::state::{new_storage_key, record_file, AppState};
+use crate::{
+    compress::{compress_file, is_uncompressed_image, CompressStats},
+    state::{new_storage_key, record_file, AppState},
+};
 
 /// Puts a staged file into the blob store from this synchronous packer (the CLI runs it inside
 /// Tokio, so the store call runs on the runtime).
@@ -33,6 +37,7 @@ pub struct PackedSample {
     pub file_ids: Vec<String>,
     pub instances: usize,
     pub bytes: u64,
+    pub compression: CompressStats,
 }
 
 /// The instance's header, read from its file up to Pixel Data; None for anything that isn't a
@@ -59,6 +64,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
         // 1. Unpack each member to a scratch file and read its header.
         let mut members: Vec<Member> = Vec::new();
         let mut n = 0usize;
+        let mut compression = CompressStats::default();
         for tgz in &tgzs {
             let gz = flate2::read::GzDecoder::new(BufReader::new(File::open(tgz).map_err(|e| e.to_string())?));
             let mut ar = tar::Archive::new(gz);
@@ -75,7 +81,11 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
                 out.flush().map_err(|e| e.to_string())?;
                 drop(out);
                 match parse_header(&path, &name) {
-                    Some(h) => members.push(Member { path, len, h }),
+                    Some(h) => {
+                        // Uncompressed images become JPEG Lossless SV1 (pixel-identical); the rest stay as they are.
+                        let len = if is_uncompressed_image(&h.transfer_syntax_uid, &h.sop_class_uid, len) { compress_file(&path, &mut compression)? } else { len };
+                        members.push(Member { path, len, h })
+                    }
                     _ => {
                         let _ = std::fs::remove_file(&path);
                     }
@@ -182,7 +192,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             patient_birth_date,
             studies: study_inputs,
         });
-        Ok(PackedSample { owner_bundle_json: bundle.to_string(), file_ids, instances, bytes })
+        Ok(PackedSample { owner_bundle_json: bundle.to_string(), file_ids, instances, bytes, compression })
     })();
     let _ = std::fs::remove_dir_all(scratch);
     result

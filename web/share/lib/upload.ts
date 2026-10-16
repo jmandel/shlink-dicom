@@ -176,6 +176,11 @@ export interface UploadJob {
   ownerKey: string;
   source: { kind: "files" | "portal" | "link" | "sample"; link?: string; stage?: string; files?: { name: string; size: number; id?: string }[] };
   addOffsetTables: boolean;
+  /**
+   * Uncompressed images re-encoded without loss before packing (lib/compress.ts): the encoding, the
+   * staging session holding the re-encoded files, and each one's staged file and SHA-256.
+   */
+  compress: { mode: import("./compress").Encoding; stage?: string; records: Record<string, import("./compress").Reencoded> } | null;
   recipient: string | null;
   passcode: string;
   exp: number | null;

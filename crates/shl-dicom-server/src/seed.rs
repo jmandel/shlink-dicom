@@ -59,6 +59,8 @@ pub struct SeedReport {
     pub files: usize,
     pub instances: usize,
     pub bytes: u64,
+    /// Images re-encoded without loss, and their bytes before and after.
+    pub compression: crate::compress::CompressStats,
 }
 
 /// Packs `samples/*.tgz` (with `samples/reports.json`) into a new read-only sample share, streaming
@@ -151,7 +153,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
             let _ = state.delete_share(&prev.sid);
         }
     }
-    Ok(SeedReport { sid: saved.sid, files: packed.file_ids.len(), instances: packed.instances, bytes: packed.bytes })
+    Ok(SeedReport { sid: saved.sid, files: packed.file_ids.len(), instances: packed.instances, bytes: packed.bytes, compression: packed.compression })
 }
 
 fn populate_demo_list(

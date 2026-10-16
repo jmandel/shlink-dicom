@@ -15,6 +15,10 @@ import {
 } from "./lib/ingest";
 import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
+import {
+  COMPRESS_DEFAULT, ENCODING_NAME, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, workers,
+  type CompressMode, type CompressSummary, type Encoding, type SeriesEstimate,
+} from "./lib/compress";
 import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadJob } from "./lib/upload";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
 import { canPickHandles, clearHandles, filesFrom, loadHandles, pathOf, permitted, pick, quickId, saveHandles, type PickedHandles } from "./lib/handles";
@@ -23,7 +27,7 @@ import {
   ApiError, ShareApi, manageUrl, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor, type LinkResource,
 } from "./lib/api";
 import { callbackUrl, defaultPortal, finishPortalLaunch, loadFiles, loadLink, loadPortal, startPortalLaunch, type Progress } from "./lib/sources";
-import type { Instance } from "./lib/ingest";
+import type { Instance, SeriesModel } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, ICONS, expiryFieldset, expiryFrom, dateOnly, SERVER_MAX_DAYS } from "./lib/ui";
 
 const STEP_NAMES = ["Add imaging", "Review", "Recipient", "Upload", "Send"];
@@ -341,7 +345,7 @@ async function runLoad(title: string, fn: Loader) {
   $("found").textContent = foundLine(col);
   $("doing").textContent = "";
   try {
-    await clearStaging(loadJob()?.source.stage ?? null);
+    await clearStaging(loadJob()?.source.stage, loadJob()?.compress?.stage);
     stager = await openStager();
     await fn(col, stager, on, ctl.signal);
     if (ctl.signal.aborted) return;
@@ -388,11 +392,60 @@ function renderReview() {
   updateTotal();
   // Multi-frame files without an offset table: offer to add one (on by default).
   if (!offsetsTouched) $<HTMLInputElement>("rv-offsets").checked = ADD_OFFSET_TABLES_DEFAULT;
-  drawThumbs(studies, ++thumbGen);
+  if (!compressTouched) setCompressMode(COMPRESS_DEFAULT);
+  const gen = ++thumbGen;
+  drawThumbs(studies, gen).then(() => estimateAll(studies, gen));
 }
 
 let offsetsTouched = false;
 $("rv-offsets").addEventListener("change", () => (offsetsTouched = true));
+let compressTouched = false;
+for (const r of document.querySelectorAll<HTMLInputElement>("input[name=compress]")) {
+  r.addEventListener("change", () => {
+    compressTouched = true;
+    updateTotal();
+  });
+}
+function compressMode(): CompressMode {
+  return (document.querySelector<HTMLInputElement>("input[name=compress]:checked")?.value ?? COMPRESS_DEFAULT) as CompressMode;
+}
+function setCompressMode(m: CompressMode) {
+  for (const r of document.querySelectorAll<HTMLInputElement>("input[name=compress]")) r.checked = r.value === m;
+}
+
+/** Each series' estimated compression, once measured (one image encoded per series). */
+let estimates = new Map<SeriesModel, SeriesEstimate | null>();
+
+/** Estimates the saving series by series, after the thumbnails, updating the line as it goes. */
+async function estimateAll(studies: StudyModel[], gen: number) {
+  if (gen === thumbGen) estimates = new Map();
+  for (const st of studies) {
+    for (const se of st.series) {
+      if (gen !== thumbGen) return;
+      if (!se.instances.some(isUncompressedImage)) continue;
+      try {
+        estimates.set(se, await estimateSeries(se));
+      } catch {
+        estimates.set(se, null);
+      }
+      if (gen === thumbGen) updateTotal();
+    }
+  }
+  if (gen === thumbGen) document.body.dataset.estimate = "done";
+}
+
+/** How uncompressed images will be re-encoded, or null: there are none, or the person keeps files exact. */
+function chosenEncoding(studies: StudyModel[]): Encoding | null {
+  const m = compressMode();
+  return m !== "exact" && studies.some((s) => s.series.some((se) => se.instances.some(isUncompressedImage))) ? m : null;
+}
+
+/** "about 40 seconds", "about 3 minutes". */
+function aboutTime(s: number): string {
+  if (s < 50) return `about ${Math.max(5, Math.round(s / 5) * 5)} seconds`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `about ${plural(m, "minute")}` : `about ${plural(Math.round(m / 6) / 10, "hour")}`;
+}
 
 function studyCard(st: StudyModel): HTMLElement {
   const c = studyCounts(st);
@@ -511,6 +564,37 @@ function updateTotal() {
     : "Include at least one study to continue.";
   // Frame offset tables: offered while an included study has files that lack them.
   $("rv-offsets-row").classList.toggle("hidden", !inc.some((s) => lackingStudies.has(s)));
+  // Compression: offered while an included study has uncompressed images.
+  const raw = inc.flatMap((s) => s.series).filter((se) => se.instances.some(isUncompressedImage));
+  $("rv-compress").classList.toggle("hidden", !raw.length);
+  if (raw.length) {
+    const images = raw.reduce((a, se) => a + se.instances.filter(isUncompressedImage).length, 0);
+    const before = raw.reduce((a, se) => a + se.instances.filter(isUncompressedImage).reduce((b, i) => b + i.src.size, 0), 0);
+    const known = raw.map((se) => estimates.get(se)).filter((e): e is SeriesEstimate => !!e);
+    const measured = raw.every((se) => estimates.has(se));
+    $("rv-compress-what").textContent = `${plural(images, "image")} here ${images === 1 ? "is" : "are"} uncompressed (${formatBytes(before)}). Compressing without loss keeps every pixel identical but changes the file bytes.`;
+    const est = (m: Encoding) => {
+      if (!measured) return null;
+      const covered = known.reduce((a, e) => a + e.before, 0);
+      const after = known.reduce((a, e) => a + e.after[m], 0) + (before - covered);
+      // Speed: what the sample encodes measured here, the first one (which loads the encoder) aside.
+      const timed = known.slice(1).filter((e) => e.rate[m] > 0);
+      const rate = timed.length ? timed.reduce((a, e) => a + e.rate[m], 0) / timed.length : known[0]?.rate[m] ?? 0;
+      return { after, seconds: rate > 0 ? before / (rate * workers()) : 0 };
+    };
+    const sv1 = est("sv1"), j2k = est("j2k");
+    // "Smaller files" is offered once this build's encoder has shown it can make JPEG 2000 here.
+    const j2kOffered = known.some((e) => e.ok.j2k);
+    $("rv-c-j2k").closest(".pick")!.classList.toggle("hidden", !j2kOffered);
+    if (!j2kOffered && compressMode() === "j2k") setCompressMode("sv1");
+    $("rv-c-sv1").textContent = sv1 ? `${ENCODING_NAME.sv1} · about ${formatBytes(sv1.after)}` : `${ENCODING_NAME.sv1} · estimating the size…`;
+    $("rv-c-j2k").textContent = j2k ? `${ENCODING_NAME.j2k} · about ${formatBytes(j2k.after)}${j2k.seconds ? ` · ${aboutTime(j2k.seconds)} to compress on this device` : ""}` : "";
+    if (sv1?.seconds && sv1.seconds > 20) $("rv-c-sv1").textContent += ` · ${aboutTime(sv1.seconds)} to compress on this device`;
+    $("rv-c-exact").textContent = `${formatBytes(before)} · the recipient gets the original files, byte for byte`;
+    const m = compressMode();
+    const chosen = m === "sv1" ? sv1 : m === "j2k" ? j2k : null;
+    if (chosen && chosen.after < before) $("rv-total").textContent += ` (about ${formatBytes(bytes - before + chosen.after)} after compression)`;
+  }
 }
 
 /** Largest instance read whole for a thumbnail. */
@@ -599,6 +683,7 @@ async function upload() {
     apiBase: cfg.apiBase,
     source: sourceInfo,
     addOffsetTables: !$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked,
+    compress: null,
     recipient: $<HTMLInputElement>("in-recipient").value.trim() || null,
     passcode: $<HTMLInputElement>("in-pass").value,
     longLived: $<HTMLInputElement>("in-updates").checked,
@@ -607,6 +692,13 @@ async function upload() {
   const studies = col.list().filter((s) => s.include);
   $("up-log").replaceChildren();
   try {
+    const encoding = chosenEncoding(studies);
+    if (encoding) {
+      const zst = await openStager(`${stager?.session ?? "visit"}-z`);
+      const sum = await compress(col, studies, encoding, zst);
+      $("up-log").prepend(h("li", null, compressedLine(sum)));
+      job.compress = { mode: encoding, stage: zst.onDisk ? zst.session : undefined, records: sum.records };
+    }
     if (job.addOffsetTables) {
       await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
         $("up-main").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
@@ -635,6 +727,23 @@ async function upload() {
   } catch (x) {
     uploadFailed(x);
   }
+}
+
+/** Re-encodes the studies' uncompressed images, showing measured progress and the time left. */
+async function compress(c: Collection, studies: StudyModel[], mode: Encoding, zst: Stager): Promise<CompressSummary> {
+  return compressStudies(c, studies, mode, zst, (p) => {
+    // Time left, from this device's measured speed once a few images are done.
+    const left = p.done >= 4 && p.seconds >= 2 && p.before > 0 ? ((p.totalBytes - p.before) * p.seconds) / p.before : 0;
+    $("up-main").textContent = `Compressing ${p.done} of ${plural(p.total, "image")} without loss · ${formatBytes(p.before)} → ${formatBytes(p.after)} so far${left > 5 ? ` · ${aboutTime(left)} left` : ""}`;
+    setBar("up-bar-wrap", p.done, p.total, `${p.done} of ${p.total} images compressed`);
+  });
+}
+
+function compressedLine(sum: CompressSummary): string {
+  const kept = sum.total - sum.compressed;
+  return sum.compressed
+    ? `Compressed ${plural(sum.compressed, "image")} without loss as ${ENCODING_NAME[sum.mode]} (pixels identical): ${formatBytes(sum.before)} → ${formatBytes(sum.after)} in ${aboutTime(sum.seconds).replace("about ", "")}${kept ? ` · ${plural(kept, "image")} kept as they were` : ""}`
+    : `${plural(sum.total, "image")} kept as they were (compressing them would not make them smaller)`;
 }
 
 function uploadFailed(x: unknown) {
@@ -784,6 +893,15 @@ async function resumeJob(job: UploadJob, files?: File[]) {
       for (const [k, src] of (await st.list()).entries()) await c.add(`staged/${k}`, src);
       c.finish();
     } else await loadLink(await openShare(job.source.link!, { recipient: "Share page (re-share)" }), c, on);
+    // The same bytes as before: each re-encoded image from its staged copy (or encoded again and checked).
+    if (job.compress) {
+      const inBundle = new Set(parseStudyIndex(owner).studies.map((s) => s.studyInstanceUid));
+      const zst = await openStager(job.compress.stage ?? `${st.session}-z`);
+      await restoreCompressed(c, c.list().filter((s) => inBundle.has(s.uid)), job.compress.mode, job.compress.records, zst, (done, total) => {
+        $("up-main").textContent = `Finding the compressed images: ${done} of ${total}`;
+        setBar("up-bar-wrap", done, total, $("up-main").textContent!);
+      });
+    }
     if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
     await runUpload({ job, api, owner, packed: planFromOwner(owner, c) });
   } catch (x) {

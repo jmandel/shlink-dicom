@@ -136,7 +136,29 @@ export function studiesFromBundle(bundle: any): FoundStudy[] {
   return out;
 }
 
-const DICOM_ACCEPT = 'multipart/related; type="application/dicom"; transfer-syntax=*';
+/**
+ * What a WADO-RS retrieve asks for (SMART Imaging Access, transfer syntax negotiation): lossless
+ * compressed first, then anything as stored. A server that can re-encode uncompressed images sends
+ * JPEG Lossless SV1 or JPEG 2000 Lossless; one that can't sends what it has. Each part says its
+ * own transfer syntax.
+ */
+export const DICOM_ACCEPT = [
+  'multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.70',
+  'multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.90; q=0.9',
+  'multipart/related; type="application/dicom"; transfer-syntax=*; q=0.5',
+].join(", ");
+
+/** One part of a WADO-RS response: its body as chunks, and the transfer syntax its Content-Type declares. */
+export interface WadoPart {
+  transferSyntax: string | null;
+  body: AsyncGenerator<Uint8Array>;
+}
+
+/** The transfer-syntax parameter of a part's Content-Type, if any. */
+export function partTransferSyntax(contentType: string | undefined): string | null {
+  const m = /;\s*transfer-syntax\s*=\s*"?([0-9.]+)"?/i.exec(contentType ?? "");
+  return m ? m[1] : null;
+}
 
 function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
   const first = needle[0];
@@ -172,7 +194,7 @@ export async function inlineAttachments(report: any, token: string): Promise<any
  * WADO-RS retrieve, streamed: yields each part's bytes as chunks while the response arrives, so a
  * series is never held whole. Consume each part before asking for the next.
  */
-export async function* wadoRetrieveParts(url: string, token: string, signal?: AbortSignal): AsyncGenerator<AsyncGenerator<Uint8Array>> {
+export async function* wadoRetrieveParts(url: string, token: string, signal?: AbortSignal): AsyncGenerator<WadoPart> {
   const res = await getWithRetry(url, { authorization: `Bearer ${token}`, accept: DICOM_ACCEPT });
   if (!res.ok || !res.body) throw new Error(`WADO-RS ${res.status} for ${url}`);
   const ct = res.headers.get("content-type") ?? "";
@@ -247,7 +269,7 @@ export async function* wadoRetrieveParts(url: string, token: string, signal?: Ab
         }
         consumed = true;
       };
-      yield body();
+      yield { transferSyntax: partTransferSyntax(headers["content-type"]), body: body() };
       if (!consumed) throw new Error("multipart: part not read");
     }
   } finally {

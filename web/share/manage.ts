@@ -8,7 +8,7 @@ import {
   ApiError, ShareApi, forgetShare, manageUrl, parseManageHash, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor,
   type AccessEvent, type LinkResource, type OwnerCredential, type ShareResource,
 } from "./lib/api";
-import { subsetBundle } from "./lib/pack";
+import { reencodingNote, subsetBundle } from "./lib/pack";
 import { plainStudyTitle, studyDisplayDate } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, when, dateOnly, expiryFieldset, expiryFrom, SERVER_MAX_DAYS } from "./lib/ui";
 
@@ -133,6 +133,7 @@ function render() {
       [index.patient.name, index.studies.map(studyName).join(", ")].filter(Boolean).join(" · "),
     ),
     h("p", { class: "tech", id: "share-tech" }),
+    filesNote(),
     h("section", { class: "mg-section" }, h("h2", null, "Links"), linksBox, h("button", { class: "btn btn-primary", id: "new-link-btn", onclick: () => toggleNewLink() }, "New link for someone else"), h("div", { id: "new-link" })),
     h(
       "section",
@@ -156,6 +157,17 @@ function render() {
     ),
   );
   refreshStatus();
+}
+
+/** What the shared files are: as they were added, or with images compressed without loss (from the owner Bundle). */
+function filesNote(): HTMLElement {
+  const notes = index.studies.map((st) => ({ st, note: reencodingNote(owner, st.id) })).filter((x) => x.note);
+  if (!notes.length) return h("p", { class: "tech", id: "share-files" }, "The files are shared exactly as they were added, byte for byte.");
+  return h(
+    "ul",
+    { class: "tech", id: "share-files" },
+    notes.map(({ st, note }) => h("li", null, `${studyName(st)}: ${note}`)),
+  );
 }
 
 function refreshStatus() {

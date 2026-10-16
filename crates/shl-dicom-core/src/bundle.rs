@@ -344,6 +344,10 @@ pub fn subset_fhir_bundle(
             new_entries.push(Value::Null);
             continue;
         }
+        // Provenance is the owner's record (the Share page's re-encoding note); links leave it out.
+        if res_type == "Provenance" {
+            continue;
+        }
         if res_type != "ImagingStudy" {
             new_entries.push(entry.clone());
             continue;

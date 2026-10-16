@@ -55,7 +55,7 @@ if (!r.success) {
 
 // Decoder worker: its own file (Workers need a URL).
 const w = await Bun.build({
-  entrypoints: ["viewer-kit/src/decoder-worker.ts", "web/core/video-mpeg2-worker.ts"],
+  entrypoints: ["viewer-kit/src/decoder-worker.ts", "web/core/video-mpeg2-worker.ts", "web/share/lib/compress-worker.ts"],
   outdir: assets,
   target: "browser",
   format: "esm",
@@ -73,6 +73,11 @@ cpSync("viewer-kit/dist/shl_dicom_decode_jxl.wasm", `${assets}/shl_dicom_decode_
 mkdirSync(`${assets}/pdfjs`, { recursive: true });
 for (const f of ["pdf.min.mjs", "pdf.worker.min.mjs"]) cpSync(`node_modules/pdfjs-dist/build/${f}`, `${assets}/pdfjs/${f}`);
 cpSync(offsetWasm, `${assets}/shl_dicom_wasm_bg.wasm`);
+// The Share page's lossless encoder (codecs/shl-dicom-transcode-wasm), loaded by its compress worker.
+const transcodePkg = "codecs/shl-dicom-transcode-wasm/pkg";
+if (existsSync(`${transcodePkg}/shl_dicom_transcode_wasm_bg.wasm`)) {
+  for (const f of ["shl_dicom_transcode_wasm.js", "shl_dicom_transcode_wasm_bg.wasm"]) cpSync(`${transcodePkg}/${f}`, `${assets}/${f}`);
+}
 // MPEG-2 video decoder (FFmpeg, LGPL-2.1+; codecs/mpeg2-wasm), loaded only for MPEG-2 video, and
 // the exact FFmpeg source it was built from, which the LGPL requires us to offer alongside it.
 for (const f of ["mpeg2dec.js", "mpeg2dec.wasm"]) cpSync(`codecs/mpeg2-wasm/dist/${f}`, `${assets}/${f}`);

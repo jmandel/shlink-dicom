@@ -1,5 +1,6 @@
 // Test data for share-checks, and the expectations read from it.
 //   bun web/checks/share-fixtures.ts synthetic <dir>   writes a synthetic CT series (TGZ) and a DX (ZIP)
+//   bun web/checks/share-fixtures.ts cd <dir> <study>  writes a CD-style folder (Explicit VR, DICOMDIR) from a sandbox study
 //   bun web/checks/share-fixtures.ts expect <path>…    reads files, archives or folders as /share does
 // Both print JSON: { files, studies: [{ title, uid, series, images, bytes }], series, images, bytes }.
 import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -36,6 +37,21 @@ if (cmd === "synthetic") {
   execFileSync("zip", ["-qr", `${dir}/synthetic-dx.zip`, "dx"], { cwd: `${dir}/src` });
   rmSync(`${dir}/src`, { recursive: true });
   console.log(JSON.stringify(await expectations([`${dir}/synthetic-ct.tgz`, `${dir}/synthetic-dx.zip`])));
+} else if (cmd === "cd") {
+  // As on a general-purpose CD (STD-GEN-CD): Explicit VR Little Endian files under DICOM/ with 8-character
+  // names, and a DICOMDIR (dcmconv and dcmmkdir from DCMTK).
+  const [dir, study] = rest;
+  const src = join(new URL("../../imaging-sandbox/build/dataset/dicom/", import.meta.url).pathname, study);
+  rmSync(dir, { recursive: true, force: true });
+  readdirSync(src).sort().forEach((se, i) => {
+    const out = `${dir}/DICOM/ST000001/SE${String(i + 1).padStart(6, "0")}`;
+    mkdirSync(out, { recursive: true });
+    readdirSync(join(src, se)).filter((f) => f.endsWith(".dcm")).sort().forEach((f, j) => {
+      execFileSync("dcmconv", ["+te", join(src, se, f), `${out}/IM${String(j + 1).padStart(6, "0")}`]);
+    });
+  });
+  execFileSync("dcmmkdir", ["--recurse", "--output-file", "DICOMDIR", "DICOM"], { cwd: dir });
+  console.log(JSON.stringify(await expectations([dir])));
 } else if (cmd === "expect") {
   console.log(JSON.stringify(await expectations(rest)));
 } else {
