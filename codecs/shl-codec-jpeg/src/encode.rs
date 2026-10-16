@@ -109,9 +109,22 @@ fn encode(fill: impl Fn(usize, &mut [u16]), columns: u32, rows: u32, components:
     let mut freq = vec![[0u32; 17]; n];
     for_rows(h, n, precision, &fill, (&mut prev, &mut cur, &mut diffs), |row: &[i32]| {
         if n == 1 {
-            let f = &mut freq[0];
-            for &d in row {
-                f[category(d) as usize] += 1;
+            // Four partial histograms, so that runs of one category do not wait on each other's
+            // increments; summed after the pass.
+            let mut parts = [[0u32; 17]; 4];
+            let mut quads = row.chunks_exact(4);
+            for q in &mut quads {
+                for (p, &d) in parts.iter_mut().zip(q) {
+                    p[category(d) as usize] += 1;
+                }
+            }
+            for &d in quads.remainder() {
+                parts[0][category(d) as usize] += 1;
+            }
+            for p in &parts {
+                for (f, &c) in freq[0].iter_mut().zip(p) {
+                    *f += c;
+                }
             }
         } else {
             for px in row.chunks_exact(n) {
