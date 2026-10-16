@@ -218,9 +218,21 @@ impl<'a> Decoder<'a> {
                 stages::xyb_to_linear(&mut img.planes[..3], &op, gray);
                 if gray {
                     stages::from_linear(&mut img.planes[..1], tf);
-                    let p0 = img.planes[0].clone();
-                    img.planes[1] = p0.clone();
-                    img.planes[2] = p0;
+                    // Grey is plane 0. Blending and later references read all three planes,
+                    // so they get copies; a frame shown as it is does not need them.
+                    let shown_as_is = display
+                        && !fh.can_be_referenced()
+                        && fh.x0 == 0
+                        && fh.y0 == 0
+                        && img.width() == self.hd.size.width as usize
+                        && img.height() == self.hd.size.height as usize
+                        && fh.blending.mode == BlendMode::Replace
+                        && fh.ec_blending.iter().all(|b| b.mode == BlendMode::Replace);
+                    if !shown_as_is {
+                        let p0 = img.planes[0].clone();
+                        img.planes[1] = p0.clone();
+                        img.planes[2] = p0;
+                    }
                 } else {
                     stages::from_linear(&mut img.planes[..3], tf);
                 }
