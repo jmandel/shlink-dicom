@@ -67,8 +67,9 @@ const fn cx_state(index: u32, mps: u32) -> Cx {
 
 /// For each context value's `2 index + MPS`: the context after an MPS and after an LPS
 /// (C.3.2, Figures C.17 and C.18), so that a renormalising decode updates it with one load.
-static NEXT: [[Cx; 2]; 94] = {
-    let mut t = [[0; 2]; 94];
+/// Entries 94..128 are unused; they let a 7-bit index need no bounds check.
+static NEXT: [[Cx; 2]; 128] = {
+    let mut t = [[0; 2]; 128];
     let mut i = 0;
     while i < 94 {
         let (index, mps) = ((i / 2) as u32, (i % 2) as u32);
