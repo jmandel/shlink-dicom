@@ -197,7 +197,7 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
   try {
     if (isSlideSeries(se)) {
       tile.status("Opening the slide");
-      await drawSlideThumbnail(canvas, await slideFor(se));
+      await drawSlideThumbnail(canvas, await slideFor(se), signal);
       return tile.drawn();
     }
     const kind = kindOf(se);
@@ -815,7 +815,6 @@ function locateSop(sop: string): { study: number; series: number; instance: numb
 /** Shows a referenced instance (and 1-based frame) in the viewer. */
 function jumpTo(sop: string, frame?: number) {
   const at = locateSop(sop);
-  console.log("DBG jump", sop, JSON.stringify(at), studyIdx, seriesIdx);
   if (!at) return;
   if (at.study !== studyIdx) openStudy(at.study);
   selectSeries(at.series);

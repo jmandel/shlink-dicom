@@ -1143,6 +1143,7 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
            bytes      INTEGER NOT NULL,
            recipient  TEXT
          );
-         CREATE INDEX IF NOT EXISTS access_ts ON access_log(ts);",
+         CREATE INDEX IF NOT EXISTS access_ts ON access_log(ts);
+         CREATE INDEX IF NOT EXISTS access_lid ON access_log(lid);",
     )
 }
