@@ -159,6 +159,15 @@ node codecs/bench/report.mjs codecs/bench/results/<a>.json --baseline codecs/ben
 
 Only the same case, runner and build are compared, so a single-format run compares cleanly with a full baseline. Results depend on the machine, so compare runs from the same machine only.
 
+**Regression check.** `check.mjs` compares a `--quick` run (native and Node, simd build) with a stored quick baseline:
+
+```sh
+node codecs/bench/check.mjs --save              # on the build to compare against: stores results/baseline-quick.json
+node codecs/bench/check.mjs                     # after a change; extra arguments (--format …) go to run.mjs
+```
+
+Every case whose median total time is more than 5% slower than the baseline is timed again on its own, and the ones still more than 5% slower are listed as `SLOWER`; the check then exits 1. The second timing filters out most one-off noise from other processes. The baseline is a local file (ignored by git), since times depend on the machine.
+
 ## Profiling a slow case
 
 ```sh
