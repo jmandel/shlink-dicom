@@ -235,7 +235,7 @@ fn parse_sp(r: &mut Reader<'_>, precincts_defined: bool) -> Result<ComponentCodi
     if levels > 32 {
         return Err(invalid(format!("{levels} decomposition levels")));
     }
-    let (cbw, cbh) = (r.u8()? + 2, r.u8()? + 2);
+    let (cbw, cbh) = (r.u8()?.saturating_add(2), r.u8()?.saturating_add(2));
     if cbw > 10 || cbh > 10 || cbw + cbh > 12 {
         return Err(invalid("code-block size"));
     }

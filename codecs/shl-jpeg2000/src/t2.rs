@@ -61,7 +61,7 @@ pub(crate) struct Packet {
     pub precinct: u32,
 }
 
-const MAX_PACKETS: usize = 1 << 25;
+const MAX_PACKETS: usize = 1 << 22;
 
 /// The tile's packets in codestream order (B.12), with progression order changes (A.6.6).
 pub(crate) fn packet_order(size: &Size, tile: Rect, tcs: &[TileComponent<'_>], layers: u16, progression: u8, poc: &[ProgressionChange]) -> Result<Vec<Packet>> {
