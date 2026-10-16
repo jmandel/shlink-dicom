@@ -2089,6 +2089,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "shl-codec-jpeg2000-encode"
+version = "0.1.0"
+dependencies = [
+ "shl-codec-common",
+ "shl-codec-jpeg2000",
+]
+
+[[package]]
 name = "shl-codec-jpegxl"
 version = "0.1.0"
 dependencies = [
@@ -2170,6 +2178,8 @@ dependencies = [
  "sha2",
  "shl-codec-common",
  "shl-codec-jpeg",
+ "shl-codec-jpeg2000",
+ "shl-codec-jpeg2000-encode",
  "shl-dicom-decode",
 ]
 
