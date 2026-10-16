@@ -135,6 +135,19 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct, about 19:30: lossless compression round (Josh: update the reference implementations, then re-measure and update the blog and LinkedIn).**
+  - **Decoders agent (a4b3a594727c938f4):** JPEG Lossless SV1 encoder plus a Part 10 transcoder with a mandatory bit-exact self-check; native and wasm. Branch `sv1-encoder`, worktree ../shlink-dicom-sv1.
+  - **Sandbox agent (ab83241fb7aa4e1f8):** WADO-RS negotiation per PR #5, with stored SV1/J2K copies made by dcmtk/OpenJPEG. Branch `sandbox-negotiation`, worktree ../shlink-dicom-sandbox.
+  - **Share agent (ac9206ae1a4d9228a):**
+    - an Accept preference list;
+    - in-browser re-encoding by default, with a "Keep files exactly as they are" option;
+    - the seed packs the sample compressed;
+    - PROPOSAL §11.1;
+    - copy honesty: "pixel-identical" vs "byte for byte".
+    - Branch `pack-compress`, worktree ../shlink-dicom-pack. It integrates the encoder when that reports.
+  - **Measurement agent (a18873dede250f0de):** ratios and speeds for SV1, JPEG-LS, J2K, HTJ2K and Deflate on the Josh Example studies.
+  - **After merge and deploy:** the visuals agent re-measures everything numeric in the post. Sample size, file and record counts, the link-to-pixels trace, bytes to the first slice, footnotes 1 and 3, and the owner page's "30 MB stored" all change. Also every "byte for byte" claim in the post and on the site. Then sync LinkedIn and update the post message. Add the measured ratios as a comment on smart-imaging PR #5.
+
 - **15 Oct, about 18:45: everything landed on main and deployed (3671bd5).**
   - Study files (d3c8a1b), the display pipeline and LUT fix (fef0a72), pan/Reset (bc0d95f, b29a072), the plain-page How (3b5969c), S3 blob store with review fixes (d5664ff; the public server stays on local disk; the one-time wipe ran), and the phone layout with study times (3671bd5).
   - No branches are left; the study-files and s3-store worktrees are removed.
