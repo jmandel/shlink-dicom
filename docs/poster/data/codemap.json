@@ -1,0 +1,347 @@
+{
+ "ref": "main",
+ "commit": "04b92d6",
+ "rule": "non-blank lines of tracked source files; see docs/poster/scripts/codemap.py",
+ "leaves": [
+  {
+   "group": "Rust codecs",
+   "leaf": "DICOM decode",
+   "langs": {
+    "Rust": 5237
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "HTJ2K glue",
+   "langs": {
+    "JavaScript": 22,
+    "Rust": 604
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "JPEG (all modes)",
+   "langs": {
+    "Rust": 5826
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "JPEG 2000 encoder",
+   "langs": {
+    "Rust": 1069
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "JPEG 2000 glue",
+   "langs": {
+    "JavaScript": 22,
+    "Rust": 1514
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "JPEG XL glue",
+   "langs": {
+    "Rust": 196
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "JPEG-LS",
+   "langs": {
+    "Rust": 1563
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "MPEG-2 video glue (C)",
+   "langs": {
+    "Shell": 50,
+    "C": 148
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "RLE",
+   "langs": {
+    "Rust": 639
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "codec common",
+   "langs": {
+    "Rust": 146
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "hayro JPEG 2000 (upstream, patched)",
+   "langs": {
+    "Rust": 12645
+   },
+   "upstream": true
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "lossless encoder",
+   "langs": {
+    "Rust": 1484,
+    "JavaScript": 134,
+    "Python": 156,
+    "Shell": 15
+   },
+   "upstream": false
+  },
+  {
+   "group": "Rust codecs",
+   "leaf": "oxideav JPEG 2000 / HTJ2K (upstream, patched)",
+   "langs": {
+    "Rust": 55842
+   },
+   "upstream": true
+  },
+  {
+   "group": "SMART Imaging sandbox",
+   "leaf": "sandbox server + data build",
+   "langs": {
+    "TypeScript": 2859,
+    "Shell": 88,
+    "Python": 126
+   },
+   "upstream": false
+  },
+  {
+   "group": "Server and protocol core",
+   "leaf": "deploy scripts",
+   "langs": {
+    "Shell": 271,
+    "TypeScript": 19
+   },
+   "upstream": false
+  },
+  {
+   "group": "Server and protocol core",
+   "leaf": "packer and protocol core",
+   "langs": {
+    "Rust": 2794
+   },
+   "upstream": false
+  },
+  {
+   "group": "Server and protocol core",
+   "leaf": "protocol core (wasm)",
+   "langs": {
+    "Rust": 70
+   },
+   "upstream": false
+  },
+  {
+   "group": "Server and protocol core",
+   "leaf": "server",
+   "langs": {
+    "Rust": 5816
+   },
+   "upstream": false
+  },
+  {
+   "group": "Spec and reference",
+   "leaf": "reference code + test vector",
+   "langs": {
+    "TypeScript": 456
+   },
+   "upstream": false
+  },
+  {
+   "group": "Spec and reference",
+   "leaf": "specification (PROPOSAL.md)",
+   "langs": {
+    "Markdown": 423
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "JPEG 2000 library survey",
+   "langs": {
+    "Rust": 234,
+    "Python": 263
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "codec benchmarks",
+   "langs": {
+    "JavaScript": 1455,
+    "Python": 306,
+    "HTML": 9,
+    "Rust": 417
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "decoder corpus + IDC scripts",
+   "langs": {
+    "Python": 6673,
+    "JavaScript": 53,
+    "C": 97,
+    "SQL": 314,
+    "Rust": 69
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "protocol tests",
+   "langs": {
+    "TypeScript": 166
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "renderer tests and benchmarks",
+   "langs": {
+    "Python": 123,
+    "JavaScript": 263,
+    "HTML": 3,
+    "TypeScript": 612
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "sandbox tests",
+   "langs": {
+    "TypeScript": 1225,
+    "Python": 22
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "speed spikes",
+   "langs": {
+    "JavaScript": 451,
+    "HTML": 2,
+    "Shell": 21,
+    "TypeScript": 225,
+    "Rust": 162
+   },
+   "upstream": false
+  },
+  {
+   "group": "Verification",
+   "leaf": "web end-to-end checks",
+   "langs": {
+    "JavaScript": 5445,
+    "TypeScript": 1432,
+    "Python": 1738,
+    "SQL": 58
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "GPU renderer + worker pool",
+   "langs": {
+    "TypeScript": 2069,
+    "HTML": 62
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "How it works",
+   "langs": {
+    "TypeScript": 1496,
+    "JavaScript": 431,
+    "CSS": 166,
+    "HTML": 96
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "build",
+   "langs": {
+    "TypeScript": 128
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "landing",
+   "langs": {
+    "HTML": 48,
+    "CSS": 26,
+    "TypeScript": 40
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "share",
+   "langs": {
+    "HTML": 230,
+    "TypeScript": 4108,
+    "CSS": 206
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "shared core",
+   "langs": {
+    "TypeScript": 9151,
+    "CSS": 141
+   },
+   "upstream": false
+  },
+  {
+   "group": "Web app",
+   "leaf": "viewer",
+   "langs": {
+    "HTML": 230,
+    "TypeScript": 5985,
+    "CSS": 407,
+    "Python": 359,
+    "SQL": 54
+   },
+   "upstream": false
+  }
+ ],
+ "review": [],
+ "generated": {
+  "DICOM data dictionary (generated)": {
+   "lines": 5293,
+   "path": "codecs/shl-dicom-transcode/src/dict.rs",
+   "language": "Rust"
+  }
+ },
+ "skipped_source_files": {},
+ "totals": {
+  "Rust codecs": 18825,
+  "upstream": 68487,
+  "SMART Imaging sandbox": 3073,
+  "Server and protocol core": 8970,
+  "Spec and reference": 879,
+  "Verification": 21838,
+  "Web app": 25433
+ },
+ "total_own": 79018
+}

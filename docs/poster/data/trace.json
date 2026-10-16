@@ -1,0 +1,113 @@
+{
+ "measuredAt": "2026-10-16T05:58:27.617Z",
+ "site": "https://shlink-dicom.exe.xyz",
+ "sampleRedirect": "https://shlink-dicom.exe.xyz/sample",
+ "linkUrl": "https://shlink-dicom.exe.xyz/shl/SfvZRMjEo3V8UKj1p9u_Mg/bundle.jwe",
+ "linkFlag": "U",
+ "linkKeyBytes": 32,
+ "jwe": {
+  "bytes": 58673,
+  "header": {
+   "alg": "dir",
+   "enc": "A256GCM",
+   "zip": "DEF"
+  }
+ },
+ "bundle": {
+  "types": {
+   "Patient": 1,
+   "ImagingStudy": 6,
+   "DiagnosticReport": 6
+  },
+  "studies": 6,
+  "series": 36,
+  "instances": 739
+ },
+ "files": [
+  {
+   "study": "CT ABDOMEN/PELVIS W CON",
+   "id": "qkEbGI_KLPu0JE_VYGd0gw",
+   "plaintext": 89870064,
+   "ciphertext": 89892016,
+   "records": 1372,
+   "served": 89892016
+  },
+  {
+   "study": "BRAIN 7/29/20",
+   "id": "mwh_OLbs1m6cO9BOcfAnxA",
+   "plaintext": 28577804,
+   "ciphertext": 28584796,
+   "records": 437,
+   "served": 28584796
+  },
+  {
+   "study": "Histopathology",
+   "id": "6Vs9W2TmKRTCcAiPm7HRBg",
+   "plaintext": 149450378,
+   "ciphertext": 149486874,
+   "records": 2281,
+   "served": 149486874
+  },
+  {
+   "study": "HAND AND WRIST RT",
+   "id": "KZZYCnuSwhNBXiNJwY-YOA",
+   "plaintext": 16150238,
+   "ciphertext": 16154190,
+   "records": 247,
+   "served": 16154190
+  },
+  {
+   "study": "WRIST LEFT AP LAT & OBL",
+   "id": "xL9uG8heNeO4u6SLj6oF9w",
+   "plaintext": 16899676,
+   "ciphertext": 16903804,
+   "records": 258,
+   "served": 16903804
+  },
+  {
+   "study": "HAND RGHT PA LAT OBL MIN 3 VW",
+   "id": "es74gDMxivxyHN6u1cHviw",
+   "plaintext": 12365412,
+   "ciphertext": 12368436,
+   "records": 189,
+   "served": 12368436
+  }
+ ],
+ "filesCount": 6,
+ "totalCiphertext": 313390116,
+ "allServedMatch": true,
+ "slice": {
+  "study": "BRAIN 7/29/20",
+  "series": 16,
+  "seriesDescription": "T2 FSE AX",
+  "instance": 11,
+  "instancesInSeries": 20,
+  "seriesBefore": 9,
+  "seriesOffset": 8768688,
+  "seriesBytes": 6972350,
+  "seriesFirstRecord": 133,
+  "seriesLastRecord": 240,
+  "instanceOffset": 12300546,
+  "instanceEnd": 12653953,
+  "instanceBytes": 353408,
+  "firstRecord": 187,
+  "lastRecord": 193,
+  "fileId": "mwh_OLbs1m6cO9BOcfAnxA",
+  "sopClass": "urn:oid:1.2.840.10008.5.1.4.1.1.4",
+  "fileBytes": 28584796,
+  "fileRecords": 437,
+  "rangeStart": 12255232,
+  "rangeEnd": 12713983,
+  "range": "bytes=12255232-12713983",
+  "responseBytes": 458752,
+  "records": 7,
+  "offsetInFirstRecord": 48306,
+  "liveStatus": 206,
+  "liveContentRange": "bytes 12255232-12713983/28584796",
+  "liveBytes": 458752,
+  "tagsOk": 7,
+  "dicm": "DICM",
+  "transferSyntax": "1.2.840.10008.1.2.4.70"
+ },
+ "source": "docs/poster/scripts/trace.mjs against the live /sample link"
+}

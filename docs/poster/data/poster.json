@@ -1,0 +1,374 @@
+{
+ "numbers": {
+  "jwe_bytes": {
+   "display": "59 KB",
+   "value": 58673,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "files_count": {
+   "display": "6",
+   "value": 6,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "share_total": {
+   "display": "313.4 MB",
+   "value": 313390116,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "bundle_instances": {
+   "display": "739",
+   "value": 739,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "bundle_series": {
+   "display": "36",
+   "value": 36,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_fileBytes": {
+   "display": 28584796,
+   "value": 28584796,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_fileRecords": {
+   "display": 437,
+   "value": 437,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_firstRecord": {
+   "display": 187,
+   "value": 187,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_lastRecord": {
+   "display": 193,
+   "value": 193,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_range": {
+   "display": "bytes=12255232-12713983",
+   "value": "bytes=12255232-12713983",
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_responseBytes": {
+   "display": 458752,
+   "value": 458752,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_records": {
+   "display": 7,
+   "value": 7,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_instanceOffset": {
+   "display": 12300546,
+   "value": 12300546,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_instanceBytes": {
+   "display": 353408,
+   "value": 353408,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_seriesOffset": {
+   "display": 8768688,
+   "value": 8768688,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_seriesBytes": {
+   "display": 6972350,
+   "value": 6972350,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_seriesFirstRecord": {
+   "display": 133,
+   "value": 133,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_seriesLastRecord": {
+   "display": 240,
+   "value": 240,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_seriesBefore": {
+   "display": 9,
+   "value": 9,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_offsetInFirstRecord": {
+   "display": 48306,
+   "value": 48306,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_tagsOk": {
+   "display": 7,
+   "value": 7,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "slice_transferSyntax": {
+   "display": "1.2.840.10008.1.2.4.70",
+   "value": "1.2.840.10008.1.2.4.70",
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+  },
+  "subagent_count": {
+   "display": "47",
+   "value": 47,
+   "source": "count of subagent transcripts (*.jsonl) in the coordinator session's subagents/ directory, 16 Oct 00:58; same method as the blog's footnote"
+  },
+  "sop_sweep_cases": {
+   "display": "156",
+   "value": "156",
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+  },
+  "sop_sweep_classes": {
+   "display": "43",
+   "value": "43",
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+  },
+  "sop_sweep_pass": {
+   "display": "120",
+   "value": "120",
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+  },
+  "sop_sweep_fail": {
+   "display": "22",
+   "value": "22",
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+  },
+  "sop_sweep_unsupported": {
+   "display": "14",
+   "value": "14",
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+  },
+  "sop_sweep_defects": {
+   "display": "seven",
+   "value": "seven",
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+  },
+  "commits": {
+   "display": "96",
+   "value": 96,
+   "source": "git rev-list --count main"
+  },
+  "first_commit": {
+   "display": "Wed 14 Oct 15:13",
+   "value": "2026-10-14T15:13:42-05:00",
+   "source": "git log on main"
+  },
+  "code_own": {
+   "display": "79,018",
+   "value": 79018,
+   "source": "docs/poster/scripts/codemap.py on main 04b92d6"
+  },
+  "code_upstream": {
+   "display": "68,487",
+   "value": 68487,
+   "source": "docs/poster/scripts/codemap.py on main 04b92d6"
+  },
+  "code_generated": {
+   "display": "5,293",
+   "value": 5293,
+   "source": "codecs/shl-dicom-transcode/src/dict.rs"
+  },
+  "s3_presign_window": {
+   "display": "presigned URLs valid \u226460 s (redirect mode only; default is proxy)",
+   "value": 60,
+   "source": "crates/shl-dicom-server/src/storage.rs:193 ; default mode crates/shl-dicom-server/src/main.rs:40",
+   "quote": "const SIGN_TTL: Duration = Duration::from_secs(60);",
+   "note": "Also storage.rs:194 'const PRESIGN_REUSE: Duration = Duration::from_secs(30);' \u2014 a URL is reused for up to 30 s, so a reader gets 30-60 s of validity; never more than 60. Default read mode is PROXY: main.rs:40 '#[arg(long, env = \"SHL_S3_READ_MODE\", value_enum, default_value = \"proxy\")]'. Presigned URLs exist only in redirect mode. docs/storage.md:183 and :297 say the same ('a presigned URL that lasts 60 s'). The public server stays on local disk (COORDINATION.md)."
+  },
+  "smart_imaging_pr5": {
+   "display": "PR #5 (open): WADO-RS transfer syntax negotiation",
+   "value": "OPEN",
+   "source": "gh pr view 5 -R argonautproject/smart-imaging --json title,state,url,createdAt",
+   "quote": "{\"createdAt\":\"2026-10-16T00:39:40Z\",\"mergedAt\":null,\"state\":\"OPEN\",\"title\":\"WADO-RS: transfer syntax negotiation (lossless compressed preferences, * fallback)\"}",
+   "note": "https://github.com/argonautproject/smart-imaging/pull/5 ; created 15 Oct 19:39 CDT. Replaces #4 (closed fork PR)."
+  },
+  "smart_imaging_issue2": {
+   "display": "Issue #2 (open): token response example omits token_type and scope",
+   "value": "OPEN",
+   "source": "gh issue view 2 -R argonautproject/smart-imaging --json title,state,url,createdAt",
+   "quote": "{\"createdAt\":\"2026-10-15T12:58:50Z\",\"state\":\"OPEN\",\"title\":\"Token response example omits token_type and scope\"}",
+   "note": "https://github.com/argonautproject/smart-imaging/issues/2"
+  },
+  "smart_imaging_issue3": {
+   "display": "Issue #3 (open): what apps send for transfer-syntax, and what happens when it is omitted",
+   "value": "OPEN",
+   "source": "gh issue view 3 -R argonautproject/smart-imaging --json title,state,url,createdAt",
+   "quote": "{\"createdAt\":\"2026-10-15T12:58:52Z\",\"state\":\"OPEN\",\"title\":\"WADO-RS: say what apps send for transfer-syntax, and what happens when it is omitted\"}",
+   "note": "https://github.com/argonautproject/smart-imaging/issues/3"
+  },
+  "guide_unclear_count": {
+   "display": "14 places the SMART Imaging Access guide was unclear",
+   "value": 14,
+   "source": "imaging-sandbox/CONFORMANCE.md:132 ('## Unclear points in the IG', items 1-14)",
+   "quote": "## Unclear points in the IG ... 1. **`aud` when the clinical and imaging endpoints differ.** ... 14. **DiagnosticReport to ImagingStudy.**",
+   "note": "PROCESS-NOTES.md:314 also says 'It found **14 unclear points in the Argonaut IG**'. Two were filed upstream (issues #2, #3); payloadMimeType was deliberately not filed."
+  },
+  "feature:ct_mr_reformats_oblique_slabs": {
+   "display": "CT and MR reformats: oblique planes, slabs",
+   "value": "main",
+   "source": "web/core/volume.ts:8 (turned and tilted lattice); web/core/volume-gl.ts:119 reformat(g, index, slab)"
+  },
+  "feature:xray_voi_luts": {
+   "display": "X-rays with their VOI LUTs",
+   "value": "main",
+   "source": "web/core/display.ts:2 (VOI LUT Sequence...) / lutOutputBits; rule documented web/core/README.md:169"
+  },
+  "feature:whole_slide_tiles": {
+   "display": "Whole-slide pathology, tile by tile",
+   "value": "main",
+   "source": "web/view/wsi-view.ts; web/core/wsi.ts:11 isSlideSeries"
+  },
+  "feature:video": {
+   "display": "Video, including MPEG-2",
+   "value": "main",
+   "source": "web/core/video.ts:120 parseMediaHeader; web/core/video-view.ts:405 MediaController; web/core/video-mpeg2.ts"
+  },
+  "feature:sr": {
+   "display": "Structured reports (dose)",
+   "value": "main",
+   "source": "web/core/sr.ts:134 readSr"
+  },
+  "feature:seg": {
+   "display": "Segmentations",
+   "value": "main (note: SOP sweep found SEG drawn upside down when rows are reversed \u2014 defect 4, NLST TotalSegmentator)",
+   "source": "web/core/derived.ts:69 readSegmentation; web/view/layers.ts:204 drawSeg"
+  },
+  "feature:pdf": {
+   "display": "Encapsulated PDF",
+   "value": "main",
+   "source": "web/view/pdf-view.ts:19 renderPdf"
+  },
+  "feature:reports_beside_images": {
+   "display": "Reports beside the images",
+   "value": "main",
+   "source": "web/core/reports.ts:50 linkReports; web/view/report-view.ts:35 renderReports"
+  },
+  "feature:study_download_zip_dicomdir": {
+   "display": "Download: a ZIP with DICOMDIR",
+   "value": "main",
+   "source": "web/core/export.ts:44 exportZip; web/core/dicomdir.ts:76 buildDicomdir"
+  },
+  "feature:dark_mode": {
+   "display": "Dark mode",
+   "value": "main",
+   "source": "web/shared/base.css:29-51 (color-scheme: light dark; prefers-color-scheme: dark tokens); check web/checks/dark.mjs"
+  },
+  "feature:phone_layout": {
+   "display": "Phone layout",
+   "value": "main",
+   "source": "web/view/view.css:133 @media (max-width: 600px) and :194 (max-width: 420px); commit 3671bd5"
+  },
+  "feature:share_from_files_cd_dicomdir": {
+   "display": "Files, a folder, a CD, an archive",
+   "value": "main",
+   "source": "web/share/share.ts:83 'Files or a folder' \u2014 'DICOM files, a CD, or a ZIP or TGZ archive'; web/share/lib/ingest.ts:119 (DICOMDIR index skipped, images read)"
+  },
+  "feature:share_from_received_shl": {
+   "display": "From a link someone sent",
+   "value": "main",
+   "source": "web/share/share.ts:85 'Paste a link from my provider'; share.ts:257 LinkResolver (re-share)"
+  },
+  "feature:share_from_smart_imaging_access": {
+   "display": "From a provider, by SMART Imaging Access",
+   "value": "main",
+   "source": "web/share/share.ts:84 'Connect to a patient portal'; web/share/lib/smart.ts:1 SMART Imaging Access client"
+  },
+  "feature:lossless_compression_sv1": {
+   "display": "Lossless JPEG or JPEG 2000",
+   "value": "main",
+   "source": "web/share/lib/compress.ts:22 ENCODING_TS sv1 1.2.840.10008.1.2.4.70; codecs/shl-dicom-transcode/src/lib.rs:74 transcode_part10 (SV1 only on main); web/share/lib/compress.ts:22 ENCODING_TS j2k 1.2.840.10008.1.2.4.90 (main 04b92d6)"
+  },
+  "feature:resumable_uploads": {
+   "display": "Resumable uploads",
+   "value": "main",
+   "source": "crates/shl-dicom-server/src/routes_api.rs:348-349 (HEAD Upload-Offset, PATCH appends); web/share/lib/api.ts:145"
+  },
+  "feature:local_or_s3_storage": {
+   "display": "Local disk or S3 storage",
+   "value": "main (public server uses local disk)",
+   "source": "crates/shl-dicom-server/src/storage.rs:95 LocalFsStore, :183 S3Store"
+  },
+  "feature:owner_link_open_counts": {
+   "display": "Owner link: open counts, revoke",
+   "value": "main",
+   "source": "web/share/manage.ts:197-198 openCount \u2192 'Opened N times, last \u2026'; crates/shl-dicom-server/src/state.rs:118 open_count"
+  },
+  "idc_random_control": {
+   "display": "1,000 / 1,000 (95% CI 99.62\u2013100%)",
+   "value": "1000/1000",
+   "source": "codec-corpus/prevalence/LONGTAIL.md:13",
+   "quote": "| Random control | 1,000 | 1,000 | 100% (99.62%\u2013100%) |",
+   "note": "Wilson interval. 998 passed in the main sweep; the other 2 were oversize slides that passed the frame-wise check (LONGTAIL.md:17)."
+  },
+  "idc_longtail_pass": {
+   "display": "9,522 / 9,537 pass (99.84%)",
+   "value": 9522,
+   "source": "codec-corpus/prevalence/LONGTAIL.md:15",
+   "quote": "| All evaluated | 9,537 | 9,522 | 99.84% (99.74%\u201399.90%) |",
+   "note": "Uses the re-checked outcomes from a fresh build (LONGTAIL.md:25). 15 non-pass, no crashes, no timeouts."
+  },
+  "corpus_real_cases": {
+   "display": "832 of 1,176 cases come from real images (691 real files as found)",
+   "value": 832,
+   "source": "codec-corpus/formats/*/cases.json source fields; codec-corpus/scripts/generate.py; codecs/bench/scripts/make_cases.py",
+   "quote": "by pixel origin {'real-file': 691, 'synthetic': 344, 'real-pixels-reencoded': 121, 'real-file-modified': 20}",
+   "note": "YES the corpus includes synthetic seeds: 344 cases trace to synthetic pixels (generate.py 'synth-*' gradients/edges/noise, and make_cases.py 'bench-*' 'deterministic, modality-like' images). Real files as found: 305 IDC + 257 toolkit/bug-report test files (GDCM, Orthanc, fo-dicom, cornerstone, dcm4che, Clunie...) + 127 pydicom test files + 2 local wrist files = 691. 121 more re-encode real pixels (pydicom CT/MR seeds, a local MRI slice, unwrapped real files); 20 are real files with one tag repaired or stripped. Caveat: some 'external' toolkit test files may themselves be synthetic test images (e.g. LEADTOOLS flowers); they are counted as real files here."
+  },
+  "display_conformance": {
+   "display": "dcmtk agrees on 1,000 of 1,020 grayscale renderings (within 1 grey level)",
+   "value": "1000/1020",
+   "source": "/media/barracuda/shlink-display-conformance/out/report.json (UNTRACKED scratch, 15 Oct 16:49) produced by web/checks/display-conformance.ts + .py; summarized in commit fef0a72's message",
+   "quote": "- display-conformance: 1,328 grayscale files; dcmtk agrees on 1,000 of 1,020, pydicom on 779 of 790, every difference triaged",
+   "note": "Triage of the 20 is NOT written up in the repo (only 'every difference triaged' in the commit message); categories below are my reconstruction from report.json: 9 = our deliberate VOI LUT bit-depth rule (6 of Josh's CR hand views + 1 IDC RF + 2 synthetic edge cases; dcmtk takes the declared 16 bits and washes the image out \u2014 this is the Josh 'Hand OBLI shows white' bug); 8 = files with no window, rendered by min-max where auto-window choices differ (5 GE PET, Cornell JPEG, GE DLX private syntax, Siemens GBS III; no pydicom reference for these); 2 = within 2 grey levels on >=99.9% of pixels; 1 = Orthanc MalaterreCP246 JPEG-LS, where pydicom matches ours exactly and only dcmtk differs. What the 1,328 files are: 531 IDC files (objects cache), 500 real codec-corpus files, 277 corpus files from synthetic seeds, 9 of Josh's sample originals, 11 synthetic LUT edge cases. Of the 1,020 dcmtk comparisons, 135 involve synthetic pixels (124 corpus-synthetic + 11 edge cases); REAL-ONLY dcmtk agreement = 867 of 885. pydicom: 779/790."
+  },
+  "encoder_ratio_sv1": {
+   "display": "2.46\u00d7 (403 MB \u2192 164 MB)",
+   "value": 2.459,
+   "source": "/media/barracuda/sv1/final-josh-1.2.840.10008.1.2.4.70.json (our SV1 encoder, UNTRACKED); cross-check /media/barracuda/compress-study/results/sizes.md:14 (dcmcjpeg)",
+   "quote": "| ALL five studies | 734 | 402.9 | 163.9 (2.46x) | 135.0 (2.98x) | 136.2 (2.96x) | 136.3 (2.96x) | 143.9 (2.80x) | 221.1 (1.82x) | 220.8 (1.83x) |",
+   "note": "Data: Josh's own 5 studies (MRI 2020, CT A/P 2012, 3 CR hand/wrist 2012), whole files incl. headers. Our encoder and DCMTK's dcmcjpeg +e1 give the same ratio (2.459 vs 2.458; 163,914,050 bytes for DCMTK). COORDINATION.md:161 quotes the DCMTK study number ('Measured on 733 images: SV1 2.46\u00d7'). Commit 47a7023 message says 'ratio 2.47' (likely pixel-data-only ratio; sizes.md pixel-only row gives 2.47x)."
+  },
+  "encoder_ratio_j2k": {
+   "display": "2.96\u00d7 (403 MB \u2192 136 MB)",
+   "value": 2.959,
+   "source": "/media/barracuda/sv1/final-josh-1.2.840.10008.1.2.4.90.json (our J2K encoder, branch-only, UNTRACKED); cross-check compress-study/results/sizes.md:14 (pydicom/OpenJPEG)",
+   "quote": "| ALL five studies | 734 | 402.9 | 163.9 (2.46x) | 135.0 (2.98x) | 136.2 (2.96x) | 136.3 (2.96x) | 143.9 (2.80x) | 221.1 (1.82x) | 220.8 (1.83x) |",
+   "note": "Our pure-Rust J2K encoder is ONLY on branches j2k-encoder/encoder-perf (efb61b5) and j2k-share (304a4ab), not on main. The 2.96x in COORDINATION.md:161 is OpenJPEG via pydicom (136,214,170 bytes). Commit efb61b5's message says 'J2K ratio 2.98 on Josh (OpenJPEG 2.98)' \u2014 that matches the pixel-data-only ratio (sizes.md pixel row 2.98x), not whole files. [16 Oct: the JPEG 2000 encoder (efb61b5) and the Share page's JPEG 2000 option are now on main (04b92d6).]"
+  },
+  "e2e_checks_how": {
+   "display": "How it works 254 / 255",
+   "value": "254/255",
+   "source": "docs/poster/data/checks-how-live.log",
+   "quote": "254/255 passed",
+   "note": "web/how/checks.mjs run against https://shlink-dicom.exe.xyz with API set to the live site and READ_ONLY=1 (step 10's share-and-revoke skipped), 16 Oct 2026. The one failure is a timing check: a 109 ms main-thread task at 390 px, limit 100 ms. view-checks.mjs has no read-only mode (its fixtures step clones the sample share and makes links on the target server), and wsi-checks.mjs needs packed fixtures, so neither was run live and their counts were removed from the poster."
+  },
+  "e2e_checks": {
+   "display": "SMART Imaging sandbox 153 / 153",
+   "value": "153/153",
+   "source": "docs/poster/data/sandbox-e2e-live.log",
+   "quote": "153 passed, 0 failed",
+   "note": "Sandbox e2e re-run by the coordinator against the live sandbox (https://smart-imaging-sandbox.exe.xyz), 2026-10-16T02:55Z, with VARIANTS_DIR=/media/barracuda/sbx-variants (run details per the coordinator; the log records the counts and targets, not the time or env). Ground truth in the log: 739 instances in 36 series."
+  },
+  "sop_census": {
+   "display": "38 object types \u00b7 58.8 M instances in IDC",
+   "value": "38 SOP classes; 58,784,975 instances (IDC v25)",
+   "source": "codec-corpus/prevalence/SOPCLASS_CENSUS.md:7 and :59 (origin/main; commit 8a5368e, merged from sop-sweep)",
+   "quote": "38 SOP classes; 58,784,975 instances; 1,044,303 series (a series counted once per SOP class it holds).",
+   "note": "Headline line 7: '- **38 SOP classes, 58.8 million instances.** CT and MR make up 81% of instances'. IDC release v25 (26 Sept 2026). Note this is on origin/main (d6ebdf3), not yet in the local main checkout (43fefc5); the sop-sweep branch was deleted after merge. The census also states IDC has no encapsulated PDF, no video and no Enhanced CT/MR/PET."
+  },
+  "design_questions": {
+   "display": "4 questions",
+   "value": [
+    "What's the zip buying us?",
+    "I don't love optionality here, how does a client even know what's deflated.",
+    "Final record delimiter\u2026 why is that needed? Doesn't ending at that point also accomplish the same?",
+    "Why use HKDF at that point?"
+   ],
+   "source": "~/hobby/blog/src/content/blog/your-images-in-your-hands/index.md:115-118 ('How I built it')"
+  }
+ },
+ "missing": [],
+ "built": "2026-10-16T00:58:44"
+}

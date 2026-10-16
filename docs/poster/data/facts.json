@@ -1,0 +1,326 @@
+{
+ "corpus_cases": {
+  "value": 1176,
+  "display": "1,176 test cases",
+  "source": "codec-corpus/formats/*/cases.json (main, last changed 1c5eaa6, 15 Oct 12:29)",
+  "quote": "total cases 1176",
+  "how": "count of cases[] across the 8 committed cases.json files (facts_cmds.sh \u00a71)",
+  "ok": true,
+  "note": "Per format: uncompressed 319, jpeg-lossless 264, jpeg-dct 212, jpeg2000 177, jpeg-ls 69, rle 53, htj2k 42, jpeg-xl 40. Blog footnote 3 says the same: 'The test corpus now has 1,176 cases, all passing.'"
+ },
+ "corpus_passing": {
+  "value": 1176,
+  "display": "1,176 / 1,176 pass",
+  "source": "codec-corpus/reports/coord.json (UNTRACKED: reports/* is gitignored except foundation.json); run 2026-10-15T12:27:22",
+  "quote": "\"time\": \"2026-10-15T12:27:22\" ... summary: htj2k pass 42, jpeg-dct pass 212, jpeg-lossless pass 264, jpeg-ls pass 69, jpeg-xl pass 40, jpeg2000 pass 177, rle pass 53, uncompressed pass 319",
+  "how": "Counter of results[].outcome = {'pass': 1176}; case ids identical to the committed cases.json",
+  "ok": true,
+  "note": "The only committed report, reports/foundation.json (15 Oct 08:25), is older: 929 pass / 3 fail of 932. Commit 1c5eaa6 came 2 min after coord.json; its case-id set matches the report exactly."
+ },
+ "corpus_real_cases": {
+  "value": 832,
+  "display": "832 of 1,176 cases come from real images (691 real files as found)",
+  "source": "codec-corpus/formats/*/cases.json source fields; codec-corpus/scripts/generate.py; codecs/bench/scripts/make_cases.py",
+  "quote": "by pixel origin {'real-file': 691, 'synthetic': 344, 'real-pixels-reencoded': 121, 'real-file-modified': 20}",
+  "how": "classify each case by source.kind and, for generated/repair/strip cases, by the seed or case it derives from (facts_cmds.sh \u00a71)",
+  "ok": true,
+  "note": "YES the corpus includes synthetic seeds: 344 cases trace to synthetic pixels (generate.py 'synth-*' gradients/edges/noise, and make_cases.py 'bench-*' 'deterministic, modality-like' images). Real files as found: 305 IDC + 257 toolkit/bug-report test files (GDCM, Orthanc, fo-dicom, cornerstone, dcm4che, Clunie...) + 127 pydicom test files + 2 local wrist files = 691. 121 more re-encode real pixels (pydicom CT/MR seeds, a local MRI slice, unwrapped real files); 20 are real files with one tag repaired or stripped. Caveat: some 'external' toolkit test files may themselves be synthetic test images (e.g. LEADTOOLS flowers); they are counted as real files here."
+ },
+ "idc_random_control": {
+  "value": "1000/1000",
+  "display": "1,000 / 1,000 (95% CI 99.62\u2013100%)",
+  "source": "codec-corpus/prevalence/LONGTAIL.md:13",
+  "quote": "| Random control | 1,000 | 1,000 | 100% (99.62%\u2013100%) |",
+  "how": "read",
+  "ok": true,
+  "note": "Wilson interval. 998 passed in the main sweep; the other 2 were oversize slides that passed the frame-wise check (LONGTAIL.md:17)."
+ },
+ "idc_longtail_evaluated": {
+  "value": 9537,
+  "display": "9,537 evaluated",
+  "source": "codec-corpus/prevalence/LONGTAIL.md:15",
+  "quote": "| All evaluated | 9,537 | 9,522 | 99.84% (99.74%\u201399.90%) |",
+  "how": "read",
+  "ok": true,
+  "note": "'All evaluated' includes the 1,000 control. Long-tail selection alone: 8,866 evaluated, 8,851 pass (LONGTAIL.md:14). Not evaluated: 3 without Pixel Data, 17 >2 GB decoded (checked frame-wise, all pass), 4 >500 MB not downloaded."
+ },
+ "idc_longtail_pass": {
+  "value": 9522,
+  "display": "9,522 / 9,537 pass (99.84%)",
+  "source": "codec-corpus/prevalence/LONGTAIL.md:15",
+  "quote": "| All evaluated | 9,537 | 9,522 | 99.84% (99.74%\u201399.90%) |",
+  "how": "read",
+  "ok": true,
+  "note": "Uses the re-checked outcomes from a fresh build (LONGTAIL.md:25). 15 non-pass, no crashes, no timeouts."
+ },
+ "idc_longtail_causes": {
+  "value": "8 missing Planar Configuration; 4 Leica JPEG 2000 within 3; 3 float parametric maps",
+  "display": "15 non-passes: 8 missing Planar Configuration (now inferred) \u00b7 4 Leica JPEG 2000 off by \u22643 (ruled acceptable) \u00b7 3 float parametric maps (now implemented)",
+  "source": "codec-corpus/prevalence/LONGTAIL.md:218-270; codec-corpus/formats/jpeg2000/cases.json (idc-lt-combo-63dd4058); codecs/shl-dicom-decode/src/infer.rs",
+  "quote": "15 non-pass instances form 4 groups. ... - **Instances:** 8. ... **4 files reach 3.** ... - **Instances:** 3 `tcga_gbm` instances ... with (7FE0,0008) Float Pixel Data.",
+  "how": "read; 8+4+3 = 15",
+  "ok": true,
+  "note": "Status: (1) Planar Configuration: INFERRED - decoder infers layout from smoothness with a warning (infer.rs), output byte-equal to the plausible reading; (2) Leica YBR_FULL_422 J2K: RULED - max_abs raised 2->3 (case idc-lt-combo-63dd4058 has max_abs 3, commit f1dfcde); (3) Float Pixel Data: IMPLEMENTED - decoded to f32 (CONTRACT.md#float-pixel-data, commit 5d9efc3). The doc says '4 groups': the 4th (empty trailing frames in one 32,625-frame slide, found by the frame-wise check) is not one of the 15 and is still 'needs a ruling' in LONGTAIL.md:279; COORDINATION says empty frames stay refused and the viewer draws them blank."
+ },
+ "idc_selected": {
+  "value": 9557,
+  "display": "9,557 instances selected",
+  "source": "codec-corpus/prevalence/LONGTAIL.md:3",
+  "quote": "A check of `shl-dicom-decode` against the reference decoders on 9,557 IDC instances, run on 2026-10-15.",
+  "how": "read",
+  "ok": true,
+  "note": "Includes the 1,000-instance random control (329 of which were also picked by the cover/extra steps, LONGTAIL.md:93)."
+ },
+ "idc_instances_total": {
+  "value": 58784975,
+  "display": "58.8 million IDC instances",
+  "source": "codec-corpus/prevalence/SOURCES.md:10 (also SOPCLASS_CENSUS.md:59 on origin/main, IDC v25)",
+  "quote": "- **Size:** 58,784,975 instances. 58,482,404 of them carry Bits Allocated (have pixel data); the other 302,571 (SR, RTSTRUCT, RTPLAN, annotations and so on) are dropped.",
+  "how": "read; 58,784,975 rounded to 58.8 M",
+  "ok": true,
+  "note": "Same number in the SOP census: '38 SOP classes; 58,784,975 instances; 1,044,303 series'."
+ },
+ "display_conformance": {
+  "value": "1000/1020",
+  "display": "dcmtk agrees on 1,000 of 1,020 grayscale renderings (within 1 grey level)",
+  "source": "/media/barracuda/shlink-display-conformance/out/report.json (UNTRACKED scratch, 15 Oct 16:49) produced by web/checks/display-conformance.ts + .py; summarized in commit fef0a72's message",
+  "quote": "- display-conformance: 1,328 grayscale files; dcmtk agrees on 1,000 of 1,020, pydicom on 779 of 790, every difference triaged",
+  "how": "recomputed from report.json with the script's own rule (max diff <= 1 grey level): dcmtk compared 1020, agree 1000 (facts_cmds.sh \u00a73)",
+  "ok": true,
+  "note": "Triage of the 20 is NOT written up in the repo (only 'every difference triaged' in the commit message); categories below are my reconstruction from report.json: 9 = our deliberate VOI LUT bit-depth rule (6 of Josh's CR hand views + 1 IDC RF + 2 synthetic edge cases; dcmtk takes the declared 16 bits and washes the image out \u2014 this is the Josh 'Hand OBLI shows white' bug); 8 = files with no window, rendered by min-max where auto-window choices differ (5 GE PET, Cornell JPEG, GE DLX private syntax, Siemens GBS III; no pydicom reference for these); 2 = within 2 grey levels on >=99.9% of pixels; 1 = Orthanc MalaterreCP246 JPEG-LS, where pydicom matches ours exactly and only dcmtk differs. What the 1,328 files are: 531 IDC files (objects cache), 500 real codec-corpus files, 277 corpus files from synthetic seeds, 9 of Josh's sample originals, 11 synthetic LUT edge cases. Of the 1,020 dcmtk comparisons, 135 involve synthetic pixels (124 corpus-synthetic + 11 edge cases); REAL-ONLY dcmtk agreement = 867 of 885. pydicom: 779/790."
+ },
+ "encoder_exact": {
+  "value": "733 Josh files + 182 corpus files per syntax, exact under 3 decoders",
+  "display": "Every re-encoded image decoded bit-exact by three reference decoders: 733 of Josh's images (SV1 and JPEG 2000) and 182 corpus files",
+  "source": "/media/barracuda/sv1/final-josh-1.2.840.10008.1.2.4.{70,90}.json and final-corpus-*.json (UNTRACKED scratch, 20:51-21:00 CDT 15 Oct); commits 47a7023 (SV1, main) and efb61b5 (J2K, branch j2k-encoder/encoder-perf only)",
+  "quote": "Gates: corpus 182 encoded per syntax, exact under pylibjpeg, GDCM and dcmdjpeg (SV1) / pylibjpeg-openjpeg, GDCM and opj_decompress (J2K); Josh Example 733/734 exact under all",
+  "how": "recount of refs == 'exact' in the final-* reports (facts_cmds.sh \u00a74)",
+  "ok": true,
+  "note": "SV1 decoders: pylibjpeg (Richter's libjpeg), GDCM (IJG), dcmtk dcmdjpeg \u2014 genuinely independent. J2K decoders: pylibjpeg-openjpeg, GDCM and opj_decompress \u2014 ALL THREE ARE OpenJPEG-based (check_corpus.py itself says 'GDCM (also OpenJPEG)'), so 'three independent decoders' is true for SV1 only; for J2K say 'three reference decoders' or 'OpenJPEG via three toolkits'. Plus our own decoder self-check. 734th Josh file has no Pixel Data (declined). Corpus: 315 tried, 133 declined (1-bit, 32-bit, big endian, float...), 12 of the 182 encoded are synthetic-seed files. [16 Oct: the JPEG 2000 encoder (efb61b5) and the Share page's JPEG 2000 option are now on main (04b92d6).]"
+ },
+ "encoder_ratio_sv1": {
+  "value": 2.459,
+  "display": "2.46\u00d7 (403 MB \u2192 164 MB)",
+  "source": "/media/barracuda/sv1/final-josh-1.2.840.10008.1.2.4.70.json (our SV1 encoder, UNTRACKED); cross-check /media/barracuda/compress-study/results/sizes.md:14 (dcmcjpeg)",
+  "quote": "| ALL five studies | 734 | 402.9 | 163.9 (2.46x) | 135.0 (2.98x) | 136.2 (2.96x) | 136.3 (2.96x) | 143.9 (2.80x) | 221.1 (1.82x) | 220.8 (1.83x) |",
+  "how": "sum input_bytes / sum output_bytes over the 733 encoded files: 402,889,830 / 163,851,426 = 2.459",
+  "ok": true,
+  "note": "Data: Josh's own 5 studies (MRI 2020, CT A/P 2012, 3 CR hand/wrist 2012), whole files incl. headers. Our encoder and DCMTK's dcmcjpeg +e1 give the same ratio (2.459 vs 2.458; 163,914,050 bytes for DCMTK). COORDINATION.md:161 quotes the DCMTK study number ('Measured on 733 images: SV1 2.46\u00d7'). Commit 47a7023 message says 'ratio 2.47' (likely pixel-data-only ratio; sizes.md pixel-only row gives 2.47x)."
+ },
+ "encoder_ratio_j2k": {
+  "value": 2.959,
+  "display": "2.96\u00d7 (403 MB \u2192 136 MB)",
+  "source": "/media/barracuda/sv1/final-josh-1.2.840.10008.1.2.4.90.json (our J2K encoder, branch-only, UNTRACKED); cross-check compress-study/results/sizes.md:14 (pydicom/OpenJPEG)",
+  "quote": "| ALL five studies | 734 | 402.9 | 163.9 (2.46x) | 135.0 (2.98x) | 136.2 (2.96x) | 136.3 (2.96x) | 143.9 (2.80x) | 221.1 (1.82x) | 220.8 (1.83x) |",
+  "how": "402,889,830 / 136,165,186 = 2.959 over 733 encoded files",
+  "ok": true,
+  "note": "Our pure-Rust J2K encoder is ONLY on branches j2k-encoder/encoder-perf (efb61b5) and j2k-share (304a4ab), not on main. The 2.96x in COORDINATION.md:161 is OpenJPEG via pydicom (136,214,170 bytes). Commit efb61b5's message says 'J2K ratio 2.98 on Josh (OpenJPEG 2.98)' \u2014 that matches the pixel-data-only ratio (sizes.md pixel row 2.98x), not whole files. [16 Oct: the JPEG 2000 encoder (efb61b5) and the Share page's JPEG 2000 option are now on main (04b92d6).]"
+ },
+ "e2e_checks": {
+  "value": "153/153",
+  "display": "SMART Imaging sandbox 153 / 153",
+  "source": "docs/poster/data/sandbox-e2e-live.log",
+  "quote": "153 passed, 0 failed",
+  "how": "read (last line of the log)",
+  "ok": true,
+  "note": "Sandbox e2e re-run by the coordinator against the live sandbox (https://smart-imaging-sandbox.exe.xyz), 2026-10-16T02:55Z, with VARIANTS_DIR=/media/barracuda/sbx-variants (run details per the coordinator; the log records the counts and targets, not the time or env). Ground truth in the log: 739 instances in 36 series."
+ },
+ "sop_census": {
+  "value": "38 SOP classes; 58,784,975 instances (IDC v25)",
+  "display": "38 object types \u00b7 58.8 M instances in IDC",
+  "source": "codec-corpus/prevalence/SOPCLASS_CENSUS.md:7 and :59 (origin/main; commit 8a5368e, merged from sop-sweep)",
+  "quote": "38 SOP classes; 58,784,975 instances; 1,044,303 series (a series counted once per SOP class it holds).",
+  "how": "read; table under 'Every SOP class' has 38 rows (counted)",
+  "ok": true,
+  "note": "Headline line 7: '- **38 SOP classes, 58.8 million instances.** CT and MR make up 81% of instances'. IDC release v25 (26 Sept 2026). Note this is on origin/main (d6ebdf3), not yet in the local main checkout (43fefc5); the sop-sweep branch was deleted after merge. The census also states IDC has no encapsulated PDF, no video and no Enhanced CT/MR/PET."
+ },
+ "guide_unclear_count": {
+  "value": 14,
+  "display": "14 places the SMART Imaging Access guide was unclear",
+  "source": "imaging-sandbox/CONFORMANCE.md:132 ('## Unclear points in the IG', items 1-14)",
+  "quote": "## Unclear points in the IG ... 1. **`aud` when the clinical and imaging endpoints differ.** ... 14. **DiagnosticReport to ImagingStudy.**",
+  "how": "count of numbered items under that heading (facts_cmds.sh \u00a77) = 14",
+  "ok": true,
+  "note": "PROCESS-NOTES.md:314 also says 'It found **14 unclear points in the Argonaut IG**'. Two were filed upstream (issues #2, #3); payloadMimeType was deliberately not filed."
+ },
+ "smart_imaging_pr5": {
+  "value": "OPEN",
+  "display": "PR #5 (open): WADO-RS transfer syntax negotiation",
+  "source": "gh pr view 5 -R argonautproject/smart-imaging --json title,state,url,createdAt",
+  "quote": "{\"createdAt\":\"2026-10-16T00:39:40Z\",\"mergedAt\":null,\"state\":\"OPEN\",\"title\":\"WADO-RS: transfer syntax negotiation (lossless compressed preferences, * fallback)\"}",
+  "how": "read",
+  "ok": true,
+  "note": "https://github.com/argonautproject/smart-imaging/pull/5 ; created 15 Oct 19:39 CDT. Replaces #4 (closed fork PR)."
+ },
+ "smart_imaging_issue2": {
+  "value": "OPEN",
+  "display": "Issue #2 (open): token response example omits token_type and scope",
+  "source": "gh issue view 2 -R argonautproject/smart-imaging --json title,state,url,createdAt",
+  "quote": "{\"createdAt\":\"2026-10-15T12:58:50Z\",\"state\":\"OPEN\",\"title\":\"Token response example omits token_type and scope\"}",
+  "how": "read",
+  "ok": true,
+  "note": "https://github.com/argonautproject/smart-imaging/issues/2"
+ },
+ "smart_imaging_issue3": {
+  "value": "OPEN",
+  "display": "Issue #3 (open): what apps send for transfer-syntax, and what happens when it is omitted",
+  "source": "gh issue view 3 -R argonautproject/smart-imaging --json title,state,url,createdAt",
+  "quote": "{\"createdAt\":\"2026-10-15T12:58:52Z\",\"state\":\"OPEN\",\"title\":\"WADO-RS: say what apps send for transfer-syntax, and what happens when it is omitted\"}",
+  "how": "read",
+  "ok": true,
+  "note": "https://github.com/argonautproject/smart-imaging/issues/3"
+ },
+ "s3_presign_window": {
+  "value": 60,
+  "display": "presigned URLs valid \u226460 s (redirect mode only; default is proxy)",
+  "source": "crates/shl-dicom-server/src/storage.rs:193 ; default mode crates/shl-dicom-server/src/main.rs:40",
+  "quote": "const SIGN_TTL: Duration = Duration::from_secs(60);",
+  "how": "read",
+  "ok": true,
+  "note": "Also storage.rs:194 'const PRESIGN_REUSE: Duration = Duration::from_secs(30);' \u2014 a URL is reused for up to 30 s, so a reader gets 30-60 s of validity; never more than 60. Default read mode is PROXY: main.rs:40 '#[arg(long, env = \"SHL_S3_READ_MODE\", value_enum, default_value = \"proxy\")]'. Presigned URLs exist only in redirect mode. docs/storage.md:183 and :297 say the same ('a presigned URL that lasts 60 s'). The public server stays on local disk (COORDINATION.md)."
+ },
+ "subagent_count": {
+  "value": 42,
+  "display": "42 Claude subagents",
+  "source": "~/hobby/blog/src/content/blog/your-images-in-your-hands/index.md:107 and footnote 4 (:151); cross-checked against ~/.claude/projects/-home-jmandel-hobby-smart-health-checkin/0c360f75-6e42-4bb2-af89-350946f294a1/subagents/",
+  "quote": "Over the project it launched 42 Claude subagents, each working in its own directory",
+  "how": "post's own source (fn 4): 'Subagent count from the coordinator's session records (42 subagent transcripts as of 15 Oct, evening).' Recount: 42 transcripts started before 18:45 CDT",
+  "ok": true,
+  "note": "42 counts transcripts at every depth: 29 launched by the coordinator directly, 13 launched by subagents (incl. 4 forks). So 'it launched 42' slightly overstates direct launches. As of now (21:30 CDT) there are 46 transcripts (31 direct), including this fact-finding agent. Blog post dir is untracked in ~/hobby/blog."
+ },
+ "agents_other": {
+  "value": "1 Claude Code coordinator (Claude Opus 5.5); pi running Gemini (google/gemini-4-argon via OpenRouter); Codex for illustrations",
+  "display": "Coordinator: Claude Code (Claude Opus 5.5) \u00b7 pi + Gemini (gemini-4-argon) built the first server and web page \u00b7 Codex drew the illustrations",
+  "source": "~/hobby/blog/src/content/blog/your-images-in-your-hands/index.md:105-107; docs/COORDINATION.md (pi section; 'Codex makes the illustrations'); ~/.pi/agent/sessions/--home-jmandel-hobby-shlink-dicom--/2026-10-14T20-16-22-993Z_*.jsonl",
+  "quote": "A pi session running Gemini (gemini-4-argon) in a tmux pane built the first version of the server and web page, and Codex drew the illustrations.",
+  "how": "read; pi session log has \"model\":\"google/gemini-4-argon\" (467 entries), provider openrouter",
+  "ok": true,
+  "note": "COORDINATION.md: 'Blog: pi is drafting docs/blog/DRAFT.md ... Codex makes the illustrations; the header is docs/blog/images/header.png.' pi also wrote docs/STUDY-FILES-AND-S3-PLAN.md and PROCESS-NOTES-pi.md."
+ },
+ "design_questions": {
+  "value": [
+   "What's the zip buying us?",
+   "I don't love optionality here, how does a client even know what's deflated.",
+   "Final record delimiter\u2026 why is that needed? Doesn't ending at that point also accomplish the same?",
+   "Why use HKDF at that point?"
+  ],
+  "display": "4 questions \u2192 no ZIP, no optional deflate, no final-record delimiter, no HKDF",
+  "source": "~/hobby/blog/src/content/blog/your-images-in-your-hands/index.md:115-118 ('How I built it')",
+  "quote": "- **\"What's the zip buying us?\"** Nothing the offsets in the `ImagingStudy` and the GCM tags didn't already provide, so the encrypted files became the DICOM instances laid end to end.",
+  "how": "read (verbatim from the four bullets)",
+  "ok": true,
+  "note": "Effects: (1) ZIP dropped: encrypted files are the DICOM instances laid end to end; offsets in ImagingStudy + GCM tags suffice. (2) Optional compression dropped: image compression lives inside DICOM; one client code path. (3) Final-record delimiter dropped: the authenticated Bundle gives each instance's length, so truncation is detectable. (4) HKDF dropped: each file has its own random key inside the link's Bundle. (A fifth question in the same section removed the slide-offset Bundle extension: 'Is this suggestion only to rescue slides that lack metadata that could be present in DICOM?') Q2 also appears in docs/PROCESS-NOTES.md:50."
+ },
+ "feature_list": {
+  "value": {
+   "ct_mr_reformats_oblique_slabs": {
+    "path": "web/core/volume.ts:8 (turned and tilted lattice); web/core/volume-gl.ts:119 reformat(g, index, slab)",
+    "where": "main"
+   },
+   "xray_voi_luts": {
+    "path": "web/core/display.ts:2 (VOI LUT Sequence...) / lutOutputBits; rule documented web/core/README.md:169",
+    "where": "main"
+   },
+   "whole_slide_tiles": {
+    "path": "web/view/wsi-view.ts; web/core/wsi.ts:11 isSlideSeries",
+    "where": "main"
+   },
+   "video": {
+    "path": "web/core/video.ts:120 parseMediaHeader; web/core/video-view.ts:405 MediaController; web/core/video-mpeg2.ts",
+    "where": "main"
+   },
+   "sr": {
+    "path": "web/core/sr.ts:134 readSr",
+    "where": "main"
+   },
+   "seg": {
+    "path": "web/core/derived.ts:69 readSegmentation; web/view/layers.ts:204 drawSeg",
+    "where": "main (note: SOP sweep found SEG drawn upside down when rows are reversed \u2014 defect 4, NLST TotalSegmentator)"
+   },
+   "pdf": {
+    "path": "web/view/pdf-view.ts:19 renderPdf",
+    "where": "main"
+   },
+   "reports_beside_images": {
+    "path": "web/core/reports.ts:50 linkReports; web/view/report-view.ts:35 renderReports",
+    "where": "main"
+   },
+   "study_download_zip_dicomdir": {
+    "path": "web/core/export.ts:44 exportZip; web/core/dicomdir.ts:76 buildDicomdir",
+    "where": "main"
+   },
+   "dark_mode": {
+    "path": "web/shared/base.css:29-51 (color-scheme: light dark; prefers-color-scheme: dark tokens); check web/checks/dark.mjs",
+    "where": "main"
+   },
+   "phone_layout": {
+    "path": "web/view/view.css:133 @media (max-width: 600px) and :194 (max-width: 420px); commit 3671bd5",
+    "where": "main"
+   },
+   "share_from_files_cd_dicomdir": {
+    "path": "web/share/share.ts:83 'Files or a folder' \u2014 'DICOM files, a CD, or a ZIP or TGZ archive'; web/share/lib/ingest.ts:119 (DICOMDIR index skipped, images read)",
+    "where": "main"
+   },
+   "share_from_received_shl": {
+    "path": "web/share/share.ts:85 'Paste a link from my provider'; share.ts:257 LinkResolver (re-share)",
+    "where": "main"
+   },
+   "share_from_smart_imaging_access": {
+    "path": "web/share/share.ts:84 'Connect to a patient portal'; web/share/lib/smart.ts:1 SMART Imaging Access client",
+    "where": "main"
+   },
+   "lossless_compression_sv1": {
+    "path": "web/share/lib/compress.ts:22 ENCODING_TS sv1 1.2.840.10008.1.2.4.70; codecs/shl-dicom-transcode/src/lib.rs:74 transcode_part10 (SV1 only on main); web/share/lib/compress.ts:22 ENCODING_TS j2k 1.2.840.10008.1.2.4.90 (main 04b92d6)",
+    "where": "main"
+   },
+   "lossless_compression_j2k": {
+    "path": "codecs/shl-codec-jpeg2000-encode/ (efb61b5) \u2014 main's compress.ts offers j2k only 'when the encoder offers it' and main's transcode_part10 supports SV1 only",
+    "where": "main (04b92d6): codecs/shl-codec-jpeg2000-encode and the Share page's JPEG 2000 option"
+   },
+   "resumable_uploads": {
+    "path": "crates/shl-dicom-server/src/routes_api.rs:348-349 (HEAD Upload-Offset, PATCH appends); web/share/lib/api.ts:145",
+    "where": "main"
+   },
+   "local_or_s3_storage": {
+    "path": "crates/shl-dicom-server/src/storage.rs:95 LocalFsStore, :183 S3Store",
+    "where": "main (public server uses local disk)"
+   },
+   "owner_link_open_counts": {
+    "path": "web/share/manage.ts:197-198 openCount \u2192 'Opened N times, last \u2026'; crates/shl-dicom-server/src/state.rs:118 open_count",
+    "where": "main"
+   },
+   "revoke_404": {
+    "path": "crates/shl-dicom-server/src/routes_shl.rs:51-53 lookup_sid_by_lid \u2192 not_found() (routes_shl.rs:549-551, StatusCode::NOT_FOUND)",
+    "where": "main (How checks assert 'share then revoke (404)', web/how/checks.mjs header)"
+   },
+   "subset_reshare_no_reupload": {
+    "path": "web/share/lib/pack.ts:209 subsetBundle(owner, studyIds) \u2192 {bundle, allowedFiles}; server clone crates/shl-dicom-server/src/routes_api.rs:123 clone_share",
+    "where": "main"
+   }
+  },
+  "display": "feature evidence (see value)",
+  "source": "git grep on main (43fefc5)",
+  "quote": "{ id: \"files\", icon: ICONS.files, title: \"Files or a folder\", sub: \"DICOM files, a CD, or a ZIP or TGZ archive\" },",
+  "how": "git grep main -- <paths>",
+  "ok": true,
+  "note": "Everything is on main except JPEG 2000 lossless re-encoding on share (branch only). Local main is 43fefc5; origin/main (d6ebdf3) adds only the SOP census/sweep docs."
+ },
+ "first_commit": {
+  "value": "00038df 2026-10-14 15:13:42 -0500",
+  "display": "Wed 14 Oct 2026, 3:13 pm CDT",
+  "source": "git log --reverse --format='%h %ad %s' --date=iso | head -1",
+  "quote": "00038df 2026-10-14 15:13:42 -0500 Proposal: sharing full DICOM studies through SMART Health Links",
+  "how": "read; TZ=America/Chicago formats as 'Wed 14 Oct 2026 15:13 CDT'",
+  "ok": true,
+  "note": "Confirmed: Wednesday 14 Oct 15:13 CDT. Same first commit across --all."
+ },
+ "e2e_checks_how": {
+  "value": "254/255",
+  "display": "How it works 254 / 255",
+  "source": "docs/poster/data/checks-how-live.log",
+  "quote": "254/255 passed",
+  "how": "read (summary line of the log)",
+  "ok": true,
+  "note": "web/how/checks.mjs run against https://shlink-dicom.exe.xyz with API set to the live site and READ_ONLY=1 (step 10's share-and-revoke skipped), 16 Oct 2026. The one failure is a timing check: a 109 ms main-thread task at 390 px, limit 100 ms. view-checks.mjs has no read-only mode (its fixtures step clones the sample share and makes links on the target server), and wsi-checks.mjs needs packed fixtures, so neither was run live and their counts were removed from the poster."
+ }
+}

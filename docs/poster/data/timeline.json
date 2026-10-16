@@ -1,0 +1,104 @@
+{
+ "events": [
+  {
+   "commit": "00038df",
+   "label": "First commit: the proposal",
+   "date": "2026-10-14T15:13:42-05:00",
+   "subject": "Proposal: sharing full DICOM studies through SMART Health Links"
+  },
+  {
+   "commit": "68e6b9a",
+   "label": "Pure-Rust decoders, test corpus, renderer",
+   "date": "2026-10-15T07:26:35-05:00",
+   "subject": "Checkpoint: pure-Rust codecs, codec corpus, benchmarks, viewer-kit, UX rounds 1-5, design docs"
+  },
+  {
+   "commit": "ed67c94",
+   "label": "Viewer, share and How pages; SMART Imaging sandbox",
+   "date": "2026-10-15T08:18:43-05:00",
+   "subject": "Three experiences: shared core, /view, /how, /share; SMART Imaging sandbox; scaled decode; JPEG-LS perf; coordination docs"
+  },
+  {
+   "commit": "9cf4a1f",
+   "label": "Whole-slide viewer; deploy scripts",
+   "date": "2026-10-15T08:55:36-05:00",
+   "subject": "Whole-slide tiled viewer in /view; bootstrap deploy scripts; wasm build fix"
+  },
+  {
+   "commit": "f1dfcde",
+   "label": "IDC long-tail sweep",
+   "date": "2026-10-15T10:21:01-05:00",
+   "subject": "Long-tail IDC sweep: 9,557 instances, random control 1000/1000 (95% CI 99.62-100%), all 9,537 evaluated 99.84%; 8 new cases; Leica YBR_FULL_422 ruling max_abs 3; corpus 942/942"
+  },
+  {
+   "commit": "f2eac46",
+   "label": "Sample data: Josh Example",
+   "date": "2026-10-15T10:44:07-05:00",
+   "subject": "Sample data: Josh Example (de-identified MRI, CT, radiographs from my-health-data 911ee41) plus the CC BY slide"
+  },
+  {
+   "commit": "5d9efc3",
+   "label": "Decoders: float, every JPEG mode",
+   "date": "2026-10-15T12:20:15-05:00",
+   "subject": "Decoders: float pixel data, .1.98/.8.1, GE private BE, files without Part 10 meta, retired photometrics, all JPEG modes (progressive, arithmetic, hierarchical), JPEG XL, JPEG 2000 Part 2"
+  },
+  {
+   "commit": "1dc953e",
+   "label": "Resumable uploads",
+   "date": "2026-10-15T13:22:15-05:00",
+   "subject": "Uploads ride out network drops; upload protocol follows draft-ietf-httpbis-resumable-upload-13"
+  },
+  {
+   "commit": "d3c8a1b",
+   "label": "One encrypted file per study",
+   "date": "2026-10-15T15:47:34-05:00",
+   "subject": "Study files review: positive lengths and non-empty series; a study-level linked-file only when used; subset rule in \u00a78.1; reports follow studies in Rust subsets; streaming CLI packer; real upload limits; renames"
+  },
+  {
+   "commit": "e7f6169",
+   "label": "Local or S3 storage",
+   "date": "2026-10-15T16:13:29-05:00",
+   "subject": "Blob store: local files or a private S3 bucket (rusty-s3), proxy or redirect reads, refcounted blobs for clones, multipart staging for resumable uploads; files table and helper renames"
+  },
+  {
+   "commit": "fef0a72",
+   "label": "Display checked against dcmtk and pydicom",
+   "date": "2026-10-15T17:10:40-05:00",
+   "subject": "Display: one pipeline for every pixel path, LUT output depth both ways, conformance against dcmtk and pydicom; GPU reformats with slabs; /view sample empty state"
+  },
+  {
+   "commit": "3671bd5",
+   "label": "Phone layout",
+   "date": "2026-10-15T18:37:08-05:00",
+   "subject": "View on phones: one More menu (report, downloads, encryption), Display and Measure in bottom sheets, no slice bar for single images, study times when dates repeat; Reset restores the series' opening view; overflow audit at 320-480 px, both orientations, 100% and 200% text"
+  },
+  {
+   "commit": "a9c6861",
+   "label": "Sandbox: transfer-syntax negotiation (PR #5)",
+   "date": "2026-10-15T19:54:43-05:00",
+   "subject": "Sandbox: WADO-RS transfer syntax negotiation (smart-imaging PR #5)"
+  },
+  {
+   "commit": "edf192e",
+   "label": "Lossless compression when sharing",
+   "date": "2026-10-15T20:07:26-05:00",
+   "subject": "Lossless compression when packing: SMART retrieve asks for JPEG Lossless first; uncompressed images re-encoded in workers (SV1 by default, JPEG 2000 when the encoder offers it, or kept exact), staged with hashes for resume; owner-only note; seed compresses the sample; checks verify pixel identity"
+  },
+  {
+   "commit": "47a7023",
+   "label": "Lossless JPEG encoder and transcoder",
+   "date": "2026-10-15T20:15:23-05:00",
+   "subject": "Lossless SV1 encoder and Part 10 transcoder (shl-dicom-transcode), with wasm export"
+  }
+ ],
+ "first": {
+  "commit": "00038df",
+  "date": "2026-10-14T15:13:42-05:00"
+ },
+ "last": {
+  "commit": "04b92d6",
+  "date": "2026-10-15T22:34:52-05:00"
+ },
+ "commits": 96,
+ "source": "git log on main (author dates); labels in docs/poster/scripts/timeline.py"
+}

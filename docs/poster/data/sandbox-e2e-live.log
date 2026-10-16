@@ -1,0 +1,186 @@
+ground truth: 739 instances in 36 series from /home/jmandel/hobby/shlink-dicom/imaging-sandbox/build/dataset
+
+Browser flow (Chromium, app origin http://localhost:3350) against https://smart-imaging-sandbox.exe.xyz
+  ok   discovery: imaging endpoint found via associated_endpoints
+  ok   login page shown
+  ok   consent page lists all 6 studies
+  ok   token response has patient context
+  ok   token response has a refresh token (offline_access)
+  ok   token response scope
+  ok   Patient read: name
+  ok   DiagnosticReport search (category=RAD): one report per radiology study (5)
+  ok   report PDF fetched cross-origin with the token
+  ok   token response has token_type Bearer and scope
+  ok   ImagingStudy search: 6 studies + 1 included Endpoint
+  ok   browser WADO-RS: 739/739 instances (all series) match the built dataset by SHA-256
+
+WADO-RS retrieval in Node with the browser's token
+  ok   external Endpoint: search returned the expected studies
+  ok   external Endpoint: 739/739 instances retrieved by series are byte-identical to the built dataset
+  ok   full brain study (44.4 MB multipart): 267 identical parts, no Content-Encoding
+  ok   multipart Content-Length matches the body
+  ok   full-study retrieval (wrist) returns 3 identical instances
+  ok   Accept without transfer-syntax: 406 with an explanation
+  ok   Accept */*: 406
+  ok   Accept with the stored transfer syntax UID (Implicit VR Little Endian): 200
+  ok   Accept with a transfer syntax the server does not store: 406
+  ok   instance-level retrieval returns the identical instance
+  ok   study metadata: DICOM JSON for 267 instances
+  ok   frames (not implemented): 404 after the token check
+
+Transfer syntax negotiation (smart-imaging PR #5)
+  ok   CT, SV1 first: 457 of 458 parts are SV1 copies (declared, in the file, same bytes and Content-Length as the copy); the dose SR comes back as stored
+  ok   CT, J2K first: every image is its JPEG 2000 Lossless copy
+  ok   CT, * only: all parts as stored (images Implicit VR Little Endian), byte-identical
+  ok   q weights win over header order (*;q=0.3, J2K;q=0.6, SV1;q=0.9 gives SV1)
+  ok   equal weights follow header order (J2K, SV1, * gives J2K)
+  ok   multipart Content-Length is exact (SV1 90.1 MB, J2K 69.6 MB, stored 246.2 MB)
+  ok   slide (mixed), SV1 then *: JPEG Baseline tiled levels as stored, uncompressed overview and thumbnail as SV1
+  ok   slide, SV1 without *: 406 with a JSON body naming what to send and what is available
+  ok   transfer-syntax missing: 406 with an example Accept
+  ok   every range at q=0: 406
+  ok   radiographs, J2K only (no *): 200, every image has a copy
+  ok   series-level retrieval negotiates too (MRI series as SV1)
+  ok   instance-level retrieval negotiates too (one MRI instance as J2K)
+  ok   shl-dicom-decode: compressed parts decode to the stored pixels (19/19)
+
+Search parameters
+  ok   identifier=urn:oid:{wrist} returns only the wrist study
+  ok   identifier=urn:dicom:uid|urn:oid:{brain} returns only the brain study
+  ok   _lastUpdated=gt2099 returns no studies
+  ok   _lastUpdated=gt2000-01-01 returns every study
+  ok   patient=Patient/{id} accepted
+  ok   external mode without _include: no Endpoint entries
+
+Whole-slide (SM) study
+  ok   slide ImagingStudy: modality SM, 1 series, 5 instances
+  ok   slide ImagingStudy carries the CC BY attribution as a note
+  ok   slide metadata: three VOLUME levels, OVERVIEW and THUMBNAIL
+  ok   slide instances share one Pyramid UID
+  ok   slide headers name the sample patient
+
+Refresh and introspection
+  ok   refresh_token grant issues a new access token with patient context
+  ok   refreshed token works for WADO-RS
+  ok   introspection without the resource-server key: 401
+
+Token audience
+  ok   aud=imaging base: token works at clinical, imaging and WADO-RS
+
+Imaging reports
+  ok   category=system|RAD: one report per radiology study (5)
+  ok   category=LAB: 0 reports
+  ok   code=http://loinc.org|37455-3: the left wrist report only
+  ok   category=SP: the slide's pathology report only
+  ok   all reports: one per study (6)
+  ok   report-mri-brain-2020: read by id
+  ok   report-mri-brain-2020: imagingStudy links its ImagingStudy by reference and Study Instance UID
+  ok   report-mri-brain-2020: category RAD, LOINC code, conclusion, synthetic tag
+  ok   report-mri-brain-2020: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order
+  ok   report-mri-brain-2020: PDF and text attachments fetchable, size and hash match
+  ok   report-mri-brain-2020: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment
+  ok   report-mri-brain-2020: text names the sample patient, the reading clinician and the facility
+  ok   report-mri-brain-2020: Binary as FHIR JSON when asked
+  ok   report-ct-abdomen-pelvis-2012: read by id
+  ok   report-ct-abdomen-pelvis-2012: imagingStudy links its ImagingStudy by reference and Study Instance UID
+  ok   report-ct-abdomen-pelvis-2012: category RAD, LOINC code, conclusion, synthetic tag
+  ok   report-ct-abdomen-pelvis-2012: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order
+  ok   report-ct-abdomen-pelvis-2012: PDF and text attachments fetchable, size and hash match
+  ok   report-ct-abdomen-pelvis-2012: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment
+  ok   report-ct-abdomen-pelvis-2012: text names the sample patient, the reading clinician and the facility
+  ok   report-ct-abdomen-pelvis-2012: Binary as FHIR JSON when asked
+  ok   report-xr-wrist-left-2012: read by id
+  ok   report-xr-wrist-left-2012: imagingStudy links its ImagingStudy by reference and Study Instance UID
+  ok   report-xr-wrist-left-2012: category RAD, LOINC code, conclusion, synthetic tag
+  ok   report-xr-wrist-left-2012: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order
+  ok   report-xr-wrist-left-2012: PDF and text attachments fetchable, size and hash match
+  ok   report-xr-wrist-left-2012: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment
+  ok   report-xr-wrist-left-2012: text names the sample patient, the reading clinician and the facility
+  ok   report-xr-wrist-left-2012: Binary as FHIR JSON when asked
+  ok   report-xr-hand-wrist-right-2012: read by id
+  ok   report-xr-hand-wrist-right-2012: imagingStudy links its ImagingStudy by reference and Study Instance UID
+  ok   report-xr-hand-wrist-right-2012: category RAD, LOINC code, conclusion, synthetic tag
+  ok   report-xr-hand-wrist-right-2012: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order
+  ok   report-xr-hand-wrist-right-2012: PDF and text attachments fetchable, size and hash match
+  ok   report-xr-hand-wrist-right-2012: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment
+  ok   report-xr-hand-wrist-right-2012: text names the sample patient, the reading clinician and the facility
+  ok   report-xr-hand-wrist-right-2012: Binary as FHIR JSON when asked
+  ok   report-xr-hand-right-2012: read by id
+  ok   report-xr-hand-right-2012: imagingStudy links its ImagingStudy by reference and Study Instance UID
+  ok   report-xr-hand-right-2012: category RAD, LOINC code, conclusion, synthetic tag
+  ok   report-xr-hand-right-2012: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order
+  ok   report-xr-hand-right-2012: PDF and text attachments fetchable, size and hash match
+  ok   report-xr-hand-right-2012: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment
+  ok   report-xr-hand-right-2012: text names the sample patient, the reading clinician and the facility
+  ok   report-xr-hand-right-2012: Binary as FHIR JSON when asked
+  ok   report-slide-lung-2023: read by id
+  ok   report-slide-lung-2023: imagingStudy links its ImagingStudy by reference and Study Instance UID
+  ok   report-slide-lung-2023: category SP, LOINC code, conclusion, synthetic tag
+  ok   report-slide-lung-2023: basedOn ServiceRequest (same code, accession), encounter, interpreter and facility resolve; ImagingStudy.basedOn points at the same order
+  ok   report-slide-lung-2023: PDF and text attachments fetchable, size and hash match
+  ok   report-slide-lung-2023: PDF parses with PDF.js, every page has the footer, and its text matches the text attachment
+  ok   report-slide-lung-2023: text names the sample patient, the reading clinician and the facility
+  ok   report-slide-lung-2023: Binary as FHIR JSON when asked
+  ok   ServiceRequest with a token lacking the scope: 403
+  ok   ServiceRequest search: one order per study (6); Encounter search: four visits
+  ok   report attachment without a token: 401
+
+Negative: missing or bad token
+  ok   ImagingStudy search, no token: 401
+  ok   Patient read, no token: 401
+  ok   WADO-RS, no token: 401
+  ok   401 carries WWW-Authenticate: Bearer
+  ok   WADO-RS, made-up token: 401
+
+Negative: token for another patient
+  ok   other patient's token has its own patient context
+  ok   search for the sample patient with robin's token: 403
+  ok   Patient read for the sample patient with robin's token: 403
+  ok   WADO-RS brain study with robin's token: 403
+  ok   WADO-RS brain series with robin's token: 403
+  ok   report attachment with robin's token: 404
+  ok   robin's own search: 200 with no studies
+
+Negative: study not shared (user shared only the wrist)
+  ok   search returns only the wrist study
+  ok   identifier search for the unshared brain study: empty Bundle
+  ok   WADO-RS brain study: 403
+  ok   WADO-RS brain metadata: 403
+  ok   WADO-RS made-up study UID: 403 (same as unauthorized)
+  ok   WADO-RS wrist study: 200
+  ok   DiagnosticReport search returns only the wrist report
+  ok   ServiceRequest search returns only the wrist order; the brain MRI order is 404
+  ok   brain report attachment with the wrist-only token: 404
+  ok   unshared and unknown studies: same status, headers and body
+
+Negative: wrong scopes
+  ok   Patient-only token: Patient read 200
+  ok   Patient-only token: ImagingStudy search 403
+  ok   Patient-only token: WADO-RS 403
+  ok   403 carries error=insufficient_scope
+  ok   ImagingStudy.s token: search 200
+  ok   ImagingStudy.s token: WADO-RS 403 (retrieval needs r)
+  ok   ImagingStudy.r token: WADO-RS 200
+  ok   ImagingStudy.r token: search 403 (search needs s)
+  ok   SMART v1 patient/*.read token: search and WADO-RS work
+  ok   user unticks ImagingStudy on the consent page: granted scope drops it
+  ok   system/ImagingStudy.rs only: invalid_scope (backend mode not offered)
+
+Negative: revocation
+  ok   revoked token: WADO-RS 401
+
+Negative: authorization request and token exchange
+  ok   authorize without code_challenge: invalid_request
+  ok   authorize with code_challenge_method=plain: invalid_request
+  ok   authorize with a wrong aud: invalid_request
+  ok   token exchange with the wrong code_verifier: invalid_grant
+  ok   token exchange with the right verifier still works after a failed attempt
+  ok   code replay: invalid_grant
+  ok   code replay revokes the token issued from that code
+  ok   unregistered client with a loopback redirect_uri (OPEN_CLIENTS): token issued
+
+CORS
+  ok   preflight to the token endpoint: 204 with Allow-Origin
+  ok   preflight to WADO-RS allows the Authorization header
+
+153 passed, 0 failed

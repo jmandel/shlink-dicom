@@ -1,0 +1,262 @@
+# How checks (web/how/checks.mjs) against the live site
+# run: 2026-10-16T05:56Z  checks script at commit 04b92d6 (main)  live main per coordinator: 80202c5
+# env: BASE=https://shlink-dicom.exe.xyz API=https://shlink-dicom.exe.xyz READ_ONLY=1
+# git diff 80202c5..HEAD touches only codec-corpus/prevalence/SOPCLASS_SWEEP.md
+PASS 360px light: sample opens — Opened the sample: Josh Example, 6 studies. The page follows slice 11 of 20 in the “T2 FSE AX” series of the BRAIN 7/29/20 study.
+PASS 360px light: every step renders — link:1 jwe:1 bundle:1 study:1 file:1 host:1 gcm:1 dicom:1 less:1 share:1 end:1
+PASS 360px light: 2 JWE: sizes shown match the file and its decryption — 58673 / 290876
+PASS 360px light: 3 Bundle: every entry listed
+PASS 360px light: 4 ImagingStudy: slice offset and length match the Bundle; the key is left out — 353408 @ 12300546
+PASS 360px light: 5 file: record range and Range header match, and that request was made — bytes=12255232-12713983
+PASS 360px light: 5 file: the slice's records light up and the slice is decoded
+PASS 360px light: 6 server: its requests listed — 4 lines
+PASS 360px light: 7 tag: every record passes and the slice is decoded from them — brightness 59.6
+PASS 360px light: 8 DICOM: header tags, implementation and the pixels (1.2.840.10008.1.2.4.70)
+PASS 360px light: 8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment — 1.2.840.10008.1.2.4.70
+PASS 360px light: 8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)
+PASS 360px light: 8 DICOM: says the compression is without loss, and names the writer — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 360px light: 8 DICOM: written by shlink-dicom (SHLDICOM_SV1_1), and says so — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 360px light: 9 on demand: counter against the study's file
+PASS 360px light: closed: every plain element present and visible
+PASS 360px light: opening every “How exactly” only adds: plain elements unchanged
+PASS 360px light: open: every expander shows its details
+PASS 360px light: no horizontal scroll, closed and open — 0 / 0
+PASS 360px light: targets ≥ 44 px
+PASS 360px light: 1 Copy link copies the viewer link and says so — https://shlink-dicom.exe.xyz/view#shlink:/eyJ1cmwi
+PASS 360px light: 1 Open link opens the sample in the viewer, in a new tab — https://shlink-dicom.exe.xyz/view#shlink:/eyJ1cmwiOiJodHRwcz
+PASS 360px light: 5 dragging across records fetches them; whole images appear, cut ones say which record they need
+PASS 360px light: 7 the tamper switch makes a record fail its tag check, and the slice is not shown — Record 187 failed its tag check. Bit 2 of byte 15,667 in it was flipped on the way.
+PASS 360px light: 8 brightness changes the window
+PASS 360px light: 9 moving to another slice fetches only its records — 3.5 MB fetched of the BRAIN 7/29/20 study's 28.6 MB encrypted file. → 3.9 MB fetched of the BRAIN 7/29/20 study's 28.6 MB encrypted file.
+PASS 360px light: no main-thread task over 100 ms
+PASS 360px light: no console errors
+PASS 360px dark: sample opens — Opened the sample: Josh Example, 6 studies. The page follows slice 11 of 20 in the “T2 FSE AX” series of the BRAIN 7/29/20 study.
+PASS 360px dark: every step renders — link:1 jwe:1 bundle:1 study:1 file:1 host:1 gcm:1 dicom:1 less:1 share:1 end:1
+PASS 360px dark: 2 JWE: sizes shown match the file and its decryption — 58673 / 290876
+PASS 360px dark: 3 Bundle: every entry listed
+PASS 360px dark: 4 ImagingStudy: slice offset and length match the Bundle; the key is left out — 353408 @ 12300546
+PASS 360px dark: 5 file: record range and Range header match, and that request was made — bytes=12255232-12713983
+PASS 360px dark: 5 file: the slice's records light up and the slice is decoded
+PASS 360px dark: 6 server: its requests listed — 4 lines
+PASS 360px dark: 7 tag: every record passes and the slice is decoded from them — brightness 59.6
+PASS 360px dark: 8 DICOM: header tags, implementation and the pixels (1.2.840.10008.1.2.4.70)
+PASS 360px dark: 8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment — 1.2.840.10008.1.2.4.70
+PASS 360px dark: 8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)
+PASS 360px dark: 8 DICOM: says the compression is without loss, and names the writer — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 360px dark: 8 DICOM: written by shlink-dicom (SHLDICOM_SV1_1), and says so — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 360px dark: 9 on demand: counter against the study's file
+PASS 360px dark: closed: every plain element present and visible
+PASS 360px dark: opening every “How exactly” only adds: plain elements unchanged
+PASS 360px dark: open: every expander shows its details
+PASS 360px dark: no horizontal scroll, closed and open — 0 / 0
+PASS 360px dark: targets ≥ 44 px
+PASS 360px dark: step link: dark scheme applied
+PASS 360px dark: step link: no near-white panels
+PASS 360px dark: step link: text contrast ≥ 4.5:1 (3:1 large) — 16 text elements
+PASS 360px dark: step jwe: dark scheme applied
+PASS 360px dark: step jwe: no near-white panels
+PASS 360px dark: step jwe: text contrast ≥ 4.5:1 (3:1 large) — 36 text elements
+PASS 360px dark: step bundle: dark scheme applied
+PASS 360px dark: step bundle: no near-white panels
+PASS 360px dark: step bundle: text contrast ≥ 4.5:1 (3:1 large) — 8 text elements
+PASS 360px dark: step study: dark scheme applied
+PASS 360px dark: step study: no near-white panels
+PASS 360px dark: step study: text contrast ≥ 4.5:1 (3:1 large) — 13 text elements
+PASS 360px dark: step file: dark scheme applied
+PASS 360px dark: step file: no near-white panels
+PASS 360px dark: step file: text contrast ≥ 4.5:1 (3:1 large) — 17 text elements
+PASS 360px dark: step host: dark scheme applied
+PASS 360px dark: step host: no near-white panels
+PASS 360px dark: step host: text contrast ≥ 4.5:1 (3:1 large) — 46 text elements
+PASS 360px dark: step gcm: dark scheme applied
+PASS 360px dark: step gcm: no near-white panels
+PASS 360px dark: step gcm: text contrast ≥ 4.5:1 (3:1 large) — 27 text elements
+PASS 360px dark: step dicom: dark scheme applied
+PASS 360px dark: step dicom: no near-white panels
+PASS 360px dark: step dicom: text contrast ≥ 4.5:1 (3:1 large) — 13 text elements
+PASS 360px dark: step less: dark scheme applied
+PASS 360px dark: step less: no near-white panels
+PASS 360px dark: step less: text contrast ≥ 4.5:1 (3:1 large) — 20 text elements
+PASS 360px dark: step share: dark scheme applied
+PASS 360px dark: step share: no near-white panels
+PASS 360px dark: step share: text contrast ≥ 4.5:1 (3:1 large) — 44 text elements
+PASS 360px dark: step end: dark scheme applied
+PASS 360px dark: step end: no near-white panels
+PASS 360px dark: step end: text contrast ≥ 4.5:1 (3:1 large) — 42 text elements
+PASS 360px dark: no main-thread task over 100 ms
+PASS 360px dark: no console errors
+PASS 390px light: sample opens — Opened the sample: Josh Example, 6 studies. The page follows slice 11 of 20 in the “T2 FSE AX” series of the BRAIN 7/29/20 study.
+PASS 390px light: every step renders — link:1 jwe:1 bundle:1 study:1 file:1 host:1 gcm:1 dicom:1 less:1 share:1 end:1
+PASS 390px light: 2 JWE: sizes shown match the file and its decryption — 58673 / 290876
+PASS 390px light: 3 Bundle: every entry listed
+PASS 390px light: 4 ImagingStudy: slice offset and length match the Bundle; the key is left out — 353408 @ 12300546
+PASS 390px light: 5 file: record range and Range header match, and that request was made — bytes=12255232-12713983
+PASS 390px light: 5 file: the slice's records light up and the slice is decoded
+PASS 390px light: 6 server: its requests listed — 4 lines
+PASS 390px light: 7 tag: every record passes and the slice is decoded from them — brightness 59.6
+PASS 390px light: 8 DICOM: header tags, implementation and the pixels (1.2.840.10008.1.2.4.70)
+PASS 390px light: 8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment — 1.2.840.10008.1.2.4.70
+PASS 390px light: 8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)
+PASS 390px light: 8 DICOM: says the compression is without loss, and names the writer — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 390px light: 8 DICOM: written by shlink-dicom (SHLDICOM_SV1_1), and says so — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 390px light: 9 on demand: counter against the study's file
+PASS 390px light: closed: every plain element present and visible
+PASS 390px light: opening every “How exactly” only adds: plain elements unchanged
+PASS 390px light: open: every expander shows its details
+PASS 390px light: no horizontal scroll, closed and open — 0 / 0
+PASS 390px light: targets ≥ 44 px
+PASS 390px light: 1 Copy link copies the viewer link and says so — https://shlink-dicom.exe.xyz/view#shlink:/eyJ1cmwi
+PASS 390px light: 1 Open link opens the sample in the viewer, in a new tab — https://shlink-dicom.exe.xyz/view#shlink:/eyJ1cmwiOiJodHRwcz
+PASS 390px light: 5 dragging across records fetches them; whole images appear, cut ones say which record they need
+PASS 390px light: 7 the tamper switch makes a record fail its tag check, and the slice is not shown — Record 190 failed its tag check. Bit 0 of byte 18,348 in it was flipped on the way.
+PASS 390px light: 8 brightness changes the window
+PASS 390px light: 9 moving to another slice fetches only its records — 3.5 MB fetched of the BRAIN 7/29/20 study's 28.6 MB encrypted file. → 3.9 MB fetched of the BRAIN 7/29/20 study's 28.6 MB encrypted file.
+PASS 390px light: end: the reference receiver runs in a worker on the sample
+PASS 390px light: end: test vector matches appendix B
+PASS 390px light: end: decoder comparison finishes with real progress and the same pixels — 36/36
+FAIL 390px light: no main-thread task over 100 ms — 109
+PASS 390px light: no console errors
+PASS 390px dark: sample opens — Opened the sample: Josh Example, 6 studies. The page follows slice 11 of 20 in the “T2 FSE AX” series of the BRAIN 7/29/20 study.
+PASS 390px dark: every step renders — link:1 jwe:1 bundle:1 study:1 file:1 host:1 gcm:1 dicom:1 less:1 share:1 end:1
+PASS 390px dark: 2 JWE: sizes shown match the file and its decryption — 58673 / 290876
+PASS 390px dark: 3 Bundle: every entry listed
+PASS 390px dark: 4 ImagingStudy: slice offset and length match the Bundle; the key is left out — 353408 @ 12300546
+PASS 390px dark: 5 file: record range and Range header match, and that request was made — bytes=12255232-12713983
+PASS 390px dark: 5 file: the slice's records light up and the slice is decoded
+PASS 390px dark: 6 server: its requests listed — 4 lines
+PASS 390px dark: 7 tag: every record passes and the slice is decoded from them — brightness 59.6
+PASS 390px dark: 8 DICOM: header tags, implementation and the pixels (1.2.840.10008.1.2.4.70)
+PASS 390px dark: 8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment — 1.2.840.10008.1.2.4.70
+PASS 390px dark: 8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)
+PASS 390px dark: 8 DICOM: says the compression is without loss, and names the writer — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 390px dark: 8 DICOM: written by shlink-dicom (SHLDICOM_SV1_1), and says so — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 390px dark: 9 on demand: counter against the study's file
+PASS 390px dark: closed: every plain element present and visible
+PASS 390px dark: opening every “How exactly” only adds: plain elements unchanged
+PASS 390px dark: open: every expander shows its details
+PASS 390px dark: no horizontal scroll, closed and open — 0 / 0
+PASS 390px dark: targets ≥ 44 px
+PASS 390px dark: step link: dark scheme applied
+PASS 390px dark: step link: no near-white panels
+PASS 390px dark: step link: text contrast ≥ 4.5:1 (3:1 large) — 17 text elements
+PASS 390px dark: step jwe: dark scheme applied
+PASS 390px dark: step jwe: no near-white panels
+PASS 390px dark: step jwe: text contrast ≥ 4.5:1 (3:1 large) — 39 text elements
+PASS 390px dark: step bundle: dark scheme applied
+PASS 390px dark: step bundle: no near-white panels
+PASS 390px dark: step bundle: text contrast ≥ 4.5:1 (3:1 large) — 21 text elements
+PASS 390px dark: step study: dark scheme applied
+PASS 390px dark: step study: no near-white panels
+PASS 390px dark: step study: text contrast ≥ 4.5:1 (3:1 large) — 13 text elements
+PASS 390px dark: step file: dark scheme applied
+PASS 390px dark: step file: no near-white panels
+PASS 390px dark: step file: text contrast ≥ 4.5:1 (3:1 large) — 26 text elements
+PASS 390px dark: step host: dark scheme applied
+PASS 390px dark: step host: no near-white panels
+PASS 390px dark: step host: text contrast ≥ 4.5:1 (3:1 large) — 51 text elements
+PASS 390px dark: step gcm: dark scheme applied
+PASS 390px dark: step gcm: no near-white panels
+PASS 390px dark: step gcm: text contrast ≥ 4.5:1 (3:1 large) — 30 text elements
+PASS 390px dark: step dicom: dark scheme applied
+PASS 390px dark: step dicom: no near-white panels
+PASS 390px dark: step dicom: text contrast ≥ 4.5:1 (3:1 large) — 13 text elements
+PASS 390px dark: step less: dark scheme applied
+PASS 390px dark: step less: no near-white panels
+PASS 390px dark: step less: text contrast ≥ 4.5:1 (3:1 large) — 22 text elements
+PASS 390px dark: step share: dark scheme applied
+PASS 390px dark: step share: no near-white panels
+PASS 390px dark: step share: text contrast ≥ 4.5:1 (3:1 large) — 44 text elements
+PASS 390px dark: step end: dark scheme applied
+PASS 390px dark: step end: no near-white panels
+PASS 390px dark: step end: text contrast ≥ 4.5:1 (3:1 large) — 46 text elements
+PASS 390px dark: no main-thread task over 100 ms
+PASS 390px dark: no console errors
+PASS 1440px light: sample opens — Opened the sample: Josh Example, 6 studies. The page follows slice 11 of 20 in the “T2 FSE AX” series of the BRAIN 7/29/20 study.
+PASS 1440px light: every step renders — link:1 jwe:1 bundle:1 study:1 file:1 host:1 gcm:1 dicom:1 less:1 share:1 end:1
+PASS 1440px light: 2 JWE: sizes shown match the file and its decryption — 58673 / 290876
+PASS 1440px light: 3 Bundle: every entry listed
+PASS 1440px light: 4 ImagingStudy: slice offset and length match the Bundle; the key is left out — 353408 @ 12300546
+PASS 1440px light: 5 file: record range and Range header match, and that request was made — bytes=12255232-12713983
+PASS 1440px light: 5 file: the slice's records light up and the slice is decoded
+PASS 1440px light: 6 server: its requests listed — 4 lines
+PASS 1440px light: 7 tag: every record passes and the slice is decoded from them — brightness 59.6
+PASS 1440px light: 8 DICOM: header tags, implementation and the pixels (1.2.840.10008.1.2.4.70)
+PASS 1440px light: 8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment — 1.2.840.10008.1.2.4.70
+PASS 1440px light: 8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)
+PASS 1440px light: 8 DICOM: says the compression is without loss, and names the writer — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 1440px light: 8 DICOM: written by shlink-dicom (SHLDICOM_SV1_1), and says so — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 1440px light: 9 on demand: counter against the study's file
+PASS 1440px light: closed: every plain element present and visible
+PASS 1440px light: opening every “How exactly” only adds: plain elements unchanged
+PASS 1440px light: open: every expander shows its details
+PASS 1440px light: no horizontal scroll, closed and open — 0 / 0
+PASS 1440px light: 1 Copy link copies the viewer link and says so — https://shlink-dicom.exe.xyz/view#shlink:/eyJ1cmwi
+PASS 1440px light: 1 Open link opens the sample in the viewer, in a new tab — https://shlink-dicom.exe.xyz/view#shlink:/eyJ1cmwiOiJodHRwcz
+PASS 1440px light: 5 dragging across records fetches them; whole images appear, cut ones say which record they need
+PASS 1440px light: 7 the tamper switch makes a record fail its tag check, and the slice is not shown — Record 193 failed its tag check. Bit 2 of byte 36,062 in it was flipped on the way.
+PASS 1440px light: 8 brightness changes the window
+PASS 1440px light: 9 moving to another slice fetches only its records — 3.5 MB fetched of the BRAIN 7/29/20 study's 28.6 MB encrypted file. → 3.9 MB fetched of the BRAIN 7/29/20 study's 28.6 MB encrypted file.
+PASS 1440px light: end: the reference receiver runs in a worker on the sample
+PASS 1440px light: end: test vector matches appendix B
+PASS 1440px light: end: decoder comparison finishes with real progress and the same pixels — 36/36
+PASS 1440px light: no main-thread task over 100 ms
+PASS 1440px light: no console errors
+PASS 1440px dark: sample opens — Opened the sample: Josh Example, 6 studies. The page follows slice 11 of 20 in the “T2 FSE AX” series of the BRAIN 7/29/20 study.
+PASS 1440px dark: every step renders — link:1 jwe:1 bundle:1 study:1 file:1 host:1 gcm:1 dicom:1 less:1 share:1 end:1
+PASS 1440px dark: 2 JWE: sizes shown match the file and its decryption — 58673 / 290876
+PASS 1440px dark: 3 Bundle: every entry listed
+PASS 1440px dark: 4 ImagingStudy: slice offset and length match the Bundle; the key is left out — 353408 @ 12300546
+PASS 1440px dark: 5 file: record range and Range header match, and that request was made — bytes=12255232-12713983
+PASS 1440px dark: 5 file: the slice's records light up and the slice is decoded
+PASS 1440px dark: 6 server: its requests listed — 4 lines
+PASS 1440px dark: 7 tag: every record passes and the slice is decoded from them — brightness 59.6
+PASS 1440px dark: 8 DICOM: header tags, implementation and the pixels (1.2.840.10008.1.2.4.70)
+PASS 1440px dark: 8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment — 1.2.840.10008.1.2.4.70
+PASS 1440px dark: 8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)
+PASS 1440px dark: 8 DICOM: says the compression is without loss, and names the writer — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 1440px dark: 8 DICOM: written by shlink-dicom (SHLDICOM_SV1_1), and says so — The Pixel Data is compressed with JPEG Lossless, first-order prediction (SV1), without loss: decoding gives back every pixel value exactly, 524 KB of pixels from 351 KB. shlink-dicom compressed it when the study was shar
+PASS 1440px dark: 9 on demand: counter against the study's file
+PASS 1440px dark: closed: every plain element present and visible
+PASS 1440px dark: opening every “How exactly” only adds: plain elements unchanged
+PASS 1440px dark: open: every expander shows its details
+PASS 1440px dark: no horizontal scroll, closed and open — 0 / 0
+PASS 1440px dark: step link: dark scheme applied
+PASS 1440px dark: step link: no near-white panels
+PASS 1440px dark: step link: text contrast ≥ 4.5:1 (3:1 large) — 23 text elements
+PASS 1440px dark: step jwe: dark scheme applied
+PASS 1440px dark: step jwe: no near-white panels
+PASS 1440px dark: step jwe: text contrast ≥ 4.5:1 (3:1 large) — 42 text elements
+PASS 1440px dark: step bundle: dark scheme applied
+PASS 1440px dark: step bundle: no near-white panels
+PASS 1440px dark: step bundle: text contrast ≥ 4.5:1 (3:1 large) — 15 text elements
+PASS 1440px dark: step study: dark scheme applied
+PASS 1440px dark: step study: no near-white panels
+PASS 1440px dark: step study: text contrast ≥ 4.5:1 (3:1 large) — 22 text elements
+PASS 1440px dark: step file: dark scheme applied
+PASS 1440px dark: step file: no near-white panels
+PASS 1440px dark: step file: text contrast ≥ 4.5:1 (3:1 large) — 49 text elements
+PASS 1440px dark: step host: dark scheme applied
+PASS 1440px dark: step host: no near-white panels
+PASS 1440px dark: step host: text contrast ≥ 4.5:1 (3:1 large) — 54 text elements
+PASS 1440px dark: step gcm: dark scheme applied
+PASS 1440px dark: step gcm: no near-white panels
+PASS 1440px dark: step gcm: text contrast ≥ 4.5:1 (3:1 large) — 30 text elements
+PASS 1440px dark: step dicom: dark scheme applied
+PASS 1440px dark: step dicom: no near-white panels
+PASS 1440px dark: step dicom: text contrast ≥ 4.5:1 (3:1 large) — 15 text elements
+PASS 1440px dark: step less: dark scheme applied
+PASS 1440px dark: step less: no near-white panels
+PASS 1440px dark: step less: text contrast ≥ 4.5:1 (3:1 large) — 20 text elements
+PASS 1440px dark: step share: dark scheme applied
+PASS 1440px dark: step share: no near-white panels
+PASS 1440px dark: step share: text contrast ≥ 4.5:1 (3:1 large) — 47 text elements
+PASS 1440px dark: step end: dark scheme applied
+PASS 1440px dark: step end: no near-white panels
+PASS 1440px dark: step end: text contrast ≥ 4.5:1 (3:1 large) — 50 text elements
+PASS 1440px dark: no main-thread task over 100 ms
+PASS 1440px dark: no console errors
+PASS no uncaught page errors in any flow
+PASS progress bars: determinate, never backwards, in proportion, and saying the same in words — 2 bars, 22 samples
+
+254/255 passed
+# exit: 1
