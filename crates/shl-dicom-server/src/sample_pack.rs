@@ -1,6 +1,6 @@
 //! Packs the server's sample (`samples/*.tgz`) into a share's study files on disk, holding at most
 //! one record and one header in memory: each archive member is written to a scratch file while its
-//! header is read, then every study is encrypted record by record (PROPOSAL.md §9.2, §11.1: one
+//! header is read, then every study is encrypted record by record (spec/README.md §9.2, §11.1: one
 //! file per study, its series in order) from those files into a staged file, which goes into the blob store.
 //! Uncompressed images are re-encoded without loss first (compress.rs), as the Share page does;
 //! every other instance is kept byte for byte.
@@ -96,7 +96,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             return Err("no DICOM instances in samples/*.tgz".to_string());
         }
 
-        // 2. Group and order as the packer does (PROPOSAL.md §11.1).
+        // 2. Group and order as the packer does (spec/README.md §11.1).
         let (patient_name, patient_id, patient_birth_date) =
             (members[0].h.patient_name.clone(), members[0].h.patient_id.clone(), members[0].h.patient_birth_date.clone());
         let mut studies: BTreeMap<String, BTreeMap<String, Vec<Member>>> = BTreeMap::new();

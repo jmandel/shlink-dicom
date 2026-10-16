@@ -189,7 +189,7 @@ node web/checks/wsi-checks.mjs --only=features      # or --only=<fixture>, icc, 
 
 `staged/ann-seg` holds links to the DX1, ANN and SEG files of the TCGA study.
 
-The server takes the 1.2 GB slide like any other share: file uploads stream to disk with no body limit, and the only size limit is the per-share quota when one is set (`--max-share-bytes`; 20 GB on the public server). `static-pack.ts` packs a slide for a static host instead, as PROPOSAL §9 describes, writing two encrypted files and a Bundle for each. Its offset tables come from the same Rust code as the packer's, through `offset_table_patch_wasm`. `static-host.ts` serves them, the way any static host would (Appendix C).
+The server takes the 1.2 GB slide like any other share: file uploads stream to disk with no body limit, and the only size limit is the per-share quota when one is set (`--max-share-bytes`; 20 GB on the public server). `static-pack.ts` packs a slide for a static host instead, as spec §9 describes, writing two encrypted files and a Bundle for each. Its offset tables come from the same Rust code as the packer's, through `offset_table_patch_wasm`. `static-host.ts` serves them, the way any static host would (Appendix C).
 
 ## Results
 
@@ -295,6 +295,6 @@ How it works:
   - An annotation instance is read whole (up to 512 MB). Its measurements (for example nucleus area) are not shown.
 - **ICC profiles:** v4 lutAtoB profiles (mAB) are not converted. The table is built on the main thread (27 ms).
 - **Learned offsets.** For files shared without tables, walking results last for the page session. They are not stored across visits, though they could be, by file id and offset, since the encrypted files are immutable.
-- **Fetch granularity.** The smallest fetch is a 64 KiB record, and tiles here average 3–17 KB. Neighbouring tiles share records, but a scattered view still over-fetches several times its tile bytes. That is the format's record size (PROPOSAL §9.3), not something the viewer can change.
+- **Fetch granularity.** The smallest fetch is a 64 KiB record, and tiles here average 3–17 KB. Neighbouring tiles share records, but a scattered view still over-fetches several times its tile bytes. That is the format's record size (spec §9.3), not something the viewer can change.
 - **Downloads.** For a slide, "Download originals" offers the study or series ZIP, not "This image". The ZIP of a 1.2 GB series was not tried.
 - **Single-channel monochrome slides.** These are shown with a percentile window. There is no window/level control for slides.

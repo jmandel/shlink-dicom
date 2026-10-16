@@ -1,4 +1,4 @@
-// Link resolution (SMART Health Links + PROPOSAL.md §10): U mode and manifest mode, passcodes,
+// Link resolution (SMART Health Links + spec/README.md §10): U mode and manifest mode, passcodes,
 // fresh /cap/ locations when a capability prefix expires, and Range reads of the encrypted files.
 import { decryptJwe, JweError } from "./jwe";
 import { hasFlag, parseShlink, type ShlPayload } from "./shlink";

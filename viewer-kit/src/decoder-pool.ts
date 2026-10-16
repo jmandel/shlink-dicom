@@ -47,7 +47,7 @@ export interface DecodeOptions {
    */
   scale?: number;
   /**
-   * The input is linked-file ciphertext (PROPOSAL.md §9): the worker verifies and decrypts it with
+   * The input is linked-file ciphertext (spec/README.md §9): the worker verifies and decrypts it with
    * WebCrypto (record-decrypt.ts) and decodes the plaintext window. A record that fails its check
    * rejects with RecordAuthenticationError and nothing is decoded.
    */

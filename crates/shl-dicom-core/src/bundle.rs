@@ -47,7 +47,7 @@ pub struct StudySummary {
     pub series: Vec<SeriesSummary>,
 }
 
-/// One encrypted file (`{file_id}.bin`): its key and lengths (PROPOSAL.md §8.1, §9.2).
+/// One encrypted file (`{file_id}.bin`): its key and lengths (spec/README.md §8.1, §9.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSummary {

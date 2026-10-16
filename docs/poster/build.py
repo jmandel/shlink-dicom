@@ -539,7 +539,7 @@ footer b {{ font-weight:700; }}
 </div>
 
 <footer>
-  <div><b>Links</b> · site <span class="mono">shlink-dicom.exe.xyz</span> · sample <span class="mono">shlink-dicom.exe.xyz/sample</span> · code and spec <span class="mono">github.com/jmandel/shlink-dicom</span> (PROPOSAL.md) · SMART Imaging sandbox <span class="mono">smart-imaging-sandbox.exe.xyz</span></div>
+  <div><b>Links</b> · site <span class="mono">shlink-dicom.exe.xyz</span> · sample <span class="mono">shlink-dicom.exe.xyz/sample</span> · code and spec <span class="mono">github.com/jmandel/shlink-dicom</span> (spec/README.md) · SMART Imaging sandbox <span class="mono">smart-imaging-sandbox.exe.xyz</span></div>
   <div><b>Data</b> · MRI, CT and X-rays: Josh Mandel's own, de-identified as Josh Example · lung slide: CPTAC-LUAD, CC BY 4.0 · shlink-dicom is a tech demo</div>
 </footer>
 </body></html>"""

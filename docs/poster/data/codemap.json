@@ -159,7 +159,7 @@
   },
   {
    "group": "Spec and reference",
-   "leaf": "specification (PROPOSAL.md)",
+   "leaf": "specification (spec/README.md)",
    "langs": {
     "Markdown": 423
    },

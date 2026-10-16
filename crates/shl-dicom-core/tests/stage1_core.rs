@@ -74,7 +74,7 @@ fn test_appendix_b_vector_and_f0_golden_share() {
     .unwrap();
     assert_eq!(inst2, &plaintext[70_000..150_000]);
 
-    // The golden share written by reference/test-vector.ts (PROPOSAL.md Appendix A): the study
+    // The golden share written by reference/test-vector.ts (spec/README.md Appendix A): the study
     // file holds series 2 and 997; series 3 has a file of its own.
     let golden_jwe = std::fs::read_to_string("../../fixtures/golden/bundle.jwe").unwrap();
     let golden_bin = std::fs::read("../../fixtures/golden/AAECAwQFBgcICQoLDA0ODw.bin").unwrap();
@@ -471,7 +471,7 @@ fn build_input(series_override: Option<LinkedFileInput>) -> BundleBuildInput {
 }
 
 /// `linked-file` on the study is the default; a series-level `linked-file` overrides it; offsets
-/// run per file (PROPOSAL.md §8.1). A subset keeps or drops each file whole.
+/// run per file (spec/README.md §8.1). A subset keeps or drops each file whole.
 #[test]
 fn test_linked_file_default_and_override() {
     let added = LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) };
@@ -534,7 +534,7 @@ fn test_linked_file_errors() {
 }
 
 /// Instance lengths are positive and every series lists an instance; an ImagingStudy with a
-/// linked-file and no series shares nothing (PROPOSAL.md §8.1).
+/// linked-file and no series shares nothing (spec/README.md §8.1).
 #[test]
 fn test_lengths_empty_series_and_empty_study() {
     let zero = || {

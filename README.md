@@ -2,9 +2,12 @@
 
 Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each study is one file of Part 10 instances (a series added later may have its own file), encrypted in 64 KiB AES-256-GCM records, so a receiver can range-read single instances or frames from a host that never sees the key.
 
+## Specification
+
+**[The shlink-dicom profile (`spec/`)](spec/README.md)**: SMART Health Links for DICOM imaging studies. It defines the ImagingStudy index and its `linked-file` and `instance-length` extensions, the encrypted study files and their 64 KiB AES-256-GCM records, the Range fetch contract, security considerations, a complete example Bundle and a test vector. Status: draft profile.
+
 ## Contents
 
-- **[`PROPOSAL.md`](PROPOSAL.md)**: the protocol, covering the ImagingStudy index, the encrypted study files, record encryption, the Range fetch contract and the test vector.
 - **[`PLAN.md`](PLAN.md)**, **[`docs/`](docs/)**: architecture, server storage ([`docs/storage.md`](docs/storage.md)), the three web experiences ([`docs/EXPERIENCES.md`](docs/EXPERIENCES.md)).
 - **`reference/`**: a short WebCrypto reference receiver and the test vector generator.
 - **`crates/`**:

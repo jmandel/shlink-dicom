@@ -5,7 +5,7 @@
 //   const file = await src.tileFile(k, tx, ty, { priority, signal });   // one-frame Part 10 file
 //   const img = await pool.decode(file, { key, priority, signal });
 //
-// Reads go through SeriesReader: a cache of verified, decrypted 64 KiB records (PROPOSAL.md §9.3)
+// Reads go through SeriesReader: a cache of verified, decrypted 64 KiB records (spec/README.md §9.3)
 // with a byte budget, and a priority queue that merges adjacent missing records into one Range
 // request. A frame is located from, in order: the Extended Offset Table, the Basic Offset Table,
 // native frame arithmetic, or by walking the fragment item headers from the start of Pixel Data

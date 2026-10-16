@@ -1,4 +1,4 @@
-// Lossless compression on the device (PROPOSAL.md §11.1): uncompressed images are re-encoded
+// Lossless compression on the device (spec/README.md §11.1): uncompressed images are re-encoded
 // before they are encrypted, so a share is smaller and recipients download less. The pixels stay
 // identical; the file bytes change (new transfer syntax, encapsulated Pixel Data, and the file meta
 // naming this packer). Every other file (reports, SRs, PDFs, already-compressed images) stays as it

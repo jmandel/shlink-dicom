@@ -1,6 +1,6 @@
 # Decrypting the encrypted files in the browser: wasm `aes-gcm` vs WebCrypto
 
-Question: is decrypting file records (PROPOSAL.md §9: 65,536-byte AES-256-GCM records, nonce `uint96_be(i)`) with the Rust `aes-gcm` crate compiled to wasm a bottleneck, and is WebCrypto faster once its per-call cost is counted?
+Question: is decrypting file records (spec/README.md §9: 65,536-byte AES-256-GCM records, nonce `uint96_be(i)`) with the Rust `aes-gcm` crate compiled to wasm a bottleneck, and is WebCrypto faster once its per-call cost is counted?
 
 Answer: yes and yes. In Chromium, WebCrypto decrypts series records 15–20× faster than `aes-gcm` in wasm: about 800 MB/s against about 50 MB/s on one thread. For most transfer syntaxes the wasm decrypt costs as much CPU as decoding, or more. With WebCrypto it costs a small fraction. `record-decrypt.ts`, now `viewer-kit/src/record-decrypt.ts`, is a drop-in module for the WebCrypto path.
 
@@ -61,7 +61,7 @@ So in Chromium the AES work runs on the calling thread, and a chain of resolved 
 
 Every path was checked in both the worker and the main thread: 12 paths × 17 checks, all passing. Each path:
 
-- reproduces the PROPOSAL Appendix B vector: the plaintext SHA-256 and the three record tags;
+- reproduces the spec Appendix B vector: the plaintext SHA-256 and the three record tags;
 - decrypts a range read of records 1 to the end;
 - decrypts a real encrypted file to its original bytes. `fixtures/wrist.bin` is the three wrist-low-res DICOM Part 10 instances (6.04 MB, 93 records), encrypted with `reference/linked-file.ts` by `make-fixtures.ts`;
 - rejects a flipped ciphertext bit, a flipped tag bit, swapped records, a record presented at the wrong index, a final record truncated by one byte, and the wrong key.

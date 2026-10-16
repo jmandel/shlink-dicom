@@ -116,11 +116,11 @@ Related docs:
   - shlink-dicom's protocol doesn't change. Only the share page's packing defaults may: what it asks the SMART source for, and whether it re-encodes uncompressed images before encrypting.
   - Candidate encodings: those IHE PDI's DVD/USB options require readers to handle (JPEG Lossless SV1, JPEG 2000 lossless).
   - Upstream PR opened (Josh approved): argonautproject/smart-imaging#5 (transfer syntax negotiation; addresses #3; #4 was the same change from a fork, closed). Branch transfer-syntax-negotiation in the upstream repo (Josh has write access: use branches there, not forks), clone at /media/barracuda/upstream/smart-imaging. Add the measured ratios as a PR comment when they arrive.
-  - The measurement agent (a18873dede250f0de) is gathering ratios and speed on the Josh Example studies. Then: the issue draft, the packing defaults, PROPOSAL §11.1 (it still says HTJ2K/JPEG-LS), and whether the sandbox should serve precomputed compressed copies so the negotiation is exercised.
+  - The measurement agent (a18873dede250f0de) is gathering ratios and speed on the Josh Example studies. Then: the issue draft, the packing defaults, spec §11.1 (it still says HTJ2K/JPEG-LS), and whether the sandbox should serve precomputed compressed copies so the negotiation is exercised.
 
 ## Decisions pending (ask Josh)
 
-- **PROPOSAL §8, DiagnosticReport** (Share agent's suggestion, not yet written into the spec):
+- **spec §8, DiagnosticReport** (Share agent's suggestion, not yet written into the spec):
   - It refers to its ImagingStudy in the same Bundle via imagingStudy.reference (the entry fullUrl), and SHOULD also give identifier urn:dicom:uid.
   - presentedForm attachments are inline data; url must not point at the source system.
   - **Open:** large attachments as encrypted files, like series files?
@@ -155,7 +155,7 @@ Resolved 15 Oct:
     - an Accept preference list;
     - in-browser re-encoding by default, with a "Keep files exactly as they are" option;
     - the seed packs the sample compressed;
-    - PROPOSAL §11.1;
+    - spec §11.1;
     - copy honesty: "pixel-identical" vs "byte for byte".
     - Branch `pack-compress`, worktree ../shlink-dicom-pack. It integrates the encoder when that reports.
   - **Decisions made in this round:**
@@ -242,7 +242,7 @@ Resolved 15 Oct:
    - DONE: `test/e2e.test.ts` deleted and the root README rewritten (01d3508);
    - update the root README;
    - re-measure on a real GPU after Josh reboots.
-2b. **Coordinator:** document the Share agent's link-key convention in PROPOSAL.md/PLAN.md (link key = HKDF(owner key, link id), so the manage link can rebuild any link; the server never holds link keys), and the server's new fields (openCount/lastOpenedAt/bytesServed, access ?lid=&limit=, share expiresAt capped at 31 days).
+2b. **Coordinator:** document the Share agent's link-key convention in spec/README.md/PLAN.md (link key = HKDF(owner key, link id), so the manage link can rebuild any link; the server never holds link keys), and the server's new fields (openCount/lastOpenedAt/bytesServed, access ?lid=&limit=, share expiresAt capped at 31 days).
 3. **When JPEG 2000/HTJ2K speed reports:**
    - verify and commit;
    - give the reduced-res agent (a21f481eac15d1f73) the go-ahead for JPEG 2000/HTJ2K scaled decode;

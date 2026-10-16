@@ -6,7 +6,7 @@ Status: design note for `shl-dicom-server`.
 
 - **`catalog.db`** holds what is needed to route a request to the right share (share ids and expiry, link ids, capability tokens) and the reference counts of the stored files.
 - **`shares/{sid}.db`** holds everything else about one share: the control-token hash, links and passcode counters, allowed-file lists, the owner and link Bundles, the list of encrypted files, uploads in progress, and the access log.
-- **The blob store** holds the finished encrypted files (one per study, PROPOSAL.md §11.1), exactly as the sharer uploaded them. It is a server setting:
+- **The blob store** holds the finished encrypted files (one per study, spec/README.md §11.1), exactly as the sharer uploaded them. It is a server setting:
   - **local files** (the default): `{data-dir}/blobs/{key}`;
   - **an S3 bucket** (any S3-compatible service): objects `{prefix}{key}` in a private bucket.
 - **Uploads in progress** are staged on local disk in `shares/{sid}/{fileId}.part`, whichever store holds finished files.

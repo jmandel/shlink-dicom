@@ -1,4 +1,4 @@
-// Reference implementation of PROPOSAL.md §8.1 (where each instance's bytes are) and §9 (how a
+// Reference implementation of spec/README.md §8.1 (where each instance's bytes are) and §9 (how a
 // linked file is encrypted). WebCrypto (AES-GCM) only; runs in Bun, Deno, Node 20+ and browsers.
 
 const SD = "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/";
@@ -120,7 +120,7 @@ function linkedFile(el: any): { id: string; key: string } | null {
 }
 
 /**
- * PROPOSAL.md §8.1: resolves each series' linked file (its own, else the study's) and walks the
+ * spec/README.md §8.1: resolves each series' linked file (its own, else the study's) and walks the
  * series and instances in array order, keeping a running offset per file.
  */
 export function layout(imagingStudy: any): { files: LinkedFile[]; instances: InstanceLocation[] } {

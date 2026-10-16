@@ -1,4 +1,4 @@
-// The ImagingStudy index: reads a decrypted SHL Bundle (PROPOSAL.md §8) into studies, series and
+// The ImagingStudy index: reads a decrypted SHL Bundle (spec/README.md §8) into studies, series and
 // instances with their byte offsets in the linked files, plus the Patient and DiagnosticReports.
 import { ciphertextLength, recordCount, RECORD_PLAINTEXT } from "./range";
 import { linkReports } from "./reports";
@@ -9,7 +9,7 @@ export const PROFILE_URL = SD + "dicom-imaging-study";
 export const EXT_LINKED_FILE = SD + "linked-file";
 export const EXT_INSTANCE_LENGTH = SD + "instance-length";
 
-/** One encrypted file, `{fileId}.bin` (PROPOSAL.md §8.1, §9). One object per fileId. */
+/** One encrypted file, `{fileId}.bin` (spec/README.md §8.1, §9). One object per fileId. */
 export interface FileEntry {
   /** 22-character file id; the file is `{fileId}.bin` next to the Bundle. */
   fileId: string;
@@ -192,7 +192,7 @@ function linkedFile(el: any): { fileId: string; key: string } | null {
 }
 
 /**
- * An ImagingStudy's series with their files (PROPOSAL.md §8.1): each series is in its own
+ * An ImagingStudy's series with their files (spec/README.md §8.1): each series is in its own
  * `linked-file`'s file, else the study's; offsets run per file through the series and instances in
  * array order. Null for an ImagingStudy with no linked-file anywhere (ordinary FHIR).
  */

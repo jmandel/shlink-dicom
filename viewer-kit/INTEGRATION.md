@@ -63,7 +63,7 @@ renderer.setView({ windowCenter, windowWidth, zoom, panX, panY, interpolation, i
 
 ## Encrypted input
 
-Linked files (PROPOSAL.md §9) are decrypted in the workers, so the main thread never runs AES and the file key never enters wasm memory. `record-decrypt.ts` (WebCrypto) does the work; `web/core` calls it through the pool:
+Linked files (spec/README.md §9) are decrypted in the workers, so the main thread never runs AES and the file key never enters wasm memory. `record-decrypt.ts` (WebCrypto) does the work; `web/core` calls it through the pool:
 
 ```ts
 const key = await importFileKey(rawKey);   // non-extractable, decrypt-only; posted with each job

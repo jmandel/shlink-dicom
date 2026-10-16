@@ -119,7 +119,7 @@ async function run(width, dark) {
   await page.waitForFunction(() => document.querySelector("#file .thumb.this canvas") && /fetched of/.test(document.querySelector("#less .counter")?.textContent ?? ""), null, { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(800);
 
-  // The numbers, recomputed here from the decrypted Bundle (PROPOSAL.md §8.1).
+  // The numbers, recomputed here from the decrypted Bundle (spec/README.md §8.1).
   const truth = await page.evaluate(() => {
     const { S } = window.__how;
     const bundle = S.share.index.bundle;

@@ -1,4 +1,4 @@
-//! Lossless compression of the sample at seed time (PROPOSAL.md §11.1), with the same rules as the
+//! Lossless compression of the sample at seed time (spec/README.md §11.1), with the same rules as the
 //! Share page (web/share/lib/compress.ts): uncompressed images are re-encoded as JPEG Lossless SV1
 //! by `shl-dicom-transcode`, which checks its own output bit for bit; everything else, and any image
 //! the encoder declines, is kept as it is.

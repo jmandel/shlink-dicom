@@ -1,4 +1,4 @@
-// Record decryption of the encrypted (linked) files with WebCrypto (PROPOSAL.md §9).
+// Record decryption of the encrypted (linked) files with WebCrypto (spec/README.md §9).
 //
 // An encrypted file is a run of AES-256-GCM records: every record but the last is 65,536 bytes
 // (65,520 bytes of ciphertext followed by a 16-byte tag), and record i uses the nonce
@@ -22,7 +22,7 @@ export interface DecryptRecordsOptions {
    * record's length is checked against §9: records before the last must be 65,536 bytes, the
    * file's final record must be its remainder plus 16, and the range must not run past the end.
    * Without it, only the tags are checked, so a range missing whole trailing records is not
-   * detected: the caller must compare lengths itself, as PROPOSAL.md §9.3 says.
+   * detected: the caller must compare lengths itself, as spec/README.md §9.3 says.
    */
   filePlaintextLength?: number;
   /**
@@ -35,7 +35,7 @@ export interface DecryptRecordsOptions {
   /**
    * Return only plaintext bytes [start, start + length) of the decrypted run, counted from the
    * start of the first record (for a read of file bytes [a, b): start = a − 65,520·first,
-   * length = b − a, as in PROPOSAL.md §9.3). Every record is still verified. Each record's
+   * length = b − a, as in spec/README.md §9.3). Every record is still verified. Each record's
    * plaintext is copied once, straight to its place in the result, so one instance can be
    * decrypted into an ArrayBuffer of exactly its size and transferred to a decoder worker.
    */

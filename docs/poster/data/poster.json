@@ -111,9 +111,9 @@
    "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "subagent_count": {
-   "display": "47",
-   "value": 47,
-   "source": "count of subagent transcripts (*.jsonl) in the coordinator session's subagents/ directory, 16 Oct 04:19; same method as the blog's footnote"
+   "display": "50",
+   "value": 50,
+   "source": "count of subagent transcripts (*.jsonl) in the coordinator session's subagents/ directory, 16 Oct 09:22; same method as the blog's footnote"
   },
   "sop_sweep_cases": {
    "display": "156",
@@ -378,5 +378,5 @@
   }
  },
  "missing": [],
- "built": "2026-10-16T04:19:26"
+ "built": "2026-10-16T09:22:32"
 }

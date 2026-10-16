@@ -6,11 +6,11 @@ Getting your medical imaging to another clinician still usually means carrying a
 
 I wanted the same model for full diagnostic imaging: every original DICOM file preserved byte for byte, viewable in a browser, without downloading a 400 MB archive before the first slice appears.
 
-I wrote a [specification](https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md), a Rust and WebAssembly reference implementation, a [sharing app](https://shlink-dicom.exe.xyz/share), a [browser viewer](https://shlink-dicom.exe.xyz/view), an [interactive explainer](https://shlink-dicom.exe.xyz/how), and a [SMART Imaging Access sandbox portal](https://smart-imaging-sandbox.exe.xyz).
+I wrote a [specification](https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md), a Rust and WebAssembly reference implementation, a [sharing app](https://shlink-dicom.exe.xyz/share), a [browser viewer](https://shlink-dicom.exe.xyz/view), an [interactive explainer](https://shlink-dicom.exe.xyz/how), and a [SMART Imaging Access sandbox portal](https://smart-imaging-sandbox.exe.xyz).
 
 **[FIGURE F1] Cover image.** *A SMART Health Link QR code on a phone opens the encrypted brain MRI study in a browser viewer beside it.*
 
-> **TL;DR:** Try the [sample study in the viewer](https://shlink-dicom.exe.xyz/view), [share your own imaging](https://shlink-dicom.exe.xyz/share) from files or our [SMART Imaging sandbox](https://smart-imaging-sandbox.exe.xyz), explore [how the protocol works on live byte ranges](https://shlink-dicom.exe.xyz/how), or read the [specification](https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md) and [code on GitHub](https://github.com/jmandel/shlink-dicom).
+> **TL;DR:** Try the [sample study in the viewer](https://shlink-dicom.exe.xyz/view), [share your own imaging](https://shlink-dicom.exe.xyz/share) from files or our [SMART Imaging sandbox](https://smart-imaging-sandbox.exe.xyz), explore [how the protocol works on live byte ranges](https://shlink-dicom.exe.xyz/how), or read the [specification](https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md) and [code on GitHub](https://github.com/jmandel/shlink-dicom).
 
 Thanks to the authors of the [Argonaut SMART Imaging Access Implementation Guide](https://build.fhir.org/ig/argonautproject/smart-imaging/) and to the [NCI Imaging Data Commons](https://portal.imaging.datacommons.cancer.gov/) for the public clinical imaging archives we used to test decoder coverage.
 
@@ -49,9 +49,9 @@ Opening the sample fetches [[MEASURE: bytes fetched to first image and first thu
 
 A standard SMART Health Link works well when the payload is a few kilobytes of FHIR JSON, because the client downloads and decrypts the whole file at once. A CT or MRI study is tens or hundreds of megabytes, and a whole-slide pathology image is over a gigabyte. We keep the FHIR Bundle small and store each DICOM study as a sequence of fixed-size 64 KiB encrypted records alongside it:
 
-- **One file per study, in 64 KiB records.** Every full record holds 65,520 bytes of concatenated DICOM files plus a 16-byte AES-256-GCM authentication tag, totaling 65,536 bytes on disk [[VERIFY: 65,520 B plaintext + 16 B tag = 65,536 B record, PROPOSAL.md §9.2]]. Each record uses its 0-based record index as the 96-bit nonce, so any record range can be fetched with an HTTP `Range` request and verified on its own.
-- **A random 32-byte key per study.** Each study's file has its own random key, stored alongside its random 22-character file ID inside the ImagingStudy resource [[VERIFY: linked-file extension with id and key, PROPOSAL.md §8.1]]. A series added to a study later can go in a file of its own. When you create a second link that shares only one study from a multi-study share, the browser encrypts a new `bundle.jwe` carrying only that study's key, without re-encrypting or re-uploading any files.
-- **The ImagingStudy resource is the byte-offset index.** Each instance entry carries its byte length, so summing earlier lengths gives the exact byte span of any slice [[VERIFY: length extension on series.instance, PROPOSAL.md §7.3]]. Listing 2,000 instances takes about 470 KB of FHIR JSON, which compresses to about 61 KB inside `bundle.jwe` [[VERIFY: 470 KB JSON / 61 KB deflated for 2,000 instances, docs/PROCESS-NOTES.md §2.10]].
+- **One file per study, in 64 KiB records.** Every full record holds 65,520 bytes of concatenated DICOM files plus a 16-byte AES-256-GCM authentication tag, totaling 65,536 bytes on disk [[VERIFY: 65,520 B plaintext + 16 B tag = 65,536 B record, spec/README.md §9.2]]. Each record uses its 0-based record index as the 96-bit nonce, so any record range can be fetched with an HTTP `Range` request and verified on its own.
+- **A random 32-byte key per study.** Each study's file has its own random key, stored alongside its random 22-character file ID inside the ImagingStudy resource [[VERIFY: linked-file extension with id and key, spec/README.md §8.1]]. A series added to a study later can go in a file of its own. When you create a second link that shares only one study from a multi-study share, the browser encrypts a new `bundle.jwe` carrying only that study's key, without re-encrypting or re-uploading any files.
+- **The ImagingStudy resource is the byte-offset index.** Each instance entry carries its byte length, so summing earlier lengths gives the exact byte span of any slice [[VERIFY: length extension on series.instance, spec/README.md §7.3]]. Listing 2,000 instances takes about 470 KB of FHIR JSON, which compresses to about 61 KB inside `bundle.jwe` [[VERIFY: 470 KB JSON / 61 KB deflated for 2,000 instances, docs/PROCESS-NOTES.md §2.10]].
 - **An opaque host.** The host stores and serves `bundle.jwe` and the encrypted study files. It sees random file names, file sizes, 64 KiB-aligned byte ranges, request times, client addresses and the `recipient` string the client sends, but no names, UIDs or pixels.
 - **No outer compression and no ZIP wrapper.** Compressing an entire file with DEFLATE or gzip would make byte offsets unpredictable and break random access; pixel compression already lives inside each DICOM file. A ZIP wrapper would only duplicate the directory and byte offsets that the ImagingStudy resource already carries.
 
@@ -147,7 +147,7 @@ The sample set is my own brain MRI, abdominal CT, and hand and wrist X-rays, de-
 
 - **Three formats are refused by design.** We refuse JPIP referenced transfer syntaxes (which hold a URL to an external server rather than pixels), Hologic private tomosynthesis slices (undocumented, though the standard centre slice is shown), and undocumented vendor compression in private tags, each with a message naming the format (`docs/COVERAGE-PLAN.md`) [[VERIFY: three refused categories in docs/COVERAGE-PLAN.md]].
 - **Demo servers, not a product.** The hosted servers are demos with storage quotas and expiry limits.
-- **Security model.** Holding a direct link grants access until it expires or is revoked. Passcode links enforce a limit of 5 failed attempts on the server before permanent revocation [[VERIFY: 5-attempt lifetime passcode counter, PROPOSAL.md §8.2 & docs/storage.md]].
+- **Security model.** Holding a direct link grants access until it expires or is revoked. Passcode links enforce a limit of 5 failed attempts on the server before permanent revocation [[VERIFY: 5-attempt lifetime passcode counter, spec/README.md §8.2 & docs/storage.md]].
 
 ## Building it with Claude Code
 
@@ -177,7 +177,7 @@ My role was to ask short questions that cut unnecessary layers and to check the 
 ## Links
 
 - **Live sites:** [Sample viewer](https://shlink-dicom.exe.xyz/view) · [Share your imaging](https://shlink-dicom.exe.xyz/share) · [How it works](https://shlink-dicom.exe.xyz/how) · [SMART Imaging sandbox](https://smart-imaging-sandbox.exe.xyz/)
-- **Specification and code:** [`PROPOSAL.md`](https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md) · [`jmandel/shlink-dicom`](https://github.com/jmandel/shlink-dicom) · [`codec-corpus/`](https://github.com/jmandel/shlink-dicom/tree/main/codec-corpus)
+- **Specification and code:** [`spec/README.md`](https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md) · [`jmandel/shlink-dicom`](https://github.com/jmandel/shlink-dicom) · [`codec-corpus/`](https://github.com/jmandel/shlink-dicom/tree/main/codec-corpus)
 - **Sample data:** [`jmandel/my-health-data/tree/master/imaging`](https://github.com/jmandel/my-health-data/tree/master/imaging)
 - **Standards:** [Argonaut SMART Imaging Access IG](https://build.fhir.org/ig/argonautproject/smart-imaging/) ([Issue #2](https://github.com/argonautproject/smart-imaging/issues/2), [Issue #3](https://github.com/argonautproject/smart-imaging/issues/3))
 

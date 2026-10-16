@@ -108,7 +108,7 @@ impl IngestSession {
     /// Groups ingested DICOM instances by `(StudyInstanceUID, SeriesInstanceUID)`, orders
     /// each study's series by `(SeriesNumber, SeriesInstanceUID)` and each series by
     /// `(InstanceNumber, SOPInstanceUID)`, encrypts each study into one `{fileId}.bin` with a
-    /// fresh 16-byte `fileId` and 32-byte `key` (PROPOSAL.md §11.1), and builds the owner's
+    /// fresh 16-byte `fileId` and 32-byte `key` (spec/README.md §11.1), and builds the owner's
     /// FHIR R4 Bundle.
     pub fn pack(self, last_updated: &str) -> Result<PackedStudySet> {
         if self.instances.is_empty() {

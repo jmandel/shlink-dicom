@@ -1,5 +1,5 @@
 // A static file host with single-range support and CORS, standing in for any static host
-// (PROPOSAL.md Appendix C).   bun web/view/wsi-tools/static-host.ts [root] [port]
+// (spec/README.md Appendix C).   bun web/view/wsi-tools/static-host.ts [root] [port]
 const root = process.argv[2] ?? "/media/barracuda/shlink-dicom-slides/host";
 const port = Number(process.argv[3] ?? 3335);
 const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Range", "Access-Control-Expose-Headers": "Content-Range, Content-Length" };

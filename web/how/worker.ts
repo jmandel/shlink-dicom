@@ -8,7 +8,7 @@ const post = (m: any) => (self as any).postMessage(m);
 const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const b64 = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 
-// PROPOSAL.md appendix B.
+// spec/README.md appendix B.
 const TV = {
   key: "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
   plaintextSha256: "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b",

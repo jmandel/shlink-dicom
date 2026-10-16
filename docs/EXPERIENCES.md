@@ -127,7 +127,7 @@ Sections, each pairing a short text with a live widget:
 6. **Sharing and revocation.** A mini-sandbox: mint a subset link from the sample share, open it, revoke it, and watch the 404s happen. This replaces today's Share tab.
 7. **Codecs and performance.** Coverage by transfer syntax (from the corpus check report), decode speed in this browser (a live micro-benchmark on the sample), and links to the full benchmark report.
 8. **Build it.**
-   - The spec (PROPOSAL.md) and the reference code.
+   - The spec (spec/README.md) and the reference code.
    - The test vectors.
    - A "receiver in 50 lines" snippet that resolves the sample link using only `fetch` and WebCrypto, runnable in the page.
 

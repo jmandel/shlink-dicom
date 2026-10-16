@@ -1,4 +1,4 @@
-// Prints the test vector in PROPOSAL.md appendix B, checks round trips, ranges and tampering,
+// Prints the test vector in spec/README.md appendix B, checks round trips, ranges and tampering,
 // checks the §8.1 byte layout of the Appendix A Bundle (a study file plus a series-level file),
 // and writes the golden share fixtures to fixtures/golden/.
 // Run: bun reference/test-vector.ts

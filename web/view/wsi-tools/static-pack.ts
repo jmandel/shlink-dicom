@@ -1,4 +1,4 @@
-// Packs a slide folder for a static host (PROPOSAL.md §10, U mode; Appendix C), for slides too
+// Packs a slide folder for a static host (spec/README.md §10, U mode; Appendix C), for slides too
 // large for the local server's upload limit. Records are encrypted one at a time.
 //   bun web/view/wsi-tools/static-pack.ts <name> <folder> [hostRoot] [hostUrl]
 // Writes <hostRoot>/<id>/ with two encrypted files and two Bundles: bundle.jwe (the files as they

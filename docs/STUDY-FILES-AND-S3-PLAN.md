@@ -13,10 +13,10 @@ This document specifies two changes to `shlink-dicom`, sequenced to run after th
 
 ### 1.1 Motivation
 
-Today `PROPOSAL.md` §8–9 uses placeholder `https://example.org/shl-dicom/*` URLs, places `{ id, key }` on every `ImagingStudy.series`, and writes one `{fileId}.bin` per series. Moving the default file and key boundary up to `ImagingStudy` (while allowing an optional series-level override for later appends) changes the system in five ways:
+Today `spec/README.md` §8–9 uses placeholder `https://example.org/shl-dicom/*` URLs, places `{ id, key }` on every `ImagingStudy.series`, and writes one `{fileId}.bin` per series. Moving the default file and key boundary up to `ImagingStudy` (while allowing an optional series-level override for later appends) changes the system in five ways:
 
 1. **Range access is unchanged.**
-   - `PROPOSAL.md` §10.1 already requires HTTP `Range` (`206 Partial Content`).
+   - `spec/README.md` §10.1 already requires HTTP `Range` (`206 Partial Content`).
    - In a study file whose plaintext is the study's instances concatenated in `series[].instance[]` order, every series, every instance, and every frame or tile is still a contiguous byte range inside `{fileId}.bin`.
    - Fetching one slice, one whole-slide tile, or one series still uses a single `Range: bytes=a-b` request and the same 64 KiB AES-256-GCM record layout (`R = 65,520`, 16-byte tag, `nonce = uint96_be(i)`).
 2. **Fewer files and less metadata visible at rest.**
@@ -28,11 +28,11 @@ Today `PROPOSAL.md` §8–9 uses placeholder `https://example.org/shl-dicom/*` U
 4. **Supports appending a series later without re-encrypting the study.**
    - Because `linked-file` is allowed on `ImagingStudy` (the default for all series in the study) and optionally on `ImagingStudy.series` (overriding the default for that series), a sharer updating a long-lived (`L`) link with a new series can write only the new series to a fresh `{fileId}.bin` and attach `linked-file` to that `series` without re-encrypting or re-uploading the original study file.
 5. **HL7 SMART Health Cards and Links canonical URLs.**
-   - Replaces the `https://example.org/shl-dicom/*` placeholder namespace with canonical URLs under `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/` (where this profile will be published), closing Open Question 1 in `PROPOSAL.md` §15.
+   - Replaces the `https://example.org/shl-dicom/*` placeholder namespace with canonical URLs under `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/` (where this profile will be published), closing Open Question 1 in `spec/README.md` §15.
 
 ---
 
-### 1.2 Wire Format and Spec Changes (`PROPOSAL.md`)
+### 1.2 Wire Format and Spec Changes (`spec/README.md`)
 
 1. **Profile and extension URLs (`§8.1`):**
    - `ImagingStudy.meta.profile`: `["http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/dicom-imaging-study"]`
@@ -437,7 +437,7 @@ pub trait BlobStore: Send + Sync {
 3. **Phase 2 (Part 2 — `BlobStore` + `S3Store`):** Add `BlobStore`, `LocalFsStore`, `S3Store` (`rusty-s3` + `reqwest`), `blobs` refcounting, `upload_parts`, `proxy` and `redirect` modes, MinIO integration tests, and cross-browser redirected-Range Playwright checks.
 
 ### Checklist — Phase 1 (Study-Level Files + HL7 UV URLs)
-- [ ] **`PROPOSAL.md`**
+- [ ] **`spec/README.md`**
   - §1, §6, §7: Update prose and overview diagram from one file per series to one file per study (`ImagingStudy`) by default.
   - §8.1–8.2 & Appendix A: Update profile URL to `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/dicom-imaging-study` and extension URLs to `.../linked-file` (on `ImagingStudy`, with optional override on `ImagingStudy.series`) and `.../instance-length` (on `ImagingStudy.series.instance`). Define per-`fileId` cumulative instance offsets.
   - §9–11: Update file terminology and packer rules (default one file per study; optional series-level `linked-file` when appending a series to an existing study).

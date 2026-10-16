@@ -1,4 +1,4 @@
-// Packing on the device (PROPOSAL.md §8, §9, §11.1): one random file id and one random 32-byte key
+// Packing on the device (spec/README.md §8, §9, §11.1): one random file id and one random 32-byte key
 // per study, the study's Part 10 files laid end to end (series by series, in Bundle order) and
 // encrypted in 65,520-byte records with AES-256-GCM (nonce = record index), and the FHIR Bundle
 // that lists them, with linked-file on each ImagingStudy.
@@ -164,7 +164,7 @@ export const REENCODED_TEXT = (n: number, of: number, encoding: string) =>
 const TS_LOSSLESS: Record<string, string> = { "1.2.840.10008.1.2.4.70": "JPEG Lossless", "1.2.840.10008.1.2.4.90": "JPEG 2000 Lossless" };
 
 /**
- * A Provenance saying the Share page re-encoded some of a study's images (PROPOSAL.md §11.1). It
+ * A Provenance saying the Share page re-encoded some of a study's images (spec/README.md §11.1). It
  * is in the owner Bundle only; subsetBundle leaves it out of every link's Bundle.
  */
 function reencodingProvenance(studyUrl: string, n: number, of: number, encoding: string, recorded: string): any {
@@ -193,7 +193,7 @@ const linkedFileId = (el: any): string | undefined =>
 /**
  * The file ids an ImagingStudy's series use (each series' own linked-file, else the study's, as
  * core/bundle.ts resolves them), and the study without a study-level linked-file none of its series
- * use, so a link carries no key for a file it does not serve (PROPOSAL.md §8.1).
+ * use, so a link carries no key for a file it does not serve (spec/README.md §8.1).
  */
 function studyFiles(study: any): { ids: string[]; study: any } {
   const studyId = linkedFileId(study);

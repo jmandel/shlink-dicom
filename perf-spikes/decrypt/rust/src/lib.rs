@@ -1,4 +1,4 @@
-//! Series-file record decryption (PROPOSAL.md §9) with the same `aes-gcm` crate the viewer uses,
+//! Series-file record decryption (spec/README.md §9) with the same `aes-gcm` crate the viewer uses,
 //! exposed as raw wasm exports (no wasm-bindgen) so JS can time it directly.
 //!
 //! Two code paths:

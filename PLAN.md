@@ -3,7 +3,7 @@
 ## 1. Core Architectural Contracts
 
 1. **Zero-Knowledge Server Contract (`Share` + `Link` Split with Per-Study Keys & `owner.jwe`):**
-   - Each study is one `.bin` file, encrypted once under its own random 32-byte key (carried inside the Bundle's `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file` extension on `ImagingStudy`, with `id` and `key` sub-extensions). A series added later may have its own `linked-file` (PROPOSAL.md §8.1, §10.3).
+   - Each study is one `.bin` file, encrypted once under its own random 32-byte key (carried inside the Bundle's `http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file` extension on `ImagingStudy`, with `id` and `key` sub-extensions). A series added later may have its own `linked-file` (spec/README.md §8.1, §10.3).
    - The server stores and serves only ciphertext (`{fileId}.bin` files, the Share's `owner.jwe`, and per-link `bundle.jwe` files). Neither the owner key, any SHL link key, nor any file key is ever sent to the server.
    - **Resource Split:**
      - **`Share` (`{sid}`):** Owns the pool of encrypted `{fileId}.bin` files, an encrypted **`owner.jwe`** (the full master Bundle of every study and its file's 32-byte `key`, encrypted under a 32-byte `ownerKey` held only by the owner), storage quotas, access history, and the `controlToken`.
@@ -35,7 +35,7 @@
 shlink-dicom/
 ├── Cargo.toml                          # Rust workspace root (members: crates/*)
 ├── package.json                        # Bun build scripts for WASM + web/ frontend
-├── PROPOSAL.md                         # Protocol specification
+├── spec/README.md                         # Protocol specification
 ├── PLAN.md                             # Architecture, API, file layout & test plan
 ├── reference/                          # Standalone ~100-line TS/WebCrypto reference
 │   ├── linked-file.ts

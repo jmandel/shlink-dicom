@@ -1,4 +1,4 @@
-// Record decryption (PROPOSAL.md §9.2–9.3) behind one interface. The implementations share
+// Record decryption (spec/README.md §9.2–9.3) behind one interface. The implementations share
 // viewer-kit's record-decrypt.ts (WebCrypto): WebCryptoDecryptor runs it on the calling thread;
 // PoolDecryptor (images.ts) runs it in the decoder workers.
 import { decryptRecords, importFileKey, RecordAuthenticationError } from "../../viewer-kit/src/record-decrypt";

@@ -1,16 +1,16 @@
-# Sharing full DICOM studies through SMART Health Links
+# SMART Health Links for DICOM imaging studies
 
-Status: draft proposal, October 2026. Reference code and a test vector are in `reference/`.
+Draft profile (shlink-dicom), October 2026. It shows how a SMART Health Link can carry a complete DICOM study that any app can fetch, range-read and verify. Reference code and the test vector generator are in [`reference/`](../reference/); the worked example and test vector are in [Appendix A](#appendix-a-complete-example-bundle) and [Appendix B](#appendix-b-test-vector).
 
 ## 1. Summary
 
 A patient or a provider should be able to share a complete imaging study, with every original DICOM file, by handing over one SMART Health Link. The files may be hosted on a server that cannot read them, including a static file host, and the receiver should be able to show the first images before the whole study has downloaded.
 
-This proposal adds no new link type. The link resolves, as any SMART Health Link does, to an encrypted FHIR Bundle. The Bundle holds an `ImagingStudy` that lists every series and instance and gives the study a random file id and a random 32-byte key. Each study is one file alongside the Bundle (`{fileId}.bin`): the original DICOM files laid end to end, encrypted in fixed-size records under that key. A series added to the study later can have a file and key of its own. A client that does not know this convention still gets a valid FHIR description of the study. A client that does can fetch any series or instance, or any byte range, and decrypt and verify it.
+This profile adds no new link type. The link resolves, as any SMART Health Link does, to an encrypted FHIR Bundle. The Bundle holds an `ImagingStudy` that lists every series and instance and gives the study a random file id and a random 32-byte key. Each study is one file alongside the Bundle (`{fileId}.bin`): the original DICOM files laid end to end, encrypted in fixed-size records under that key. A series added to the study later can have a file and key of its own. A client that does not know this convention still gets a valid FHIR description of the study. A client that does can fetch any series or instance, or any byte range, and decrypt and verify it.
 
 ## 2. Background: SMART Health Links in brief
 
-A SMART Health Link (SHL) is a way to share health data by handing over a link or QR code. It is specified in the HL7 *SMART Health Cards and Links* implementation guide ([Health Links specification](https://build.fhir.org/ig/HL7/smart-health-cards-and-links/links-specification.html)). The parts this proposal depends on:
+A SMART Health Link (SHL) is a way to share health data by handing over a link or QR code. It is specified in the HL7 *SMART Health Cards and Links* implementation guide ([Health Links specification](https://build.fhir.org/ig/HL7/smart-health-cards-and-links/links-specification.html)). The parts this profile depends on:
 
 - **The link.** An SHL is the string `shlink:/` followed by base64url-encoded JSON, optionally prefixed by a viewer URL ending in `#`. The JSON (the *SHL payload*) holds:
   - `url`, where the data is fetched;
@@ -336,7 +336,7 @@ To save a study to disk, the receiver writes each instance as its own file, or b
 
 A client implementing only the core SHL specification can parse the link, retrieve the Bundle (in U or manifest mode) and decrypt it. The Bundle is valid FHIR R4. Such a client sees the patient, the study and series structure, and any `DiagnosticReport`. It ignores the profile and the two extensions in `ImagingStudy` as the specification requires, and does not fetch the encrypted files.
 
-This proposal therefore treats these links as Plain SHLs. The counter-argument is that for imaging the pixels are the fundamental data, and a client that cannot get them has not fully processed the link. If the SHL community takes that view, the convention would need its own URI scheme (for example `shlink-dicom:/`) and an entry on the SHL extensions registry, with no change to anything else in this proposal.
+This profile therefore treats these links as Plain SHLs. The counter-argument is that for imaging the pixels are the fundamental data, and a client that cannot get them has not fully processed the link. If the SHL community takes that view, the convention would need its own URI scheme (for example `shlink-dicom:/`) and an entry on the SHL extensions registry, with no change to anything else in this profile.
 
 ## 13. Security and privacy
 
@@ -352,7 +352,7 @@ This proposal therefore treats these links as Plain SHLs. The counter-argument i
 - **Correlation across recipients.** When two links share the same underlying `.bin` file, both Bundles carry the same `id` and `key`, so recipients who compare decrypted Bundles can tell they received identical data. When that matters, the sharer can re-encrypt the study with a fresh `id` and `key` for each link.
 - **Nonce safety.** The SHL key is used only for the Bundle JWE, which draws a fresh random 12-byte IV each time the Bundle is encrypted. Each file is encrypted under its own random 32-byte key *K_f* and uses a sequential counter (`uint96_be(i)`) per record. Because each *K_f* is used for at most one immutable file, no `(K_f, nonce)` pair is ever reused. A sharer MUST draw file keys and file ids from a cryptographically secure random source and MUST NOT reuse either for different content.
 - **The `recipient` string** is supplied by the client and is not authenticated. It is an access log hint, not access control.
-- **DICOM content is sensitive throughout.** Headers carry names, identifiers and dates, and some images carry burned-in text. Nothing in this proposal removes them; the receiver gets the study as exported.
+- **DICOM content is sensitive throughout.** Headers carry names, identifiers and dates, and some images carry burned-in text. Nothing in this profile removes them; the receiver gets the study as exported.
 
 ## 14. Alternatives considered
 
@@ -370,7 +370,7 @@ This proposal therefore treats these links as Plain SHLs. The counter-argument i
 ## 15. Open questions
 
 1. **Plain or not.** Whether the SHL community accepts §12's reading.
-2. **FHIR version.** The proposal targets R4, as the SHL guide does. In R5, `instance-length` could use `integer64`.
+2. **FHIR version.** This profile targets R4, as the SHL guide does. In R5, `instance-length` could use `integer64`.
 3. **Frame offsets.** Whether to add an optional per-instance list of frame offsets to the Bundle, so viewers can fetch a frame without first reading the instance header. The cost is a larger Bundle for multi-frame studies.
 4. **Several studies in one link.** Allowed as written, with one `ImagingStudy` each. Any limits are untested.
 5. **Hosts without Range support.** Whether to define the one-file-per-instance fallback formally, or simply require Range support.

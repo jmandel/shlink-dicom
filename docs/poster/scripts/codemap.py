@@ -4,7 +4,7 @@
 Rules (all in this file so the poster can say exactly what was counted):
 - Files: `git ls-files` at the ref given (default main). Lines = non-blank lines.
 - Languages counted by extension: Rust, TypeScript, JavaScript, Python, C, SQL, Shell, CSS, HTML;
-  Markdown only for the specification (PROPOSAL.md).
+  Markdown only for the specification (spec/README.md).
 - Excluded: data and config (json, toml, lock, csv, yml), logs, patches, binaries, built output (dist/),
   docs other than the spec, and node_modules (never tracked).
 - Vendored upstream code (codecs/*/vendor/<name>/) is counted separately and shown as upstream.
@@ -64,7 +64,7 @@ RULES = [
     ("fixtures/", "Verification", "protocol tests"),
     ("deploy/", "Server and protocol core", "deploy scripts"),
     ("reference/", "Spec and reference", "reference code + test vector"),
-    ("PROPOSAL.md", "Spec and reference", "specification (PROPOSAL.md)"),
+    ("spec/README.md", "Spec and reference", "specification (spec/README.md)"),
 ]
 
 def ls(ref):
@@ -75,7 +75,7 @@ def lines(ref, path):
     return sum(1 for l in blob.decode("utf-8", "replace").split("\n") if l.strip())
 
 def lang_of(path):
-    if path == "PROPOSAL.md": return "Markdown"
+    if path == "spec/README.md": return "Markdown"
     if "/dist/" in path: return None
     ext = path.rsplit(".", 1)[-1] if "." in path else ""
     return LANG.get(ext)

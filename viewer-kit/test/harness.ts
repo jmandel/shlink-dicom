@@ -301,7 +301,7 @@ async function poolSemantics(opts: { big: string; multiframe: string; unsupporte
         `${thumb.columns}x${thumb.rows}; decode ${full.decodeMs.toFixed(1)} ms full, ${thumb.decodeMs.toFixed(1)} ms at 1/8`,
       );
     }
-    // Encrypted input (PROPOSAL.md §9): a series file of [garbage, the instance, garbage], the
+    // Encrypted input (spec/README.md §9): a series file of [garbage, the instance, garbage], the
     // instance's window decrypted and decoded in the worker; one flipped bit is refused.
     const one = new Uint8Array(await fetchBytes(opts.big));
     const pre = 70_000, post = 9_000, P = pre + one.length + post;

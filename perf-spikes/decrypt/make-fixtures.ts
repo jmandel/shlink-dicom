@@ -1,5 +1,5 @@
 // Builds the correctness fixtures for the decrypt spike:
-//   fixtures/vector.bin + vector.json   copy of the PROPOSAL Appendix B vector (fixtures/golden/)
+//   fixtures/vector.bin + vector.json   copy of the spec Appendix B vector (fixtures/golden/)
 //   fixtures/wrist.bin + wrist.json     a real encrypted file: the three wrist-low-res instances,
 //                                       concatenated and encrypted with reference/linked-file.ts
 // Run from the repository root: bun perf-spikes/decrypt/make-fixtures.ts

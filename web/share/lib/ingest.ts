@@ -1,6 +1,6 @@
 // Reading imaging on the device: archives (ZIP, TAR, TGZ), loose DICOM files and folders, and
 // instances handed over by the portal and link sources. Everything ends up as Part 10 files grouped
-// into studies and series (PROPOSAL.md §11.1 steps 1–4).
+// into studies and series (spec/README.md §11.1 steps 1–4).
 //
 // Nothing here holds a whole file: an instance is a byte source (lib/bytes.ts) read on demand, and
 // only its header is read while collecting. Archive members that can't be read in place (deflated

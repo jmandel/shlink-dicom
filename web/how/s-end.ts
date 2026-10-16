@@ -106,7 +106,7 @@ export function mountEnd(_pic: HTMLElement, exact: HTMLElement) {
     h("pre", { id: "rx-code", class: "code", tabindex: "0", text: receiverSource }),
     h("div", { class: "row wrap" }, rxRun, h("a", { class: "btn", href: "../how/receiver.mjs", download: "receiver.mjs", text: "Download" })),
     rxOut,
-    para("The protocol: ", h("a", { href: "https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md", text: "the specification" }), ", with a ", h("a", { href: "https://github.com/jmandel/shlink-dicom/blob/main/PROPOSAL.md#appendix-b-test-vector", text: "test vector" }), " for the record format."),
+    para("The protocol: ", h("a", { href: "https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md", text: "the specification" }), ", with a ", h("a", { href: "https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#appendix-b-test-vector", text: "test vector" }), " for the record format."),
     tvRun,
     tvOut,
     h("h3", { text: "Decoder speed" }),

@@ -1,4 +1,4 @@
-// Record arithmetic for the encrypted files (PROPOSAL.md §9.2–9.3) and range planning.
+// Record arithmetic for the encrypted files (spec/README.md §9.2–9.3) and range planning.
 import type { SeriesEntry } from "./bundle";
 
 /** Plaintext bytes per record. */

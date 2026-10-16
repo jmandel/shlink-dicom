@@ -61,7 +61,7 @@ vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); /
 
 ### The Bundle: `bundle.ts`
 
-`parseStudyIndex(bytes | string | object): StudyIndex` reads PROPOSAL.md §8:
+`parseStudyIndex(bytes | string | object): StudyIndex` reads spec/README.md §8:
 
 ```ts
 StudyIndex  { lastUpdated, patient: { name, birthDate, id }, reports: ReportEntry[], studies: StudyEntry[], bundle }
@@ -72,7 +72,7 @@ InstanceEntry { uid, sopClass, number, offset, length, firstRecord, lastRecord }
 ReportEntry { id, status, title, conclusion, issued, effective, studyIds[], text }
 ```
 
-Each series is in a file: its own `linked-file`, else its study's. Offsets run per file, through the series and instances in Bundle order (PROPOSAL.md §8.1), so `instance.offset` and `series.offset` are positions in `series.file`. There is one `FileEntry` object per file id, shared by its series; `study.files` lists them in first-use order. `series.bytes` is the series' own size; `series.file.plaintextLength` is the whole file's. Several series share a file, so key caches and maps by `series.id` (`${file.fileId}@${offset}`), not by the file id.
+Each series is in a file: its own `linked-file`, else its study's. Offsets run per file, through the series and instances in Bundle order (spec/README.md §8.1), so `instance.offset` and `series.offset` are positions in `series.file`. There is one `FileEntry` object per file id, shared by its series; `study.files` lists them in first-use order. `series.bytes` is the series' own size; `series.file.plaintextLength` is the whole file's. Several series share a file, so key caches and maps by `series.id` (`${file.fileId}@${offset}`), not by the file id.
 
 The field names match the Rust `StudyIndex` in `shl-dicom-core`, with additions.
 
