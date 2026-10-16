@@ -17,10 +17,10 @@ The counts it draws on are in [SOPCLASS_CENSUS.md](SOPCLASS_CENSUS.md).
 | 3 | Out-of-order frames step in stored order | Fixed in ec827af |
 | 4 | SEG drawn through the image's grid, upside down for NLST | Fixed in ec827af (placed through its own geometry) |
 | 5 | GSPS opens the wrong image | Fixed in ec827af |
-| 6 | Deflated label-map SEGs dropped at Share ingest | Open (Share) |
+| 6 | Deflated label-map SEGs dropped at Share ingest | Fixed in cb70e6b (header reads inflate deflated data sets) |
 | 7 | Breast Projection For Processing draws black | Fixed in ec827af (percentile window when the stored one covers under 1% of values) |
 
-The sweep's regression fixtures pass for 1–5 and 7.
+All seven regression fixtures pass.
 
 ## Summary
 
