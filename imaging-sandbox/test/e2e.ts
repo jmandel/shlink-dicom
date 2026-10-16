@@ -23,6 +23,7 @@ import type { Sandbox } from "../src/server.ts";
 const HERE = import.meta.dir;
 const ROOT = resolve(HERE, "..");
 const DATASET = resolve(process.env.DATASET_DIR ?? join(ROOT, "build/dataset"));
+const VARIANTS = resolve(process.env.VARIANTS_DIR ?? join(ROOT, "build/variants"));
 const PORT_BASE = Number(process.env.E2E_PORT_BASE ?? 3341);
 // The stand-in app page is served from a real loopback server, so Chromium
 // treats app and sandbox as the same (loopback) address space.
@@ -88,7 +89,7 @@ const sandboxes = new Map<string, Sandbox>();
 async function start(port: number, env: Record<string, string>): Promise<string> {
   const { startSandbox } = await import("../src/server.ts");
   const base = `http://localhost:${port}`;
-  const sb = await startSandbox({ PORT: String(port), BASE_URL: base, LOG_REQUESTS: "0", INTROSPECTION_KEY: introspectionKey!, DATASET_DIR: DATASET, SHARE_REDIRECT_URIS: REDIRECT, ...env });
+  const sb = await startSandbox({ PORT: String(port), BASE_URL: base, LOG_REQUESTS: "0", INTROSPECTION_KEY: introspectionKey!, DATASET_DIR: DATASET, VARIANTS_DIR: VARIANTS, SHARE_REDIRECT_URIS: REDIRECT, ...env });
   running.push({ stop: () => sb.server.stop(true) });
   sandboxes.set(base, sb);
   return base;
@@ -272,6 +273,82 @@ async function main() {
   const meta = await C.wadoGet(`${base}/wado-rs/studies/${brain}/metadata`, at, "application/dicom+json");
   check(`study metadata: DICOM JSON for ${brainN} instances`, meta.status === 200 && Array.isArray(meta.json) && meta.json.length === brainN && meta.json[0]["0020000D"]?.Value?.[0] === brain);
   check("frames (not implemented): 404 after the token check", (await status(`${base}/wado-rs/studies/${wrist}/series/${sopT.seriesUID}/instances/${sopT.sopUID}/frames/1`, at)) === 404);
+
+  section("Transfer syntax negotiation (smart-imaging PR #5)");
+  {
+    const SV1 = "1.2.840.10008.1.2.4.70", J2K = "1.2.840.10008.1.2.4.90";
+    const range = (ts: string, q?: number) => `multipart/related; type="application/dicom"; transfer-syntax=${ts}${q === undefined ? "" : `; q=${q}`}`;
+    const vman = JSON.parse(await Bun.file(join(VARIANTS, "manifest.json")).text());
+    const copyBySop = new Map<string, Map<string, { size: number; sha256: string }>>();
+    for (const e of vman.instances) copyBySop.set(e.sop, new Map(e.variants.filter((v: any) => v.size).map((v: any) => [v.ts, v])));
+    const ct = studyUIDById.get("ct-abdomen-pelvis-2012")!;
+    const slideUID = studyUIDById.get("slide-lung-2023")!;
+    const get = async (url: string, accept: string) => {
+      const r = await fetch(url, { headers: { authorization: `Bearer ${at}`, accept } });
+      const body = new Uint8Array(await r.arrayBuffer());
+      const parts = r.ok ? C.parseMultipart(body, r.headers.get("content-type") ?? "") : [];
+      return { status: r.status, body, parts, json: r.ok ? null : JSON.parse(new TextDecoder().decode(body) || "{}"), length: Number(r.headers.get("content-length")) };
+    };
+    const tsOf = (p: any) => (p.headers["content-type"].match(/transfer-syntax=([0-9.*]+)/) ?? [])[1];
+    const sopOf = (p: any) => str(parseDicom(p.bytes).dataset, 0x00080018)!;
+    const tsInFile = (p: any) => parseDicom(p.bytes).transferSyntaxUID;
+    const matchesCopy = (p: any, ts: string) => { const c = copyBySop.get(sopOf(p))?.get(ts); return !!c && c.size === p.bytes.byteLength && Number(p.headers["content-length"]) === c.size; };
+    const sha = (b: Uint8Array) => new Bun.CryptoHasher("sha256").update(b).digest("hex");
+    // Instances without a compressed copy (the dose SR has no pixels) come back as stored.
+    const hasCopy = (p: any, ts: string) => !!copyBySop.get(sopOf(p))?.get(ts);
+    const storedTs = (p: any) => truthBySop.get(sopOf(p)) && parseDicom(truthBySop.get(sopOf(p))!.bytes).transferSyntaxUID;
+    const asWanted = (p: any, ts: string) => hasCopy(p, ts) ? tsOf(p) === ts && tsInFile(p) === ts && matchesCopy(p, ts) : tsOf(p) === storedTs(p) && sameBytes(p.bytes, truthBySop.get(sopOf(p))!.bytes);
+
+    const ctStored = await get(`${base}/wado-rs/studies/${ct}`, range("*"));
+    const ctSv1 = await get(`${base}/wado-rs/studies/${ct}`, [range(SV1), range(J2K, 0.9), range("*", 0.5)].join(", "));
+    check(`CT, SV1 first: ${ctSv1.parts.filter((p) => tsOf(p) === SV1).length} of ${ctSv1.parts.length} parts are SV1 copies (declared, in the file, same bytes and Content-Length as the copy); the dose SR comes back as stored`,
+      ctSv1.status === 200 && ctSv1.parts.length === ctStored.parts.length && ctSv1.parts.every((p) => asWanted(p, SV1)) && ctSv1.parts.filter((p) => tsOf(p) === SV1).every((p) => sha(p.bytes) === copyBySop.get(sopOf(p))!.get(SV1)!.sha256) && ctSv1.parts.filter((p) => tsOf(p) !== SV1).length === 1);
+    const ctJ2k = await get(`${base}/wado-rs/studies/${ct}`, [range(J2K), range(SV1, 0.8), range("*", 0.1)].join(", "));
+    check(`CT, J2K first: every image is its JPEG 2000 Lossless copy`, ctJ2k.status === 200 && ctJ2k.parts.every((p) => asWanted(p, J2K)));
+    check(`CT, * only: all parts as stored (images Implicit VR Little Endian), byte-identical`, ctStored.status === 200 && ctStored.parts.every((p) => tsOf(p) === storedTs(p) && sameBytes(p.bytes, truthBySop.get(sopOf(p))!.bytes)) && ctStored.parts.filter((p) => tsOf(p) === "1.2.840.10008.1.2").length === ctStored.parts.length - 1);
+    const byQ = await get(`${base}/wado-rs/studies/${ct}`, [range("*", 0.3), range(J2K, 0.6), range(SV1, 0.9)].join(", "));
+    check("q weights win over header order (*;q=0.3, J2K;q=0.6, SV1;q=0.9 gives SV1)", byQ.status === 200 && byQ.parts.every((p) => asWanted(p, SV1)));
+    const tie = await get(`${base}/wado-rs/studies/${ct}`, [range(J2K), range(SV1), range("*")].join(", "));
+    check("equal weights follow header order (J2K, SV1, * gives J2K)", tie.status === 200 && tie.parts.every((p) => asWanted(p, J2K)));
+    check(`multipart Content-Length is exact (SV1 ${(ctSv1.body.byteLength / 1e6).toFixed(1)} MB, J2K ${(ctJ2k.body.byteLength / 1e6).toFixed(1)} MB, stored ${(ctStored.body.byteLength / 1e6).toFixed(1)} MB)`,
+      [ctSv1, ctJ2k, ctStored].every((r) => r.length === r.body.byteLength) && ctSv1.body.byteLength < ctStored.body.byteLength / 2 && ctJ2k.body.byteLength < ctSv1.body.byteLength);
+
+    const mixed = await get(`${base}/wado-rs/studies/${slideUID}`, [range(SV1), range("*", 0.5)].join(", "));
+    const byType = mixed.parts.map((p) => [tsOf(p), tsInFile(p)]);
+    check("slide (mixed), SV1 then *: JPEG Baseline tiled levels as stored, uncompressed overview and thumbnail as SV1",
+      mixed.status === 200 && byType.filter(([a]) => a === "1.2.840.10008.1.2.4.50").length === 3 && byType.filter(([a]) => a === SV1).length === 2 && byType.every(([a, b]) => a === b));
+    const noStar = await get(`${base}/wado-rs/studies/${slideUID}`, range(SV1));
+    check("slide, SV1 without *: 406 with a JSON body naming what to send and what is available",
+      noStar.status === 406 && /transfer-syntax=\*/.test(noStar.json?.error ?? "") && noStar.json?.available?.stored?.includes("1.2.840.10008.1.2.4.50") && noStar.json?.available?.losslessCopies?.includes(SV1));
+    const missing = await get(`${base}/wado-rs/studies/${ct}`, 'multipart/related; type="application/dicom"');
+    check("transfer-syntax missing: 406 with an example Accept", missing.status === 406 && (missing.json?.example ?? "").includes("transfer-syntax=*"));
+    const zero = await get(`${base}/wado-rs/studies/${ct}`, [range(SV1, 0), range("*", 0)].join(", "));
+    check("every range at q=0: 406", zero.status === 406);
+    const crJ2kOnly = await get(`${base}/wado-rs/studies/${wrist}`, range(J2K));
+    check("radiographs, J2K only (no *): 200, every image has a copy", crJ2kOnly.status === 200 && crJ2kOnly.parts.length === 3 && crJ2kOnly.parts.every((p) => tsOf(p) === J2K));
+
+    const mriSeries = truthBySeries.get([...truthBySeries.keys()].find((k) => truthBySeries.get(k)![0].studyUID === brain)!)!;
+    const se = await get(`${base}/wado-rs/studies/${brain}/series/${mriSeries[0].seriesUID}`, [range(SV1), range("*", 0.5)].join(", "));
+    check("series-level retrieval negotiates too (MRI series as SV1)", se.status === 200 && se.parts.length === mriSeries.length && se.parts.every((p) => tsOf(p) === SV1));
+    const inst = await get(`${base}/wado-rs/studies/${brain}/series/${mriSeries[0].seriesUID}/instances/${mriSeries[0].sopUID}`, [range(J2K), range("*", 0.5)].join(", "));
+    check("instance-level retrieval negotiates too (one MRI instance as J2K)", inst.status === 200 && inst.parts.length === 1 && tsOf(inst.parts[0]) === J2K && sopOf(inst.parts[0]) === mriSeries[0].sopUID);
+
+    // Pixel identity through an independent decoder: shl-dicom-decode on the stored and the SV1/J2K parts.
+    const decoder = process.env.SHL_DICOM_DECODE ?? join(ROOT, "../codecs/target/coord/release/shl-dicom-decode");
+    if (await Bun.file(decoder).exists()) {
+      const dir = join(HERE, ".work", "neg"); require("node:fs").mkdirSync(dir, { recursive: true });
+      let same = 0, n = 0;
+      for (const [k, p] of ctSv1.parts.filter((x) => tsOf(x) === SV1).slice(0, 8).concat(ctJ2k.parts.filter((x) => tsOf(x) === J2K).slice(0, 8), crJ2kOnly.parts).entries()) {
+        const sop = sopOf(p);
+        await Bun.write(join(dir, "c.dcm"), p.bytes); await Bun.write(join(dir, "s.dcm"), truthBySop.get(sop)!.bytes);
+        const a = Bun.spawnSync([decoder, join(dir, "c.dcm"), join(dir, "c.raw")]), b = Bun.spawnSync([decoder, join(dir, "s.dcm"), join(dir, "s.raw")]);
+        n++;
+        if (a.exitCode === 0 && b.exitCode === 0 && sha(new Uint8Array(await Bun.file(join(dir, "c.raw")).arrayBuffer())) === sha(new Uint8Array(await Bun.file(join(dir, "s.raw")).arrayBuffer()))) same++;
+        void k;
+      }
+      check(`shl-dicom-decode: compressed parts decode to the stored pixels (${same}/${n})`, same === n && n > 0);
+    }
+  }
 
   section("Search parameters");
   const byId = await C.searchStudies(d.imagingBase, PATIENT, at, `&identifier=urn:oid:${wrist}`);

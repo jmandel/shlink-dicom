@@ -77,7 +77,7 @@ function indexPage(cfg: Config, store: Store): Response {
 
 export async function startSandbox(env: Record<string, string | undefined> = process.env): Promise<Sandbox> {
   const cfg = loadConfig(env);
-  const store = await loadStore(cfg.datasetDir, cfg.testPatientsFile);
+  const store = await loadStore(cfg.datasetDir, cfg.testPatientsFile, cfg.variantsDir);
   const auth = new AuthServer(cfg, store);
   const caps = new CapabilityStore(cfg);
   const basePath = new URL(cfg.baseUrl).pathname.replace(/\/+$/, "");

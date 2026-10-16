@@ -19,6 +19,8 @@ Deployed (private for now) at **https://smart-imaging-sandbox.exe.xyz**: see [De
 
 Requires Bun 1.4.3. The server has no runtime dependencies. The tests use `playwright-core` and `pdfjs-dist`, pinned in `package.json` (`bun install`).
 
+The data build also needs dcmtk (`dcmcjpeg`) and `uv`, for the compressed copies; `--no-variants` builds without them.
+
 ```sh
 cd imaging-sandbox
 bun scripts/build-data.ts         # once: builds build/dataset/ (about 1 s; downloads the sources if needed)
@@ -204,11 +206,33 @@ Every FHIR resource request and every WADO-RS request needs `Authorization: Bear
 
 ### WADO-RS details
 
-- **Response format.** Retrieval returns `multipart/related; type="application/dicom"`, one part per instance, each part being the served Part 10 file. Parts carry `Content-Type: application/dicom; transfer-syntax=<stored syntax>`, `Content-Length` and `Content-Location`.
-- **Accept header.** It must name a transfer syntax:
-  - `transfer-syntax=*` returns the stored bytes;
-  - the stored syntax's UID also works: `1.2.840.10008.1.2.1` for the brain MRI, `1.2.840.10008.1.2.4.51` (JPEG Baseline) for the wrist radiographs;
-  - with no `transfer-syntax` parameter, or with any other UID, the server answers `406` and a JSON body that says what to send. The server does not transcode.
+- **Response format.** Retrieval returns `multipart/related; type="application/dicom"`, one part per instance, each part a Part 10 file. Each part carries `Content-Type: application/dicom; transfer-syntax=<the part's actual syntax>`, `Content-Length` and `Content-Location`.
+- **Transfer syntax negotiation**, as proposed in [argonautproject/smart-imaging PR #5](https://github.com/argonautproject/smart-imaging/pull/5). Study, series and instance retrieval all negotiate the same way:
+  - **The Accept header.** It lists one or more `multipart/related; type="application/dicom"; transfer-syntax=<UID or *>` ranges, each with an optional `q` weight (default 1).
+  - **Choosing a syntax.** For each instance the server picks the highest-weighted syntax it can provide; equal weights follow header order. `*` means as stored.
+  - **What can be provided.** Every image stored uncompressed (the MRI, CT and radiographs, and the slide's overview and thumbnail) is also available as JPEG Lossless SV1 (`1.2.840.10008.1.2.4.70`) and JPEG 2000 Lossless (`1.2.840.10008.1.2.4.90`), from copies made at build time. Already-compressed images (the slide's JPEG Baseline tiled levels) and the dose SR come back as stored.
+  - **Example.** `Accept: multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.70, multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.90; q=0.9, multipart/related; type="application/dicom"; transfer-syntax=*; q=0.5` returns SV1 wherever a copy exists and stored files elsewhere.
+  - **406 Not Acceptable,** with a JSON body giving an example `Accept` and the syntaxes available, in three cases:
+    - a range without `transfer-syntax` (PS3.18 reads that as Explicit VR Little Endian; the sandbox refuses it so apps learn to send the parameter);
+    - every range at `q=0`;
+    - a list without `*` that some instance can't meet.
+- **The compressed copies.** `scripts/make-variants.py` makes them during `scripts/build-data.ts`, using encoders that are not this project's code:
+  - SV1 with dcmtk's `dcmcjpeg`;
+  - JPEG 2000 with OpenJPEG, through pinned `pylibjpeg-openjpeg` and `pydicom` run by `uv`.
+
+  A copy is kept only if it decodes (pydicom with libjpeg or OpenJPEG) to exactly the original pixels and its other attributes are unchanged. The UIDs are kept, and `dcmcjpeg` adds a Derivation Description. The copies live in `build/variants/` (gitignored). They are not in `SHA256SUMS`, because their bytes depend on the encoder versions; `test/data-check.ts` decodes every copy with `shl-dicom-decode` and compares it with the stored image. `--no-variants` skips them.
+
+  Sizes of the images stored uncompressed, as stored, SV1 and J2K:
+
+  | Study | Stored | SV1 | J2K |
+  |---|---|---|---|
+  | MRI brain (263 images) | 44.3 MB | 28.6 MB | 26.7 MB |
+  | CT abdomen and pelvis (457 images) | 246.0 MB | 89.9 MB | 69.4 MB |
+  | XR left wrist (3) | 40.7 MB | 16.9 MB | 15.3 MB |
+  | XR right hand and wrist (3) | 40.7 MB | 16.2 MB | 14.5 MB |
+  | XR right hand, portable (3) | 31.3 MB | 12.4 MB | 10.3 MB |
+  | Slide overview and thumbnail (2) | 5.6 MB | 2.8 MB | 2.1 MB |
+
 - **Denials.** A study the token does not cover and a study that does not exist get the same `403`, with the same headers and body.
 - **Metadata.** `/metadata` returns `application/dicom+json` built from the served headers. Pixel Data is left out (there is no bulk data endpoint).
 - **Not implemented.** Frames, rendered images and thumbnails return 404, after the token check.
@@ -254,7 +278,7 @@ The Share flow should run a standard SMART standalone launch:
 4. **Find studies and reports.**
    - `GET <imaging base>/ImagingStudy?patient=<patient>&_include=ImagingStudy:endpoint`. Resolve each `ImagingStudy.endpoint` within the Bundle: it may be a contained `#id`, an included `Endpoint/…`, or a `urn:uuid:` entry, and the client must handle all three. Use `Endpoint.address` as the WADO-RS base.
    - `GET <clinical base>/DiagnosticReport?patient=<patient>` (or with `category=RAD` for radiology only; the slide's report is `SP`). Reports link to studies through `imagingStudy` (reference and Study Instance UID). Fetch `presentedForm[].url` with the token.
-5. **Retrieve.** `GET <address>/studies/<uid>/series/<uid>` (or the whole study) with the same Bearer token and `Accept: multipart/related; type="application/dicom"; transfer-syntax=*`.
+5. **Retrieve.** `GET <address>/studies/<uid>/series/<uid>` (or the whole study) with the same Bearer token and an `Accept` that names transfer syntaxes and ends with `transfer-syntax=*` (see [WADO-RS details](#wado-rs-details)), for example lossless SV1 and JPEG 2000 first with `*` as the fallback.
 
 `test/client.ts` does these steps using only `fetch` and WebCrypto, and the e2e test runs it in Chromium. The Share app can copy it.
 
@@ -279,6 +303,7 @@ All settings are environment variables.
 | `CAPABILITY_TTL` | `900` | capability URL lifetime, seconds |
 | `INTROSPECTION_KEY` | random at startup | credential for `/auth/introspect`, sent as `Authorization: Bearer <key>` or as the password in HTTP Basic |
 | `DATASET_DIR` | `build/dataset` | output of `scripts/build-data.ts` |
+| `VARIANTS_DIR` | `build/variants` | the lossless compressed copies used for transfer syntax negotiation; copies that don't match the current dataset file are ignored |
 | `TEST_PATIENTS_FILE` | `data/test-patients.json` | synthetic patients without imaging |
 | `LOG_REQUESTS` | `true` | log method, path, status and time; query strings are never logged and capability IDs are redacted |
 
@@ -314,7 +339,8 @@ It also checks that:
 It then covers:
 - the three Endpoint forms, search parameters, refresh, introspection and token audience;
 - report search, attachments and PDF text;
-- negative cases: no token, another patient's token, an unshared study, wrong scopes, expired and revoked tokens, grant-bound capabilities, transfer-syntax negotiation, PKCE and code replay;
+- transfer syntax negotiation: SV1-first and J2K-first preferences, `*` only, q weights and header order, a mixed study, the 406 cases, exact sizes, and pixel identity of the compressed parts;
+- negative cases: no token, another patient's token, an unshared study, wrong scopes, expired and revoked tokens, grant-bound capabilities, PKCE and code replay;
 - CORS.
 
 Against a remote server it skips the checks that need special settings, and runs the introspection checks only if `INTROSPECTION_KEY` is set.

@@ -16,6 +16,7 @@ export interface Config {
   baseUrl: string; // public origin + optional path prefix, no trailing slash
   allowedOrigins: "*" | string[];
   datasetDir: string;
+  variantsDir: string;
   testPatientsFile: string;
   accessTokenTtl: number; // seconds
   refreshTokenTtl: number; // seconds
@@ -64,6 +65,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     baseUrl,
     allowedOrigins,
     datasetDir: resolve(env.DATASET_DIR || resolve(here, "../build/dataset")),
+    variantsDir: resolve(env.VARIANTS_DIR || resolve(here, "../build/variants")),
     testPatientsFile: resolve(env.TEST_PATIENTS_FILE || resolve(here, "../data/test-patients.json")),
     accessTokenTtl: num(env.ACCESS_TOKEN_TTL, 3600),
     refreshTokenTtl: num(env.REFRESH_TOKEN_TTL, 30 * 24 * 3600),

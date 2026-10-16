@@ -53,43 +53,61 @@ function parseAccept(h: string | null): MediaRange[] {
   }).filter((m) => m.type);
 }
 
-// Can we answer a bulk retrieval with the stored bytes?
-function acceptsStoredDicom(accept: MediaRange[], instances: Instance[]): boolean {
-  const syntaxes = new Set(instances.map((i) => i.transferSyntaxUID));
-  return accept.some((m) => {
-    if (m.params.q === "0") return false;
-    if (m.type !== "multipart/related") return false;
-    const t = (m.params.type ?? "application/dicom").toLowerCase();
-    if (t !== "application/dicom") return false;
+// Transfer syntax negotiation (PS3.18 8.7; argonautproject/smart-imaging
+// PR #5). Each multipart/related; type=application/dicom range names one
+// transfer syntax and an optional q weight (default 1). "*" means "as
+// stored". For each instance the server picks the highest-weighted syntax it
+// can provide: the stored one, or a losslessly compressed copy. A range
+// without transfer-syntax would mean Explicit VR Little Endian, which the
+// sandbox refuses with 406 so that apps learn to send the parameter.
+interface Preference { ts: string; q: number; order: number }
+
+function dicomPreferences(accept: MediaRange[]): { prefs: Preference[]; missing: boolean } {
+  const prefs: Preference[] = [];
+  let missing = false;
+  accept.forEach((m, order) => {
+    if (m.type !== "multipart/related") return;
+    if ((m.params.type ?? "application/dicom").toLowerCase() !== "application/dicom") return;
     const ts = m.params["transfer-syntax"];
-    // An absent transfer-syntax means Explicit VR Little Endian in PS3.18,
-    // which would need transcoding; the sandbox refuses it (406) instead.
-    if (!ts) return false;
-    if (ts === "*") return true;
-    return syntaxes.size === 1 && syntaxes.has(ts);
+    if (!ts) { missing = true; return; }
+    const q = m.params.q === undefined ? 1 : Number(m.params.q);
+    prefs.push({ ts, q: Number.isFinite(q) ? Math.min(Math.max(q, 0), 1) : 1, order });
   });
+  return { prefs: prefs.filter((p) => p.q > 0).sort((a, b) => b.q - a.q || a.order - b.order), missing };
+}
+
+interface Part { instance: Instance; ts: string; size: number; body: Uint8Array; file?: string }
+
+// The part to send for one instance, or null if no preference can be met.
+function choose(i: Instance, prefs: Preference[]): Part | null {
+  for (const p of prefs) {
+    if (p.ts === "*" || p.ts === i.transferSyntaxUID) return { instance: i, ts: i.transferSyntaxUID, size: i.bytes.byteLength, body: i.bytes };
+    const v = i.variants.get(p.ts);
+    if (v) return { instance: i, ts: p.ts, size: v.size, body: new Uint8Array(0), file: v.file };
+  }
+  return null;
 }
 
 function acceptsJson(accept: MediaRange[]): boolean {
   return accept.some((m) => ["*/*", "application/*", "application/dicom+json", "application/json"].includes(m.type) && m.params.q !== "0");
 }
 
-function multipart(instances: Instance[], locate: (i: Instance) => string): Response {
+function multipart(parts: Part[], locate: (i: Instance) => string): Response {
   const boundary = `sandbox-${crypto.randomUUID()}`;
   const enc = new TextEncoder();
-  const parts: (Uint8Array | string)[] = [];
+  const chunks: Uint8Array[] = [];
   let length = 0;
-  for (const i of instances) {
+  for (const p of parts) {
     const head = enc.encode(
-      `--${boundary}\r\nContent-Type: application/dicom; transfer-syntax=${i.transferSyntaxUID}\r\nContent-Length: ${i.bytes.byteLength}\r\nContent-Location: ${locate(i)}\r\n\r\n`,
+      `--${boundary}\r\nContent-Type: application/dicom; transfer-syntax=${p.ts}\r\nContent-Length: ${p.size}\r\nContent-Location: ${locate(p.instance)}\r\n\r\n`,
     );
-    parts.push(head, i.bytes, enc.encode("\r\n"));
-    length += head.byteLength + i.bytes.byteLength + 2;
+    chunks.push(head, p.body, enc.encode("\r\n"));
+    length += head.byteLength + p.size + 2;
   }
   const tail = enc.encode(`--${boundary}--\r\n`);
-  parts.push(tail);
+  chunks.push(tail);
   length += tail.byteLength;
-  return new Response(new Blob(parts as BlobPart[]), {
+  return new Response(new Blob(chunks as BlobPart[]), {
     status: 200,
     headers: {
       "content-type": `multipart/related; type="application/dicom"; boundary=${boundary}`,
@@ -104,7 +122,7 @@ function multipart(instances: Instance[], locate: (i: Instance) => string): Resp
 // studies cannot be told apart.
 const STUDY_DENIED = () => wadoError(403, "access to the requested study is not authorized");
 
-export function handleWado(cfg: Config, store: Store, caps: CapabilityStore, auth: AuthServer, tok: ValidatedToken, req: Request, path: string[], capId?: string): Response {
+export async function handleWado(cfg: Config, store: Store, caps: CapabilityStore, auth: AuthServer, tok: ValidatedToken, req: Request, path: string[], capId?: string): Promise<Response> {
   if (req.method !== "GET") return wadoError(405, "WADO-RS retrieval is read-only");
   const base = capId ? `${cfg.baseUrl}/wado-rs/cap/${capId}` : `${cfg.baseUrl}/wado-rs`;
 
@@ -164,9 +182,39 @@ export function handleWado(cfg: Config, store: Store, caps: CapabilityStore, aut
     return new Response(JSON.stringify(body), { headers: { "content-type": "application/dicom+json", "cache-control": "no-store" } });
   }
 
-  if (!acceptsStoredDicom(accept, instances)) {
-    const ts = [...new Set(instances.map((i) => i.transferSyntaxUID))].join(", ");
-    return wadoError(406, `send Accept: multipart/related; type="application/dicom"; transfer-syntax=* (or the stored transfer syntax UID: ${ts}). This server returns stored instances and does not transcode.`);
+  const { prefs, missing } = dicomPreferences(accept);
+  const offered = () => {
+    const stored = [...new Set(instances.map((i) => i.transferSyntaxUID))];
+    const copies = [...new Set(instances.flatMap((i) => [...i.variants.keys()]))];
+    return { stored, losslessCopies: copies };
+  };
+  const example = 'multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.70, multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.4.90; q=0.9, multipart/related; type="application/dicom"; transfer-syntax=*; q=0.5';
+  if (missing || prefs.length === 0) {
+    return new Response(JSON.stringify({
+      error: "Accept must name a transfer syntax: send multipart/related; type=\"application/dicom\"; transfer-syntax=* (as stored), optionally preceded by preferred lossless syntaxes with q weights.",
+      example,
+      available: offered(),
+    }), { status: 406, headers: { "content-type": "application/json", "cache-control": "no-store" } });
   }
-  return multipart(instances, locate);
+  const parts: Part[] = [];
+  for (const i of instances) {
+    const p = choose(i, prefs);
+    if (!p) {
+      return new Response(JSON.stringify({
+        error: "None of the requested transfer syntaxes is available for every instance. Add transfer-syntax=* to accept instances as stored.",
+        requested: prefs.map((x) => x.ts),
+        example,
+        available: offered(),
+      }), { status: 406, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+    }
+    parts.push(p);
+  }
+  // Copies are read from disk when sent.
+  for (const p of parts) {
+    if (p.file) {
+      p.body = await Bun.file(p.file).bytes();
+      if (p.body.byteLength !== p.size) return wadoError(500, "a compressed copy changed on disk");
+    }
+  }
+  return multipart(parts, locate);
 }

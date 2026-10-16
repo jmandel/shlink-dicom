@@ -17,6 +17,10 @@
 // 3. Generates a sample report per study (PDF and plain text).
 // 4. Writes everything, with manifest.json and SHA256SUMS, to --out, and a
 //    plain per-study export of the DICOM files and reports to --export.
+// 5. Makes losslessly compressed copies of the uncompressed images
+//    (JPEG Lossless SV1 with dcmtk, JPEG 2000 Lossless with OpenJPEG) in
+//    --variants, kept only if they decode to the original pixels. They are
+//    not in SHA256SUMS: their bytes depend on the encoder versions.
 //
 // The output depends only on the pinned sources, the config and this code,
 // so two runs produce identical bytes (checked by test/data-check.ts).
@@ -40,6 +44,9 @@ const SOURCES = arg("--sources", join(ROOT, "build/sources"));
 // reports and an index. "--export none" skips it.
 const EXPORT = args.includes("--export") && args[args.indexOf("--export") + 1] === "none" ? null : arg("--export", join(ROOT, "out"));
 const quiet = args.includes("--quiet");
+// Losslessly compressed copies for transfer syntax negotiation
+// (scripts/make-variants.py; needs uv and dcmtk). "--no-variants" skips them.
+const VARIANTS = args.includes("--no-variants") ? null : arg("--variants", join(ROOT, "build/variants"));
 const log = (...a: unknown[]) => { if (!quiet) console.log(...a); };
 
 interface StudyConfig {
@@ -287,4 +294,12 @@ if (EXPORT) {
 rmSync(OUT, { recursive: true, force: true });
 renameSync(tmp, OUT);
 const digest = sha256(new TextEncoder().encode(sums.join("\n") + "\n"));
+if (VARIANTS) {
+  const p = Bun.spawnSync(["uv", "run", "--quiet", "--python", "3.12", join(ROOT, "scripts/make-variants.py"), "--dataset", OUT, "--out", VARIANTS], { stdout: "pipe", stderr: "pipe" });
+  const out = p.stdout.toString() + p.stderr.toString();
+  if (p.exitCode !== 0) throw new Error(`make-variants failed:\n${out}`);
+  const vm = JSON.parse(require("node:fs").readFileSync(join(VARIANTS, "manifest.json"), "utf8"));
+  if (vm.failures.length) throw new Error(`lossless copies failed the pixel check:\n${JSON.stringify(vm.failures.slice(0, 5))}`);
+  log(out.trim());
+}
 log(`wrote ${sums.length} files to ${relative(process.cwd(), OUT) || "."}; SHA-256 of SHA256SUMS: ${digest}`);

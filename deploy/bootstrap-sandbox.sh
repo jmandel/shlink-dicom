@@ -29,9 +29,21 @@ $SUDO chmod 666 /var/log/shlink-bootstrap-sandbox.log
 exec > >(tee -a /var/log/shlink-bootstrap-sandbox.log) 2>&1
 echo "== bootstrap-sandbox $(date -Is)"
 
+# dcmtk's dcmcjpeg makes the JPEG Lossless SV1 copies used for transfer
+# syntax negotiation; uv runs the copy script with pinned Python packages
+# (pydicom, OpenJPEG for JPEG 2000).
 need=""
 for c in git curl unzip openssl; do command -v "$c" >/dev/null || need="$need $c"; done
+command -v dcmcjpeg >/dev/null || need="$need dcmtk"
 if [ -n "$need" ]; then $SUDO apt-get update -qq && $SUDO apt-get install -y -qq $need; fi
+UV_VERSION="0.13.1"
+export UV_INSTALL_DIR=/opt/uv UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_CACHE_DIR=/opt/uv/cache
+$SUDO mkdir -p /opt/uv && $SUDO chown "$(id -u):$(id -g)" /opt/uv
+if [ ! -x /opt/uv/uv ] || [ "$(/opt/uv/uv --version | cut -d' ' -f2)" != "$UV_VERSION" ]; then
+  curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | env INSTALLER_NO_MODIFY_PATH=1 sh >/dev/null
+fi
+export PATH="/opt/uv:$PATH"
+echo "uv $(uv --version | cut -d' ' -f2), $(dcmcjpeg --version | head -1)"
 
 $SUDO mkdir -p "$DIR" "$BUN_INSTALL"
 $SUDO chown "$(id -u):$(id -g)" "$DIR" "$BUN_INSTALL"
@@ -48,6 +60,9 @@ fi
 echo "bun $("$BUN" --version)"
 
 cd "$DIR/imaging-sandbox"
+# Also makes build/variants (lossless SV1 and J2K copies), each checked to
+# decode to the original pixels. Their bytes depend on the encoder versions,
+# so they are not part of EXPECTED_SUMS.
 "$BUN" scripts/build-data.ts --quiet
 SUMS="$(sha256sum build/dataset/SHA256SUMS | cut -d' ' -f1)"
 if [ "$SUMS" = "$EXPECTED_SUMS" ]; then

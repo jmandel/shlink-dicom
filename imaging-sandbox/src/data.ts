@@ -15,6 +15,9 @@ export interface Instance {
   path: string;
   bytes: Uint8Array;
   header: DicomElement[];
+  // Losslessly compressed copies (scripts/make-variants.py), by transfer
+  // syntax UID; served from disk.
+  variants: Map<string, { file: string; size: number }>;
 }
 
 export interface Series {
@@ -91,7 +94,18 @@ export interface Store {
 // instant is used as meta.lastUpdated so responses are reproducible.
 export const DATA_LAST_UPDATED = "2026-10-15T00:00:00Z";
 
-export async function loadStore(datasetDir: string, testPatientsFile: string): Promise<Store> {
+export async function loadStore(datasetDir: string, testPatientsFile: string, variantsDir?: string): Promise<Store> {
+  // Compressed copies, keyed by the dataset path of their source.
+  const variantsByPath = new Map<string, Map<string, { file: string; size: number }>>();
+  const vm = variantsDir ? join(variantsDir, "manifest.json") : "";
+  if (vm && existsSync(vm)) {
+    const v = JSON.parse(await Bun.file(vm).text());
+    for (const e of v.instances) {
+      const m = new Map<string, { file: string; size: number }>();
+      for (const x of e.variants) if (x.path) m.set(x.ts, { file: join(variantsDir!, x.path), size: x.size });
+      variantsByPath.set(e.source, Object.assign(m, { sourceSha256: e.sourceSha256 as string }));
+    }
+  }
   const manifestPath = join(datasetDir, "manifest.json");
   if (!existsSync(manifestPath)) throw new Error(`${manifestPath} not found: run bun scripts/build-data.ts first`);
   const manifest = JSON.parse(await Bun.file(manifestPath).text());
@@ -146,6 +160,12 @@ export async function loadStore(datasetDir: string, testPatientsFile: string): P
         path: f.path,
         bytes,
         header: d,
+        // Copies made from a different version of this file are ignored.
+        variants: (() => {
+          const v = variantsByPath.get(f.path) as (Map<string, { file: string; size: number }> & { sourceSha256?: string }) | undefined;
+          if (!v || v.sourceSha256 !== new Bun.CryptoHasher("sha256").update(bytes).digest("hex")) return new Map();
+          return v;
+        })(),
       });
       study.bytes += bytes.byteLength;
     }

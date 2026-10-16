@@ -38,7 +38,7 @@ mkdirSync(WORK, { recursive: true });
 
 console.log("Determinism");
 for (const run of ["a", "b"]) {
-  const p = Bun.spawnSync(["bun", join(ROOT, "scripts/build-data.ts"), "--out", join(WORK, run), "--export", join(WORK, `${run}-export`), "--quiet"], { stdout: "inherit", stderr: "inherit" });
+  const p = Bun.spawnSync(["bun", join(ROOT, "scripts/build-data.ts"), "--out", join(WORK, run), "--export", join(WORK, `${run}-export`), "--no-variants", "--quiet"], { stdout: "inherit", stderr: "inherit" });
   if (p.exitCode !== 0) throw new Error(`build ${run} failed`);
 }
 const sumsA = readFileSync(join(WORK, "a/SHA256SUMS"), "utf8");
@@ -226,6 +226,61 @@ for (const st of manifest.studies) {
   check(`${st.id}: PDF text equals the text/plain report`, norm(pdfBody.join("\n")) === norm(txtBody.join("\n")), { pdf: norm(pdfBody.join(" ")).slice(0, 300), txt: norm(txtBody.join(" ")).slice(0, 300) });
   check(`${st.id}: letterhead, patient block and signature present`, txt.includes("EXAMPLE, JOSH") && txt.includes(`MRN: ${patient.mrn}`) && txt.includes(`Date of birth: ${patient.birthDate}`) && txt.includes("Electronically signed"));
   check(`${st.id}: conclusion is the report's impression or diagnosis`, norm(txt).includes(norm(st.report.conclusion.split(". ")[0])));
+}
+
+console.log("\nLossless compressed copies (transfer syntax negotiation)");
+{
+  const VDIR = resolve(process.env.VARIANTS_DIR ?? join(ROOT, "build/variants"));
+  const vmPath = join(VDIR, "manifest.json");
+  if (!existsSync(vmPath)) {
+    check("compressed copies present (run bun scripts/build-data.ts without --no-variants)", false);
+  } else {
+    const vm = JSON.parse(readFileSync(vmPath, "utf8"));
+    const live = join(ROOT, "build/dataset");
+    const liveManifest = JSON.parse(readFileSync(join(live, "manifest.json"), "utf8"));
+    const SV1 = "1.2.840.10008.1.2.4.70", J2K = "1.2.840.10008.1.2.4.90";
+    const UNC = new Set(["1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2"]);
+    const byPath = new Map<string, any>(vm.instances.map((e: any) => [e.source, e]));
+    let uncompressed = 0, complete = 0, fresh = 0;
+    const sizes = new Map<string, { stored: number; uncompressed: number; sv1: number; j2k: number }>();
+    for (const st of liveManifest.studies) {
+      const z = { stored: 0, uncompressed: 0, sv1: 0, j2k: 0 };
+      for (const f of st.files) {
+        z.stored += f.size;
+        const b = new Uint8Array(readFileSync(join(live, f.path)));
+        const p = parseDicom(b);
+        if (!UNC.has(p.transferSyntaxUID) || !p.dataset.some((e) => e.tag === 0x00280010)) continue;
+        uncompressed++;
+        z.uncompressed += f.size;
+        const e = byPath.get(f.path);
+        if (e && e.sourceSha256 === f.sha256) fresh++;
+        const sv1 = e?.variants.find((v: any) => v.ts === SV1 && v.size), j2k = e?.variants.find((v: any) => v.ts === J2K && v.size);
+        if (sv1 && j2k) { complete++; z.sv1 += sv1.size; z.j2k += j2k.size; }
+      }
+      sizes.set(st.id, z);
+    }
+    check(`every uncompressed image (${uncompressed}) has an SV1 and a J2K copy made from the current file; no failures`, complete === uncompressed && fresh === uncompressed && vm.failures.length === 0, { complete, fresh, failures: vm.failures.length });
+    for (const [id, z] of sizes) console.log(`  ${id.padEnd(26)} stored ${(z.stored / 1e6).toFixed(1).padStart(6)} MB; uncompressed images ${(z.uncompressed / 1e6).toFixed(1).padStart(6)} MB -> SV1 ${(z.sv1 / 1e6).toFixed(1).padStart(5)} MB, J2K ${(z.j2k / 1e6).toFixed(1).padStart(5)} MB`);
+    // Pixel identity through an independent decoder (the copies were made by dcmtk and OpenJPEG).
+    const decoder = process.env.SHL_DICOM_DECODE ?? join(ROOT, "../codecs/target/coord/release/shl-dicom-decode");
+    if (existsSync(decoder)) {
+      const h = (f: string) => new Bun.CryptoHasher("sha256").update(readFileSync(f)).digest("hex");
+      let same = 0, n = 0;
+      const bad: string[] = [];
+      for (const e of vm.instances) {
+        const r0 = Bun.spawnSync([decoder, join(live, e.source), join(WORK, "s.raw")]);
+        if (r0.exitCode !== 0) { bad.push(e.source); continue; }
+        const ref = h(join(WORK, "s.raw"));
+        for (const v of e.variants.filter((x: any) => x.size)) {
+          n++;
+          const r = Bun.spawnSync([decoder, join(VDIR, v.path), join(WORK, "v.raw")]);
+          if (r.exitCode === 0 && h(join(WORK, "v.raw")) === ref) same++;
+          else bad.push(v.path);
+        }
+      }
+      check(`shl-dicom-decode decodes every copy to the stored image's pixels (${same}/${n})`, same === n && n === 2 * uncompressed, bad.slice(0, 3));
+    } else console.log("  skip decoder check (set SHL_DICOM_DECODE)");
+  }
 }
 
 console.log("\nReport-to-study links");
