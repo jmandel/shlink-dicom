@@ -43,8 +43,7 @@ impl Default for BlendingInfo {
 }
 
 fn read_blending(br: &mut BitReader, num_ec: usize, partial: bool) -> Result<BlendingInfo> {
-    let mut b = BlendingInfo::default();
-    b.mode = match br.u32([val(0), val(1), val(2), bits_offset(2, 3)]) {
+    let mode = match br.u32([val(0), val(1), val(2), bits_offset(2, 3)]) {
         0 => BlendMode::Replace,
         1 => BlendMode::Add,
         2 => BlendMode::Blend,
@@ -52,6 +51,7 @@ fn read_blending(br: &mut BitReader, num_ec: usize, partial: bool) -> Result<Ble
         4 => BlendMode::Mul,
         _ => return invalid("blend mode"),
     };
+    let mut b = BlendingInfo { mode, ..BlendingInfo::default() };
     let uses_alpha = matches!(b.mode, BlendMode::Blend | BlendMode::AlphaWeightedAdd);
     if num_ec > 0 && uses_alpha {
         b.alpha_channel = br.u32([val(0), val(1), val(2), bits_offset(3, 3)]);
@@ -492,9 +492,7 @@ pub struct FrameDims {
     pub group_dim: usize,
     pub lf_group_dim: usize,
     pub xsize_groups: usize,
-    pub ysize_groups: usize,
     pub xsize_lf_groups: usize,
-    pub ysize_lf_groups: usize,
     pub num_groups: usize,
     pub num_lf_groups: usize,
 }
@@ -523,9 +521,7 @@ impl FrameDims {
             group_dim,
             lf_group_dim: group_dim * 8,
             xsize_groups,
-            ysize_groups,
             xsize_lf_groups,
-            ysize_lf_groups,
             num_groups: xsize_groups * ysize_groups,
             num_lf_groups: xsize_lf_groups * ysize_lf_groups,
         }

@@ -1,6 +1,6 @@
 //! Brotli decompressor (RFC 7932).
 //!
-//! [`decompress`] decodes one complete brotli stream held in memory.
+//! [`decompress_with_consumed`] decodes one complete brotli stream held in memory.
 //!
 //! - The stream must be complete: running out of input before the final
 //!   meta-block ends is an error, and the padding bits after the final
@@ -741,12 +741,17 @@ struct Decoder<'a> {
     scratch: Vec<u8>,
 }
 
-/// Decompresses a complete brotli stream.
+/// Decompresses a complete brotli stream and returns it with the length of the
+/// stream in bytes: everything up to and including the byte that holds the
+/// last bit of the final meta-block (that byte's padding bits must be zero).
 ///
 /// Returns an error if the stream is invalid or truncated, uses the
 /// large-window extension, or decodes to more than `max_output` bytes.
 /// Input after the end of the stream is ignored.
-pub fn decompress(input: &[u8], max_output: usize) -> Result<Vec<u8>, BrotliError> {
+pub fn decompress_with_consumed(
+    input: &[u8],
+    max_output: usize,
+) -> Result<(Vec<u8>, usize), BrotliError> {
     let mut br = BitReader::new(input);
     let wbits = read_window_bits(&mut br)?;
     let mut d = Decoder {
@@ -810,7 +815,8 @@ pub fn decompress(input: &[u8], max_output: usize) -> Result<Vec<u8>, BrotliErro
         }
     }
     d.br.align()?;
-    Ok(d.out)
+    let used = d.br.pos.checked_sub((d.br.nbits / 8) as usize).ok_or(INTERNAL)?;
+    Ok((d.out, used))
 }
 
 fn read_window_bits(br: &mut BitReader) -> R<u32> {
@@ -1170,8 +1176,3 @@ const SIGNED_LUT: [u8; 256] = [
     5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
     6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7,
 ];
-
-/// Temporary: until the stream-length API lands.
-pub fn decompress_with_consumed(input: &[u8], max_output: usize) -> Result<(Vec<u8>, usize), BrotliError> {
-    decompress(input, max_output).map(|v| (v, input.len()))
-}

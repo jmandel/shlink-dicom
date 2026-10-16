@@ -14,8 +14,8 @@ const DCT_CTX: usize = 5;
 const MAX_CONTROL_POINTS: usize = 1 << 20;
 const POS_LIMIT: i64 = 1 << 23;
 const CHANNEL_WEIGHT: [f32; 4] = [0.0042, 0.075, 0.07, 0.3333];
-const SQRT0_5: f32 = 0.707_106_78;
-const SQRT2: f32 = 1.414_213_56;
+const SQRT0_5: f32 = std::f32::consts::FRAC_1_SQRT_2;
+const SQRT2: f32 = std::f32::consts::SQRT_2;
 
 #[derive(Clone, Debug)]
 struct QuantizedSpline {
@@ -194,7 +194,7 @@ fn fast_cosf(x: f32) -> f32 {
     let x2 = xs * xs;
     let x4 = x2 * x2;
     let pre = x4 * 0.06960438 + (x2 * -0.84087373 + 1.68179268);
-    let s1 = pre * pre + -1.414213562;
+    let s1 = pre * pre + -SQRT2;
     let s2 = s1 * s1 + -1.0;
     if above {
         -s2
@@ -371,7 +371,7 @@ pub fn draw(sp: &Splines, planes: &mut [Plane], ytox: f32, ytob: f32) -> Result<
                 let li = s.s4i * (f * f);
                 for c in 0..3 {
                     let v = &mut planes[c].data[y * w + x];
-                    *v = s.color[c] * li + *v;
+                    *v += s.color[c] * li;
                 }
             }
         }

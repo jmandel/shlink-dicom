@@ -230,7 +230,7 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                         let bb = &r1[(lo as isize + ddx) as usize..(lo as isize + ddx) as usize + n];
                         let ee = &mut e[lo..lo + n];
                         for i in 0..n {
-                            ee[i] = (a[i] - bb[i]).abs() * sc + ee[i];
+                            ee[i] += (a[i] - bb[i]).abs() * sc;
                         }
                     }
                     etags[k][slot] = r;
@@ -258,7 +258,7 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                     let o = (pb as isize + dx) as usize;
                     let r1 = &prow(c, dy)[o..o + w];
                     for x in 0..w {
-                        sad[x] = (r1[x] - r0[x]).abs() * sc + sad[x];
+                        sad[x] += (r1[x] - r0[x]).abs() * sc;
                     }
                 }
             } else {
@@ -290,9 +290,9 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
             for x in 0..w {
                 let weight = (sad[x] * inv_s[x] + 1.0).max(0.0);
                 wsum[x] += weight;
-                acc[0][x] = weight * n0[x] + acc[0][x];
-                acc[1][x] = weight * n1[x] + acc[1][x];
-                acc[2][x] = weight * n2[x] + acc[2][x];
+                acc[0][x] += weight * n0[x];
+                acc[1][x] += weight * n1[x];
+                acc[2][x] += weight * n2[x];
             }
         }
         for c in 0..3 {
@@ -371,12 +371,12 @@ pub fn upsample(p: &Plane, kernel: &[f32], shift: u32, w: usize, h: usize) -> Re
                     let mut a2 = win[2] * kk[2];
                     let mut i = 3;
                     while i < 24 {
-                        a0 = win[i] * kk[i] + a0;
-                        a1 = win[i + 1] * kk[i + 1] + a1;
-                        a2 = win[i + 2] * kk[i + 2] + a2;
+                        a0 += win[i] * kk[i];
+                        a1 += win[i + 1] * kk[i + 1];
+                        a2 += win[i + 2] * kk[i + 2];
                         i += 3;
                     }
-                    a0 = win[24] * kk[24] + a0;
+                    a0 += win[24] * kk[24];
                     let r = (a1 + a2) + a0;
                     out.data[yy * w + xx] = r.clamp(mn, mx);
                 }
@@ -455,12 +455,12 @@ pub fn xyb_to_linear(planes: &mut [Plane], op: &OpsinParams, gray: bool) {
         let mut r = m[0][0] * mr;
         let mut g = m[1][0] * mr;
         let mut bb = m[2][0] * mr;
-        r = m[0][1] * mg + r;
-        g = m[1][1] * mg + g;
-        bb = m[2][1] * mg + bb;
-        r = m[0][2] * mb + r;
-        g = m[1][2] * mb + g;
-        bb = m[2][2] * mb + bb;
+        r += m[0][1] * mg;
+        g += m[1][1] * mg;
+        bb += m[2][1] * mg;
+        r += m[0][2] * mb;
+        g += m[1][2] * mb;
+        bb += m[2][2] * mb;
         p0[0].data[i] = r;
         p1[0].data[i] = g;
         p2[0].data[i] = bb;
@@ -726,7 +726,7 @@ fn noise_strength(lut: &[f32; 8], x: f32) -> f32 {
     let i = fl as usize;
     let low = lut[i];
     let hi = lut[i + 1];
-    ((hi - low) * frac + low).min(1.0).max(0.0)
+    ((hi - low) * frac + low).clamp(0.0, 1.0)
 }
 
 /// Adds noise (already convolved random planes) to the XYB planes.
@@ -749,6 +749,6 @@ pub fn add_noise(planes: &mut [Plane], rnd: &[Plane; 3], lut: &[f32; 8], ytox: f
         let rg = red + green;
         px[0].data[i] = (ytox * rg + (red - green)) + vx;
         py[0].data[i] = vy + rg;
-        pb[0].data[i] = ytob * rg + pb[0].data[i];
+        pb[0].data[i] += ytob * rg;
     }
 }

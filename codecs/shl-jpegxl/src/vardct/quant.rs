@@ -28,6 +28,8 @@ impl DctParams {
     }
 }
 
+// Parsed once per quantisation table; the size spread does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Encoding {
     Library,
@@ -115,10 +117,13 @@ fn read_dct_params(br: &mut BitReader) -> Result<DctParams> {
 }
 
 /// Reads one table's encoding. `raw` decodes a RAW (modular-coded) table of the given size.
+/// Reads a raw quantisation table of the given size (a modular sub-image).
+pub type RawReader<'a> = dyn FnMut(&mut BitReader, usize, usize) -> Result<Vec<i32>> + 'a;
+
 pub fn read_encoding(
     br: &mut BitReader,
     table: usize,
-    raw: &mut dyn FnMut(&mut BitReader, usize, usize) -> Result<Vec<i32>>,
+    raw: &mut RawReader,
 ) -> Result<Encoding> {
     let required = SIZE_X[table] * SIZE_Y[table];
     let mode = br.read(3);
@@ -473,6 +478,11 @@ fn unreachable_library() -> Result<()> {
     Err(Error::Invalid("library quantisation table"))
 }
 
+/// libjxl's FastPowf (used by the gamma transfer function).
+pub fn fast_powf_pub(b: f32, e: f32) -> f32 {
+    fast_powf(b, e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,9 +503,4 @@ mod tests {
             assert!(w.iter().all(|v| v.is_finite() && *v > 0.0));
         }
     }
-}
-
-/// libjxl's FastPowf (used by the gamma transfer function).
-pub fn fast_powf_pub(b: f32, e: f32) -> f32 {
-    fast_powf(b, e)
 }

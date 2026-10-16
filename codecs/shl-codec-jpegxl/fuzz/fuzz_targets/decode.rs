@@ -3,23 +3,12 @@
 //! Pixel Representation.
 #![no_main]
 
-use jxl_oxide::{InitializeResult, JxlImage, JxlThreadPool, PixelFormat};
 use libfuzzer_sys::fuzz_target;
 use shl_codec_common::{FrameInfo, Photometric};
 
 fn header(cs: &[u8]) -> Option<(u32, u32, u16)> {
-    let mut u = JxlImage::builder().pool(JxlThreadPool::none()).build_uninit();
-    u.feed_bytes(cs).ok()?;
-    match u.try_init().ok()? {
-        InitializeResult::Initialized(img) => {
-            let spp = match img.pixel_format() {
-                PixelFormat::Gray | PixelFormat::Graya => 1,
-                _ => 3,
-            };
-            Some((img.width(), img.height(), spp))
-        }
-        InitializeResult::NeedMoreData(_) => None,
-    }
+    let h = shl_jpegxl::info(cs).ok()?;
+    Some((h.width, h.height, h.num_color as u16))
 }
 
 fuzz_target!(|data: &[u8]| {

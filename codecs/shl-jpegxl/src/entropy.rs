@@ -640,8 +640,7 @@ impl EntropyCode {
     }
 
     fn read_inner(br: &mut BitReader, mut num_contexts: usize, disallow_lz77: bool) -> Result<Self> {
-        let mut lz77 = Lz77::default();
-        lz77.enabled = br.bit();
+        let mut lz77 = Lz77 { enabled: br.bit(), ..Lz77::default() };
         if lz77.enabled {
             lz77.min_symbol = br.u32([val(224), val(512), val(4096), bits_offset(15, 8)]);
             lz77.min_length = br.u32([val(3), val(4), bits_offset(2, 5), bits_offset(8, 9)]);
@@ -717,14 +716,6 @@ impl EntropyCode {
         Ok(EntropyCode { lz77, context_map, configs, codes, lz77_ctx, single_symbol })
     }
 
-    pub fn uses_lz77(&self) -> bool {
-        self.lz77.enabled
-    }
-
-    pub fn num_clusters(&self) -> usize {
-        self.configs.len()
-    }
-
     /// The only token cluster `c` can produce, when that token is a literal value below the
     /// hybrid-uint split (so it decodes to itself and consumes no bits). ANS only.
     pub fn single_value(&self, cluster: usize) -> Option<u32> {
@@ -739,10 +730,6 @@ impl EntropyCode {
     /// The only symbol cluster `c` can produce (ANS only), as libjxl's degenerate symbol.
     pub fn single_symbol(&self, cluster: usize) -> Option<u32> {
         *self.single_symbol.get(cluster)?
-    }
-
-    pub fn is_prefix(&self) -> bool {
-        matches!(self.codes, Codes::Prefix(_))
     }
 
     /// Creates a decoder positioned at the start of the symbol stream.

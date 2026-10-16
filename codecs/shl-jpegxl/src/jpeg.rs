@@ -176,7 +176,7 @@ pub fn parse_jbrd(data: &[u8], brotli: impl Fn(&[u8], usize) -> Result<(Vec<u8>,
             }
         }
         2 => {
-            for (c, id) in j.components.iter_mut().zip([b'R', b'G', b'B']) {
+            for (c, id) in j.components.iter_mut().zip(*b"RGB") {
                 c.id = u32::from(id);
             }
         }
@@ -888,7 +888,7 @@ fn encode_refinement(c: &[i16], ac_idx: usize, acs: &[HuffTable], mut ss: i32, s
     let mut abs_values = [0i32; 64];
     let mut eob = 0i32;
     for k in ss..=se {
-        let a = i32::from(c[NATURAL_ORDER[k as usize]]).abs() as u16 as i16;
+        let a = i32::from(c[NATURAL_ORDER[k as usize]]).unsigned_abs() as u16 as i16;
         abs_values[k as usize] = i32::from(a) >> al;
         if abs_values[k as usize] == 1 {
             eob = k;

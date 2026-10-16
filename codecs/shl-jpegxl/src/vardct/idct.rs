@@ -3,7 +3,7 @@
 
 use super::acs::AcStrategy;
 
-const SQRT2: f32 = 1.414_213_56;
+const SQRT2: f32 = std::f32::consts::SQRT_2;
 
 /// 1 / (2 cos((i + 0.5) π / N)) for i < N/2, for N = 4..=256 (index log2(N) - 2).
 fn wc_multipliers(n: usize) -> &'static [f32] {
@@ -279,7 +279,7 @@ pub fn idct2d(coef: &mut [f32], rows: usize, cols: usize, out: &mut [f32], strid
     let n = rows * cols;
     let (block, rest) = scratch.split_at_mut(n);
     let pass = |d: &mut [f32], pts: usize, lanes: usize, rest: &mut [f32]| {
-        if pts >= 8 && lanes % 8 == 0 {
+        if pts >= 8 && lanes.is_multiple_of(8) {
             idct_rows_bundled(d, pts, lanes);
         } else {
             idct_rows(d, pts, lanes, rest);
@@ -367,6 +367,8 @@ pub fn llf_from_dc(acs: AcStrategy, dc: &[f32], dc_stride: usize, llf: &mut [f32
     }
 }
 
+// libjxl's AFV basis, digit for digit.
+#[allow(clippy::approx_constant)]
 pub const AFV_BASIS: [[f32; 16]; 16] = [
     [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25],
     [0.876902929799142, 0.2206518106944235, -0.10140050393753763, -0.1014005039375375, 0.2206518106944236, -0.10140050393753777, -0.10140050393753772, -0.10140050393753763, -0.10140050393753758, -0.10140050393753769, -0.1014005039375375, -0.10140050393753768, -0.10140050393753768, -0.10140050393753759, -0.10140050393753763, -0.10140050393753741],

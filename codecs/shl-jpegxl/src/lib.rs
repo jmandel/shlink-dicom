@@ -4,6 +4,9 @@
 //! the exact integer sample values; everything else as floating-point samples in the image's
 //! colour space (nominal range 0.0–1.0).
 #![forbid(unsafe_code)]
+// Constant tables are copied digit for digit from the specification and libjxl; per-channel
+// loops index several parallel arrays.
+#![allow(clippy::excessive_precision, clippy::needless_range_loop, clippy::too_many_arguments)]
 
 mod bits;
 mod brotli;
@@ -201,7 +204,7 @@ pub fn reconstruct_jpeg(data: &[u8]) -> Result<Vec<u8>> {
     if hd.metadata.xyb_encoded {
         return Err(Error::Invalid("cannot rebuild a JPEG from an XYB image"));
     }
-    let mut jd = jpeg::parse_jbrd(jbrd, |input, n| brotli_decompress(input, n))?;
+    let mut jd = jpeg::parse_jbrd(jbrd, brotli_decompress)?;
     let mut pos = br.byte_pos();
     if hd.metadata.preview.is_some() {
         pos = skip_frame(cs, pos, &hd, true)?;
@@ -287,7 +290,7 @@ pub fn reconstruct_jpeg(data: &[u8]) -> Result<Vec<u8>> {
 /// Brotli-decompresses one stream of at most `max` bytes; returns the output and the number of
 /// input bytes the stream used.
 fn brotli_decompress(input: &[u8], max: usize) -> Result<(Vec<u8>, usize)> {
-    brotli::decompress_with_consumed(input, max).map_err(|_| Error::Invalid("brotli stream"))
+    brotli::decompress_with_consumed(input, max).map_err(|e| Error::Invalid(e.message()))
 }
 
 /// Skips a frame using its TOC; returns the offset of the next frame.

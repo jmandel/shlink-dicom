@@ -50,8 +50,7 @@ impl BlockCtxMap {
         if br.bit() {
             return Ok(BlockCtxMap::default());
         }
-        let mut m = BlockCtxMap::default();
-        m.num_dc_ctxs = 1;
+        let mut m = BlockCtxMap { num_dc_ctxs: 1, ..BlockCtxMap::default() };
         for j in 0..3 {
             let n = br.read(4) as usize;
             m.num_dc_ctxs *= n + 1;
@@ -187,7 +186,6 @@ pub struct JpegCoeffs {
 /// VarDCT state of one frame.
 pub struct VarDct {
     pub global_scale: u32,
-    pub quant_dc: u32,
     pub inv_global_scale: f32,
     pub mul_dc: [f32; 3],
     pub block_ctx: BlockCtxMap,
@@ -245,7 +243,6 @@ pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf
     let mkp = |c: usize| Plane::new((xb >> hs[c]) * 8, (yb >> vs[c]) * 8);
     Ok(VarDct {
         global_scale,
-        quant_dc,
         inv_global_scale,
         mul_dc,
         block_ctx,

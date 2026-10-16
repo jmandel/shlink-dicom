@@ -1,19 +1,19 @@
 //! JPEG XL for DICOM (1.2.840.10008.1.2.4.110 lossless, .111 JPEG recompression, .112): a thin
-//! wrapper around `jxl-oxide` (pure Rust, single-threaded here).
+//! wrapper around this project's decoder, `shl-jpegxl`.
 //!
-//! The first keyframe of the codestream is rendered and its colour channels are returned as
-//! integers of the codestream's bit depth, the way libjxl returns them for an integer output
-//! buffer: each rendered sample `v` (nominal range 0.0–1.0) becomes `round(v × (2^bits − 1))`,
-//! clamped. For lossless (modular, integer) data this gives the stored values exactly. Signed
-//! data is carried as its two's-complement bit pattern, unsigned; the CLI sign-extends from Bits
-//! Stored. Colour images (RGB, YBR_RCT, XYB, YBR_FULL_422 for .111) come back as RGB.
+//! The first displayed frame of the codestream is decoded and its colour channels are returned
+//! as integers of the codestream's bit depth. Lossless (modular, non-XYB) images come back as
+//! their exact sample values. Other images are rendered to floating point in the image's own
+//! colour space and each sample `v` (nominal range 0.0–1.0) becomes `v × (2^bits − 1)` rounded
+//! to nearest, ties to even, and clamped: libjxl's integer output without its 8-bit dither.
+//! Signed data is carried as its two's-complement bit pattern, unsigned; the CLI sign-extends
+//! from Bits Stored. Colour images (RGB, YBR_RCT, XYB, YBR_FULL_422 for .111) come back as RGB.
 //!
 //! See codec-corpus/formats/jpeg-xl/FORMAT.md.
 #![forbid(unsafe_code)]
 
-use jxl_oxide::color::{ColourEncoding, EnumColourEncoding, TransferFunction};
-use jxl_oxide::{AllocTracker, InitializeResult, JxlImage, JxlThreadPool, PixelFormat};
 use shl_codec_common::{ColorOut, DecodeError, DecodedFrame, FrameInfo, Result};
+use shl_jpegxl::{Error, Options, Plane};
 
 fn invalid(m: impl Into<String>) -> DecodeError {
     DecodeError::Invalid(m.into())
@@ -23,11 +23,19 @@ fn unsupported(m: impl Into<String>) -> DecodeError {
     DecodeError::Unsupported(m.into())
 }
 
-/// Bytes jxl-oxide may allocate for image buffers while decoding a frame of `samples` output
-/// samples: its working buffers are 32-bit, per channel, with group padding, plus room for extra
-/// channels and the frame's own small allocations.
-fn alloc_limit(samples: usize) -> usize {
-    samples.saturating_mul(4 * 12).saturating_add(64 << 20)
+fn map_err(e: Error) -> DecodeError {
+    match e {
+        Error::Invalid(_) => invalid(e.to_string()),
+        Error::Unsupported(_) | Error::Limit(_) => unsupported(e.to_string()),
+    }
+}
+
+/// Round to nearest, ties to even, for 0 ≤ v < 2^23 (adding and removing 2^23 makes the FPU
+/// round; no libm call, as `round_ties_even` would be on targets without SSE4.1).
+#[inline(always)]
+fn round_even(v: f32) -> f32 {
+    const M: f32 = 8_388_608.0;
+    (v + M) - M
 }
 
 /// Decode one frame's codestream. See `shl_codec_common::DecodeFn`.
@@ -42,101 +50,60 @@ pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame>
         b => return Err(unsupported(format!("JPEG XL output with Bits Allocated {b}"))),
     };
     let spp = usize::from(info.samples_per_pixel);
-    let samples = frame_bytes / bps;
-
-    let mut uninit = JxlImage::builder()
-        .pool(JxlThreadPool::none())
-        .alloc_tracker(AllocTracker::with_limit(alloc_limit(samples)))
-        .build_uninit();
-    uninit.feed_bytes(codestream).map_err(|e| invalid(format!("JPEG XL: {e}")))?;
-    let mut image = match uninit.try_init().map_err(|e| invalid(format!("JPEG XL: {e}")))? {
-        InitializeResult::Initialized(image) => image,
-        InitializeResult::NeedMoreData(_) => return Err(invalid("JPEG XL codestream ends inside its header")),
-    };
-    image.finalize().map_err(|e| invalid(format!("JPEG XL: {e}")))?;
-
-    if image.width() != info.columns || image.height() != info.rows {
+    let hdr = shl_jpegxl::info(codestream).map_err(map_err)?;
+    if hdr.width != info.columns || hdr.height != info.rows {
         return Err(invalid(format!(
             "JPEG XL image is {}x{} but the dataset says {}x{}",
-            image.width(),
-            image.height(),
-            info.columns,
-            info.rows
+            hdr.width, hdr.height, info.columns, info.rows
         )));
     }
-    let channels = match image.pixel_format() {
-        PixelFormat::Gray | PixelFormat::Graya => 1,
-        PixelFormat::Rgb | PixelFormat::Rgba => 3,
-        f => return Err(unsupported(format!("JPEG XL pixel format {f:?}"))),
-    };
-    if channels != spp {
-        return Err(invalid(format!("JPEG XL has {channels} colour channel(s) but Samples per Pixel is {spp}")));
+    if hdr.num_color != spp {
+        return Err(invalid(format!("JPEG XL has {} colour channel(s) but Samples per Pixel is {spp}", hdr.num_color)));
     }
-    let bits = match image.image_header().metadata.bit_depth {
-        jxl_oxide::image::BitDepth::IntegerSample { bits_per_sample } => bits_per_sample,
-        jxl_oxide::image::BitDepth::FloatSample { .. } => {
-            return Err(unsupported("JPEG XL with floating-point samples"));
-        }
-    };
+    if hdr.bit_depth.float {
+        return Err(unsupported("JPEG XL with floating-point samples"));
+    }
+    let bits = hdr.bit_depth.bits;
     if bits == 0 || bits as usize > 8 * bps {
-        return Err(invalid(format!(
-            "JPEG XL samples have {bits} bits, more than Bits Allocated {}",
-            info.bits_allocated
-        )));
+        return Err(invalid(format!("JPEG XL samples have {bits} bits, more than Bits Allocated {}", info.bits_allocated)));
     }
-    if image.num_loaded_keyframes() == 0 {
-        return Err(invalid("JPEG XL codestream ends before its first frame is complete"));
+    let pixels = u64::from(info.rows) * u64::from(info.columns);
+    let img = shl_jpegxl::decode(codestream, &Options { max_pixels: pixels }).map_err(map_err)?;
+    if img.width != info.columns || img.height != info.rows || img.num_color != spp || img.planes.len() < spp {
+        return Err(invalid("JPEG XL decoded frame does not match the dataset"));
     }
-
-    // An XYB image is rendered to its suggested colour space. jxl-oxide applies the sRGB transfer
-    // curve with a fast approximation (relative error about 1e-4, up to 8 at 16 bits), so render
-    // linear light instead and apply the exact sRGB curve here, as libjxl's decoder does.
-    let exact_srgb = match &image.image_header().metadata.colour_encoding {
-        ColourEncoding::Enum(e) if image.image_header().metadata.xyb_encoded && e.tf == TransferFunction::Srgb => {
-            image.request_color_encoding(EnumColourEncoding { tf: TransferFunction::Linear, ..e.clone() });
-            true
-        }
-        _ => false,
-    };
-
-    let render = image.render_frame(0).map_err(|e| invalid(format!("JPEG XL: {e}")))?;
-    let mut stream = render.stream_no_alpha();
-    if stream.channels() as usize != spp || stream.width() != info.columns || stream.height() != info.rows {
-        return Err(invalid("JPEG XL rendered frame does not match the dataset"));
-    }
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(samples).map_err(|_| unsupported("cannot allocate the decoded frame"))?;
-    buf.resize(samples, 0f32);
-    if stream.write_to_buffer(&mut buf) != samples {
-        return Err(invalid("JPEG XL rendered fewer samples than the frame holds"));
-    }
-
-    if exact_srgb {
-        for v in &mut buf {
-            *v = linear_to_srgb(*v);
-        }
-    }
-
-    let max = ((1u64 << bits) - 1) as f32;
+    let n = pixels as usize;
+    let max = (1u32 << bits) - 1;
     let mut data = Vec::new();
     data.try_reserve_exact(frame_bytes).map_err(|_| unsupported("cannot allocate the decoded frame"))?;
-    for v in buf {
-        // The same conversion as libjxl's float to unsigned integer output.
-        let q = (v * max + 0.5).clamp(0.0, max) as u32;
-        if bps == 1 {
-            data.push(q as u8);
-        } else {
-            data.extend_from_slice(&(q as u16).to_le_bytes());
+    data.resize(frame_bytes, 0);
+    for (c, plane) in img.planes.iter().take(spp).enumerate() {
+        let put = |data: &mut [u8], i: usize, q: u32| {
+            let o = (i * spp + c) * bps;
+            if bps == 1 {
+                data[o] = q as u8;
+            } else {
+                data[o..o + 2].copy_from_slice(&(q as u16).to_le_bytes());
+            }
+        };
+        match plane {
+            Plane::Int(d) if d.len() == n => {
+                for (i, &v) in d.iter().enumerate() {
+                    put(&mut data, i, v.clamp(0, max as i32) as u32);
+                }
+            }
+            Plane::Float(d) if d.len() == n => {
+                let m = max as f32;
+                for (i, &v) in d.iter().enumerate() {
+                    // NaN clamps to 0, as libjxl's Clamp does.
+                    let x = (v * m).max(0.0).min(m);
+                    put(&mut data, i, round_even(x) as u32);
+                }
+            }
+            _ => return Err(invalid("JPEG XL decoded plane has the wrong size")),
         }
     }
     Ok(DecodedFrame { data, planar: false, color: if spp == 3 { ColorOut::Rgb } else { ColorOut::AsDeclared } })
-}
-
-/// The sRGB transfer curve (IEC 61966-2-1), computed in f64; negative values mirror.
-fn linear_to_srgb(v: f32) -> f32 {
-    let x = f64::from(v).abs();
-    let y = if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 };
-    (y as f32).copysign(v)
 }
 
 #[cfg(test)]

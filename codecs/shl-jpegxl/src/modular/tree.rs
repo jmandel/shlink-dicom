@@ -224,21 +224,6 @@ pub fn specialise(tree: &Tree, channel: i32, group: i32, context_map: &[u8]) -> 
 }
 
 impl ChannelTree {
-    #[inline(always)]
-    pub fn lookup(&self, props: &[i32]) -> (u32, Predictor, i64, u32) {
-        let mut i = 0usize;
-        loop {
-            match self.nodes.get(i) {
-                Some(&Node::Split { property, splitval, left, right }) => {
-                    let v = props.get(property as usize).copied().unwrap_or(0);
-                    i = if v > splitval { left as usize } else { right as usize };
-                }
-                Some(&Node::Leaf { ctx, predictor, offset, multiplier }) => return (ctx, predictor, offset, multiplier),
-                None => return (0, Predictor::Zero, 0, 1),
-            }
-        }
-    }
-
     /// If every split tests property `prop` with split values inside ±`range`, and every leaf
     /// has `predictor` with offset 0 and multiplier 1: the leaf cluster for each property value
     /// in -range..range (index value + range).

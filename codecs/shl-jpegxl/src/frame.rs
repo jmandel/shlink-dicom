@@ -88,7 +88,6 @@ pub struct ModularFrame {
     global: Option<TreeCode>,
     /// First channel that is decoded in groups instead of the global stream.
     begin_group_ch: usize,
-    pub dims: FrameDims,
     /// Number of colour channels coded in the modular image (0 for VarDCT, 1 or 3).
     pub nb_color: usize,
 }
@@ -135,7 +134,7 @@ impl ModularFrame {
                 break;
             }
         }
-        Ok(ModularFrame { image: img, global, begin_group_ch: begin, dims: *dims, nb_color: nb_chans })
+        Ok(ModularFrame { image: img, global, begin_group_ch: begin, nb_color: nb_chans })
     }
 
     /// Decodes the channels of a group stream whose shift lies in [min_shift, max_shift],
@@ -187,11 +186,6 @@ impl ModularFrame {
         }
         Ok(())
     }
-}
-
-/// LF global fields read before the global modular stream.
-pub struct LfGlobal {
-    pub lf_dequant: [f32; 3],
 }
 
 pub const DEFAULT_LF_DEQUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];

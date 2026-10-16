@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 shl-codec-jpegxl = { path = ".." }
 shl-codec-common = { path = "../../shl-codec-common" }
-jxl-oxide = { version = "0.12.6", default-features = false }
+shl-jpegxl = { path = "../../shl-jpegxl" }
 
 # Separate workspace so the codecs workspace never builds this (it needs nightly + libFuzzer).
 [workspace]
