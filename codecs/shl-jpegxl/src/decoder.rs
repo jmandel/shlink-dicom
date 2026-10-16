@@ -121,7 +121,8 @@ impl<'a> Decoder<'a> {
         use crate::stages;
         let m = &self.hd.metadata;
         let dims = fh.dims();
-        let mut img = to_planes(&self.hd, fh, &df)?;
+        let mut df = df;
+        let mut img = to_planes(&self.hd, fh, &mut df)?;
         // Chroma upsampling.
         if fh.ycbcr && !fh.is_444() {
             for c in 0..3 {
@@ -344,23 +345,30 @@ fn channel_to_plane(ch: &Channel, bd: &crate::headers::BitDepth) -> Result<Plane
 }
 
 /// Converts the decoded samples to float planes (3 colour + extra channels).
-fn to_planes(hd: &Headers, fh: &FrameHeader, df: &DecodedFrame) -> Result<FrameImage> {
+fn to_planes(hd: &Headers, fh: &FrameHeader, df: &mut DecodedFrame) -> Result<FrameImage> {
     let m = &hd.metadata;
     let chans = &df.modular.channels;
     let mut planes = Vec::with_capacity(3 + m.extra_channels.len());
     match df.nb_color {
         0 => {
-            let v = df.vardct.as_ref().ok_or(Error::Invalid("frame without colour"))?;
+            let v = df.vardct.as_mut().ok_or(Error::Invalid("frame without colour"))?;
             let dims = fh.dims();
             for c in 0..3 {
                 let w = dims.xsize.div_ceil(1 << fh.hshift(c));
                 let h = dims.ysize.div_ceil(1 << fh.vshift(c));
-                let src = &v.planes[c];
-                let mut p = Plane::new(w, h)?;
-                for y in 0..h.min(src.h) {
-                    let n = w.min(src.w);
-                    p.data[y * w..y * w + n].copy_from_slice(&src.data[y * src.w..y * src.w + n]);
+                // The block-padded plane, cropped in place (rows only move towards the start).
+                let mut p = std::mem::replace(&mut v.planes[c], Plane { w: 0, h: 0, data: Vec::new() });
+                if p.w < w || p.h < h {
+                    return invalid("VarDCT plane smaller than the frame");
                 }
+                if p.w != w {
+                    for y in 0..h {
+                        p.data.copy_within(y * p.w..y * p.w + w, y * w);
+                    }
+                }
+                p.data.truncate(w * h);
+                p.w = w;
+                p.h = h;
                 planes.push(p);
             }
         }

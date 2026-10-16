@@ -133,22 +133,23 @@ pub fn gaborish(planes: &mut [Plane], lf: &LoopFilter) {
         w1 *= mul;
         w2 *= mul;
         let mut ring = RowRing::new(p.w, 1);
-        let mut out = vec![0f32; p.w * p.h];
+        let mut tail = TailRows::default();
         let w = p.w;
+        let mut o = vec![0f32; w];
         for y in 0..p.h {
             ring.load(p, y);
             let t = &ring.get(y, -1)[..w + 2];
             let m = &ring.get(y, 0)[..w + 2];
             let b = &ring.get(y, 1)[..w + 2];
-            let o = &mut out[y * w..(y + 1) * w];
             for x in 0..w {
                 let sum0 = m[x + 1];
                 let sum1 = (m[x] + m[x + 2]) + (t[x + 1] + b[x + 1]);
                 let sum2 = (t[x] + t[x + 2]) + (b[x] + b[x + 2]);
                 o[x] = sum2 * w2 + (sum1 * w1 + sum0 * w0);
             }
+            tail.put(p, 0, y, 1, &o);
         }
-        p.data = out;
+        tail.flush(std::slice::from_mut(p));
     }
 }
 
@@ -198,7 +199,7 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
     const ER: usize = 5;
     let mut erows: Vec<Vec<Vec<f32>>> = dirs.iter().map(|_| vec![vec![0f32; ew]; ER]).collect();
     let mut etags: Vec<Vec<i64>> = dirs.iter().map(|_| vec![i64::MIN; ER]).collect();
-    let mut out: Vec<Vec<f32>> = (0..3).map(|_| vec![0f32; w * h]).collect();
+    let mut tail = TailRows::default();
     let mut inv_s = vec![0f32; w];
     let mut skip = vec![false; w];
     let mut sad = vec![0f32; w];
@@ -296,15 +297,38 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
             }
         }
         for c in 0..3 {
-            let center = &prow(c, 0)[pb..pb + w];
-            let o = &mut out[c][y * w..(y + 1) * w];
+            let center = &rings[c].get(y, 0)[pb..pb + w];
+            let o = &mut acc[c];
             for x in 0..w {
-                o[x] = if skip[x] { center[x] } else { acc[c][x] * (1.0 / wsum[x]) };
+                o[x] = if skip[x] { center[x] } else { o[x] * (1.0 / wsum[x]) };
             }
+            tail.put(&mut planes[c], c, y, pb, o);
         }
     }
-    for (p, o) in planes.iter_mut().zip(out) {
-        p.data = o;
+    tail.flush(planes);
+}
+
+/// In-place output for the row filters. Row `y` of the result can overwrite the input once
+/// the window for `y` has been loaded, unless a later window still reads it through the
+/// bottom mirror (rows `h - b ..`); those rows wait here until the plane is done.
+#[derive(Default)]
+struct TailRows {
+    rows: Vec<(usize, usize, Vec<f32>)>,
+}
+
+impl TailRows {
+    fn put(&mut self, p: &mut Plane, c: usize, y: usize, b: usize, row: &[f32]) {
+        if y + b < p.h {
+            p.row_mut(y).copy_from_slice(row);
+        } else {
+            self.rows.push((c, y, row.to_vec()));
+        }
+    }
+
+    fn flush(&mut self, planes: &mut [Plane]) {
+        for (c, y, r) in self.rows.drain(..) {
+            planes[c].row_mut(y).copy_from_slice(&r);
+        }
     }
 }
 
@@ -418,40 +442,28 @@ pub struct OpsinParams {
 /// XYB to linear RGB; with `gray` (all matrix rows equal) only the first plane is computed
 /// and copied to the other two.
 pub fn xyb_to_linear(planes: &mut [Plane], op: &OpsinParams, gray: bool) {
-    let n = planes[0].data.len();
+    let (p0, rest) = planes.split_at_mut(1);
+    let (p1, p2) = rest.split_at_mut(1);
+    let n = p0[0].data.len().min(p1[0].data.len()).min(p2[0].data.len());
+    let (d0, d1, d2) = (&mut p0[0].data[..n], &mut p1[0].data[..n], &mut p2[0].data[..n]);
+    let (bc, bias, m) = (op.bias_cbrt, op.bias, &op.inverse);
+    #[inline(always)]
+    fn mix(x: f32, y: f32, b: f32, bc: [f32; 3], bias: [f32; 3]) -> (f32, f32, f32) {
+        let gr = (y + x) - bc[0];
+        let gg = (y - x) - bc[1];
+        let gb = b - bc[2];
+        (gr * gr * gr + bias[0], gg * gg * gg + bias[1], gb * gb * gb + bias[2])
+    }
     if gray {
-        let m = &op.inverse[0];
-        {
-            let (p0, rest) = planes.split_at_mut(1);
-            let (p1, p2) = rest.split_at_mut(1);
-            for i in 0..n {
-                let x = p0[0].data[i];
-                let y = p1[0].data[i];
-                let b = p2[0].data[i];
-                let gr = (y + x) - op.bias_cbrt[0];
-                let gg = (y - x) - op.bias_cbrt[1];
-                let gb = b - op.bias_cbrt[2];
-                let mr = gr * gr * gr + op.bias[0];
-                let mg = gg * gg * gg + op.bias[1];
-                let mb = gb * gb * gb + op.bias[2];
-                p0[0].data[i] = m[2] * mb + (m[1] * mg + m[0] * mr);
-            }
+        let m = m[0];
+        for ((x, y), b) in d0.iter_mut().zip(d1.iter()).zip(d2.iter()) {
+            let (mr, mg, mb) = mix(*x, *y, *b, bc, bias);
+            *x = m[2] * mb + (m[1] * mg + m[0] * mr);
         }
         return;
     }
-    let (p0, rest) = planes.split_at_mut(1);
-    let (p1, p2) = rest.split_at_mut(1);
-    let m = &op.inverse;
-    for i in 0..n {
-        let x = p0[0].data[i];
-        let y = p1[0].data[i];
-        let b = p2[0].data[i];
-        let gr = (y + x) - op.bias_cbrt[0];
-        let gg = (y - x) - op.bias_cbrt[1];
-        let gb = b - op.bias_cbrt[2];
-        let mr = gr * gr * gr + op.bias[0];
-        let mg = gg * gg * gg + op.bias[1];
-        let mb = gb * gb * gb + op.bias[2];
+    for ((x, y), b) in d0.iter_mut().zip(d1.iter_mut()).zip(d2.iter_mut()) {
+        let (mr, mg, mb) = mix(*x, *y, *b, bc, bias);
         let mut r = m[0][0] * mr;
         let mut g = m[1][0] * mr;
         let mut bb = m[2][0] * mr;
@@ -461,9 +473,9 @@ pub fn xyb_to_linear(planes: &mut [Plane], op: &OpsinParams, gray: bool) {
         r += m[0][2] * mb;
         g += m[1][2] * mb;
         bb += m[2][2] * mb;
-        p0[0].data[i] = r;
-        p1[0].data[i] = g;
-        p2[0].data[i] = bb;
+        *x = r;
+        *y = g;
+        *b = bb;
     }
 }
 
@@ -479,23 +491,15 @@ pub enum OutputTf {
 
 #[allow(clippy::excessive_precision)]
 fn srgb_from_linear(x: f32) -> f32 {
-    let sign = x.is_sign_negative();
     let a = x.abs();
     let p = [-5.135152395e-04f32, 5.287254571e-03, 3.903842876e-01, 1.474205315e+00, 7.352629620e-01];
     let q = [1.004519624e-02f32, 3.036675394e-01, 1.340816930e+00, 9.258482155e-01, 2.424867759e-02];
-    let v = if a > 0.0031308 {
-        let s = a.sqrt();
-        let yp = (((p[4] * s + p[3]) * s + p[2]) * s + p[1]) * s + p[0];
-        let yq = (((q[4] * s + q[3]) * s + q[2]) * s + q[1]) * s + q[0];
-        yp / yq
-    } else {
-        a * 12.92
-    };
-    if sign {
-        -v
-    } else {
-        v
-    }
+    // Both branches are computed so the loop vectorises; the select picks one.
+    let s = a.sqrt();
+    let yp = (((p[4] * s + p[3]) * s + p[2]) * s + p[1]) * s + p[0];
+    let yq = (((q[4] * s + q[3]) * s + q[2]) * s + q[1]) * s + q[0];
+    let v = if a > 0.0031308 { yp / yq } else { a * 12.92 };
+    v.copysign(x)
 }
 
 fn bt709_from_linear(x: f32) -> f32 {
