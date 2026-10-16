@@ -234,34 +234,6 @@
       "disputed": false
     },
     {
-      "id": "gen-local-mri-slice-oxideav-rev-refine",
-      "notes": "HT code-blocks with SigProp and MagRef passes (3 passes per block), written by the vendored oxideav encoder (extra/gen_oxideav.py); ojph_compress writes cleanup passes only.",
-      "tags": [],
-      "transfer_syntax": "1.2.840.10008.1.2.4.201",
-      "rows": 128,
-      "columns": 128,
-      "frames": 1,
-      "samples_per_pixel": 1,
-      "bits_allocated": 16,
-      "bits_stored": 16,
-      "pixel_representation": 1,
-      "photometric": "MONOCHROME2",
-      "planar_configuration": 0,
-      "source": {
-        "kind": "generated",
-        "seed": "local-mri-slice",
-        "encoder": "oxideav-rev-refine"
-      },
-      "truth": "seed",
-      "sha256": "ca1670102d6a08694dc7e274365b5d10fdd331b3d6ed2e04a026c60e2b1cb559",
-      "size": 9298,
-      "expect": "decode",
-      "max_abs": 0,
-      "oracle_sha256": "6eb1a90cf9414b76438469f8555a7593fa36e673f212dfd968f09256cdc9411a",
-      "confidence": "ground truth from seed; families agreeing: ['openjpeg']",
-      "disputed": false
-    },
-    {
       "id": "gen-pydicom-CT_small-ojph-rev-rpcl-signed",
       "notes": "",
       "tags": [],
@@ -291,7 +263,7 @@
     },
     {
       "id": "gen-pydicom-CT_small-oxideav-rev-mixed",
-      "notes": "MIXED code-blocks (HT and Part 1 in one tile-component), written by the vendored oxideav encoder (extra/gen_oxideav.py). No reference decoder reads MIXED, so only the seed vouches for it; see FORMAT.md STATUS.",
+      "notes": "MIXED code-blocks (HT and Part 1 in one tile-component), written by the oxideav-jpeg2000 encoder (codestream stored in extra/oxideav/). No reference decoder reads MIXED, so only the seed vouches for it; see FORMAT.md STATUS.",
       "tags": [],
       "transfer_syntax": "1.2.840.10008.1.2.4.201",
       "rows": 128,
@@ -315,6 +287,34 @@
       "max_abs": 0,
       "oracle_sha256": "7a481f6ffff833aef4d8bd54819bd8f472aaa7232090208e056c90eacf079926",
       "confidence": "ground truth from seed; families agreeing: []",
+      "disputed": false
+    },
+    {
+      "id": "gen-pydicom-MR_small-oxideav-rev-refine",
+      "notes": "HT code-blocks with SigProp and MagRef passes (3 passes per block), written by the oxideav-jpeg2000 encoder (codestream stored in extra/oxideav/); ojph_compress writes cleanup passes only.",
+      "tags": [],
+      "transfer_syntax": "1.2.840.10008.1.2.4.201",
+      "rows": 64,
+      "columns": 64,
+      "frames": 1,
+      "samples_per_pixel": 1,
+      "bits_allocated": 16,
+      "bits_stored": 16,
+      "pixel_representation": 1,
+      "photometric": "MONOCHROME2",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "generated",
+        "seed": "pydicom-MR_small",
+        "encoder": "oxideav-rev-refine"
+      },
+      "truth": "seed",
+      "sha256": "5926de8c9ae2bb3f771120e1db9b9904fae977114220a4e0b4cc940da857e689",
+      "size": 5244,
+      "expect": "decode",
+      "max_abs": 0,
+      "oracle_sha256": "88617aaa46138fb1b6e2a951e762d962382354d69f47f8c04d4abff2f6a6a63e",
+      "confidence": "ground truth from seed; families agreeing: ['openjpeg']",
       "disputed": false
     },
     {
@@ -431,7 +431,7 @@
     },
     {
       "id": "gen-synth-rgb8-60x40-oxideav-rev-mixed",
-      "notes": "MIXED code-blocks (HT and Part 1 in one tile-component), written by the vendored oxideav encoder (extra/gen_oxideav.py). No reference decoder reads MIXED, so only the seed vouches for it; see FORMAT.md STATUS.",
+      "notes": "MIXED code-blocks (HT and Part 1 in one tile-component), written by the oxideav-jpeg2000 encoder (codestream stored in extra/oxideav/). No reference decoder reads MIXED, so only the seed vouches for it; see FORMAT.md STATUS.",
       "tags": [],
       "transfer_syntax": "1.2.840.10008.1.2.4.202",
       "rows": 40,
@@ -459,7 +459,7 @@
     },
     {
       "id": "gen-synth-rgb8-60x40-oxideav-rev-refine",
-      "notes": "HT code-blocks with SigProp and MagRef passes (3 passes per block), written by the vendored oxideav encoder (extra/gen_oxideav.py); ojph_compress writes cleanup passes only.",
+      "notes": "HT code-blocks with SigProp and MagRef passes (3 passes per block), written by the oxideav-jpeg2000 encoder (codestream stored in extra/oxideav/); ojph_compress writes cleanup passes only.",
       "tags": [],
       "transfer_syntax": "1.2.840.10008.1.2.4.202",
       "rows": 40,
