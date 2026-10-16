@@ -320,6 +320,10 @@ pub fn subset_fhir_bundle(
     if selected_file_ids.is_empty() {
         let mut cloned = owner_bundle.clone();
         cloned["meta"]["lastUpdated"] = json!(last_updated);
+        // Provenance is the owner's record (the Share page's re-encoding note); links leave it out.
+        if let Some(entries) = cloned.get_mut("entry").and_then(Value::as_array_mut) {
+            entries.retain(|e| e["resource"]["resourceType"] != "Provenance");
+        }
         return Ok(cloned);
     }
 
@@ -342,6 +346,10 @@ pub fn subset_fhir_bundle(
             // Decided once the kept studies are known; the slot keeps the Bundle's order.
             reports.push((new_entries.len(), entry));
             new_entries.push(Value::Null);
+            continue;
+        }
+        // Provenance is the owner's record (the Share page's re-encoding note); links leave it out.
+        if res_type == "Provenance" {
             continue;
         }
         if res_type != "ImagingStudy" {

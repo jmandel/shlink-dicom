@@ -8,6 +8,8 @@ export interface Stager {
   stage(name: string, chunks: AsyncIterable<Uint8Array>): Promise<Bytes>;
   /** Staged files from an earlier visit (same session id), in the order they were written. */
   list(): Promise<Bytes[]>;
+  /** One staged file by its name (a staged BlobBytes's File name), or null when it is gone. */
+  open(name: string): Promise<Bytes | null>;
   readonly session: string;
   readonly onDisk: boolean;
 }
@@ -53,6 +55,13 @@ class OpfsStager implements Stager {
     for (const name of names) out.push(new BlobBytes(await (await this.dir.getFileHandle(name)).getFile()));
     return out;
   }
+  async open(name: string): Promise<Bytes | null> {
+    try {
+      return new BlobBytes(await (await this.dir.getFileHandle(name)).getFile());
+    } catch {
+      return null;
+    }
+  }
 }
 
 class MemoryStager implements Stager {
@@ -73,6 +82,9 @@ class MemoryStager implements Stager {
   async list() {
     return [];
   }
+  async open() {
+    return null;
+  }
 }
 
 /** A stager for a session (a new one when `session` is omitted). */
@@ -83,14 +95,14 @@ export async function openStager(session = `s${Date.now().toString(36)}${Math.ra
   return new OpfsStager(session, await base.getDirectoryHandle(session, { create: true }));
 }
 
-/** Removes staged sessions other than `keep`. */
-export async function clearStaging(keep: string | null) {
+/** Removes staged sessions other than those in `keep`. */
+export async function clearStaging(...keep: (string | null | undefined)[]) {
   const root = await opfsRoot();
   if (!root) return;
   try {
     const base = await root.getDirectoryHandle(ROOT, { create: true });
     const names: string[] = [];
-    for await (const [name, h] of (base as any).entries()) if (h.kind === "directory" && name !== keep) names.push(name);
+    for await (const [name, h] of (base as any).entries()) if (h.kind === "directory" && !keep.includes(name)) names.push(name);
     for (const name of names) await base.removeEntry(name, { recursive: true });
   } catch {}
 }

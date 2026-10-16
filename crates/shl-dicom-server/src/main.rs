@@ -115,6 +115,15 @@ enum Commands {
         #[arg(long)]
         add_offset_tables: bool,
     },
+    /// Re-encode the uncompressed images in DICOM files and .tgz archives without loss, as the seed
+    /// and the Share page do (JPEG Lossless SV1, checked bit for bit), writing every file (re-encoded
+    /// or as it was) under OUT at its path in the input. For checks: the files a share will hold.
+    Compress {
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Inspect an shlink:/ URI and verify a single-instance HTTP 206 Range read
     Inspect {
         /// The shlink:/... or viewer#shlink:/... URI
@@ -179,6 +188,19 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Compress { inputs, out } => match shl_dicom_server::compress::compress_tree(&inputs, &out) {
+            Ok(c) => println!(
+                "Compressed {} of {} uncompressed images without loss: {:.1} MB → {:.1} MB",
+                c.compressed,
+                c.images,
+                c.bytes_before as f64 / 1e6,
+                c.bytes_after as f64 / 1e6
+            ),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        },
         Commands::Inspect { shlink, passcode } => {
             if let Err(e) = run_inspect_cli(&shlink, passcode.as_deref()).await {
                 eprintln!("Error: {e}");
@@ -192,14 +214,27 @@ async fn main() {
             // The earlier sample's files, if any, leave the store now.
             state.empty_trash().await;
             match result {
-                Ok(r) => println!(
-                    "Sample packed in {:.1} s: share {}, {} files (one per study), {} instances, {:.1} MB",
-                    t0.elapsed().as_secs_f64(),
-                    r.sid,
-                    r.files,
-                    r.instances,
-                    r.bytes as f64 / 1e6
-                ),
+                Ok(r) => {
+                    let c = &r.compression;
+                    println!(
+                        "Sample packed in {:.1} s: share {}, {} files (one per study), {} instances, {:.1} MB",
+                        t0.elapsed().as_secs_f64(),
+                        r.sid,
+                        r.files,
+                        r.instances,
+                        r.bytes as f64 / 1e6
+                    );
+                    println!(
+                        "Compressed {} of {} uncompressed images without loss: {:.1} MB → {:.1} MB",
+                        c.compressed,
+                        c.images,
+                        c.bytes_before as f64 / 1e6,
+                        c.bytes_after as f64 / 1e6
+                    );
+                    for (why, n) in &c.declined {
+                        println!("  kept as they were ({why}): {n}");
+                    }
+                }
                 Err(e) => {
                     eprintln!("Error: {e}");
                     std::process::exit(1);

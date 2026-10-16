@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod compress;
 pub mod routes_api;
 pub mod routes_shl;
 pub mod sample_pack;

@@ -1,8 +1,9 @@
 // The download menu on whatever the viewer shows: every choice offered with the right size, the
-// default on the button, and (when asked) the files themselves byte for byte against the
-// originals. Shared by view-checks (the sample) and object-checks (objects, video).
-//   originals: { sop: { path, size, series, study } } for every file in the share
-//   (sample-originals.py makes it from a directory of the shared files).
+// default on the button, and (when asked) the files themselves byte for byte against the files the
+// share holds. Shared by view-checks (the sample) and object-checks (objects, video).
+//   originals: { sop: { path, size, series, study, source?, reencoded? } } for every file in the share
+//   (sample-originals.py). A re-encoded file was checked there against its `source`: same pixels,
+//   same other elements. Kept-exact files are their source.
 import { downloadDefault, openDownloads } from "./ui.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -61,7 +62,7 @@ export async function downloadMatrix(page, label, originals, check, downloads = 
   const opts = await page.$$eval("#sheet-download .dl-option", (bs) => bs.map((b) => ({ choice: b.dataset.choice, bytes: b.dataset.bytes === undefined ? undefined : Number(b.dataset.bytes), reason: b.dataset.reason, disabled: b.disabled, height: b.getBoundingClientRect().height })));
   const got = Object.fromEntries(opts.filter((o) => !o.disabled).map((o) => [o.choice, o.bytes]));
   const bad = Object.entries(want).filter(([k, v]) => got[k] !== v).map(([k, v]) => `${k}: ${got[k]} vs ${v}`);
-  check(`${label}: menu choices and sizes match the original files`, bad.length === 0, bad.join("; ") || opts.map((o) => `${o.choice} ${o.bytes}`).join(", "));
+  check(`${label}: menu choices and sizes match the shared files`, bad.length === 0, bad.join("; ") || opts.map((o) => `${o.choice} ${o.bytes}`).join(", "));
   check(`${label}: default size on the button matches its choice`, defBytes !== undefined && got[def] === defBytes, `${def} ${got[def]}`);
   const img = opts.find((o) => o.choice === "image");
   if (cur.onScreen?.reason) check(`${label}: "This image" greyed out, with the reason`, img?.disabled === true && img.reason === cur.onScreen.reason, img?.reason ?? "missing");
@@ -69,7 +70,8 @@ export async function downloadMatrix(page, label, originals, check, downloads = 
   const tag = label.replace(/[^a-z0-9]+/gi, "-");
   if (downloads.image && got.image !== undefined) {
     const { path, name } = await save(page, "image", tag);
-    check(`${label}: image download is the original file`, name === `${cur.onScreen.uid}.dcm` && sha(path) === sha(originals[cur.onScreen.uid].path), name);
+    const o = originals[cur.onScreen.uid];
+    check(`${label}: image download is the shared file, byte for byte${o.reencoded ? " (re-encoded: pixel-identical to its source)" : " (the source file)"}`, name === `${cur.onScreen.uid}.dcm` && sha(path) === sha(o.path), name);
     rmSync(path, { force: true });
     await reopen(page);
   }
@@ -84,7 +86,9 @@ export async function downloadMatrix(page, label, originals, check, downloads = 
     try {
       records = (execFileSync("dcmdump", ["--search", "0004,1500", dicomdir]).toString().match(/\(0004,1500\)/g) ?? []).length;
     } catch {}
-    check(`${label}: ${scope} ZIP holds the original files, with a DICOMDIR listing each`, ok && records === dicom.length, `${dicom.length} files, ${records} DICOMDIR file records${ok ? "" : ", contents differ"}`);
+    const scopeFiles = scope === "series" ? series : study;
+    const re = scopeFiles.filter((o) => o.reencoded).length;
+    check(`${label}: ${scope} ZIP holds the shared files byte for byte (${re} re-encoded and pixel-identical to their sources, ${scopeFiles.length - re} the source files), with a DICOMDIR listing each`, ok && records === dicom.length, `${dicom.length} files, ${records} DICOMDIR file records${ok ? "" : ", contents differ"}`);
     rmSync(path, { force: true });
     rmSync(`/tmp/dlm-${tag}-${scope}`, { recursive: true, force: true });
     await reopen(page);

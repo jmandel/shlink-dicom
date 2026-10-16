@@ -90,6 +90,7 @@ export async function addOffsetTables(series: SeriesModel[], onProgress?: (done:
     if (need) todo.push([se, inst, need]);
   }
   if (!todo.length) return 0;
+  onProgress?.(0, todo.length);
   const m = await loadWasm();
   let rewritten = 0;
   for (let k = 0; k < todo.length; k++) {

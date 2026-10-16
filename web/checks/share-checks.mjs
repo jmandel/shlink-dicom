@@ -110,6 +110,21 @@ function verify(link, archives = [], passcode, extra = []) {
   const out = execFileSync("bun", [`${ROOT}web/checks/share-verify.ts`, link, ...archives, ...(passcode ? [`--passcode=${passcode}`] : []), ...extra], { cwd: ROOT, encoding: "utf8", timeout: 900000, stdio: ["ignore", "pipe", "pipe"] });
   return JSON.parse(out.trim().split("\n").pop());
 }
+/**
+ * Every instance is the file it came from: byte-identical, or (where the share page compressed it,
+ * the default) re-encoded without loss with the same pixels and other elements (share-verify --pixels).
+ * `exact`: only byte-identical counts.
+ */
+function sameContent(P, v, n, what, o = {}) {
+  if (o.exact) return check(`${P}: every instance byte-identical to ${what}`, v.instances === n && v.matched === n, `${v.matched} of ${n} matched, ${v.mismatched} differ, ${v.missing} missing`);
+  const re = o.reencoded === undefined ? true : o.reencoded === v.reencoded;
+  check(
+    `${P}: every instance byte-identical to ${what} or re-encoded without loss and pixel-identical${o.reencoded !== undefined ? ` (${o.reencoded} re-encoded)` : ""}`,
+    v.instances === n && v.matched + v.reencoded === n && v.pixelDiffer === 0 && v.missing === 0 && re,
+    `${v.matched} byte-identical, ${v.reencoded} re-encoded and pixel-identical, ${v.pixelDiffer} differ, ${v.missing} missing`,
+  );
+}
+
 function verifyFails(link) {
   try {
     verify(link);
@@ -218,14 +233,18 @@ async function flowFiles(dev) {
     await page.waitForSelector(".study .report-row");
     check(`${P}: attached report listed`, /Report: Report/.test(await page.locator(".study .report-row").first().textContent()));
   }
+  await compressReview(page, P, FX);
   await layout(page, `${P} review`, dev);
   await shot(page, `${dev}-2-review`);
   const r = await finish(page, dev, P, { recipient: "Dr. Patel, Neurology", shots: true });
+  const upLog = (await page.locator("#up-log li").allTextContents()).find((t) => /^Compressed/.test(t)) ?? "";
+  check(`${P}: the upload log says what was compressed`, new RegExp(`^Compressed ${FX.images} images without loss as JPEG Lossless \\(pixels identical\\): `).test(upLog), upLog);
   const m = await mem.done();
   console.log(`MEMORY ${P}: peak renderer resident ${m.peakHwmMB} MB for ${(FX.bytes / 1e6).toFixed(1)} MB (baseline)`);
-  const v = verify(r.shlink, FX.files);
+  const v = verify(r.shlink, FX.files, undefined, ["--pixels"]);
   check(`${P}: link opens with every study`, v.studies.length === FX.studies.length && v.instances === FX.images, JSON.stringify(v.studies.map((s) => s.instances)));
-  check(`${P}: every instance byte-identical to the files`, v.matched === FX.images && v.mismatched === 0, `${v.matched} matched, ${v.mismatched} differ, ${v.missing} missing`);
+  sameContent(P, v, FX.images, "the files", { reencoded: FX.images });
+  check(`${P}: re-encoded as JPEG Lossless by this packer`, v.pixelReport?.transferSyntaxes?.["1.2.840.10008.1.2.4.70"] === FX.images && Object.keys(v.pixelReport?.implementations ?? {}).every((k) => /SHLDICOM/.test(k)), JSON.stringify([v.pixelReport?.transferSyntaxes, v.pixelReport?.implementations]));
   check(`${P}: label in the link`, v.label === "Imaging for Dr. Patel, Neurology", v.label);
   if (canAttach) check(`${P}: attached report is in the Bundle, linked to its study by reference`, v.reports.length === 1 && v.reports[0].hasText && v.reports[0].studyIds[0] === v.studies[0].id && v.reports[0].basis === "reference" && v.reports[0].byFullUrl, JSON.stringify(v.reports));
   const view = await openInView(dev, r.shlink, P, { name: "files" });
@@ -233,6 +252,76 @@ async function flowFiles(dev) {
   await noErrors(P, errors);
   await context.close();
   return r;
+}
+
+/** The review step's compression choice for files that are all uncompressed images (`x`: fixture expectations). */
+async function compressReview(page, P, x) {
+  await page.waitForFunction(() => document.body.dataset.estimate === "done", null, { timeout: 120000 });
+  const r = await page.evaluate(() => ({
+    shown: !document.getElementById("rv-compress").classList.contains("hidden"),
+    checked: document.querySelector("input[name=compress]:checked")?.value,
+    what: document.getElementById("rv-compress-what").textContent,
+    sv1: document.getElementById("rv-c-sv1").textContent,
+    exact: document.getElementById("rv-c-exact").textContent,
+    total: document.getElementById("rv-total").textContent,
+  }));
+  check(`${P}: compression offered, compressing without loss chosen by default`, r.shown && r.checked === "sv1", JSON.stringify(r));
+  check(`${P}: the choice says what changes`, new RegExp(`^${x.images} images? here (is|are) uncompressed \\([\\d.]+ [KMG]B\\)\\. Compressing without loss keeps every pixel identical but changes the file bytes\\.$`).test(r.what), r.what);
+  const about = /^JPEG Lossless · about ([\d.]+) ([KMG]B)/.exec(r.sv1);
+  check(`${P}: the estimated size is smaller`, !!about && /\(about [\d.]+ [KMG]B after compression\)$/.test(r.total), `${r.sv1} · ${r.total}`);
+  check(`${P}: keeping files exact says byte for byte`, /· the recipient gets the original files, byte for byte$/.test(r.exact), r.exact);
+}
+
+/** "Keep files exactly as they are": every instance byte-identical, and the owner page says so. */
+async function flowExact(dev) {
+  const P = `exact/${dev}`;
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(`${BASE}/share`);
+  await page.click("[data-src=files]");
+  await page.setInputFiles("#in-files", FX.files);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 60000 });
+  await page.waitForFunction(() => document.body.dataset.estimate === "done", null, { timeout: 120000 });
+  await page.locator("label.pick:has(input[value=exact])").click();
+  check(`${P}: keep exact chosen`, (await page.evaluate(() => document.querySelector("input[name=compress]:checked")?.value)) === "exact");
+  const total = await page.textContent("#rv-total");
+  check(`${P}: no compressed size in the summary`, !/after compression/.test(total), total);
+  await layout(page, `${P} review`, dev);
+  await shot(page, `${dev}-2-review-exact`);
+  const r = await finish(page, dev, P, { recipient: "Exact copies" });
+  const log = await page.locator("#up-log li").allTextContents();
+  check(`${P}: nothing compressed`, !log.some((t) => /Compressed/.test(t)), log.join(" | "));
+  const v = verify(r.shlink, FX.files);
+  sameContent(P, v, FX.images, "the files", { exact: true });
+  const m = await newPage(dev);
+  await m.page.goto(r.manage);
+  await m.page.waitForSelector("#share-files", { timeout: 20000 });
+  const note = await m.page.textContent("#share-files");
+  check(`${P}: the owner page says the files are byte for byte`, note === "The files are shared exactly as they were added, byte for byte.", note);
+  await m.context.close();
+  await noErrors(P, errors);
+  await context.close();
+}
+
+/** A CD-style folder (Explicit VR, DICOMDIR): compressed without loss by default, pixel-identical. */
+async function flowCd(dev) {
+  const P = `cd/${dev}`;
+  const dir = `${FXDIR}/cd`;
+  const CD = fixtures("cd", dir, "xr-wrist-left-2012");
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(`${BASE}/share`);
+  await page.click("[data-src=files]");
+  await page.setInputFiles("#in-folder", dir);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+  const skipped = await page.textContent("#rv-skipped");
+  check(`${P}: the DICOMDIR is skipped as an index`, /1 file skipped/.test(skipped), skipped);
+  await compressReview(page, P, CD);
+  await shot(page, `${dev}-2-review-cd`);
+  const r = await finish(page, dev, P, { recipient: "CD test" });
+  const v = verify(r.shlink, [dir], undefined, ["--pixels"]);
+  sameContent(P, v, CD.images, "the CD's files", { reencoded: CD.images });
+  check(`${P}: smaller than the CD`, (await page.locator("#up-log li").allTextContents()).some((t) => /^Compressed \d+ images without loss .*: ([\d.]+ [KMG]B) → ([\d.]+ [KMG]B)/.test(t)));
+  await noErrors(P, errors);
+  await context.close();
 }
 
 async function flowPortal(dev) {
@@ -300,9 +389,15 @@ async function flowPortal(dev) {
   await shot(page, `${dev}-2-review-portal`);
   const pass = "2468";
   const r = await finish(page, dev, P, { recipient: "Dr. Okafor", passcode: pass, expiry: "1m", updates: true });
-  const v = verify(r.shlink, S.sameAsLocal ? [DATASET] : [], pass);
+  const received = await page.evaluate(() => [...window.__share.collection.received]).catch(() => []);
+  console.log(`PORTAL ${P}: images received by transfer syntax: ${JSON.stringify(received)}`);
+  const sv1 = received.find(([t]) => t === "1.2.840.10008.1.2.4.70")?.[1] ?? 0;
+  check(`${P}: the portal sent JPEG Lossless for the images it stores uncompressed (Accept lists it first)`, sv1 > 0, JSON.stringify(received));
+  const v = verify(r.shlink, S.sameAsLocal ? [DATASET] : [], pass, ["--pixels"]);
+  const ts = v.pixelReport?.transferSyntaxes ?? {};
+  check(`${P}: images arrive compressed or are compressed on the device`, Object.keys(ts).every((t) => ["1.2.840.10008.1.2.4.70", "1.2.840.10008.1.2.4.90"].includes(t)), JSON.stringify({ received, inLink: ts }));
   check(`${P}: link has the studies left in`, v.studies.length === keep.length && v.instances === keepImages, JSON.stringify(v.studies.map((s) => s.instances)));
-  if (S.sameAsLocal) check(`${P}: every instance byte-identical to the sandbox dataset`, v.matched === keepImages, `${v.matched} matched, ${v.mismatched} differ, ${v.missing} missing`);
+  if (S.sameAsLocal) sameContent(P, v, keepImages, "the sandbox dataset");
   check(`${P}: reports travel with PDF and text inline`, v.reports.length === keepReports - leftOut && v.reports.every((x) => x.hasText && x.forms.includes("application/pdf")), JSON.stringify(v.reports));
   check(`${P}: every report links to its study by reference (fullUrl), none unmatched or by date`, v.reports.every((x) => x.basis === "reference" && x.byFullUrl), JSON.stringify(v.reports.map((x) => [x.title, x.basis, x.byFullUrl])));
   check(`${P}: started date from the portal`, !!v.studies[0].started, v.studies[0].started);
@@ -354,6 +449,8 @@ async function flowManage(dev, files) {
   check(`${P}: link shows it was opened`, /^Opened \d+ times?, last today/.test(status), status);
   const studies = await page.locator(".link-card .lc-studies").first().textContent();
   check(`${P}: link lists its studies`, studies === FX.studies.map((s) => s.title).join(", "), studies);
+  const filesNote = await page.locator("#share-files li").allTextContents();
+  check(`${P}: the owner page says which images were compressed without loss`, filesNote.length === FX.studies.length && FX.studies.every((st, i) => filesNote[i] === `${st.title}: ${st.images} of ${st.images} images were compressed without loss when shared (JPEG Lossless): pixel-identical to the files they came from, not the same bytes.`), filesNote.join(" | "));
   const tl = await page.locator("#timeline li").allTextContents();
   check(`${P}: timeline has an open and image loads`, tl.some((t) => /Opened · Dr\. Patel/.test(t)) && tl.some((t) => /encrypted image data/.test(t)), tl.slice(0, 3).join(" | "));
   await layout(page, `${P} page`, dev);
@@ -385,10 +482,10 @@ async function flowManage(dev, files) {
   await page.waitForFunction(() => document.querySelectorAll(".link-card").length === 2);
   await page.waitForSelector(".lc-qr .mono");
   const newLink = await page.locator(".lc-qr .mono").first().textContent();
-  const v = verify(newLink, FX.files);
+  const v = verify(newLink, FX.files, undefined, ["--pixels"]);
   const rest = FX.studies.slice(1);
   const restImages = rest.reduce((a, s) => a + s.images, 0);
-  check(`${P}: new link leaves out ${FX.studies[0].title}`, v.studies.length === rest.length && v.instances === restImages && v.matched === restImages, JSON.stringify(v.studies));
+  check(`${P}: new link leaves out ${FX.studies[0].title}`, v.studies.length === rest.length && v.instances === restImages && v.matched + v.reencoded === restImages, JSON.stringify(v.studies));
   await shot(page, `${dev}-6-manage-two-links`);
 
   // Revoke it.
@@ -529,10 +626,15 @@ async function flowBigCt(dev) {
   await page.click("#rv-next");
   await page.fill("#in-recipient", "Big CT test");
   await page.click("#who-form button[type=submit]");
-  // Reload a third of the way through, then continue with the same files.
+  // Reload a third of the way through the upload (after compressing), then continue with the same files.
+  const tc = Date.now();
+  await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? ""), null, { timeout: 1800000, polling: 250 });
+  const compressLine = (await page.locator("#up-log li").allTextContents()).find((t) => /^Compressed/.test(t)) ?? "";
+  console.log(`COMPRESS ${P}: ${compressLine} (page: ${((Date.now() - tc) / 1000).toFixed(0)} s to the first upload)`);
+  check(`${P}: compressed before uploading`, /^Compressed \d+ images without loss/.test(compressLine), compressLine);
   await page.waitForFunction(() => {
     const w = parseFloat(document.getElementById("up-bar")?.style.width ?? "0");
-    return w > 33;
+    return /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && w > 33;
   }, null, { timeout: 900000, polling: 250 });
   const before = await page.textContent("#up-main");
   await page.reload();
@@ -553,8 +655,8 @@ async function flowBigCt(dev) {
   check(`${P}: renderer memory stays bounded while sharing ${(info.bytes / 1e9).toFixed(2)} GB`, m.peakHwmMB < MEMORY_BOUND_MB, `peak resident ${m.peakHwmMB} MB (bound ${MEMORY_BOUND_MB} MB)`);
   console.log(`MEMORY ${P}: peak renderer resident ${m.peakHwmMB} MB for ${(info.bytes / 1e9).toFixed(2)} GB`);
   await shot(page, `${dev}-big-done`);
-  const v = verify(result.shlink, [dir]);
-  check(`${P}: every instance byte-identical to the files`, v.instances === files.length && v.matched === files.length, `${v.matched} of ${files.length} matched`);
+  const v = verify(result.shlink, [dir], undefined, ["--pixels"]);
+  sameContent(P, v, files.length, "the files");
   await noErrors(P, errors);
   await context.close();
 }
@@ -605,15 +707,20 @@ async function stallProxy(port, upstream, stallAtPatch) {
   };
 }
 
-/** Starts the upload of NET_DIR's files and waits until `pct` percent is sent. */
+/**
+ * Starts the upload of NET_DIR's files and waits until `pct` percent is sent. `o.exact`: keep the
+ * files exactly as they are (the network flows, so the upload stays long enough to disturb).
+ */
 async function startNetUpload(page, dev, files, pct, o = {}) {
   await page.goto(`${o.pageBase ?? BASE}/share${o.query ?? ""}`);
   await page.click("[data-src=files]");
   await page.setInputFiles("#in-files", files);
   await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+  if (o.exact) await page.locator("label.pick:has(input[value=exact])").click();
   await page.click("#rv-next");
   await page.click("#who-form button[type=submit]");
-  await page.waitForFunction((p) => parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= p, pct, { timeout: 300000, polling: 100 });
+  // The upload's own bar (compressing comes first, on the same bar).
+  await page.waitForFunction((p) => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= p, pct, { timeout: 300000, polling: 100 });
 }
 
 async function finishNetUpload(page, P, files, timeout = 900000) {
@@ -621,8 +728,8 @@ async function finishNetUpload(page, P, files, timeout = 900000) {
   if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
   const result = await page.evaluate(() => window.__share.result);
   made.push(result.manage);
-  const v = verify(result.shlink, [NET_DIR]);
-  check(`${P}: every instance byte-identical to the files`, v.instances === files.length && v.matched === files.length, `${v.matched} of ${files.length} matched`);
+  const v = verify(result.shlink, [NET_DIR], undefined, ["--pixels"]);
+  sameContent(P, v, files.length, "the files");
 }
 
 /** Waits until the page reports a connection problem, and returns what it shows. */
@@ -645,7 +752,7 @@ async function flowNetwork(dev) {
     const cdp = await context.newCDPSession(page);
     await cdp.send("Network.enable");
     await cdp.send("Network.emulateNetworkConditions", slow);
-    await startNetUpload(page, dev, files, 20);
+    await startNetUpload(page, dev, files, 20, { exact: true });
     await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });
     const shown = await seesTrouble(page);
     check(`${P}: the page says the connection is lost`, /Connection lost/.test(shown), shown);
@@ -663,16 +770,17 @@ async function flowNetwork(dev) {
   {
     const P = `flaky/${dev}`;
     const { context, page, errors } = await newPage(dev, { allowErrors: noise });
-    let failed = 0;
+    // Every third append fails (alternately reset and 503), so every run rides out some.
+    let failed = 0, patches = 0;
     await page.route(/\/api\/shares\/[^/]+\/files\//, async (route) => {
       const r = route.request();
-      if (r.method() === "PATCH" && Math.random() < 0.33) {
+      if (r.method() === "PATCH" && ++patches % 3 === 2) {
         failed++;
         return failed % 2 ? route.abort("connectionreset") : route.fulfill({ status: 503, body: "Service Unavailable" });
       }
       return route.continue();
     });
-    await startNetUpload(page, dev, files, 0);
+    await startNetUpload(page, dev, files, 0, { exact: true });
     await finishNetUpload(page, P, files);
     check(`${P}: rode out ${failed} failed requests`, failed > 0, `${failed} failed`);
     await noErrors(P, errors);
@@ -689,7 +797,7 @@ async function flowNetwork(dev) {
     const proxy = await stallProxy(3399, remote ? { host: u.hostname, port: Number(u.port || 443), tls: u.protocol === "https:" } : { port: Number(u.port || 80) }, 3);
     // 409 while the server is still holding the stalled request (until its 30 s idle limit).
     const { context, page, errors } = await newPage(dev, { allowErrors: [...noise, /409/] });
-    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399", pageBase: remote ? "http://localhost:3333" : BASE });
+    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399", pageBase: remote ? "http://localhost:3333" : BASE, exact: true });
     const shown = await seesTrouble(page, 120000);
     check(`${P}: a stalled request is noticed`, proxy.stalled && /Connection lost/.test(shown), shown);
     await finishNetUpload(page, P, files);
@@ -737,8 +845,8 @@ async function flowCapExpiry(dev) {
     const posts = ev.events.filter((e) => e.method === "POST" && e.status === 200).length;
     const expired = ev.events.filter((e) => /\/cap\//.test(e.path) && e.status === 404).length;
     check(`${P}: the capability URL expired and was renewed with the remembered passcode`, posts >= 2, `${posts} manifest requests, ${expired} expired-capability 404s logged`);
-    const v = verify(result.shlink, [], undefined, [`--ref-link=${src.link}`, "--ref-passcode=4321"]);
-    check(`${P}: every instance byte-identical to the source link`, v.instances > 0 && v.matched === v.instances, `${v.matched} of ${v.instances}`);
+    const v = verify(result.shlink, [], undefined, [`--ref-link=${src.link}`, "--ref-passcode=4321", "--pixels"]);
+    sameContent(P, v, v.instances, "the source link");
     await noErrors(P, errors);
     await context.close();
   } finally {
@@ -780,7 +888,7 @@ async function flowRemember(dev) {
     await page.waitForSelector("#s-review:not(.hidden)", { timeout: 60000 });
     await page.click("#rv-next");
     await page.click("#who-form button[type=submit]");
-    await page.waitForFunction(() => parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 20, null, { timeout: 120000, polling: 100 });
+    await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 20, null, { timeout: 120000, polling: 100 });
     await page.reload();
     await page.waitForSelector("#resume:not(.hidden)");
     const label = await page.textContent("#resume-continue");
@@ -835,8 +943,8 @@ async function finishNetUploadFrom(page, P, files, images, ref) {
   if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
   const result = await page.evaluate(() => window.__share.result);
   made.push(result.manage);
-  const v = verify(result.shlink, ref ? [ref] : files);
-  check(`${P}: every instance byte-identical to the files`, v.instances === images && v.matched === images, `${v.matched} of ${images} matched`);
+  const v = verify(result.shlink, ref ? [ref] : files, undefined, ["--pixels"]);
+  sameContent(P, v, images, "the files");
 }
 
 // --------------------------------------------------------------------------------- dark mode
@@ -920,7 +1028,7 @@ async function flowDark(dev) {
   const slow = { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 512 << 10 };
   await cdp.send("Network.emulateNetworkConditions", slow);
   await page.click("#who-form button[type=submit]");
-  await page.waitForFunction(() => parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 10, null, { timeout: 120000, polling: 100 });
+  await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 10, null, { timeout: 120000, polling: 100 });
   await darkAudit(page, `${P} upload`);
   await shotD(page, "4-upload");
   await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });
@@ -1008,6 +1116,8 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "files" || only === "manage") files = await flowFiles(dev);
     if (!only || only === "portal") await flowPortal(dev);
     if (!only || only === "reshare") await flowReshare(dev);
+    if (!only || only === "exact") await flowExact(dev);
+    if (!only || only === "cd") await flowCd(dev);
     if (files && (!only || only === "manage")) await flowManage(dev, files);
     if (!only || only === "slide") await flowSlide(dev);
     if (!only || only === "sample") await flowSample(dev);

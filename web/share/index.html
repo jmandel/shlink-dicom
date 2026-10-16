@@ -118,6 +118,15 @@
         <span class="box" aria-hidden="true"></span>
         <span>Add frame offset tables (lets viewers jump to any tile without downloading the rest; image data unchanged)</span>
       </label>
+      <fieldset class="field compress hidden" id="rv-compress">
+        <legend>Uncompressed images</legend>
+        <p class="hint" id="rv-compress-what"></p>
+        <div class="picks" role="radiogroup">
+          <label class="pick"><input type="radio" name="compress" value="sv1" /><span><span class="pick-title">Compress without loss (recommended)</span><span class="tech" id="rv-c-sv1"></span></span></label>
+          <label class="pick hidden"><input type="radio" name="compress" value="j2k" /><span><span class="pick-title">Smaller files, slower</span><span class="tech" id="rv-c-j2k"></span></span></label>
+          <label class="pick"><input type="radio" name="compress" value="exact" /><span><span class="pick-title">Keep files exactly as they are</span><span class="tech" id="rv-c-exact"></span></span></label>
+        </div>
+      </fieldset>
       <div class="actions">
         <button class="btn" data-go="1">Back</button>
         <button class="btn btn-primary" id="rv-next">Continue</button>

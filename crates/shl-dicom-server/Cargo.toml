@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+shl-dicom-transcode = { path = "../../codecs/shl-dicom-transcode" }
 axum = "0.8"
 chrono = "0.4"
 flate2 = "1.0"

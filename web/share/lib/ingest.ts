@@ -16,6 +16,8 @@ export interface Instance {
   src: Bytes;
   h: DicomHeader;
   number: number | null;
+  /** Re-encoded on this device (lib/compress.ts): pixel-identical to the file it came from. */
+  reencoded?: boolean;
 }
 
 /** Bytes a header is read from, growing until the UIDs are found. */
@@ -94,6 +96,8 @@ export class Collection {
   instanceCount = 0;
   bytes = 0;
   patient: PatientInfo = { name: null, birthDate: null, identifier: [] };
+  /** Portal downloads: images received per transfer syntax, as each part declared it. */
+  received = new Map<string, number>();
   /** Where the patient details came from: "dicom" until a FHIR source sets them. */
   patientSource: "dicom" | "fhir" = "dicom";
   private seen = new Set<string>();

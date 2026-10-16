@@ -300,7 +300,7 @@ A long-lived link may gain studies, series or instances (for example a new prior
 2. Parse each file's header. Group instances by (Study Instance UID, Series Instance UID); grouping by the pair keeps a series UID wrongly reused across studies from merging them.
 3. Handle broken data explicitly:
    - **Missing UID.** A file without a Series Instance UID, which DICOM requires but some exporters omit, is either rejected or placed in a series of its own with a newly generated UID. That choice is recorded in the Bundle, for example in `series.description`.
-   - **Bare data set.** A file that is a bare data set without Part 10 wrapping is given the Part 10 preamble and file meta header. This is the only change a sharer makes to file bytes.
+   - **Bare data set.** A file that is a bare data set without Part 10 wrapping is given the Part 10 preamble and file meta header. Apart from lossless compression (below), this is the only change a sharer makes to file bytes.
 4. Order each study's series by Series Number, then by Series Instance UID; order each series' instances by Instance Number, then by SOP Instance UID for ties or missing numbers.
 5. For each study:
    - draw a random 16-byte file id and a random 32-byte file key;
@@ -309,7 +309,13 @@ A long-lived link may gain studies, series or instances (for example a new prior
    - put `linked-file` on the `ImagingStudy`, and none on its series.
 6. Build the Bundle (§8), encrypt it as the SHL file or manifest entry, and create the link.
 
-A sharer may offer, as a separate step before packing, to transcode uncompressed images to a lossless compressed transfer syntax (for example HTJ2K lossless or JPEG-LS) to reduce size. The result is still DICOM and declares its own transfer syntax, so the format is unchanged. The files are then no longer byte-identical to the source's, and the sharer should say so.
+**Lossless compression (informative).** Much patient-held imaging is stored uncompressed: a CD made to the general-purpose CD profile allows only Explicit VR Little Endian, and many archives keep images that way. Lossless compression typically shrinks CT and MR two to three times. A sharer SHOULD therefore get images losslessly compressed before packing:
+- **From a DICOMweb source,** ask for compressed data first. A SMART Imaging Access retrieve lists JPEG Lossless SV1 (`1.2.840.10008.1.2.4.70`), then JPEG 2000 Lossless (`1.2.840.10008.1.2.4.90`), then `transfer-syntax=*`, using `q` weights (PS3.18 §8.7.5). Each part of the response declares its own transfer syntax.
+- **Re-encode what is still uncompressed,** from a CD, a folder, an archive, or a server that sent images as stored, as JPEG Lossless SV1 or JPEG 2000 Lossless. These are the compressed transfer syntaxes that DICOM's general-purpose DVD and USB media profiles require every reader to support (PS3.11 Annex H, Table H.3-1; Annex J), so recipients' systems can be expected to read them.
+- **Check the result.** Decode each re-encoded image and compare it with the original pixels before using it; on any difference, or when compression would not make the file smaller, keep the original file.
+- **Leave everything else.** Already-compressed images, reports, structured reports, PDFs and other non-image objects are not touched.
+
+A re-encoded file is still DICOM and declares its own transfer syntax, so the format is unchanged. Its pixel data is identical to the source's, but the file bytes are not: the transfer syntax, the encapsulated Pixel Data and the file meta header differ. The re-encoding application identifies itself in the file meta Implementation Class UID (0002,0012) and Implementation Version Name (0002,0013), as PS3.10 provides. A sharer should offer to keep files exactly as they are, and should say which it did.
 
 ### 11.2 Receiver and viewing (informative)
 

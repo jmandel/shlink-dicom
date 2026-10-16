@@ -230,7 +230,9 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
       const url = se ? `${f.wadoBase}/studies/${f.studyUID}/series/${se.uid}` : `${f.wadoBase}/studies/${f.studyUID}`;
       let k = 0;
       for await (const part of S.wadoRetrieveParts(url, tok, signal)) {
-        const src = await stager.stage(`${se?.description ?? f.studyUID}/${++k}`, part);
+        // The file's own meta header says its transfer syntax; the part's Content-Type is counted for the log.
+        if (part.transferSyntax) col.received.set(part.transferSyntax, (col.received.get(part.transferSyntax) ?? 0) + 1);
+        const src = await stager.stage(`${se?.description ?? f.studyUID}/${++k}`, part.body);
         await col.add(`${se?.description ?? f.studyUID}/${k}`, src);
         bytes += src.size;
         got++;
