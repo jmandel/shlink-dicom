@@ -639,6 +639,20 @@ mod tests {
         }
     }
 
+    /// The regrouping the wasm simd128 colour kernel (`simd::wasm::ycc8`) relies on: for 8-bit
+    /// chroma, each term (k·x + 2^15) >> 16 equals j·x + ((k'·x + 2^15) >> 16) with k = j·2^16 + k'.
+    #[test]
+    fn ycc_terms_regrouped_for_16_bit_lanes() {
+        for cb in -128i32..128 {
+            for cr in -128i32..128 {
+                let (r, g, b) = ycc_px(0, cb, cr);
+                assert_eq!(r, cr + ((26345 * cr + (2 << 14)) >> 16), "cr {cr}");
+                assert_eq!(g, ((-FIX_0_34414 * cb - 14034 * cr) + (-(1 << 15) * cr + (2 << 14))) >> 16, "cb {cb} cr {cr}");
+                assert_eq!(b, 2 * cb + ((-14942 * cb + (2 << 14)) >> 16), "cb {cb}");
+            }
+        }
+    }
+
     #[test]
     fn ycc_arithmetic_matches_tables() {
         let fix = |x: f64| (x * 65536.0 + 0.5) as i32;

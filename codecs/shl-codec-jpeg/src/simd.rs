@@ -474,20 +474,32 @@ pub(crate) mod wasm {
     #[inline(always)]
     fn ycc8(y: v128, cb: v128, cr: v128) -> [v128; 3] {
         use crate::dct::{FIX_0_34414, FIX_0_71414, FIX_1_40200, FIX_1_77200};
+        // `dct::ycc_px` regrouped for 16-bit lanes and `i32x4.dot_i16x8_s`. Each term
+        // (k·x + 2^15) >> 16 has k split as j·2^16 + k' with |k'| < 2^15, so the term is
+        // j·x + ((k'·x + 2^15) >> 16) exactly, and k'·x + 2^15 is one dot product of the pairs
+        // (x, 2)·(k', 2^14) (the G term, with two chroma products, is two). Every sum lies far
+        // inside i16 before the saturating narrow to u8, which is the 0..=255 clamp.
+        const KR: i32 = FIX_1_40200 - (1 << 16); // 26345
+        const KB: i32 = FIX_1_77200 - (2 << 16); // -14942
+        const KG_CR: i32 = (1 << 15) - FIX_0_71414; // -14034, with −2^15·cr in the second pair
+        let pair = |a: i32, b: i32| i32x4_splat((a as u16 as u32 | (b as u16 as u32) << 16) as i32);
         let c128 = i16x8_splat(128);
         let (cb, cr) = (i16x8_sub(cb, c128), i16x8_sub(cr, c128));
-        let half = i32x4_splat(1 << 15);
-        let px = |y: v128, cb: v128, cr: v128| -> [v128; 3] {
-            let r = i32x4_add(y, i32x4_shr(i32x4_add(i32x4_mul(cr, i32x4_splat(FIX_1_40200)), half), 16));
-            let g = i32x4_mul(cb, i32x4_splat(-FIX_0_34414));
-            let g = i32x4_sub(g, i32x4_mul(cr, i32x4_splat(FIX_0_71414)));
-            let g = i32x4_add(y, i32x4_shr(i32x4_add(g, half), 16));
-            let b = i32x4_add(y, i32x4_shr(i32x4_add(i32x4_mul(cb, i32x4_splat(FIX_1_77200)), half), 16));
-            [r, g, b]
+        let two = i16x8_splat(2);
+        let zip = |a: v128, b: v128| (i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(a, b), i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(a, b));
+        let (cr2, cb2, cbcr) = (zip(cr, two), zip(cb, two), zip(cb, cr));
+        let term = |p: (v128, v128), k: v128| {
+            i16x8_narrow_i32x4(i32x4_shr(i32x4_dot_i16x8(p.0, k), 16), i32x4_shr(i32x4_dot_i16x8(p.1, k), 16))
         };
-        let lo = px(u32x4_extend_low_u16x8(y), i32x4_extend_low_i16x8(cb), i32x4_extend_low_i16x8(cr));
-        let hi = px(u32x4_extend_high_u16x8(y), i32x4_extend_high_i16x8(cb), i32x4_extend_high_i16x8(cr));
-        [0, 1, 2].map(|c| i16x8_narrow_i32x4(lo[c], hi[c]))
+        let term2 = |p: (v128, v128), k: v128, q: (v128, v128), l: v128| {
+            let lo = i32x4_add(i32x4_dot_i16x8(p.0, k), i32x4_dot_i16x8(q.0, l));
+            let hi = i32x4_add(i32x4_dot_i16x8(p.1, k), i32x4_dot_i16x8(q.1, l));
+            i16x8_narrow_i32x4(i32x4_shr(lo, 16), i32x4_shr(hi, 16))
+        };
+        let r = i16x8_add(i16x8_add(y, cr), term(cr2, pair(KR, 1 << 14)));
+        let g = i16x8_add(y, term2(cbcr, pair(-FIX_0_34414, KG_CR), cr2, pair(-(1 << 15), 1 << 14)));
+        let b = i16x8_add(i16x8_add(y, i16x8_add(cb, cb)), term(cb2, pair(KB, 1 << 14)));
+        [r, g, b]
     }
 
     /// YCbCr→RGB for 8-bit output, 16 pixels at a time; returns how many pixels it converted

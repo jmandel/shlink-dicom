@@ -164,6 +164,19 @@ Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv
 - **Stopped:** the encoder is 4.6–5.4× faster than libjpeg-turbo on these series, and the last ideas each saved under 3% of cycles. In the wasm transcode the encoder is now about 40% and the self-check's SV1 decode about a third, so further gains there are decoder work ([SV1 on real CT series](#sv1-on-real-ct-series)).
 - **Exactness:** SV1 outputs of every live file (735 encoded, 4 declined, as before) and every corpus file are byte-identical to the previous build natively, and the wasm build's outputs equal the native ones.
 
+## Track T4: 8-bit colour
+
+[Performance plan, T4](../../../docs/PERF-PLAN.md#t4-jpeg-baseline-8-bit-colour). Real frames: `pydicom-color3d_jpeg_baseline` (ultrasound cine, 120 frames of 640×480 YCbCr 4:2:2) and `idc-jpgbase-ybr422-u8of8-p0-mf-sm-mirax-6fc896a9` (8 slide tiles). References on the same codestreams: libjpeg-turbo 3.2 natively (`tj3Decompress8` from Python, as `perf_refs.py`) and the Cornerstone libjpeg-turbo 8-bit wasm build in Node (`decode()` only, fastest of 7 passes).
+
+| Case | Native: ours / libjpeg-turbo, ms per frame | wasm in Node: ours before → after / libjpeg-turbo wasm, ms per frame |
+|---|---|---|
+| ultrasound cine | 0.90 / 0.82 | 1.50 → 1.38 / 2.88 |
+| slide tiles | 2.82 / 2.65 | 5.07 → 5.01 / 9.53 |
+
+(Ours in wasm: codec-stage medians from the bench module; load 2–5.)
+
+- **YCbCr → RGB in wasm on 16-bit lanes.** The simd128 colour kernel widened everything to 32-bit lanes and multiplied with `i32x4.mul`. Each term (k·x + 2^15) >> 16 is now j·x + ((k'·x + 2^15) >> 16) with k = j·2^16 + k' and |k'| < 2^15, so the products become `i32x4.dot_i16x8_s` of (x, 2)·(k', 2^14) pairs and everything else stays in 16-bit lanes (identity checked for every 8-bit chroma pair by `ycc_terms_regrouped_for_16_bit_lanes`). Cycles per decode in Node, minimum of 4 rounds: cine 766M → 689M (−10%), slide tiles 170M → 158M (−7%). Outputs identical: corpus and live JPEG (481 files) and the long tail's 190 baseline files, against the previous wasm build.
+
 ## Exactness
 
 Every step had to keep every jpeg-dct and jpeg-lossless corpus result unchanged:
