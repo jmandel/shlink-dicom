@@ -215,6 +215,7 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
     // 1.0 where the filter is skipped (sigma below the minimum), else 0.0.
     let mut skip = vec![0f32; w4];
     let mut sad = vec![0f32; w4];
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut wsum = vec![0f32; w4];
     let mut acc = [vec![0f32; w4], vec![0f32; w4], vec![0f32; w4]];
     for y in 0..h {
@@ -261,6 +262,19 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                 *v = s * if i == 0 || i == 7 { bsm } else { inner };
             }
         }
+        // Column ranges (whole 8-column blocks) where the filter runs; skipped blocks keep
+        // their centre values (libjxl skips them too).
+        spans.clear();
+        for bx in 0..w4.div_ceil(8) {
+            if srow.get(bx).copied().unwrap_or(0.0) < MIN_SIGMA {
+                continue;
+            }
+            let (x0, x1) = (bx * 8, (bx * 8 + 8).min(w4));
+            match spans.last_mut() {
+                Some(last) if last.1 == x0 => last.1 = x1,
+                _ => spans.push((x0, x1)),
+            }
+        }
         wsum.fill(1.0);
         for c in 0..3 {
             acc[c].copy_from_slice(&prow(c, 0)[pb..pb + w4]);
@@ -273,8 +287,10 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                     let r0 = &prow(c, 0)[pb..pb + w4];
                     let o = (pb as isize + dx) as usize;
                     let r1 = &prow(c, dy)[o..o + w4];
-                    for x in (0..w4).step_by(4) {
-                        F4::load(&sad[x..]).add(F4::load(&r1[x..]).sub(F4::load(&r0[x..])).abs().mul(scv)).store(&mut sad[x..]);
+                    for &(x0, x1) in &spans {
+                        for x in (x0..x1).step_by(4) {
+                            F4::load(&sad[x..]).add(F4::load(&r1[x..]).sub(F4::load(&r0[x..])).abs().mul(scv)).store(&mut sad[x..]);
+                        }
                     }
                 }
             } else {
@@ -295,9 +311,11 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                 let left = &er(sy)[base - 1..base - 1 + w4];
                 let down = &er(sy + 1)[base..base + w4];
                 let right = &er(sy)[base + 1..base + 1 + w4];
-                for x in (0..w4).step_by(4) {
-                    let v = F4::load(&c0[x..]).add(F4::load(&up[x..])).add(F4::load(&left[x..])).add(F4::load(&down[x..])).add(F4::load(&right[x..]));
-                    v.store(&mut sad[x..]);
+                for &(x0, x1) in &spans {
+                    for x in (x0..x1).step_by(4) {
+                        let v = F4::load(&c0[x..]).add(F4::load(&up[x..])).add(F4::load(&left[x..])).add(F4::load(&down[x..])).add(F4::load(&right[x..]));
+                        v.store(&mut sad[x..]);
+                    }
                 }
             }
             let o = (pb as isize + dx) as usize;
@@ -306,7 +324,7 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
             let n2 = &prow(2, dy)[o..o + w4];
             let [a0, a1, a2] = &mut acc;
             let one = F4::splat(1.0);
-            for x in (0..w4).step_by(4) {
+            for x in spans.iter().flat_map(|&(x0, x1)| (x0..x1).step_by(4)) {
                 let weight = F4::load(&sad[x..]).mul(F4::load(&inv_s[x..])).add(one).max0();
                 F4::load(&wsum[x..]).add(weight).store(&mut wsum[x..]);
                 F4::load(&a0[x..]).add(weight.mul(F4::load(&n0[x..]))).store(&mut a0[x..]);
