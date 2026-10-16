@@ -187,6 +187,14 @@ Rejected:
 
 **T4 stops here**: three changes in a row were rejected. The remaining gap is native, where cine takes 1.10× and slide tiles 1.13× libjpeg-turbo's time in the [quiet run](#final-comparison). In wasm we already take 0.46–0.56× the time of the libjpeg-turbo build. The next idea is streaming rows to the colour pass after each MCU row while the planes are still in cache. It was not written: a 640×480 frame's planes take about 600 KB, and the colour pass runs at its average IPC, so it is not waiting on memory.
 
+## Track T8: no unsafe kernels
+
+[Performance plan, T8](../../../docs/PERF-PLAN.md#t8-removing-unsafe). The SIMD kernels no longer use `unsafe`. The only `unsafe` left in the crate is the three calls into `#[target_feature(enable = "avx2")]` functions, made after `is_x86_feature_detected!("avx2")`.
+
+- **wasm simd128:** loads and stores go through slices. 8-bit samples move as 64-bit integers, which LLVM turns into `v128.load64_zero` and vector stores; 16-bit samples use lane constructors and extracts. The wasm instruction counts are unchanged within 0.2% on cine, slide tiles, the 2048² photo and the wrist (Node, `--no-liftoff`), and within 1.9% on an RGB 4:4:4 live slide, where `rgb_row8` is no longer inlined. Cycles were within run-to-run noise (load 2–3).
+- **Native AVX2:** the kernels are `#[target_feature]` functions that call the intrinsics directly (target_feature 1.1). A trait method cannot enable AVX2, so the `Lane` type for the shared 1-D transforms is an `[i32; 8]` with wrapping arithmetic, which LLVM compiles to the same `vpaddd`/`vpmulld`. Block loads and stores go through arrays and slices, and one bound on `stride` up front lets LLVM drop the per-row checks. Cycles against the previous build (minimum of 6 alternating rounds, `perf stat`, load 2.5–3): photo +1.7%, wrist 12-bit +2.5%, slide tiles +0.4%, cine +0.2%, dx2048 12-bit +0.7%; instructions +0.5–1.4%. The cost is LLVM no longer folding the last transpose into the packs, plus a few extra adds. For scale, libjpeg-turbo 3.2 (tj3) takes 0.82 ms per cine frame, 2.65 ms per slide tile and 11.8 ms for the photo in the same window, against our 0.89, 2.88 and 14.9 ms.
+- **Outputs:** identical natively on the corpus at every scale, the live sample, the long tail and the SOP sweep (all JPEG XL differences are the same on main). In wasm they are identical on the 481 corpus and live files and the 190 long-tail baseline files. The AVX2-against-scalar corpus test passes on 2,949 frames.
+
 ## Exactness
 
 Every step had to keep every jpeg-dct and jpeg-lossless corpus result unchanged:

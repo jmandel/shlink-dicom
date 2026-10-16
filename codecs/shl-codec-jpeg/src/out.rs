@@ -35,13 +35,49 @@ pub(crate) trait Sample: Copy + Default + Into<i32> + 'static {
     const BYTES: usize;
     /// From a value known to fit (at most the precision's maximum).
     fn from_u16(v: u16) -> Self;
+    /// Fill `dst` from little-endian packed samples: 8 per word for `u8`, 4 for `u16`.
+    #[cfg(target_arch = "x86_64")]
+    fn put_words(dst: &mut [Self], w: &[u64; 2]);
+    /// wasm simd128: 8 samples from the start of `s` as u16 lanes.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn get8(s: &[Self]) -> core::arch::wasm32::v128;
+    /// wasm simd128: the first 8 (or 16) u16 lanes of `lo`, `hi` written as samples, values
+    /// known to fit (u8 narrows them); `dst.len()` is 8 or 16.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn put(dst: &mut [Self], lo: core::arch::wasm32::v128, hi: core::arch::wasm32::v128);
 }
+
+// The wasm loads and stores below use no `unsafe` pointer access: 8-bit samples go through
+// 64-bit integers, 16-bit samples through lane constructors and extracts. LLVM combines both
+// into `v128.load64_zero` / `v128.load` and vector or 64-bit stores.
 
 impl Sample for u8 {
     const BYTES: usize = 1;
     #[inline(always)]
     fn from_u16(v: u16) -> Self {
         v as u8
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn put_words(dst: &mut [u8], w: &[u64; 2]) {
+        dst[..8].copy_from_slice(&w[0].to_le_bytes());
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    fn get8(s: &[u8]) -> core::arch::wasm32::v128 {
+        use core::arch::wasm32::*;
+        let w = u64::from_le_bytes(s[..8].try_into().unwrap_or_else(|_| unreachable!()));
+        u16x8_extend_low_u8x16(u64x2(w, 0))
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    fn put(dst: &mut [u8], lo: core::arch::wasm32::v128, hi: core::arch::wasm32::v128) {
+        use core::arch::wasm32::*;
+        let v = u8x16_narrow_i16x8(lo, hi);
+        dst[..8].copy_from_slice(&u64x2_extract_lane::<0>(v).to_le_bytes());
+        if dst.len() >= 16 {
+            dst[8..16].copy_from_slice(&u64x2_extract_lane::<1>(v).to_le_bytes());
+        }
     }
 }
 
@@ -50,6 +86,27 @@ impl Sample for u16 {
     #[inline(always)]
     fn from_u16(v: u16) -> Self {
         v
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn put_words(dst: &mut [u16], w: &[u64; 2]) {
+        let v: [u16; 8] = core::array::from_fn(|j| (w[j / 4] >> (16 * (j % 4))) as u16);
+        dst[..8].copy_from_slice(&v);
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    fn get8(s: &[u16]) -> core::arch::wasm32::v128 {
+        let s: &[u16; 8] = s[..8].try_into().unwrap_or_else(|_| unreachable!());
+        core::arch::wasm32::u16x8(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7])
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    fn put(dst: &mut [u16], lo: core::arch::wasm32::v128, hi: core::arch::wasm32::v128) {
+        use core::arch::wasm32::u16x8_extract_lane as e;
+        dst[..8].copy_from_slice(&[e::<0>(lo), e::<1>(lo), e::<2>(lo), e::<3>(lo), e::<4>(lo), e::<5>(lo), e::<6>(lo), e::<7>(lo)]);
+        if dst.len() >= 16 {
+            dst[8..16].copy_from_slice(&[e::<0>(hi), e::<1>(hi), e::<2>(hi), e::<3>(hi), e::<4>(hi), e::<5>(hi), e::<6>(hi), e::<7>(hi)]);
+        }
     }
 }
 

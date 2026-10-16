@@ -10,11 +10,11 @@
 //! are bit-identical. That is checked by unit tests on random input here and in `idct.rs`, and
 //! by the corpus test, which decodes every frame with each available kernel set.
 //!
-//! `unsafe` is confined to this module and used for two things only:
-//! - calling `#[target_feature(enable = "avx2")]` code, done only after
-//!   `is_x86_feature_detected!("avx2")`;
-//! - unaligned vector loads and stores, each preceded by a length check on its slice.
-#![allow(unsafe_code)]
+//! The only `unsafe` in the crate is the three calls below into `#[target_feature(enable =
+//! "avx2")]` code, each made only when `Kernels::Vector` was chosen after
+//! `is_x86_feature_detected!("avx2")`. The kernels themselves are safe code: the AVX2 ones use
+//! the intrinsics inside AVX2 functions (target_feature 1.1), the simd128 ones the wasm32
+//! intrinsics, which are safe in a simd128 build, and both load and store through slices.
 
 use crate::dct::RowJob;
 use crate::idct::{self, SMALL_MAX};
@@ -66,6 +66,7 @@ impl Kernels {
         if self == Kernels::Vector && stride >= 8 && out.len() >= 7 * stride + 8 {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
+            #[allow(unsafe_code)]
             return unsafe { avx2::idct(blk, q, pass1, max, range, out, stride) };
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             return wasm::idct(blk, q, pass1, max, range, out, stride);
@@ -100,6 +101,7 @@ impl Kernels {
         if self == Kernels::Vector && (size == 4 || size == 2) && stride >= size && out.len() >= (size - 1) * stride + size {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
+            #[allow(unsafe_code)]
             return unsafe { avx2::idct_reduced(size, blk, q, pass1, max, range, out, stride) };
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             return wasm::idct_reduced(size, blk, q, pass1, max, range, out, stride);
@@ -116,6 +118,7 @@ impl Kernels {
         #[cfg(target_arch = "x86_64")]
         if self == Kernels::Vector {
             // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
+            #[allow(unsafe_code)]
             return unsafe { rows_avx2(job, sink) };
         }
         job.run(sink)
@@ -149,57 +152,101 @@ impl Limits {
 
 #[cfg(target_arch = "x86_64")]
 mod avx2 {
+    //! Every function that uses AVX2 is `#[target_feature(enable = "avx2")]`, so the intrinsics
+    //! are safe to call inside it (target_feature 1.1), and so are calls between these
+    //! functions. Loads and stores go through arrays and lane extracts, which LLVM turns into
+    //! the same vector loads and stores; no raw pointers.
     use super::Limits;
     use crate::idct::{idct2_1d, idct4_1d, idct_1d, Lane, CONST_BITS, REDUCED_MAX, SMALL_MAX};
     use crate::out::Sample;
     use core::arch::x86_64::*;
     use core::ops::{Add, Sub};
 
-    /// One row of 8 lanes. Only built inside `#[target_feature(enable = "avx2")]` functions, so
-    /// the AVX2 instructions its methods use are always available.
+    /// One row of 8 lanes for the shared 1-D transforms. A trait method cannot enable AVX2, so
+    /// `Lane` works on a plain array with wrapping arithmetic (what `_mm256_add_epi32`,
+    /// `_mm256_mullo_epi32` and `_mm256_sll_epi32` compute); inlined into the AVX2 functions,
+    /// LLVM emits those instructions.
     #[derive(Clone, Copy)]
-    struct Y(__m256i);
+    struct Y([i32; 8]);
 
     impl Add for Y {
         type Output = Y;
         #[inline(always)]
         fn add(self, o: Y) -> Y {
-            // SAFETY: see `Y`.
-            Y(unsafe { _mm256_add_epi32(self.0, o.0) })
+            Y(core::array::from_fn(|i| self.0[i].wrapping_add(o.0[i])))
         }
     }
     impl Sub for Y {
         type Output = Y;
         #[inline(always)]
         fn sub(self, o: Y) -> Y {
-            // SAFETY: see `Y`.
-            Y(unsafe { _mm256_sub_epi32(self.0, o.0) })
+            Y(core::array::from_fn(|i| self.0[i].wrapping_sub(o.0[i])))
         }
     }
     impl Lane for Y {
         #[inline(always)]
         fn mulc(self, c: i32) -> Y {
-            // SAFETY: see `Y`.
-            Y(unsafe { _mm256_mullo_epi32(self.0, _mm256_set1_epi32(c)) })
+            Y(self.0.map(|x| x.wrapping_mul(c)))
         }
         #[inline(always)]
         fn shl(self, n: u32) -> Y {
-            // SAFETY: see `Y`.
-            Y(unsafe { _mm256_sll_epi32(self.0, _mm_cvtsi32_si128(n as i32)) })
+            Y(self.0.map(|x| x.wrapping_shl(n)))
         }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn v(y: Y) -> __m256i {
+        let a = y.0;
+        _mm256_setr_epi32(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7])
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn y(v: __m256i) -> Y {
+        Y([
+            _mm256_extract_epi32::<0>(v),
+            _mm256_extract_epi32::<1>(v),
+            _mm256_extract_epi32::<2>(v),
+            _mm256_extract_epi32::<3>(v),
+            _mm256_extract_epi32::<4>(v),
+            _mm256_extract_epi32::<5>(v),
+            _mm256_extract_epi32::<6>(v),
+            _mm256_extract_epi32::<7>(v),
+        ])
+    }
+
+    /// Row r of a block, dequantised.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn dequant_rows(blk: &[i32; 64], q: &[i32; 64]) -> [__m256i; 8] {
+        let ld = |a: &[i32; 64], r: usize| {
+            let s = &a[r * 8..r * 8 + 8];
+            _mm256_setr_epi32(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7])
+        };
+        core::array::from_fn(|r| _mm256_mullo_epi32(ld(blk, r), ld(q, r)))
+    }
+
+    /// Whether any lane of `rows` has |x| > `bound`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn any_over(rows: &[__m256i; 8], bound: u32) -> bool {
+        let b = _mm256_set1_epi32(bound as i32);
+        let over = rows.iter().fold(_mm256_setzero_si256(), |acc, &r| _mm256_or_si256(acc, _mm256_cmpgt_epi32(_mm256_abs_epi32(r), b)));
+        _mm256_movemask_epi8(over) != 0
     }
 
     #[inline]
     #[target_feature(enable = "avx2")]
     fn descale(x: Y, n: u32) -> Y {
         let r = _mm256_set1_epi32(1 << (n - 1));
-        Y(_mm256_sra_epi32(_mm256_add_epi32(x.0, r), _mm_cvtsi32_si128(n as i32)))
+        y(_mm256_sra_epi32(_mm256_add_epi32(v(x), r), _mm_cvtsi32_si128(n as i32)))
     }
 
     #[inline]
     #[target_feature(enable = "avx2")]
-    fn transpose(m: [Y; 8]) -> [Y; 8] {
-        let [r0, r1, r2, r3, r4, r5, r6, r7] = m.map(|y| y.0);
+    fn transpose(m: [__m256i; 8]) -> [__m256i; 8] {
+        let [r0, r1, r2, r3, r4, r5, r6, r7] = m;
         let t0 = _mm256_unpacklo_epi32(r0, r1);
         let t1 = _mm256_unpackhi_epi32(r0, r1);
         let t2 = _mm256_unpacklo_epi32(r2, r3);
@@ -217,15 +264,24 @@ mod avx2 {
         let u6 = _mm256_unpacklo_epi64(t5, t7);
         let u7 = _mm256_unpackhi_epi64(t5, t7);
         [
-            Y(_mm256_permute2x128_si256::<0x20>(u0, u4)),
-            Y(_mm256_permute2x128_si256::<0x20>(u1, u5)),
-            Y(_mm256_permute2x128_si256::<0x20>(u2, u6)),
-            Y(_mm256_permute2x128_si256::<0x20>(u3, u7)),
-            Y(_mm256_permute2x128_si256::<0x31>(u0, u4)),
-            Y(_mm256_permute2x128_si256::<0x31>(u1, u5)),
-            Y(_mm256_permute2x128_si256::<0x31>(u2, u6)),
-            Y(_mm256_permute2x128_si256::<0x31>(u3, u7)),
+            _mm256_permute2x128_si256::<0x20>(u0, u4),
+            _mm256_permute2x128_si256::<0x20>(u1, u5),
+            _mm256_permute2x128_si256::<0x20>(u2, u6),
+            _mm256_permute2x128_si256::<0x20>(u3, u7),
+            _mm256_permute2x128_si256::<0x31>(u0, u4),
+            _mm256_permute2x128_si256::<0x31>(u1, u5),
+            _mm256_permute2x128_si256::<0x31>(u2, u6),
+            _mm256_permute2x128_si256::<0x31>(u3, u7),
         ]
+    }
+
+    /// libjpeg's range limit as arithmetic on every lane (see `Limits`).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn limit(x: Y, l: Limits) -> __m256i {
+        let (k, mask, two_n) = (_mm256_set1_epi32(l.k), _mm256_set1_epi32(l.mask), _mm256_set1_epi32(l.two_n));
+        let w = _mm256_sub_epi32(_mm256_and_si256(_mm256_add_epi32(v(x), k), mask), two_n);
+        _mm256_min_epi32(_mm256_max_epi32(w, _mm256_setzero_si256()), _mm256_set1_epi32(l.max))
     }
 
     /// `Kernels::idct` with AVX2: dequantisation and `idct::idct_small` with no zero shortcuts
@@ -233,45 +289,33 @@ mod avx2 {
     #[target_feature(enable = "avx2")]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn idct<T: Sample>(blk: &[i32; 64], q: &[i32; 64], pass1: u32, max: i32, range: &[u16], out: &mut [T], stride: usize) {
-        // SAFETY: both arrays have 64 elements, so 8 are readable at r * 8 for r < 8.
-        let ld = |a: &[i32; 64], r: usize| unsafe { _mm256_loadu_si256(a.as_ptr().add(r * 8).cast()) };
-        let rows: [Y; 8] = core::array::from_fn(|r| Y(_mm256_mullo_epi32(ld(blk, r), ld(q, r))));
-        let small = _mm256_set1_epi32(SMALL_MAX as i32);
-        let over = rows.iter().fold(_mm256_setzero_si256(), |acc, y| {
-            _mm256_or_si256(acc, _mm256_cmpgt_epi32(_mm256_abs_epi32(y.0), small))
-        });
-        if _mm256_movemask_epi8(over) != 0 {
+        let rows = dequant_rows(blk, q);
+        if any_over(&rows, SMALL_MAX) {
             let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
             return crate::idct::idct_ref(&deq, pass1, range, out, stride);
         }
-        let ws = idct_1d(rows).map(|y| descale(y, CONST_BITS - pass1));
-        let cols = idct_1d(transpose(ws)).map(|y| descale(y, CONST_BITS + pass1 + 3));
+        let ws = idct_1d(rows.map(|r| y(r))).map(|r| descale(r, CONST_BITS - pass1));
+        let cols = idct_1d(transpose(ws.map(|r| v(r))).map(|c| y(c))).map(|c| descale(c, CONST_BITS + pass1 + 3));
         let l = Limits::new(max);
-        let (k, mask, two_n) = (_mm256_set1_epi32(l.k), _mm256_set1_epi32(l.mask), _mm256_set1_epi32(l.two_n));
-        let (zero, vmax) = (_mm256_setzero_si256(), _mm256_set1_epi32(l.max));
-        let lim = cols.map(|y| {
-            let v = _mm256_sub_epi32(_mm256_and_si256(_mm256_add_epi32(y.0, k), mask), two_n);
-            Y(_mm256_min_epi32(_mm256_max_epi32(v, zero), vmax))
-        });
-        let rows = transpose(lim);
-        assert!(out.len() >= 7 * stride + 8);
-        let base = out.as_mut_ptr();
+        let rows = transpose(cols.map(|c| limit(c, l)));
+        // Rows of `out` one stride apart. One check up front, with a bound on `stride` so that
+        // nothing below can overflow; LLVM then drops the per-row checks. The caller has
+        // checked the length already, and no plane is 2^28 samples wide.
+        assert!(stride <= 1 << 28 && out.len() >= 7 * stride + 8);
         for r in (0..8).step_by(2) {
             // Values are in 0..=max (<= 4095), so the unsigned saturating packs are exact.
             // p = row r then row r + 1, as 16-bit values.
-            let p = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi32(rows[r].0, rows[r + 1].0));
+            let p = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi32(rows[r], rows[r + 1]));
             let (lo, hi) = (_mm256_castsi256_si128(p), _mm256_extracti128_si256::<1>(p));
-            // SAFETY: the assert above; each store writes 8 samples at the start of row r or r + 1.
-            unsafe {
-                if T::BYTES == 1 {
-                    let b = _mm_packus_epi16(lo, hi);
-                    _mm_storel_epi64(base.add(r * stride).cast(), b);
-                    _mm_storel_epi64(base.add((r + 1) * stride).cast(), _mm_unpackhi_epi64(b, b));
-                } else {
-                    _mm_storeu_si128(base.add(r * stride).cast(), lo);
-                    _mm_storeu_si128(base.add((r + 1) * stride).cast(), hi);
-                }
-            }
+            let (a, b) = if T::BYTES == 1 {
+                let b = _mm_packus_epi16(lo, hi);
+                ([_mm_cvtsi128_si64(b) as u64, 0], [_mm_extract_epi64::<1>(b) as u64, 0])
+            } else {
+                let w = |x: __m128i| [_mm_cvtsi128_si64(x) as u64, _mm_extract_epi64::<1>(x) as u64];
+                (w(lo), w(hi))
+            };
+            T::put_words(&mut out[r * stride..r * stride + 8], &a);
+            T::put_words(&mut out[(r + 1) * stride..(r + 1) * stride + 8], &b);
         }
     }
     /// `Kernels::idct_reduced` with AVX2: lanes are columns in pass 1. For 4×4, pass 2 runs on
@@ -289,39 +333,22 @@ mod avx2 {
         out: &mut [T],
         stride: usize,
     ) {
-        // SAFETY: both arrays have 64 elements, so 8 are readable at r * 8 for r < 8.
-        let ld = |a: &[i32; 64], r: usize| unsafe { _mm256_loadu_si256(a.as_ptr().add(r * 8).cast()) };
-        let rows: [Y; 8] = core::array::from_fn(|r| Y(_mm256_mullo_epi32(ld(blk, r), ld(q, r))));
-        let lim_v = _mm256_set1_epi32(REDUCED_MAX as i32);
-        let over = rows.iter().fold(_mm256_setzero_si256(), |acc, y| {
-            _mm256_or_si256(acc, _mm256_cmpgt_epi32(_mm256_abs_epi32(y.0), lim_v))
-        });
-        let store = |y: Y| {
-            let mut a = [0i32; 8];
-            // SAFETY: `a` holds 8 i32.
-            unsafe { _mm256_storeu_si256(a.as_mut_ptr().cast(), y.0) };
-            a
-        };
-        if _mm256_movemask_epi8(over) != 0 {
+        let rows = dequant_rows(blk, q);
+        if any_over(&rows, REDUCED_MAX) {
             let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
             return crate::idct::idct_reduced(size, &deq, pass1, range, out, stride);
         }
+        let rows = rows.map(|r| y(r));
         if size == 2 {
-            let ws = idct2_1d(rows).map(|y| store(descale(y, CONST_BITS - pass1 + 2)).map(i64::from));
+            let ws = idct2_1d(rows).map(|r| descale(r, CONST_BITS - pass1 + 2).0.map(i64::from));
             return crate::idct::idct2_rows(&ws, pass1, range, out, stride);
         }
-        let ws = idct4_1d(rows).map(|y| descale(y, CONST_BITS - pass1 + 1));
-        let z = Y(_mm256_setzero_si256());
-        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z]);
+        let ws = idct4_1d(rows).map(|r| descale(r, CONST_BITS - pass1 + 1));
+        let z = Y([0; 8]);
+        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z].map(|r| v(r))).map(|c| y(c));
         let l = Limits::new(max);
-        let (k, mask, two_n) = (_mm256_set1_epi32(l.k), _mm256_set1_epi32(l.mask), _mm256_set1_epi32(l.two_n));
-        let (zero, vmax) = (_mm256_setzero_si256(), _mm256_set1_epi32(l.max));
         // o[c] lane r is output row r, column c.
-        let o = idct4_1d(cols).map(|y| {
-            let y = descale(y, CONST_BITS + pass1 + 4);
-            let v = _mm256_sub_epi32(_mm256_and_si256(_mm256_add_epi32(y.0, k), mask), two_n);
-            store(Y(_mm256_min_epi32(_mm256_max_epi32(v, zero), vmax)))
-        });
+        let o = idct4_1d(cols).map(|c| y(limit(descale(c, CONST_BITS + pass1 + 4), l)).0);
         for r in 0..4 {
             let dst = &mut out[r * stride..r * stride + 4];
             for (c, d) in dst.iter_mut().enumerate() {
@@ -330,7 +357,6 @@ mod avx2 {
         }
     }
 }
-
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 pub(crate) mod wasm {
@@ -408,33 +434,29 @@ pub(crate) mod wasm {
         ]
     }
 
-    /// 16 samples as two u16x8. Caller checks `s.len() >= 16`.
+    /// The 16 bytes of `v` written to `dst` (exactly 16 bytes) as two 64-bit lanes.
     #[inline(always)]
-    fn load16<T: Sample>(s: &[T]) -> (v128, v128) {
-        assert!(s.len() >= 16);
-        // SAFETY: the assert above: 16 samples of T::BYTES bytes are readable.
-        unsafe {
-            if T::BYTES == 1 {
-                let b = v128_load(s.as_ptr().cast());
-                (u16x8_extend_low_u8x16(b), u16x8_extend_high_u8x16(b))
-            } else {
-                (v128_load(s.as_ptr().cast()), v128_load(s.as_ptr().add(8).cast()))
-            }
-        }
+    fn store_bytes(dst: &mut [u8], v: v128) {
+        dst[..8].copy_from_slice(&u64x2_extract_lane::<0>(v).to_le_bytes());
+        dst[8..16].copy_from_slice(&u64x2_extract_lane::<1>(v).to_le_bytes());
     }
 
-    /// 8 samples as one u16x8. Caller checks `s.len() >= 8`.
+    /// Store 8 u16 lanes (values that fit T) as 8 samples.
+    #[inline(always)]
+    fn store8<T: Sample>(dst: &mut [T], p: v128) {
+        T::put(&mut dst[..8], p, p);
+    }
+
+    /// 16 samples as two u16x8.
+    #[inline(always)]
+    fn load16<T: Sample>(s: &[T]) -> (v128, v128) {
+        (T::get8(&s[..8]), T::get8(&s[8..16]))
+    }
+
+    /// 8 samples as one u16x8.
     #[inline(always)]
     fn load8<T: Sample>(s: &[T]) -> v128 {
-        assert!(s.len() >= 8);
-        // SAFETY: the assert above: 8 samples of T::BYTES bytes are readable.
-        unsafe {
-            if T::BYTES == 1 {
-                u16x8_extend_low_u8x16(v128_load64_zero(s.as_ptr().cast()))
-            } else {
-                v128_load(s.as_ptr().cast())
-            }
-        }
+        T::get8(s)
     }
 
     /// The middle of `dct::h2v1_fancy`: output pairs for inputs i = 1, 2, ... while a whole
@@ -454,16 +476,8 @@ pub(crate) mod wasm {
             let a = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(even, odd);
             let b = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(even, odd);
             let dst = &mut out[2 * i..2 * i + 16];
-            // SAFETY: dst has exactly 16 samples of T::BYTES bytes each; values are at most
-            // 4095 (12-bit) or 255 (8-bit, so the unsigned narrow is exact).
-            unsafe {
-                if T::BYTES == 1 {
-                    v128_store(dst.as_mut_ptr().cast(), u8x16_narrow_i16x8(a, b));
-                } else {
-                    v128_store(dst.as_mut_ptr().cast(), a);
-                    v128_store(dst.as_mut_ptr().add(8).cast(), b);
-                }
-            }
+            // Values are at most 4095 (12-bit) or 255 (8-bit, so the unsigned narrow is exact).
+            T::put(dst, a, b);
             i += 8;
         }
         i
@@ -529,13 +543,9 @@ pub(crate) mod wasm {
         let o1 = i8x16_shuffle::<0, 21, 2, 3, 22, 5, 6, 23, 8, 9, 24, 11, 12, 25, 14, 15>(t1, bl);
         let t2 = i8x16_shuffle::<0, 11, 27, 0, 12, 28, 0, 13, 29, 0, 14, 30, 0, 15, 31, 0>(r, g);
         let o2 = i8x16_shuffle::<26, 1, 2, 27, 4, 5, 28, 7, 8, 29, 10, 11, 30, 13, 14, 31>(t2, bl);
-        assert!(dst.len() == 48);
-        // SAFETY: the assert above: dst has exactly 48 bytes.
-        unsafe {
-            v128_store(dst.as_mut_ptr().cast(), o0);
-            v128_store(dst.as_mut_ptr().add(16).cast(), o1);
-            v128_store(dst.as_mut_ptr().add(32).cast(), o2);
-        }
+        store_bytes(&mut dst[..16], o0);
+        store_bytes(&mut dst[16..32], o1);
+        store_bytes(&mut dst[32..48], o2);
     }
 
     /// Three 8-bit components interleaved into RGB bytes, 16 pixels at a time; returns how many
@@ -580,15 +590,7 @@ pub(crate) mod wasm {
         for (r, w) in transpose(lim).iter().enumerate() {
             // Values are in 0..=max (<= 4095), so the unsigned saturating narrows are exact.
             let p = u16x8_narrow_i32x4(w.0, w.1);
-            let dst = &mut out[r * stride..r * stride + 8];
-            // SAFETY: dst has exactly 8 samples of T::BYTES bytes each.
-            unsafe {
-                if T::BYTES == 1 {
-                    v128_store64_lane::<0>(u8x16_narrow_i16x8(p, p), dst.as_mut_ptr().cast());
-                } else {
-                    v128_store(dst.as_mut_ptr().cast(), p);
-                }
-            }
+            store8(&mut out[r * stride..r * stride + 8], p);
         }
     }
     /// `Kernels::idct_reduced` with simd128; the same steps as the AVX2 kernel.
@@ -632,7 +634,7 @@ pub(crate) mod wasm {
         }
         let ws = idct4_1d(rows).map(|y| descale(y, CONST_BITS - pass1 + 1));
         let z = W(i32x4_splat(0), i32x4_splat(0));
-        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z]);
+        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z].map(|r| v(r))).map(|c| y(c));
         let l = Limits::new(max);
         let (k, mask, two_n) = (i32x4_splat(l.k), i32x4_splat(l.mask), i32x4_splat(l.two_n));
         let (zero, vmax) = (i32x4_splat(0), i32x4_splat(l.max));
