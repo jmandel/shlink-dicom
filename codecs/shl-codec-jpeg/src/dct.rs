@@ -65,7 +65,7 @@ impl<T: Sample> DctDecoder<T> {
     /// `buffered`: keep coefficients until `finish` (needed by every process except sequential
     /// Huffman). `samples`: allocate the sample planes (false for hierarchical frames, which
     /// `hier` reconstructs from the coefficients).
-    pub(crate) fn new(f: &Frame, scale_log2: u8, buffered: bool, samples: bool) -> Result<Self> {
+    pub(crate) fn new(f: &Frame, scale_log2: u8, buffered: bool, samples: bool, kernels: Kernels) -> Result<Self> {
         let (mx, my) = f.mcus(8);
         let mut planes = Vec::with_capacity(f.comps.len());
         for (c, bs) in f.comps.iter().zip(block_sizes(f, scale_log2)) {
@@ -84,7 +84,7 @@ impl<T: Sample> DctDecoder<T> {
             range: idct::range_table(max),
             pass1_bits: if f.precision == 8 { 2 } else { 1 },
             max,
-            kernels: Kernels::detect(),
+            kernels,
         })
     }
 
@@ -253,7 +253,7 @@ impl<T: Sample> DctDecoder<T> {
 
 /// Upsample, colour-convert and output a hierarchical image whose components are already
 /// reconstructed: `comps[ci]` is component `ci` of `f` at its `comp_size`, clamped.
-pub(crate) fn render<T: Sample>(f: &Frame, comps: Vec<Vec<T>>, t: &Tables, photometric: Photometric, bps: usize) -> Result<Image> {
+pub(crate) fn render<T: Sample>(f: &Frame, comps: Vec<Vec<T>>, t: &Tables, photometric: Photometric, bps: usize, kernels: Kernels) -> Result<Image> {
     let n = f.comps.len();
     let planes: Vec<Plane<T>> = comps
         .into_iter()
@@ -266,7 +266,7 @@ pub(crate) fn render<T: Sample>(f: &Frame, comps: Vec<Vec<T>>, t: &Tables, photo
     let ycc = n == 3 && is_ycc(t, photometric);
     let mut sink = Sink::new(w, h, n, bps)?;
     let job = RowJob { planes: &planes, ups: &ups, w, h, ycc, bps, max };
-    Kernels::detect().rows(&job, &mut sink);
+    kernels.rows(&job, &mut sink);
     Ok(Image { width: w, height: h, components: n, data: sink.into_data(), rgb: n == 3, retry_cornell: false, bad_codes: 0 })
 }
 

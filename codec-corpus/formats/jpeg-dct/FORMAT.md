@@ -51,7 +51,7 @@ Each was checked by decoding streams of every process. libjpeg-turbo and dcmtk a
 
 ## Decision
 
-**Build.** `shl-codec-jpeg` is an in-house decoder shared by jpeg-dct and jpeg-lossless: one marker parser, Huffman table builder and bit reader, with a DCT path and a lossless path. It has no dependencies beyond `shl-codec-common`. The crate is `#![deny(unsafe_code)]`; the only exception is `simd.rs`, whose AVX2 dispatch call and vector loads and stores are documented there (see [PERF.md](PERF.md)).
+**Build.** `shl-codec-jpeg` is an in-house decoder shared by jpeg-dct and jpeg-lossless: one marker parser, Huffman table builder and bit reader, with a DCT path and a lossless path. It has no dependencies beyond `shl-codec-common`. The crate is `#![deny(unsafe_code)]`, with one exception: in `simd.rs`, after run-time AVX2 detection, one call enters the AVX2 kernel set, as documented there (see [PERF.md](PERF.md#track-t8-no-unsafe-kernels)).
 
 Evidence, from running the candidate crates on every extracted corpus frame:
 

@@ -10,50 +10,104 @@
 //! are bit-identical. That is checked by unit tests on random input here and in `idct.rs`, and
 //! by the corpus test, which decodes every frame with each available kernel set.
 //!
-//! The only `unsafe` in the crate is the three calls below into `#[target_feature(enable =
-//! "avx2")]` code, each made only when `Kernels::Vector` was chosen after
-//! `is_x86_feature_detected!("avx2")`. The kernels themselves are safe code: the AVX2 ones use
-//! the intrinsics inside AVX2 functions (target_feature 1.1), the simd128 ones the wasm32
-//! intrinsics, which are safe in a simd128 build, and both load and store through slices.
+//! **The crate's one `unsafe` call** is in [`with_kernels`]: after
+//! `is_x86_feature_detected!("avx2")` says the CPU has AVX2, it calls `with_avx2`, which is
+//! `#[target_feature(enable = "avx2")]`. That function builds the AVX2 kernel set from closures
+//! defined inside it. The closures inherit its target feature, so they call the AVX2 kernels as
+//! safe code (target_feature 1.1), and as `fn` pointers they can only come into existence once
+//! `with_avx2` is running, that is, on a CPU with AVX2. The frame decode then runs inside
+//! `with_avx2` (the same generic code as the scalar path, taking the kernel set as a value) and
+//! calls the kernels through those pointers. The kernels themselves are safe code: the AVX2 ones
+//! use the intrinsics inside AVX2 functions, the simd128 ones the wasm32 intrinsics, which are
+//! safe in a simd128 build, and both load and store through slices.
 
 use crate::dct::RowJob;
 use crate::idct::{self, SMALL_MAX};
 use crate::out::{Sample, Sink};
 
-/// Which kernels to run; chosen once per frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which kernels to run; chosen once per frame by [`with_kernels`].
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Kernels {
     Scalar,
-    /// x86_64 AVX2, or wasm32 simd128, whichever this build targets.
+    /// wasm32 simd128.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     Vector,
+    /// x86_64 AVX2: entry points built inside `with_avx2`.
+    #[cfg(target_arch = "x86_64")]
+    Avx2(Avx2),
+}
+
+/// An 8×8 IDCT kernel (`Kernels::idct`'s arguments).
+#[cfg(target_arch = "x86_64")]
+pub(crate) type IdctFn<T> = fn(&[i32; 64], &[i32; 64], u32, i32, &[u16], &mut [T], usize);
+/// A reduced IDCT kernel (`Kernels::idct_reduced`'s arguments).
+#[cfg(target_arch = "x86_64")]
+pub(crate) type ReducedFn<T> = fn(usize, &[i32; 64], &[i32; 64], u32, i32, &[u16], &mut [T], usize);
+/// The row stage (`Kernels::rows`).
+#[cfg(target_arch = "x86_64")]
+pub(crate) type RowsFn<T> = for<'a, 'b> fn(&'a RowJob<'b, T>, &'a mut Sink);
+
+/// The AVX2 kernels for 8-bit (`u8` planes) and 12-bit (`u16`) samples. Only `with_avx2` can
+/// make one.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Avx2 {
+    pub(crate) idct8: IdctFn<u8>,
+    pub(crate) idct16: IdctFn<u16>,
+    pub(crate) reduced8: ReducedFn<u8>,
+    pub(crate) reduced16: ReducedFn<u16>,
+    pub(crate) rows8: RowsFn<u8>,
+    pub(crate) rows16: RowsFn<u16>,
 }
 
 #[cfg(test)]
 thread_local!(static FORCE_SCALAR: core::cell::Cell<bool> = const { core::cell::Cell::new(false) });
 
-impl Kernels {
-    pub(crate) fn detect() -> Self {
-        #[cfg(test)]
-        if FORCE_SCALAR.with(|f| f.get()) {
-            return Kernels::Scalar;
-        }
-        #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx2") {
-            return Kernels::Vector;
-        }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        return Kernels::Vector;
-        #[allow(unreachable_code)]
-        Kernels::Scalar
+/// Run `f` (a frame decode) with the best kernel set this machine has.
+pub(crate) fn with_kernels<R>(f: impl FnOnce(Kernels) -> R) -> R {
+    #[cfg(test)]
+    if FORCE_SCALAR.with(|s| s.get()) {
+        return f(Kernels::Scalar);
     }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has AVX2, the only target feature `with_avx2` enables. This is the
+        // crate's one `unsafe` call (see the module documentation).
+        #[allow(unsafe_code)]
+        return unsafe { with_avx2(f) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return f(Kernels::Vector);
+    #[allow(unreachable_code)]
+    f(Kernels::Scalar)
+}
 
+/// `f` with the AVX2 kernels. Each closure below inherits this function's target feature: the
+/// row stage's generic code (`RowJob::run`, `#[inline(always)]`) is compiled again with AVX2 in
+/// it, and the IDCT closures call the `avx2` module's functions as safe code.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn with_avx2<R>(f: impl FnOnce(Kernels) -> R) -> R {
+    f(Kernels::Avx2(Avx2 {
+        idct8: |b, q, p, m, r, o, s| avx2::idct(b, q, p, m, r, o, s),
+        idct16: |b, q, p, m, r, o, s| avx2::idct(b, q, p, m, r, o, s),
+        reduced8: |n, b, q, p, m, r, o, s| avx2::idct_reduced(n, b, q, p, m, r, o, s),
+        reduced16: |n, b, q, p, m, r, o, s| avx2::idct_reduced(n, b, q, p, m, r, o, s),
+        rows8: |job, sink| job.run(sink),
+        rows16: |job, sink| job.run(sink),
+    }))
+}
+
+impl Kernels {
     /// Every kernel set this machine can run, for tests that compare them.
     #[cfg(test)]
     pub(crate) fn available() -> Vec<Self> {
         let mut v = vec![Kernels::Scalar];
-        if Self::detect() == Kernels::Vector {
-            v.push(Kernels::Vector);
-        }
+        with_kernels(|k| {
+            if !matches!(k, Kernels::Scalar) {
+                v.push(k);
+            }
+        });
         v
     }
 
@@ -63,13 +117,14 @@ impl Kernels {
     #[inline]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn idct<T: Sample>(self, blk: &[i32; 64], q: &[i32; 64], pass1: u32, max: i32, range: &[u16], out: &mut [T], stride: usize) {
-        if self == Kernels::Vector && stride >= 8 && out.len() >= 7 * stride + 8 {
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
-            #[allow(unsafe_code)]
-            return unsafe { avx2::idct(blk, q, pass1, max, range, out, stride) };
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            return wasm::idct(blk, q, pass1, max, range, out, stride);
+        if stride >= 8 && out.len() >= 7 * stride + 8 {
+            match self {
+                #[cfg(target_arch = "x86_64")]
+                Kernels::Avx2(k) => return T::avx2(&k).0(blk, q, pass1, max, range, out, stride),
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                Kernels::Vector => return wasm::idct(blk, q, pass1, max, range, out, stride),
+                _ => {}
+            }
         }
         let _ = max; // only the vector kernels need it
         let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
@@ -79,9 +134,7 @@ impl Kernels {
             idct::idct_ref(&deq, pass1, range, out, stride)
         }
     }
-}
 
-impl Kernels {
     /// Dequantise and run the reduced IDCT of `size` 4 or 2 (`idct::idct_reduced`). The vector
     /// kernels handle blocks whose dequantised coefficients lie within ±REDUCED_MAX, with the same
     /// results; others go to the scalar code.
@@ -98,37 +151,30 @@ impl Kernels {
         out: &mut [T],
         stride: usize,
     ) {
-        if self == Kernels::Vector && (size == 4 || size == 2) && stride >= size && out.len() >= (size - 1) * stride + size {
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
-            #[allow(unsafe_code)]
-            return unsafe { avx2::idct_reduced(size, blk, q, pass1, max, range, out, stride) };
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            return wasm::idct_reduced(size, blk, q, pass1, max, range, out, stride);
+        if (size == 4 || size == 2) && stride >= size && out.len() >= (size - 1) * stride + size {
+            match self {
+                #[cfg(target_arch = "x86_64")]
+                Kernels::Avx2(k) => return T::avx2(&k).1(size, blk, q, pass1, max, range, out, stride),
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                Kernels::Vector => return wasm::idct_reduced(size, blk, q, pass1, max, range, out, stride),
+                _ => {}
+            }
         }
         let _ = max;
         let deq: [i32; 64] = core::array::from_fn(|i| blk[i] * q[i]);
         idct::idct_reduced(size, &deq, pass1, range, out, stride)
     }
 
-    /// Upsampling, colour conversion and output (`dct::RowJob`). On x86_64 with AVX2 the same
-    /// code is compiled with AVX2 enabled; LLVM vectorises its loops. wasm simd128 builds
-    /// vectorise it the same way without a separate copy.
+    /// Upsampling, colour conversion and output (`dct::RowJob`). With AVX2 the same generic
+    /// code runs compiled with AVX2 enabled (`with_avx2`), and LLVM vectorises its loops; wasm
+    /// simd128 builds vectorise it the same way.
     pub(crate) fn rows<T: Sample>(self, job: &RowJob<T>, sink: &mut Sink) {
         #[cfg(target_arch = "x86_64")]
-        if self == Kernels::Vector {
-            // SAFETY: `Vector` is only chosen on x86_64 when the CPU has AVX2.
-            #[allow(unsafe_code)]
-            return unsafe { rows_avx2(job, sink) };
+        if let Kernels::Avx2(k) = self {
+            return T::avx2(&k).2(job, sink);
         }
         job.run(sink)
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-fn rows_avx2<T: Sample>(job: &RowJob<T>, sink: &mut Sink) {
-    job.run(sink)
 }
 
 /// The final steps shared by both vector IDCTs, per lane: descale, then libjpeg's range limit as
@@ -663,7 +709,7 @@ mod tests {
     /// kernels as with the scalar ones.
     #[test]
     fn corpus_frames_match_scalar() {
-        if Kernels::detect() != Kernels::Vector {
+        if Kernels::available().len() < 2 {
             eprintln!("no vector kernels on this machine; nothing to compare");
             return;
         }

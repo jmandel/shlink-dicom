@@ -35,6 +35,9 @@ pub(crate) trait Sample: Copy + Default + Into<i32> + 'static {
     const BYTES: usize;
     /// From a value known to fit (at most the precision's maximum).
     fn from_u16(v: u16) -> Self;
+    /// This sample type's AVX2 kernels (IDCT, reduced IDCT, rows).
+    #[cfg(target_arch = "x86_64")]
+    fn avx2(k: &crate::simd::Avx2) -> (crate::simd::IdctFn<Self>, crate::simd::ReducedFn<Self>, crate::simd::RowsFn<Self>);
     /// Fill `dst` from little-endian packed samples: 8 per word for `u8`, 4 for `u16`.
     #[cfg(target_arch = "x86_64")]
     fn put_words(dst: &mut [Self], w: &[u64; 2]);
@@ -56,6 +59,11 @@ impl Sample for u8 {
     #[inline(always)]
     fn from_u16(v: u16) -> Self {
         v as u8
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn avx2(k: &crate::simd::Avx2) -> (crate::simd::IdctFn<u8>, crate::simd::ReducedFn<u8>, crate::simd::RowsFn<u8>) {
+        (k.idct8, k.reduced8, k.rows8)
     }
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
@@ -86,6 +94,11 @@ impl Sample for u16 {
     #[inline(always)]
     fn from_u16(v: u16) -> Self {
         v
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn avx2(k: &crate::simd::Avx2) -> (crate::simd::IdctFn<u16>, crate::simd::ReducedFn<u16>, crate::simd::RowsFn<u16>) {
+        (k.idct16, k.reduced16, k.rows16)
     }
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]

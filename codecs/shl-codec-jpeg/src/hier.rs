@@ -92,7 +92,7 @@ impl Hier {
 
     /// The final image: every DHP component at its full size, clamped, upsampled to the image
     /// size and colour-converted as a non-hierarchical frame of the last frame's kind would be.
-    pub(crate) fn finish(self, t: &Tables, photometric: Photometric, bps: usize) -> Result<Image> {
+    pub(crate) fn finish(self, t: &Tables, photometric: Photometric, bps: usize, kernels: crate::simd::Kernels) -> Result<Image> {
         let f = &self.dhp;
         let mut comps = Vec::with_capacity(f.comps.len());
         for (ci, img) in self.images.into_iter().enumerate() {
@@ -111,10 +111,10 @@ impl Hier {
         }
         if f.precision <= 8 {
             let c: Vec<Vec<u8>> = comps.iter().map(|d| d.iter().map(|&v| v.clamp(0, max) as u8).collect()).collect();
-            dct::render(f, c, t, photometric, bps)
+            dct::render(f, c, t, photometric, bps, kernels)
         } else {
             let c: Vec<Vec<u16>> = comps.iter().map(|d| d.iter().map(|&v| v.clamp(0, max) as u16).collect()).collect();
-            dct::render(f, c, t, photometric, bps)
+            dct::render(f, c, t, photometric, bps, kernels)
         }
     }
 }

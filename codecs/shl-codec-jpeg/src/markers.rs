@@ -418,12 +418,12 @@ fn parse_sos(s: &[u8], frame: &Frame) -> Result<Scan> {
 }
 
 impl State {
-    fn new(f: &Frame, scale_log2: u8, cornell: bool, hierarchical: bool) -> Result<Self> {
+    fn new(f: &Frame, scale_log2: u8, cornell: bool, hierarchical: bool, kernels: crate::simd::Kernels) -> Result<Self> {
         // Every DCT process but sequential Huffman keeps coefficients until the end.
         let buffered = hierarchical || f.progressive || f.arithmetic;
         Ok(match f.process {
-            Process::Dct if f.precision == 8 => State::Dct8(dct::DctDecoder::new(f, scale_log2, buffered, !hierarchical)?),
-            Process::Dct => State::Dct12(dct::DctDecoder::new(f, scale_log2, buffered, !hierarchical)?),
+            Process::Dct if f.precision == 8 => State::Dct8(dct::DctDecoder::new(f, scale_log2, buffered, !hierarchical, kernels)?),
+            Process::Dct => State::Dct12(dct::DctDecoder::new(f, scale_log2, buffered, !hierarchical, kernels)?),
             Process::Lossless => State::Lossless(lossless::LosslessDecoder::new(f, cornell)?),
         })
     }
@@ -461,6 +461,11 @@ fn min_bits(f: &Frame) -> usize {
 /// `scale_log2`: DCT only, decode at 1/2^scale_log2 size (0 to 3); lossless and hierarchical
 /// images refuse any reduced scale as Unsupported.
 pub(crate) fn decode(d: &[u8], info: &FrameInfo, cornell: bool, scale_log2: u8) -> Result<Image> {
+    crate::simd::with_kernels(|k| decode_with(d, info, cornell, scale_log2, k))
+}
+
+/// [`decode`] with the kernel set chosen.
+fn decode_with(d: &[u8], info: &FrameInfo, cornell: bool, scale_log2: u8, kernels: crate::simd::Kernels) -> Result<Image> {
     if d.len() < 2 || d[0] != 0xFF || d[1] != 0xD8 {
         return Err(invalid("codestream does not start with SOI"));
     }
@@ -512,7 +517,7 @@ pub(crate) fn decode(d: &[u8], info: &FrameInfo, cornell: bool, scale_log2: u8) 
                         h.add(&f, st.out(), &tables, e)?;
                     }
                     let f = parse_sof(s, Some(kind), info, Some(&h.dhp))?;
-                    let st = State::new(&f, 0, false, true)?;
+                    let st = State::new(&f, 0, false, true, kernels)?;
                     cur = Some((f, st, exp));
                     exp = (false, false);
                     scans = 0;
@@ -532,7 +537,7 @@ pub(crate) fn decode(d: &[u8], info: &FrameInfo, cornell: bool, scale_log2: u8) 
                 if min_bits(&f) > d.len().saturating_mul(8) {
                     return Err(invalid("codestream too short for the frame size"));
                 }
-                let st = State::new(&f, scale_log2, cornell, false)?;
+                let st = State::new(&f, scale_log2, cornell, false, kernels)?;
                 cur = Some((f, st, (false, false)));
             }
             0xC4 => parse_dht(r.segment()?, &mut tables)?,
@@ -600,7 +605,7 @@ pub(crate) fn decode(d: &[u8], info: &FrameInfo, cornell: bool, scale_log2: u8) 
             return Err(invalid("no scan before end of codestream"));
         }
         h.add(&f, st.out(), &tables, e)?;
-        return h.finish(&tables, info.photometric, info.bytes_per_sample());
+        return h.finish(&tables, info.photometric, info.bytes_per_sample(), kernels);
     }
     let Some((f, st, _)) = cur else {
         return Err(invalid("no SOF before end of codestream"));
