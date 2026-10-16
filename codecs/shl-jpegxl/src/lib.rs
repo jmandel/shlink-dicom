@@ -9,6 +9,7 @@
 #![allow(clippy::excessive_precision, clippy::needless_range_loop, clippy::too_many_arguments)]
 
 mod bits;
+mod simd;
 mod colour;
 mod brotli;
 mod container;
