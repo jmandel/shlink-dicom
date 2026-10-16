@@ -81,7 +81,7 @@ The share option, at 75–82% of OpenJPEG's speed. The remaining cost is about o
 
 ### T4. JPEG baseline, 8-bit colour
 
-Ultrasound cine and slide tiles. The largest remaining idea is decoding one MCU row at a time into buffers that stay in cache, instead of whole planes; the gap is widest on large frames (1.21× on 2048²). Then explicit wasm kernels for the h2v2 upsampler and 12-bit colour conversion, which still rely on auto-vectorisation.
+**Stopped.** Kept: the wasm YCbCr→RGB kernel on 16-bit lanes (db16333), 7–10% fewer cycles on cine and slide tiles. Then three in a row missed: a native AVX2 colour kernel (−2–3% cycles), a fused 4:2:2 upsample-and-colour kernel in wasm (fewer instructions, more cycles), and a cheaper RGB interleave in wasm (V8 lowers the shuffles the same way). Natively we stay at 1.10–1.13× libjpeg-turbo on cine and slide tiles; in the browser we take 0.46–0.56× the time of libjpeg-turbo's wasm build. Streaming by MCU row wasn't tried: the planes of these frames are about 600 KB and the colour pass isn't memory-bound. See jpeg-dct PERF.md.
 
 ### T5. HTJ2K block decoder
 
