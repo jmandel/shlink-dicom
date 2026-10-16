@@ -4,7 +4,7 @@ use super::tree::{ChannelTree, Node, Predictor, GRADIENT_PROP, NUM_NONREF_PROPS,
 use super::wp::{WpHeader, WpState};
 use super::Channel;
 use crate::bits::{unpack_signed, BitReader};
-use crate::entropy::{EntropyCode, SymbolReader};
+use crate::entropy::{EntropyCode, RleParts, SymbolReader};
 use crate::error::{invalid, Result};
 
 /// The neighbours of a sample, with the standard's edge rules applied.
@@ -133,6 +133,10 @@ pub fn decode_channel(
                 }
                 return check(br);
             }
+            Predictor::Gradient if offset == 0 && multiplier == 1 && r.rle_only(code) => {
+                decode_gradient_rle(br, r, code, &mut ch.data, w, h, ctx);
+                return check(br);
+            }
             Predictor::Gradient if offset == 0 && multiplier == 1 => {
                 decode_gradient(br, r, code, &mut ch.data, w, h, |_| ctx);
                 return check(br);
@@ -166,8 +170,52 @@ fn check(br: &BitReader) -> Result<()> {
     }
 }
 
+/// Where the gradient loop gets each pixel's residual token.
+trait Residuals {
+    /// The token for a pixel whose gradient property (left + top − topleft) is `g`.
+    fn next(&mut self, br: &mut BitReader, g: i64) -> u32;
+}
+
+/// Tokens read from the entropy code, in the context `ctx_of(g)`.
+struct Clustered<'a, F: Fn(i64) -> usize> {
+    r: &'a mut SymbolReader,
+    code: &'a EntropyCode,
+    ctx_of: F,
+}
+
+impl<F: Fn(i64) -> usize> Residuals for Clustered<'_, F> {
+    #[inline(always)]
+    fn next(&mut self, br: &mut BitReader, g: i64) -> u32 {
+        self.r.read_clustered(self.code, br, (self.ctx_of)(g))
+    }
+}
+
+/// An RLE-only stream (`SymbolReader::rle_only`), libjxl's "Gradient RLE (fjxl) very fast
+/// track": a run repeats the previous token, with no LZ77 window to maintain.
+struct Rle<'a> {
+    parts: RleParts<'a>,
+    last: u32,
+    run: u64,
+}
+
+impl Residuals for Rle<'_> {
+    #[inline(always)]
+    fn next(&mut self, br: &mut BitReader, _g: i64) -> u32 {
+        if self.run > 0 {
+            self.run -= 1;
+        } else {
+            let (v, n) = self.parts.read(br);
+            if n > 0 {
+                self.run = n - 1;
+            } else {
+                self.last = v;
+            }
+        }
+        self.last
+    }
+}
+
 /// Gradient predictor everywhere; `ctx_of(left + top - topleft)` picks the cluster.
-#[inline(always)]
 fn decode_gradient(
     br: &mut BitReader,
     r: &mut SymbolReader,
@@ -177,6 +225,22 @@ fn decode_gradient(
     h: usize,
     ctx_of: impl Fn(i64) -> usize,
 ) {
+    gradient_loop(br, &mut Clustered { r, code, ctx_of }, data, w, h);
+}
+
+/// The gradient predictor with one context on an RLE-only stream.
+fn decode_gradient_rle(br: &mut BitReader, r: &mut SymbolReader, code: &EntropyCode, data: &mut [i32], w: usize, h: usize, ctx: usize) {
+    let Some(parts) = r.rle_parts(code, ctx) else {
+        return decode_gradient(br, r, code, data, w, h, |_| ctx);
+    };
+    let (last, run) = r.rle_state();
+    let mut src = Rle { parts, last, run };
+    gradient_loop(br, &mut src, data, w, h);
+    r.rle_finish((w * h) as u64, src.last, src.run);
+}
+
+#[inline(always)]
+fn gradient_loop(br: &mut BitReader, src: &mut impl Residuals, data: &mut [i32], w: usize, h: usize) {
     for y in 0..h {
         let (above, cur) = data.split_at_mut(y * w);
         let cur = &mut cur[..w];
@@ -184,8 +248,7 @@ fn decode_gradient(
             let mut left = 0i64;
             for p in cur.iter_mut() {
                 // top = topleft = left on the first row.
-                let ctx = ctx_of(left);
-                let v = r.read_clustered(code, br, ctx);
+                let v = src.next(br, left);
                 *p = make_pixel(v, 1, left);
                 left = i64::from(*p);
             }
@@ -195,17 +258,15 @@ fn decode_gradient(
         // x = 0: left = topleft = top.
         {
             let top = i64::from(top_row[0]);
-            let ctx = ctx_of(top);
-            let v = r.read_clustered(code, br, ctx);
+            let v = src.next(br, top);
             cur[0] = make_pixel(v, 1, top);
         }
         for x in 1..w {
             let left = i64::from(cur[x - 1]);
             let top = i64::from(top_row[x]);
             let topleft = i64::from(top_row[x - 1]);
-            let ctx = ctx_of(left + top - topleft);
             let guess = clamped_gradient(left, top, topleft);
-            let v = r.read_clustered(code, br, ctx);
+            let v = src.next(br, left + top - topleft);
             cur[x] = make_pixel(v, 1, guess);
         }
     }

@@ -45,6 +45,23 @@ impl HybridUint {
 
     /// The value of `token`, reading its extra bits (at most 31 are buffered by `refill`).
     #[inline(always)]
+    /// The value of `token` if it carries no extra bits.
+    fn bitless_value(&self, token: u32) -> Option<u32> {
+        if token < self.split_token {
+            return Some(token);
+        }
+        let ml = self.msb_in_token + self.lsb_in_token;
+        let nbits = (self.split_exponent - ml).wrapping_add((token - self.split_token) >> ml) & 31;
+        if nbits != 0 {
+            return None;
+        }
+        let low = token & ((1 << self.lsb_in_token) - 1);
+        let t = token >> self.lsb_in_token;
+        let hi = (1u64 << self.msb_in_token) | u64::from(t & ((1 << self.msb_in_token) - 1));
+        Some((((hi << self.lsb_in_token) | u64::from(low)) & 0xFFFF_FFFF) as u32)
+    }
+
+    #[inline(always)]
     fn decode(&self, token: u32, br: &mut BitReader) -> u32 {
         if token < self.split_token {
             return token;
@@ -815,6 +832,30 @@ fn inverse_mtf(v: &mut [u8]) {
 }
 
 /// Decoding state for one symbol stream.
+/// The tables an RLE-only loop reads (`SymbolReader::rle_parts`), resolved once outside it.
+pub struct RleParts<'c> {
+    table: &'c HuffTable,
+    cfg: &'c HybridUint,
+    min_symbol: u32,
+    len_cfg: &'c HybridUint,
+    min_length: u32,
+}
+
+impl RleParts<'_> {
+    /// One step: a new value, or a run length (copies of the previous value, this one
+    /// included). The run's distance symbol is not read: it is a zero-bit code.
+    #[inline(always)]
+    pub fn read(&self, br: &mut BitReader) -> (u32, u64) {
+        br.refill();
+        let token = self.table.read(br);
+        if token >= self.min_symbol {
+            let len = self.len_cfg.decode(token - self.min_symbol, br);
+            return (0, u64::from(len) + u64::from(self.min_length));
+        }
+        (self.cfg.decode(token, br), 0)
+    }
+}
+
 pub struct SymbolReader {
     state: u32,
     /// LZ77 window: grows to WINDOW_SIZE, then wraps. Unwritten entries read as 0.
@@ -938,6 +979,51 @@ impl SymbolReader {
     /// True when an ANS stream ended in its initial state (always true for prefix codes).
     pub fn check_final_state(&self) -> bool {
         self.state == ANS_SIGNATURE << 16
+    }
+
+    /// Prefix codes with LZ77 whose only distance is 1 (the previous value): libjxl's "Huffman
+    /// RLE only" streams (`IsHuffRleOnly`), which its fastest lossless encoder writes.
+    pub fn rle_only(&self, code: &EntropyCode) -> bool {
+        if !self.lz77 || !code.lz77.enabled {
+            return false;
+        }
+        let Codes::Prefix(t) = &code.codes else { return false };
+        let Some(dt) = t.get(code.lz77_ctx) else { return false };
+        if dt.table.iter().any(|e| e.bits != 0 || e.value != 1) {
+            return false;
+        }
+        let Some(v) = code.configs.get(code.lz77_ctx).and_then(|c| c.bitless_value(1)) else { return false };
+        let d = if (v as usize) < self.num_special { u64::from(self.special[v as usize]) } else { u64::from(v) + 1 - self.num_special as u64 };
+        d == 1
+    }
+
+    /// The tables for an RLE-only loop in `cluster`.
+    pub fn rle_parts<'c>(&self, code: &'c EntropyCode, cluster: usize) -> Option<RleParts<'c>> {
+        let Codes::Prefix(t) = &code.codes else { return None };
+        Some(RleParts {
+            table: t.get(cluster)?,
+            cfg: code.configs.get(cluster)?,
+            min_symbol: code.lz77.min_symbol,
+            len_cfg: &code.lz77.length_config,
+            min_length: code.lz77.min_length,
+        })
+    }
+
+    /// Where an RLE-only loop starts: the previous value and the copies still to make.
+    pub fn rle_state(&self) -> (u32, u64) {
+        let last = if self.num_decoded == 0 { 0 } else { self.window.get(((self.num_decoded - 1) as usize) & WINDOW_MASK).copied().unwrap_or(0) };
+        (last, self.num_to_copy)
+    }
+
+    /// Ends an RLE-only loop that decoded `count` values, the last being `last`, with `run`
+    /// copies left: the window needs only that last value, since every copy has distance 1.
+    pub fn rle_finish(&mut self, count: u64, last: u32, run: u64) {
+        if count > 0 {
+            self.num_decoded += count - 1;
+            self.push_window(last);
+        }
+        self.num_to_copy = run;
+        self.copy_pos = self.num_decoded.saturating_sub(1);
     }
 
     /// Records `n` copies of `v` as decoded (for the LZ77 window), after a fast-path fill.
