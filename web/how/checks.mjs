@@ -13,6 +13,11 @@ import { mkdirSync } from "node:fs";
 const BASE = process.env.BASE ?? "http://localhost:3360";
 /** Prefix for screenshot names, to keep runs against differently packed samples apart (e.g. "sv1-"). */
 const SHOT_TAG = process.env.SHOT_TAG ?? "";
+/** Another server's API to run the page against (the page reads ?api=), e.g. a differently packed sample. */
+const API = process.env.API ?? "";
+/** READ_ONLY=1: skip step 10's share and revoke, which writes a copy of the share to the server. */
+const READ_ONLY = process.env.READ_ONLY === "1";
+const PAGE = `${BASE}/how${API ? `?api=${encodeURIComponent(API)}` : ""}`;
 const SHOTS = new URL("../../docs/shots/how/", import.meta.url).pathname;
 const DARK_SHOTS = new URL("../../docs/shots/dark/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
@@ -98,7 +103,7 @@ async function run(width, dark) {
     if (r.status() >= 400 && !(r.status() === 404 && expected404(r.url()))) errors.push(`${r.status()} ${r.url().slice(0, 100)}`);
   });
 
-  await page.goto(`${BASE}/how`);
+  await page.goto(PAGE);
   await page.waitForFunction(() => document.querySelector("#status")?.classList.contains("ok") && window.__how, null, { timeout: 30000 });
   check(L("sample opens"), true, await text(page, "#status"));
 
@@ -167,6 +172,8 @@ async function run(width, dark) {
     if (/\.4\.(57|70)$/.test(ts)) check(L("8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)"), /SOI/.test(dh) && /SOF3\s+lossless frame: \d+-bit, 512 rows, 512 columns/.test(dh) && /SOS/.test(dh));
     if (/\.4\.(90|91|201|202|203)$/.test(ts)) check(L("8 DICOM: JPEG 2000 markers labelled (SOC, SIZ, COD, SOT, SOD)"), /SOC/.test(dh) && /SIZ\s+image and tile size: 512 × 512, 1 component, (signed )?\d+-bit/.test(dh) && /COD\s+coding style: \d+ wavelet levels/.test(dh) && /SOT/.test(dh) && /SOD/.test(dh), dh.split("\n").filter((l) => /SIZ|COD/.test(l)).join(" | "));
     check(L("8 DICOM: says the compression is without loss, and names the writer"), /without loss/.test(enc) && /names the program that wrote this file/.test(enc), enc);
+    const impl = /Implementation Version Name\s+(\S+)/.exec(dh)?.[1] ?? "";
+    if (/shl/i.test(impl)) check(L(`8 DICOM: written by shlink-dicom (${impl}), and says so`), /shlink-dicom compressed it when the study was shared/.test(enc), enc);
   }
   check(L("9 on demand: counter against the study's file"), /fetched of the .* encrypted file/.test(await text(page, "#less .counter")));
 
@@ -265,6 +272,7 @@ async function run(width, dark) {
     check(L("9 moving to another slice fetches only its records"), (await text(page, "#less .counter")) !== c0, `${c0} → ${await text(page, "#less .counter")}`);
 
     // Share, open, revoke, open again.
+    if (!READ_ONLY) {
     await page.locator("#sh-make").scrollIntoViewIfNeeded();
     await page.locator("#sh-make").click();
     await page.waitForFunction(() => /A new link/.test(document.querySelector("#share .share-result")?.textContent ?? ""), null, { timeout: 20000 });
@@ -281,6 +289,7 @@ async function run(width, dark) {
     await page.waitForFunction(() => document.querySelectorAll("#share .exact-body .req").length >= 2, null, { timeout: 10000 }).catch(() => {});
     check(L("10 the server's access log for the copy is shown"), (await page.locator("#share .exact-body .req").count()) >= 2);
     await page.locator("#share").screenshot({ path: `${SHOTS}${SHOT_TAG}${width}-revoked.png` });
+    }
 
     // Build your own: receiver, test vector, decoder comparison, all in the worker.
     if (width !== "360") {
