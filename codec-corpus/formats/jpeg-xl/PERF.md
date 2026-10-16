@@ -87,6 +87,22 @@ In Chromium (`run.mjs --runners chromium-worker --builds simd`, load average 12,
 
 The interleaving is still about 10% of a native lossy decode; libjxl does the same conversion inside its decode.
 
+## In the bench, after perf-t6d
+
+`run.mjs --format jpeg-xl`, 16 Oct, three runs at load average 4.6–7.8 (each marked noisy): `--runners chromium-cwasm` (ours and libjxl 0.12.0 in wasm, same worker, interleaved), `--runners chromium-worker --builds simd`, and `--runners native,ref`. Codec stage, ms (the native run is the noisiest; the quiet full run will replace it):
+
+| Case | ours wasm | libjxl wasm | ours ÷ libjxl | ours native | libjxl native | ours ÷ libjxl |
+|---|---|---|---|---|---|---|
+| Photo 2048², d1 | 182 | 151 | 1.21 | 172 | 87.0 | 1.97 |
+| Photo 2048², d3 | 162 | 127 | 1.28 | 178 | 74.0 | 2.41 |
+| Photo 2048², lossless e1 | 149 | 150 | 1.00 | 136 | 116 | 1.17 |
+| Photo 2048², lossless e7 | 957 | 966 | 0.99 | 972 | 1000 | 0.97 |
+| DX 2048², d1 | 134 | 123 | 1.08 | 118 | 57.3 | 2.07 |
+| DX 2048², lossless e1 | 45.4 | 44.3 | 1.03 | 40.0 | 31.9 | 1.26 |
+| DX 2048², lossless e7 | 372 | 373 | 1.00 | 371 | 379 | 0.98 |
+| IDC DX 3032×2520, d1 | 252 | 233 | 1.08 | 219 | 122 | 1.79 |
+| IDC DX 3032×2520, lossless e1 | 71.7 | 72.2 | 0.99 | 63.3 | 52.7 | 1.20 |
+
 ## What changed
 
 The crate stays `#![forbid(unsafe_code)]` and has no new dependencies.
@@ -102,6 +118,11 @@ Each effect was measured on its own during the work (on the scratch branch, agai
 | **LLF resample scales** tabulated once per size instead of three cosines per coefficient. | −0.3% |
 | **EPF skips 8×8 blocks** whose sigma is below the minimum (they keep their input; libjxl skips them too). Each row's filtered column ranges are collected once. | −3% to −10% at distance 1, −22% at distance 3 (three EPF passes); natively −2% to −11% instructions, −26% at d3 |
 | **RLE-only lossless streams** (effort 1): libjxl's fastest encoder writes prefix codes whose only LZ77 distance is the previous value. For a gradient channel with one context, the tables are now resolved once and a run repeats the previous token without the LZ77 window, as libjxl's "Gradient RLE" track does. | −25% to −35% on effort-1 files; natively −28% to −37% instructions |
+| **The output interleave** (perf-t6c), see [above](#the-bench-path-and-the-output-conversion). | bench codec stage: native cycles −3% to −28% |
+| **Local bit reader in the effort-1 loop** (perf-t6d): behind a reference, the reader's buffer and bit count went back to memory after every symbol; a local copy keeps them in registers. | effort 1: native cycles −8% to −10%, wasm −9% to −13% |
+| **Bundled IDCT in place** (perf-t6d): each recursion level copied its even and odd points into new arrays. The bundle is now loaded in split order (point bitrev(p) at position p), so every level works in place on contiguous halves. | native cycles −0.6% to −4.3%, wasm −2% to −4% on the lossy cases |
+| **No grey plane copies for a frame shown as it is** (perf-t6d): a lossy grey image's colour transform copied the grey plane into planes 1 and 2 for blending and references, which a displayed frame that is neither blended nor saved never reads. | wasm −5% to −7% on the 3032×2520 radiograph; native −1.7% on the grey cases |
+| **Dequantisation skips the bias adjustment for all-zero groups** (perf-t6d): most AC coefficients are zero, and the adjustment (with its division) maps 0 to +0. | wasm −4% to −6% on the photo; native cycles −0.4% to −1.8% |
 
 ## Rejected
 
@@ -117,6 +138,14 @@ Each effect was measured on its own during the work (on the scratch branch, agai
 | Resolving the AC entropy tables once per group (ANS without LZ77) | 0.2–2.9% more instructions natively: the per-call dispatch cost more than the lookups it saved |
 | IDCT bundles of 4 lanes instead of 8 (to cut register spills natively) | 5% more instructions natively; in wasm within noise, +4% on DX |
 | One copy fewer in the 2-D IDCT (the second pass works in the scratch block) | −0.5% instructions; in wasm under 1% |
+| XYB → transfer curve → integer interleave in one pass for a frame shown as it is (perf-t6d) | the fused kernel ran on `F4` lanes; natively that fell back to scalar arrays (+41% on the photo), and in wasm it was 8% slower than the separate passes |
+| XYB and the sRGB curve in one pass, without lanes | within noise in wasm; natively −8% to +1% |
+| Local bit reader for every modular channel (copied at the channel's entry) | the copy sat outside the loop's function, so it went back to memory; effort 1 got 10% slower |
+| Local bit reader for the first pass in the AC coefficient loop | native cycles −0.2% to −1.5% |
+| Local bit reader in the gradient, weighted-predictor and general modular loops | −1.5% to −1.7% at effort 7 natively, +25% on the small CT |
+| EPF: each direction's plus-shaped SAD formed once per row and shared by an offset and its opposite | native cycles +2% to +5%, wasm +3% to +6% (the sums cover whole rows, skipped blocks included) |
+| EPF: one division per pixel (1/wsum) shared by the three channels instead of one each | within noise in wasm and natively |
+| 8×8 IDCT through the 8-lane bundled kernel instead of its own column code (one implementation fewer) | within noise in wasm, +0.4% to +1.4% native cycles |
 | Threads within one image (groups, EPF, Gaborish, colour) | 1.5× at 4 threads, 1.7× at 8 in a rough prototype; deferred (the viewer decodes frames in parallel already) |
 
 ## Where we stand
