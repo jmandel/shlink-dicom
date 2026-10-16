@@ -26,6 +26,9 @@ export type OnProgress = (c: Collection, p: Progress) => void;
  * Collects picked files and folders (and the archives among them). Only headers are read here;
  * gzip archives and deflated ZIP entries are decompressed into the stager as they are read.
  */
+/** Series retrieved at once from a SMART Imaging Access server. */
+const SERIES_AT_ONCE = 3;
+
 export async function loadFiles(files: File[], col: Collection, stager: Stager, on: OnProgress, signal?: AbortSignal) {
   // Measured by bytes of the picked files: each file counts when it has been read through
   // (only headers for loose files), an archive as its bytes are consumed.
@@ -224,23 +227,32 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
     });
   for (const f of found) {
     const series: any[] = f.study.series?.length ? f.study.series : [null];
-    for (const se of series) {
+    // A few series at once: one retrieve at a time leaves the connection idle between series and
+    // runs at one response's speed (series are sorted when the collection is finished).
+    let next = 0;
+    const one = async (se: any) => {
       signal?.throwIfAborted();
       say();
       const url = se ? `${f.wadoBase}/studies/${f.studyUID}/series/${se.uid}` : `${f.wadoBase}/studies/${f.studyUID}`;
+      const name = se?.description ?? f.studyUID;
       let k = 0;
       for await (const part of S.wadoRetrieveParts(url, tok, signal)) {
         // The file's own meta header says its transfer syntax; the part's Content-Type is counted for the log.
         if (part.transferSyntax) col.received.set(part.transferSyntax, (col.received.get(part.transferSyntax) ?? 0) + 1);
-        const src = await stager.stage(`${se?.description ?? f.studyUID}/${++k}`, part.body);
-        await col.add(`${se?.description ?? f.studyUID}/${k}`, src);
+        const src = await stager.stage(`${name}/${++k}`, part.body);
+        await col.add(`${name}/${k}`, src);
         bytes += src.size;
         got++;
         say();
       }
       done++;
       say();
-    }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SERIES_AT_ONCE, series.length) }, async () => {
+        while (next < series.length) await one(series[next++]);
+      }),
+    );
     const m = col.studies.get(f.studyUID);
     if (m) {
       if (f.study.started) m.started = f.study.started;
