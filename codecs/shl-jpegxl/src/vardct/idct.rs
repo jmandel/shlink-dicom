@@ -148,56 +148,61 @@ fn v_add(a: V8, b: V8) -> V8 {
     core::array::from_fn(|i| a[i] + b[i])
 }
 
-/// Fixed-size IDCTs on bundles of 8 lanes: `d[i]` holds point i of 8 independent transforms.
+/// Position p of an N-point bundle in "split order" holds point `bitrev(p)`: the even points
+/// first (themselves in split order), then the odd ones. In that order every stage of the
+/// recursive IDCT works in place on a contiguous half, with no copies.
+const fn bitrev<const N: usize>() -> [u8; N] {
+    let mut t = [0u8; N];
+    let bits = N.trailing_zeros();
+    let mut i = 0;
+    while i < N {
+        t[i] = (i.reverse_bits() >> (usize::BITS - bits)) as u8;
+        i += 1;
+    }
+    t
+}
+
+/// In-place IDCTs on bundles of 8 lanes: `d[p]` holds point `bitrev(p)` of 8 independent
+/// transforms on entry, point p on return. The arithmetic is libjxl's recursive factorisation,
+/// operation for operation.
 macro_rules! idct_bundle {
     ($name:ident, $n:expr, $h:expr, $half:ident) => {
         #[inline(always)]
-        fn $name(d: &mut [V8; $n], m: &[f32]) {
-            let mut lo = [[0f32; 8]; $h];
-            let mut hi = [[0f32; 8]; $h];
-            for i in 0..$h {
-                lo[i] = d[2 * i];
-                hi[i] = d[2 * i + 1];
-            }
-            $half(&mut lo, wc_multipliers($h));
+        fn $name(d: &mut [V8]) {
+            const BR: [u8; $h] = bitrev::<$h>();
+            let (lo, hi) = d.split_at_mut($h);
+            $half(lo);
+            // The odd points' prefix sums, in their natural order (held in split order).
             for i in (1..$h).rev() {
-                hi[i] = v_add(hi[i], hi[i - 1]);
+                let (p, q) = (BR[i] as usize, BR[i - 1] as usize);
+                hi[p] = v_add(hi[p], hi[q]);
             }
             hi[0] = core::array::from_fn(|k| hi[0][k] * SQRT2);
-            $half(&mut hi, wc_multipliers($h));
-            for i in 0..$h {
-                let mul = m[i];
-                let (a, b) = (lo[i], hi[i]);
-                d[i] = core::array::from_fn(|k| mul * b[k] + a[k]);
-                d[$n - 1 - i] = core::array::from_fn(|k| a[k] - mul * b[k]);
+            $half(hi);
+            let m = wc_multipliers($n);
+            // Output i and n-1-i come from lo[i] and hi[i]; n-1-i lands in hi's slot h-1-i, so
+            // pairs (i, h-1-i) are read before either is written.
+            for i in 0..$h / 2 {
+                let j = $h - 1 - i;
+                let (ai, bi, aj, bj) = (lo[i], hi[i], lo[j], hi[j]);
+                let (mi, mj) = (m[i], m[j]);
+                lo[i] = core::array::from_fn(|k| mi * bi[k] + ai[k]);
+                hi[j] = core::array::from_fn(|k| ai[k] - mi * bi[k]);
+                lo[j] = core::array::from_fn(|k| mj * bj[k] + aj[k]);
+                hi[i] = core::array::from_fn(|k| aj[k] - mj * bj[k]);
             }
         }
     };
 }
 
 #[inline(always)]
-fn idct_b2(d: &mut [V8; 2], _m: &[f32]) {
+fn idct_b2(d: &mut [V8]) {
     let (a, b) = (d[0], d[1]);
     d[0] = core::array::from_fn(|k| a[k] + b[k]);
     d[1] = core::array::from_fn(|k| a[k] - b[k]);
 }
 
-#[inline(always)]
-fn idct_b4(d: &mut [V8; 4], m: &[f32]) {
-    let mut lo = [d[0], d[2]];
-    let mut hi = [d[1], d[3]];
-    idct_b2(&mut lo, m);
-    hi[1] = v_add(hi[1], hi[0]);
-    hi[0] = core::array::from_fn(|k| hi[0][k] * SQRT2);
-    idct_b2(&mut hi, m);
-    for i in 0..2 {
-        let mul = m[i];
-        let (a, b) = (lo[i], hi[i]);
-        d[i] = core::array::from_fn(|k| mul * b[k] + a[k]);
-        d[3 - i] = core::array::from_fn(|k| a[k] - mul * b[k]);
-    }
-}
-
+idct_bundle!(idct_b4, 4, 2, idct_b2);
 idct_bundle!(idct_b8, 8, 4, idct_b4);
 idct_bundle!(idct_b16, 16, 8, idct_b8);
 idct_bundle!(idct_b32, 32, 16, idct_b16);
@@ -209,13 +214,14 @@ idct_bundle!(idct_b256, 256, 128, idct_b128);
 fn idct_rows_bundled(d: &mut [f32], n: usize, l: usize) {
     macro_rules! run {
         ($f:ident, $n:expr) => {{
-            let m = wc_multipliers($n);
+            const BR: [u8; $n] = bitrev::<$n>();
             let mut b = [[0f32; 8]; $n];
             for l0 in (0..l).step_by(8) {
-                for i in 0..$n {
-                    b[i].copy_from_slice(&d[i * l + l0..i * l + l0 + 8]);
+                for (p, &i) in BR.iter().enumerate() {
+                    let i = i as usize;
+                    b[p].copy_from_slice(&d[i * l + l0..i * l + l0 + 8]);
                 }
-                $f(&mut b, m);
+                $f(&mut b);
                 for i in 0..$n {
                     d[i * l + l0..i * l + l0 + 8].copy_from_slice(&b[i]);
                 }
