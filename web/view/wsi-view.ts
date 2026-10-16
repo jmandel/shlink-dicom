@@ -151,20 +151,32 @@ export function renderSlide(ctx: CanvasRenderingContext2D, ss: SlideSession, v: 
 }
 
 /** Draws the coarsest level into a thumbnail canvas (loads its tiles at Near priority). */
-export async function drawSlideThumbnail(canvas: HTMLCanvasElement, ss: SlideSession) {
+export async function drawSlideThumbnail(canvas: HTMLCanvasElement, ss: SlideSession, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const p = ss.pyramid;
   const k = p.levels.length - 1;
   const L = p.levels[k];
   const d = defaultDisplay(p);
   const loads: Promise<unknown>[] = [];
+  const keys: string[] = [];
   for (const path of activePaths(p, d))
     for (let ty = 0; ty < L.tilesDown; ty++)
       for (let tx = 0; tx < L.tilesAcross; tx++) {
         if (!L.frameRef(tx, ty, d.plane, path)) continue;
-        ss.pin(tileKey(k, tx, ty, d.plane, path));
+        const key = tileKey(k, tx, ty, d.plane, path);
+        ss.pin(key);
+        keys.push(key);
         loads.push(ss.load(k, tx, ty, d.plane, path, Priority.Near).catch(() => null));
       }
-  await Promise.all(loads);
+  // Stopped (another study opened): the loads still queued or running are dropped.
+  const stop = () => ss.cancel(keys);
+  signal?.addEventListener("abort", stop, { once: true });
+  try {
+    await Promise.all(loads);
+  } finally {
+    signal?.removeEventListener("abort", stop);
+  }
+  signal?.throwIfAborted();
   const W = canvas.width, H = canvas.height;
   const scale = Math.min(W / p.width, H / p.height);
   renderSlide(canvas.getContext("2d")!, ss, { cx: p.width / 2, cy: p.height / 2, scale, W, H, dpr: 1 }, k, d);
@@ -288,7 +300,11 @@ export class SlideView {
       this.requestStats();
     };
     this.panel.attach();
-    this.noticeEl.classList.toggle("hidden", !ss.pyramid.levels.some((l) => ss.src.frameSource(l.instance) === "walk"));
+    // Whether frames must be found by walking is known once every level's header is in.
+    this.noticeEl.classList.add("hidden");
+    void ss.src.complete.then(() => {
+      if (gen === this.openGen) this.noticeEl.classList.toggle("hidden", !ss.pyramid.levels.some((l) => ss.src.frameSource(l.instance) === "walk"));
+    }, () => {});
     this.pendingSince = null;
     this.progTimer = setInterval(() => this.renderProgress(), 200);
     this.requestUpdate();
@@ -844,6 +860,7 @@ export class SlideView {
   get idle() {
     if (!this.ss) return true;
     if (this.updateQueued) return false;
+    if (!this.ss.src.headersDone) return false;
     for (const k of this.wanted) {
       const [l, x, y, z, path] = k.split("/").map(Number);
       if (!this.ss.peek(l, x, y, z, path)) return false;

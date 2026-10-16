@@ -94,6 +94,11 @@ export class SeriesReader {
     } = {},
   ) {}
 
+  /** Requests queued or running. */
+  get busy(): boolean {
+    return this.running > 0 || this.queue.length > 0;
+  }
+
   /** Plaintext bytes [a, b) of the series' file. */
   async read(a: number, b: number, o: ReadOptions = {}): Promise<Uint8Array> {
     if (o.signal?.aborted) throw abortError();
@@ -337,14 +342,173 @@ export class SlideSource {
     this.reader = new SeriesReader(share.resolver, share.decryptor, series, { budgetBytes: opts.budgetBytes, onRecords: opts.onRecords });
   }
 
-  /** Reads every instance's header (small ranges before Pixel Data) and builds the pyramid. */
+  /**
+   * Reads every instance's header (small ranges before Pixel Data) and builds the pyramid.
+   *
+   * Progressive: when the first read of each header shows a plain tiled slide (TILED_FULL, one
+   * focal plane and optical path, the coarsest level's header complete), the pyramid is built from
+   * those reads and returned at once, so the coarsest level can be drawn; the other levels'
+   * headers (ICC profiles, offset tables) are read on after it at lower priority. A frame of such
+   * a level waits for its header (`locate`). `complete` resolves when every header is in; if the
+   * full headers describe a different pyramid, `pyramid` is replaced and `onPyramid` called.
+   */
   static async open(share: SlideShare, series: SeriesEntry, opts: SlideSourceOptions = {}): Promise<SlideSource> {
     const t0 = performance.now();
     const s = new SlideSource(share, series, opts);
-    await Promise.all(series.instances.map((_, i) => s.loadHeader(i)));
-    s.pyramid = buildPyramid(s.headers);
+    const first = await Promise.all(series.instances.map((_, i) => s.readHeader(i, s.firstHeaderBytes(i), 0, true)));
+    // A plain tiled slide: the coarsest level's header is finished first; the others after it.
+    const coarse = s.coarsestCandidate();
+    let provisional: Pyramid | null = null;
+    if (coarse !== null) {
+      // The other headers wait until the coarsest level's first tiles have come in (or a frame of
+      // their level is asked for), so they don't share the connection with those tiles.
+      let go!: () => void;
+      const started = new Promise<void>((r) => (go = r));
+      s.continueHeaders = () => go();
+      series.instances.forEach((_, i) => {
+        if (i === coarse || first[i] === 0) return;
+        s.headerWait.set(i, started.then(() => s.readHeader(i, first[i], 2, false)).then(() => {}));
+      });
+      if (first[coarse]) await s.readHeader(coarse, first[coarse], 0, false);
+      provisional = s.provisionalPyramid();
+      if (!provisional) go();
+      else {
+        const t = performance.now();
+        const tick = () => {
+          if ((s.reader.stats.byPurpose.tile.requests > 0 && !s.reader.busy) || performance.now() - t > 3000) go();
+          else setTimeout(tick, 50);
+        };
+        setTimeout(tick, 50);
+      }
+    }
+    if (provisional) {
+      s.pyramid = provisional;
+      s.headersDone = false;
+      s.complete = Promise.all(s.headerWait.values())
+        .then(() => s.settle(provisional))
+        .finally(() => {
+          s.headersDone = true;
+          s.headerWait.clear();
+        });
+      s.complete.catch(() => {});
+    } else {
+      await Promise.all(series.instances.map((_, i) => s.headerWait.get(i) ?? (first[i] === 0 || s.headers[i]?.complete ? null : s.readHeader(i, first[i], 0, false))));
+      s.headerWait.clear();
+      s.pyramid = buildPyramid(s.headers);
+    }
     s.openMs = performance.now() - t0;
     return s;
+  }
+
+  /** Resolves when every header has been read in full (at once unless the open was progressive). */
+  complete: Promise<void> = Promise.resolve();
+  /** False while a progressive open is still reading headers. */
+  headersDone = true;
+  /** Called when the full headers replace a provisional pyramid that turned out different. */
+  onPyramid: (() => void) | null = null;
+  private headerWait = new Map<number, Promise<void>>();
+  /** Starts reading the headers a progressive open left for later. */
+  private continueHeaders: () => void = () => {};
+
+  /** Bytes for a header's first read: to the end of the record holding byte 16 KiB. */
+  private firstHeaderBytes(i: number): number {
+    const inst = this.series.instances[i];
+    let n = RECORD_PLAINTEXT - (inst.offset % RECORD_PLAINTEXT);
+    if (n < 16384) n += RECORD_PLAINTEXT;
+    return Math.min(inst.length, n);
+  }
+
+  /**
+   * Reads instance i's header from n bytes on, growing the read until it is complete (or, with
+   * `once`, stops after one read). Returns 0 when the header needs no more bytes, else the bytes
+   * the next read should cover.
+   */
+  private async readHeader(i: number, n: number, priority: number, once: boolean): Promise<number> {
+    const inst = this.series.instances[i];
+    const sig = { priority, signal: this.opts.signal, purpose: "header" as const };
+    for (;;) {
+      const bytes = await this.reader.read(inst.offset, inst.offset + n, sig);
+      const h = parseSlideHeader(bytes, { partial: true });
+      this.headers[i] = h;
+      this.tables[i] = h.complete ? frameTableFromHeader(h, inst.length) : null;
+      if (h.complete) return 0;
+      // Label, overview and thumbnail images are read whole when shown, so their attributes are
+      // enough here; Pixel Data's position is not needed.
+      if (["LABEL", "OVERVIEW", "THUMBNAIL"].includes(h.flavor) && h.rows && h.columns && h.transferSyntax) return 0;
+      if (n >= inst.length) return 0;
+      // Read on, to the end of the record holding the byte needed, growing by at least 2.5× so a
+      // long header (an ICC profile, say) takes two or three reads rather than one per record.
+      const want = inst.offset + Math.max((h.needBytes || n) + 1024, Math.ceil(n * 2.5));
+      n = Math.min(inst.length, (Math.floor(want / RECORD_PLAINTEXT) + 1) * RECORD_PLAINTEXT - inst.offset);
+      if (once) return n;
+    }
+  }
+
+  /**
+   * A pyramid from the first reads, when that is safe: every level TILED_FULL with one frame per
+   * tile (so one focal plane and one optical path), the coarsest level's header complete, and the
+   * other levels' optical path taken from it. Null when the headers must be read in full first.
+   */
+  /**
+   * From the first reads: the coarsest level's instance when every level looks like a plain tiled
+   * slide (TILED_FULL, one frame per tile, so one focal plane and one optical path) and some level
+   * still needs more header; else null.
+   */
+  private coarsestCandidate(): number | null {
+    const hs = this.headers;
+    const isVol = (h: SlideHeader | null) => !!h && !!h.rows && !!h.columns && !["LABEL", "OVERVIEW", "THUMBNAIL"].includes(h.flavor);
+    const vols = hs.flatMap((h, i) => (isVol(h) ? [i] : []));
+    if (vols.length < 2 || vols.every((i) => hs[i]!.complete)) return null;
+    for (const i of vols) {
+      const h = hs[i]!;
+      if (!h.totalColumns || !h.totalRows || h.dimensionOrganization !== "TILED_FULL" || !h.transferSyntax || h.segments.length) return null;
+      if (h.numberOfFrames !== Math.ceil(h.totalColumns / h.columns) * Math.ceil(h.totalRows / h.rows)) return null;
+    }
+    const minW = Math.min(...vols.map((i) => hs[i]!.totalColumns));
+    const coarse = vols.filter((i) => hs[i]!.totalColumns === minW);
+    return coarse.length === 1 ? coarse[0] : null;
+  }
+
+  private provisionalPyramid(): Pyramid | null {
+    const hs = this.headers;
+    const isVol = (h: SlideHeader | null) => !!h && !!h.rows && !!h.columns && !["LABEL", "OVERVIEW", "THUMBNAIL"].includes(h.flavor);
+    const vols = hs.flatMap((h, i) => (isVol(h) ? [i] : []));
+    const coarse = this.coarsestCandidate();
+    if (coarse === null) return null;
+    const c = hs[coarse]!;
+    if (!c.complete || c.paths.length > 1 || c.opticalPaths > 1 || c.focalPlanes > 1 || c.planePositions) return null;
+    const filled = hs.map((h, i) =>
+      !h || h.complete || !vols.includes(i)
+        ? h
+        : { ...h, paths: c.paths, sharedPath: c.sharedPath, sharedZ: c.sharedZ, opticalPaths: 1, focalPlanes: 1, frameZ: null, framePath: null, planePositions: null },
+    );
+    try {
+      return buildPyramid(filled);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every header is in: the provisional pyramid takes the full one's details, or is replaced. */
+  private settle(provisional: Pyramid) {
+    const full = buildPyramid(this.headers);
+    const shape = (p: Pyramid) =>
+      JSON.stringify([
+        p.levels.map((l) => [l.width, l.height, l.tileWidth, l.tileHeight, l.instance, l.header.numberOfFrames]),
+        p.paths.map((x) => x.id),
+        p.planes,
+        p.label,
+        p.overview,
+        p.thumbnail,
+      ]);
+    if (shape(full) === shape(provisional)) {
+      // Same tiles and frames: keep the object (sessions hold it), with the full headers' details.
+      provisional.levels.splice(0, provisional.levels.length, ...full.levels);
+      Object.assign(provisional, { ...full, levels: provisional.levels });
+    } else {
+      this.pyramid = full;
+      this.onPyramid?.();
+    }
   }
 
   /** Total bytes of the slide (sum of instance lengths). */
@@ -357,33 +521,9 @@ export class SlideSource {
     return Math.min(file.ciphertextLength, (lastRecord + 1) * RECORD_CIPHERTEXT) - firstRecord * RECORD_CIPHERTEXT;
   }
 
-  private async loadHeader(i: number) {
-    const inst = this.series.instances[i];
-    const sig = { priority: 0, signal: this.opts.signal, purpose: "header" as const };
-    // Read up to the end of the Basic Offset Table (a filled BOT is 4 bytes per frame).
-    let n = RECORD_PLAINTEXT - (inst.offset % RECORD_PLAINTEXT);
-    if (n < 16384) n += RECORD_PLAINTEXT;
-    n = Math.min(inst.length, n);
-    let h: SlideHeader | null = null;
-    for (;;) {
-      const bytes = await this.reader.read(inst.offset, inst.offset + n, sig);
-      h = parseSlideHeader(bytes, { partial: true });
-      if (h.complete) break;
-      // Label, overview and thumbnail images are read whole when shown, so their attributes are
-      // enough here; Pixel Data's position is not needed.
-      if (["LABEL", "OVERVIEW", "THUMBNAIL"].includes(h.flavor) && h.rows && h.columns && h.transferSyntax) break;
-      if (n >= inst.length) break;
-      // Read on, to the end of the record holding the byte needed, growing by at least 2.5× so a
-      // long header (an ICC profile, say) takes two or three reads rather than one per record.
-      const want = inst.offset + Math.max((h.needBytes || n) + 1024, Math.ceil(n * 2.5));
-      n = Math.min(inst.length, (Math.floor(want / RECORD_PLAINTEXT) + 1) * RECORD_PLAINTEXT - inst.offset);
-    }
-    this.headers[i] = h;
-    this.tables[i] = h && h.complete ? frameTableFromHeader(h, inst.length) : null;
-  }
-
   /** The header-only frame table source of an instance, or "walk". */
-  frameSource(instance: number): FrameTable["source"] {
+  frameSource(instance: number): FrameTable["source"] | "pending" {
+    if (this.headerWait.has(instance)) return "pending";
     return this.tables[instance]?.source ?? "walk";
   }
 
@@ -412,6 +552,12 @@ export class SlideSource {
 
   /** Instance byte range of frame k, locating it first if needed. */
   async locate(instance: number, k: number, o: ReadOptions = {}): Promise<[number, number] | null> {
+    // A level whose header is still being read (progressive open).
+    const wait = this.headerWait.get(instance);
+    if (wait) {
+      this.continueHeaders();
+      await wait;
+    }
     const t = this.tables[instance];
     if (t) return t.range(k);
     const h = this.headers[instance];

@@ -142,11 +142,16 @@ In the viewer, Range reads of one file went one round trip apart, held by the br
 8. **Downloads read three 8 MiB runs ahead.** 13 → 15 MB/s on the home profile; 14.4 → 19.8 MB/s on the live link.
 9. **SMART import retrieves three series at once.** Search to review: 23.6 → 20.6 s.
 
-**Known regression.** Slide first tile on Fast 4G: 527 → 1153 ms (home: 247 → 164 ms). Main loads the 4 MB slide thumbnail during the overview, competing with everything else. The branch loads it after the small thumbnails, so a slide opened at once starts from nothing. Where the time goes, on Fast 4G with the slide opened at once:
-- before the pyramid exists, the slide view reads the header of every instance, about 0.85 MB (ICC profiles and offset tables), mostly in two rounds;
-- only then does it read the first tiles.
+**Slide opened straight from the overview.** Main before these changes loaded the 4 MB slide thumbnail during the overview, so a slide opened at once found its headers and coarsest tiles already there. The branch loads it after the small thumbnails, so a slide opened at once starts from nothing. Fast 4G first tile went 527 → 1153 ms.
 
-Reading three records at once for each level (one round instead of two) made it worse: 1356 ms, because the link is bandwidth-bound. The fix that would help is a pyramid built progressively: draw the coarsest level once its own header and tiles are in, and read the other levels' headers after it. That would save about 0.6 MB, or about 0.6 s on Fast 4G. It is a change to `wsi-source.ts`/`wsi-view.ts` (see Findings).
+The progressive pyramid (e2e-2) takes the slide view part of the way back:
+- After the first read of every header, the coarsest level's header is finished first and the pyramid is built from those reads. This applies only when every level is TILED_FULL with one frame per tile.
+- The other levels' headers (ICC profiles, offset tables) are read once the first tiles are in, or when a frame of their level is wanted.
+- When all headers are in, the pyramid is checked against the full one, and replaced if it differs.
+
+Fast 4G, 1440×900, median of 3: first tile 1121 → 1001 ms, sharp at fit 4892 → 4931 ms, sharp at zoom 2814 → 2808 ms. Home: 158 → 145 ms. The overview is unchanged.
+
+The rest of the 1 s is the first read of every header: about 0.45 MB, needed to find the coarsest level and check the slide is a plain one. Getting to main's 527 ms takes preloading during the overview again, which costs the overview its gain.
 
 **Tried and dropped.** `Cache-Control: private, immutable` on `.bin` responses would let a second visit skip the download. It also made the browser's cache lock serialise every read of a file, and the cached partial entries broke the expiry of passcode capability URLs (the `cap-expiry` check). Josh's decision (16 Oct): share data is kept in memory only (the loader's record cache and the frame cache), never across page loads. The server now sends encrypted files with `Cache-Control: no-store`.
 

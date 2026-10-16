@@ -126,6 +126,16 @@ export class SlideSession {
     return p;
   }
 
+  /** Stops the loads of these tiles that are still queued or running (they load again when asked for). */
+  cancel(keys: string[]) {
+    for (const k of keys) {
+      const f = this.inflight.get(k);
+      if (!f) continue;
+      f.ctrl.abort();
+      this.inflight.delete(k);
+    }
+  }
+
   /** Raises a loading tile's priority: re-issuing its read moves queued records up (the reader dedupes). */
   raise(key: string, priority: number) {
     const f = this.inflight.get(key);
@@ -279,6 +289,11 @@ export function slideSession(share: OpenShare, series: SeriesEntry, pool: Decode
     const t0 = performance.now();
     s = SlideSource.open(share, series, { onRecords: o.onRecords }).then((src) => {
       const ss = new SlideSession(src, pool, o.mode);
+      // The full headers described a different pyramid than the first reads: start the tiles over.
+      src.onPyramid = () => {
+        ss.reset();
+        ss.onTile?.("");
+      };
       ss.metrics.marks.sessionStart = t0;
       ss.metrics.marks.headers = performance.now();
       return ss;
