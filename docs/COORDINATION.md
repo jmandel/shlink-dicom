@@ -135,6 +135,15 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **Josh (15 Oct, about 21:00): schedule the LinkedIn article for Fri 16 Oct, 9:00 am ET,** once the compressed web app is deployed and tested. Steps:
+  1. Merge pack-compress and how-compressed, deploy, and verify live.
+  2. The visuals agent re-measures and retakes everything (sample size, trace, bytes to the first slice, footnotes 1 and 3, How caption and screenshot, owner page).
+  3. Apply edits 2 and 4 plus the numbers to the blog md, then rebuild LinkedIn and verify it.
+  4. Update the post message's numbers (Josh's opener version, no links).
+  5. Schedule in LinkedIn's publish flow with that post message.
+  6. Tell Josh the final text and how to reschedule.
+  If anything isn't verified, don't schedule; tell Josh.
+
 - **15 Oct, about 19:30: lossless compression round (Josh: update the reference implementations, then re-measure and update the blog and LinkedIn).**
   - **Decoders agent (a4b3a594727c938f4):** JPEG Lossless SV1 encoder plus a Part 10 transcoder with a mandatory bit-exact self-check; native and wasm. Branch `sv1-encoder`, worktree ../shlink-dicom-sv1.
   - **Sandbox agent (ab83241fb7aa4e1f8):** WADO-RS negotiation per PR #5, with stored SV1/J2K copies made by dcmtk/OpenJPEG. Branch `sandbox-negotiation`, worktree ../shlink-dicom-sandbox.
