@@ -165,6 +165,7 @@ async function run(width, dark) {
   else {
     check(L("8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment"), /Basic Offset Table/.test(dh) && /the compressed image|fragment 1/.test(dh) && /end of the items/.test(dh), ts);
     if (/\.4\.(57|70)$/.test(ts)) check(L("8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)"), /SOI/.test(dh) && /SOF3\s+lossless frame: \d+-bit, 512 rows, 512 columns/.test(dh) && /SOS/.test(dh));
+    if (/\.4\.(90|91|201|202|203)$/.test(ts)) check(L("8 DICOM: JPEG 2000 markers labelled (SOC, SIZ, COD, SOT, SOD)"), /SOC/.test(dh) && /SIZ\s+image and tile size: 512 × 512, 1 component, (signed )?\d+-bit/.test(dh) && /COD\s+coding style: \d+ wavelet levels/.test(dh) && /SOT/.test(dh) && /SOD/.test(dh), dh.split("\n").filter((l) => /SIZ|COD/.test(l)).join(" | "));
     check(L("8 DICOM: says the compression is without loss, and names the writer"), /without loss/.test(enc) && /names the program that wrote this file/.test(enc), enc);
   }
   check(L("9 on demand: counter against the study's file"), /fetched of the .* encrypted file/.test(await text(page, "#less .counter")));

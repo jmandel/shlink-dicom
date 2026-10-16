@@ -46,7 +46,7 @@ const JPEG_MARKERS: Record<number, string> = {
 /** The first fragment's JPEG markers, up to the start of scan: offset, the bytes, a label. */
 function jpegMarkers(frag: Uint8Array): string[] {
   if (frag[0] !== 0xff || frag[1] !== 0xd8) return [];
-  const out = [`      @0      ff d8              ${JPEG_MARKERS[0xd8]}`];
+  const out = [`      @0      ff d8                          ${JPEG_MARKERS[0xd8]}`];
   let p = 2;
   while (p + 4 <= frag.length && frag[p] === 0xff) {
     const m = frag[p + 1];
@@ -57,11 +57,65 @@ function jpegMarkers(frag: Uint8Array): string[] {
       const prec = frag[p + 4], rows = (frag[p + 5] << 8) | frag[p + 6], cols = (frag[p + 7] << 8) | frag[p + 8], comps = frag[p + 9];
       label += `: ${prec}-bit, ${rows} rows, ${cols} columns, ${comps} component${comps === 1 ? "" : "s"}`;
     }
-    out.push(`      @${String(p).padEnd(6)} ${shown.padEnd(18)} ${label}`);
+    out.push(`      @${String(p).padEnd(6)} ${shown.padEnd(30)} ${label}`);
     if (m === 0xda) {
       const end = frag.length >= 2 && frag[frag.length - 2] === 0xff && frag[frag.length - 1] === 0xd9 ? frag.length - 2 : frag.length;
       out.push(`      … ${n(end - (p + 2 + len))} bytes of coded pixel differences …`);
-      if (end < frag.length) out.push(`      @${String(end).padEnd(6)} ff d9              ${JPEG_MARKERS[0xd9]}`);
+      if (end < frag.length) out.push(`      @${String(end).padEnd(6)} ff d9                          ${JPEG_MARKERS[0xd9]}`);
+      break;
+    }
+    p += 2 + len;
+  }
+  return out;
+}
+
+const J2K_MARKERS: Record<number, string> = {
+  0x4f: "SOC   start of codestream",
+  0x50: "CAP   extended capabilities (HTJ2K)",
+  0x51: "SIZ   image and tile size",
+  0x52: "COD   coding style",
+  0x53: "COC   component coding style",
+  0x55: "TLM   tile-part lengths",
+  0x5c: "QCD   quantisation",
+  0x5d: "QCC   component quantisation",
+  0x60: "PPM   packed packet headers",
+  0x63: "CRG   component registration",
+  0x64: "COM   comment",
+  0x90: "SOT   start of tile-part",
+  0x93: "SOD   start of data: the coded wavelet data follow",
+  0xd9: "EOC   end of codestream",
+};
+
+/** A JPEG 2000 codestream's markers: the main header, the first tile-part's SOT and SOD, then EOC. */
+function j2kMarkers(cs: Uint8Array): string[] {
+  if (cs[0] !== 0xff || cs[1] !== 0x4f) return [];
+  const line = (p: number, len: number, label: string) => `      @${String(p).padEnd(6)} ${hex(cs.subarray(p, p + len)).replace(/(..)(?!$)/g, "$1 ").padEnd(30)} ${label}`;
+  const out = [line(0, 2, J2K_MARKERS[0x4f])];
+  let p = 2;
+  while (p + 4 <= cs.length && cs[p] === 0xff) {
+    const m = cs[p + 1];
+    const len = (cs[p + 2] << 8) | cs[p + 3];
+    let label = J2K_MARKERS[m] ?? `marker ff ${m.toString(16)}`;
+    if (m === 0x51 && p + 41 <= cs.length) {
+      // SIZ: Lsiz, Rsiz, then Xsiz, Ysiz, XOsiz, YOsiz (4 bytes each) … Csiz (2), then Ssiz per component.
+      const dv = new DataView(cs.buffer, cs.byteOffset + p);
+      const w = dv.getUint32(6) - dv.getUint32(14), hgt = dv.getUint32(10) - dv.getUint32(18), comps = dv.getUint16(38);
+      const bits = (cs[p + 40] & 0x7f) + 1, signed = cs[p + 40] & 0x80 ? "signed " : "";
+      label += `: ${w} × ${hgt}, ${comps} component${comps === 1 ? "" : "s"}, ${signed}${bits}-bit`;
+    }
+    if (m === 0x52 && p + 13 <= cs.length) label += `: ${cs[p + 9]} wavelet levels, ${cs[p + 13] === 1 ? "reversible 5/3 (lossless)" : "irreversible 9/7"}`;
+    out.push(line(p, Math.min(len + 2, 10), label));
+    if (m === 0x90) {
+      // SOT: then SOD and the coded data of this tile-part; stop labelling there.
+      const psot = new DataView(cs.buffer, cs.byteOffset + p).getUint32(6);
+      const sod = p + 2 + len;
+      if (cs[sod] === 0xff && cs[sod + 1] === 0x93) {
+        out.push(line(sod, 2, J2K_MARKERS[0x93]));
+        const end = cs.length >= 2 && cs[cs.length - 2] === 0xff && cs[cs.length - 1] === 0xd9 ? cs.length - 2 : cs.length;
+        const tileEnd = psot ? Math.min(end, p + psot) : end;
+        out.push(`      … ${n(tileEnd - (sod + 2))} bytes of coded data${tileEnd < end ? ", then more tile-parts" : ""} …`);
+        if (end < cs.length) out.push(line(end, 2, J2K_MARKERS[0xd9]));
+      }
       break;
     }
     p += 2 + len;
@@ -81,7 +135,8 @@ function pixelLines(bytes: Uint8Array, px: Element): string[] {
   frags.forEach((fr, i) => {
     lines.push(`  (FFFE,E000) item, ${n(fr.length)} bytes: ${frags.length === 1 ? "the compressed image" : `fragment ${i + 1}`}`);
     if (i === 0) {
-      const marks = jpegMarkers(bytes.subarray(fr.offset, fr.offset + fr.length));
+      const frag = bytes.subarray(fr.offset, fr.offset + fr.length);
+      const marks = jpegMarkers(frag).length ? jpegMarkers(frag) : j2kMarkers(frag);
       if (marks.length) lines.push(...marks);
       else lines.push(`      ${hex(bytes.subarray(fr.offset, fr.offset + 16)).replace(/(..)(?!$)/g, "$1 ")} …`);
     }
@@ -159,7 +214,7 @@ export async function mountDicom(pic: HTMLElement, exact: HTMLElement) {
   const encoding = h("p", { class: "cap", id: "dicom-encoding" });
   pic.replaceChildren(
     h("p", { class: "cap", text: `The DICOM header of slice ${S.slice + 1}, a few of its ${n(ds.elements.size)} attributes, and how its Pixel Data is stored:` }),
-    excerpt(lines.join("\n"), [/Transfer Syntax UID/, /Implementation Version Name/, /Patient's Name/, /Pixel Data/, /Basic Offset Table/, /SOF3|SOF0|SOF1/], "The DICOM header and Pixel Data"),
+    excerpt(lines.join("\n"), [/Transfer Syntax UID/, /Implementation Version Name/, /Patient's Name/, /Pixel Data/, /Basic Offset Table/, /SOF3|SOF0|SOF1|SIZ /], "The DICOM header and Pixel Data"),
     encoding,
     h("p", { class: "cap", text: "The Pixel Data, decoded in this browser:" }),
     stage,
@@ -170,6 +225,9 @@ export async function mountDicom(pic: HTMLElement, exact: HTMLElement) {
   const how = encapsulated
     ? [
         para("Compressed Pixel Data is stored as items. The first item is the Basic Offset Table: where each frame's data starts (empty means a single frame, or that the reader finds frames itself). The items after it hold the compressed frames."),
+        ...(/\.4\.(90|91|201|202|203)$/.test(transferSyntax)
+          ? [para("JPEG 2000 transforms the image into wavelet bands and codes them in blocks. The markers name each part: SOC starts the codestream, SIZ gives the size and bit depth, COD the coding style (the reversible 5/3 wavelet is lossless), SOT and SOD start each tile's data, EOC ends it.")]
+          : []),
         ...(/\.4\.(57|70)$/.test(transferSyntax)
           ? [para("JPEG Lossless predicts each pixel from its neighbour to the left (with SV1, first-order prediction) and Huffman-codes the difference. The markers name each part: SOI starts the image, DHT holds the Huffman table, SOF3 gives the bit depth and size, SOS starts the coded data, EOI ends it. Decoding reverses each step exactly, so no value changes.")]
           : []),
