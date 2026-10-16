@@ -79,19 +79,48 @@ fn rows3<T>(buf: &mut [T], w: usize, r: usize, a: usize, b: usize) -> (&mut [T],
     }
 }
 
-/// Apply `f(row, above, below)` to every row of parity `parity` (0 even) in `buf`, mirrored at
-/// the edges.
+/// `dst[i] = f(dst[i], a[i], b[i])` over a row.
 #[inline(always)]
-fn vstep<T: Copy>(buf: &mut [T], w: usize, h: usize, parity: usize, f: impl Fn(T, T, T) -> T) {
-    let mut r = parity;
-    while r < h {
-        let a = if r == 0 { 1 } else { r - 1 };
-        let b = if r + 1 >= h { r - 1 } else { r + 1 };
-        let (t, n1, n2) = rows3(buf, w, r, a, b);
-        for ((x, &p), &q) in t.iter_mut().zip(n1).zip(n2) {
-            *x = f(*x, p, q);
+fn lift_row<T: Copy>(dst: &mut [T], a: &[T], b: &[T], f: impl Fn(T, T, T) -> T) {
+    for ((x, &p), &q) in dst.iter_mut().zip(a).zip(b) {
+        *x = f(*x, p, q);
+    }
+}
+
+/// Vertical lifting in one pass down the rows: step k (of `N`) updates the rows of parity
+/// `parity[k]` from their neighbours, through `step(k, row, above, below)`. Step k reaches
+/// row r once its neighbours have had step k − 1 and before they have step k + 1 (row
+/// t − k when the pass is at row t), so every sample sees what it would in separate passes,
+/// while only a few rows are live in cache. `scale(row, r)`, if any, runs on each row before
+/// any step reads it.
+#[inline(always)]
+fn vlift<T: Copy, const N: usize>(
+    buf: &mut [T],
+    w: usize,
+    h: usize,
+    parity: [usize; N],
+    step: impl Fn(usize, &mut [T], &[T], &[T]),
+    scale: Option<impl Fn(&mut [T], usize)>,
+) {
+    if let Some(sc) = &scale {
+        sc(&mut buf[..w], 0);
+    }
+    for t in 0..h + N {
+        if let Some(sc) = &scale {
+            if t + 1 < h {
+                sc(&mut buf[(t + 1) * w..(t + 2) * w], t + 1);
+            }
         }
-        r += 2;
+        for (k, &par) in parity.iter().enumerate() {
+            let Some(r) = t.checked_sub(k) else { continue };
+            if r >= h || r % 2 != par {
+                continue;
+            }
+            let a = if r == 0 { 1 } else { r - 1 };
+            let b = if r + 1 >= h { r - 1 } else { r + 1 };
+            let (row, n1, n2) = rows3(buf, w, r, a, b);
+            step(k, row, n1, n2);
+        }
     }
 }
 
@@ -109,8 +138,11 @@ impl Filter<i32> for Rev53 {
     fn lift_columns(buf: &mut [i32], w: usize, h: usize, odd: bool) {
         // Low-pass rows are those at even coordinates.
         let low = usize::from(odd);
-        vstep(buf, w, h, low, |s, l, r| s - ((l + r + 2) >> 2));
-        vstep(buf, w, h, 1 - low, |s, l, r| s + ((l + r) >> 1));
+        let step = |k: usize, row: &mut [i32], a: &[i32], b: &[i32]| match k {
+            0 => lift_row(row, a, b, |s, l, r| s - ((l + r + 2) >> 2)),
+            _ => lift_row(row, a, b, |s, l, r| s + ((l + r) >> 1)),
+        };
+        vlift(buf, w, h, [low, 1 - low], step, None::<fn(&mut [i32], usize)>);
     }
 }
 
@@ -126,8 +158,11 @@ impl Filter<f32> for Rev53F {
     }
     fn lift_columns(buf: &mut [f32], w: usize, h: usize, odd: bool) {
         let low = usize::from(odd);
-        vstep(buf, w, h, low, |s, l, r| s - ((l + r) * 0.25 + 0.5).floor());
-        vstep(buf, w, h, 1 - low, |s, l, r| s + ((l + r) * 0.5).floor());
+        let step = |k: usize, row: &mut [f32], a: &[f32], b: &[f32]| match k {
+            0 => lift_row(row, a, b, |s, l, r| s - ((l + r) * 0.25 + 0.5).floor()),
+            _ => lift_row(row, a, b, |s, l, r| s + ((l + r) * 0.5).floor()),
+        };
+        vlift(buf, w, h, [low, 1 - low], step, None::<fn(&mut [f32], usize)>);
     }
 }
 
@@ -151,16 +186,19 @@ impl Filter<f32> for Irr97 {
     }
     fn lift_columns(buf: &mut [f32], w: usize, h: usize, odd: bool) {
         let low = usize::from(odd);
-        for (r, row) in buf.chunks_exact_mut(w).take(h).enumerate() {
+        let step = |k: usize, row: &mut [f32], a: &[f32], b: &[f32]| match k {
+            0 => lift_row(row, a, b, |s, l, r| (l + r) * NEG_DELTA + s),
+            1 => lift_row(row, a, b, |s, l, r| (l + r) * NEG_GAMMA + s),
+            2 => lift_row(row, a, b, |s, l, r| (l + r) * NEG_BETA + s),
+            _ => lift_row(row, a, b, |s, l, r| (l + r) * NEG_ALPHA + s),
+        };
+        let scale = |row: &mut [f32], r: usize| {
             let k = if r % 2 == low { KAPPA } else { INV_KAPPA };
             for v in row {
                 *v *= k;
             }
-        }
-        vstep(buf, w, h, low, |s, l, r| (l + r) * NEG_DELTA + s);
-        vstep(buf, w, h, 1 - low, |s, l, r| (l + r) * NEG_GAMMA + s);
-        vstep(buf, w, h, low, |s, l, r| (l + r) * NEG_BETA + s);
-        vstep(buf, w, h, 1 - low, |s, l, r| (l + r) * NEG_ALPHA + s);
+        };
+        vlift(buf, w, h, [low, 1 - low, low, 1 - low], step, Some(scale));
     }
 }
 
@@ -199,8 +237,12 @@ pub(crate) fn level<T: Copy + Default, F: Filter<T>>(rect: Rect, ll: &[T], hl: &
         high.copy_from_slice(&hb[row * nuh..row * nuh + nuh]);
         F::lift(low, high, odd_x);
         let (first, second) = if odd_x { (&high[..], &low[..]) } else { (&low[..], &high[..]) };
-        for (i, d) in o.iter_mut().enumerate() {
-            *d = if i % 2 == 0 { first[i / 2] } else { second[i / 2] };
+        for ((pair, &a), &b) in o.chunks_exact_mut(2).zip(first).zip(second) {
+            pair[0] = a;
+            pair[1] = b;
+        }
+        if w % 2 == 1 {
+            o[w - 1] = first[w / 2];
         }
     }
     if h == 1 {

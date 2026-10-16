@@ -73,6 +73,7 @@ struct Decoder<'c, 'a> {
     ht: crate::ht::Scratch,
     ht_out: Vec<u32>,
     ht_coded: Vec<u8>,
+    ht_sets: Vec<(usize, usize)>,
 }
 
 const MAX_MIXED_ATTEMPTS: u32 = 4096;
@@ -123,8 +124,9 @@ impl<'c, 'a> Decoder<'c, 'a> {
                     let cc = &t.params.components[c];
                     !cc.reversible || t.params.quantization[c].style != 0
                 });
-            let n = (r.w() as usize).checked_mul(r.h() as usize).ok_or_else(|| invalid("image too large"))?;
-            let plane = if float { Plane::Float(alloc(n)?) } else { Plane::Int(alloc(n)?) };
+            (r.w() as usize).checked_mul(r.h() as usize).ok_or_else(|| invalid("image too large"))?;
+            // Allocated by the first tile stored (or taken from it, for a single tile).
+            let plane = if float { Plane::Float(Vec::new()) } else { Plane::Int(Vec::new()) };
             planes.push(Component {
                 width: r.w(),
                 height: r.h(),
@@ -137,7 +139,7 @@ impl<'c, 'a> Decoder<'c, 'a> {
                 plane,
             });
         }
-        Ok(Self { cs, reduce, part2, planes, t1: T1::default(), ht: Default::default(), ht_out: Vec::new(), ht_coded: Vec::new() })
+        Ok(Self { cs, reduce, part2, planes, t1: T1::default(), ht: Default::default(), ht_out: Vec::new(), ht_coded: Vec::new(), ht_sets: Vec::new() })
     }
 
     fn run(mut self) -> Result<Image> {
@@ -148,6 +150,15 @@ impl<'c, 'a> Decoder<'c, 'a> {
         let size = &cs.size;
         let image = Rect { x0: size.x0, y0: size.y0, x1: size.x1, y1: size.y1 }.scale_down(self.reduce);
         let mut components = self.planes;
+        // Components no tile wrote to (tiles missing from the codestream) are zero.
+        for c in &mut components {
+            let n = c.width as usize * c.height as usize;
+            match &mut c.plane {
+                Plane::Int(v) if v.len() != n => *v = alloc(n)?,
+                Plane::Float(v) if v.len() != n => *v = alloc(n)?,
+                _ => {}
+            }
+        }
         if let Some(p) = &self.part2 {
             let len = image.w() as usize * image.h() as usize;
             let mut data: Vec<Vec<f32>> = components
@@ -349,43 +360,44 @@ impl<'c, 'a> Decoder<'c, 'a> {
                             Coding::Mixed => block.mixed,
                         };
                         let ht = match lane {
-                            Lane::Mq => false,
-                            Lane::Ht => true,
-                            Lane::Unknown => {
-                                // Trial: HT first, Part 1 if the HT decode fails (T.814 A.4).
-                                self.ht_block(block, mb, coding.style.causal).is_ok()
-                            }
+                            Lane::Mq => None,
+                            Lane::Ht => Some(self.ht_block(block, mb, coding.style.causal)?),
+                            // Trial: HT first, Part 1 if the HT decode fails (T.814 A.4).
+                            Lane::Unknown => self.ht_block(block, mb, coding.style.causal).ok(),
                         };
-                        if ht {
-                            if lane != Lane::Unknown {
-                                self.ht_block(block, mb, coding.style.causal)?;
-                            }
+                        if let Some(nonzero) = ht {
                             let shift = 31 - mb;
                             let src = &self.ht_out;
                             match &mut bufs {
                                 BandBufs::Int(v) => {
-                                    let dst = &mut v[b][off..];
-                                    for y in 0..h {
-                                        for x in 0..w {
-                                            let sm = src[y * w + x];
-                                            let m = ((sm & 0x7FFF_FFFF) >> shift) as i32;
-                                            dst[y * bw + x] = if sm >> 31 != 0 { -m } else { m };
+                                    let rows = v[b][off..].chunks_mut(bw).take(h);
+                                    if !nonzero {
+                                        rows.for_each(|r| r[..w].fill(0));
+                                    } else {
+                                        for (drow, srow) in rows.zip(src.chunks_exact(w)) {
+                                            for (d, &sm) in drow[..w].iter_mut().zip(srow) {
+                                                let m = ((sm & 0x7FFF_FFFF) >> shift) as i32;
+                                                *d = if sm >> 31 != 0 { -m } else { m };
+                                            }
                                         }
                                     }
                                 }
                                 BandBufs::Float(v) => {
-                                    let dst = &mut v[b][off..];
+                                    let rows = v[b][off..].chunks_mut(bw).take(h);
                                     let irreversible = !coding.reversible;
                                     let scale = f32::from_bits((127 - shift) << 23) * step;
-                                    for y in 0..h {
-                                        for x in 0..w {
-                                            let sm = src[y * w + x];
-                                            let m = if irreversible {
-                                                (sm & 0x7FFF_FFFF) as f32 * scale
-                                            } else {
-                                                ((sm & 0x7FFF_FFFF) >> shift) as f32 * step
-                                            };
-                                            dst[y * bw + x] = if sm >> 31 != 0 { -m } else { m };
+                                    if !nonzero {
+                                        rows.for_each(|r| r[..w].fill(0.0));
+                                    } else {
+                                        for (drow, srow) in rows.zip(src.chunks_exact(w)) {
+                                            for (d, &sm) in drow[..w].iter_mut().zip(srow) {
+                                                let m = if irreversible {
+                                                    (sm & 0x7FFF_FFFF) as f32 * scale
+                                                } else {
+                                                    ((sm & 0x7FFF_FFFF) >> shift) as f32 * step
+                                                };
+                                                *d = if sm >> 31 != 0 { -m } else { m };
+                                            }
                                         }
                                     }
                                 }
@@ -406,89 +418,89 @@ impl<'c, 'a> Decoder<'c, 'a> {
     }
 
     /// Decode an HT code-block (T.814 B.3, clause 7) into `self.ht_out` (sign-magnitude, the
-    /// cleanup plane at bit 30 − S_blk). Uses the last HT set whose cleanup segment is present.
-    fn ht_block(&mut self, block: &Block<'a>, mb: u32, causal: bool) -> Result<()> {
+    /// cleanup plane at bit 30 − S_blk), using the last HT set whose cleanup segment is
+    /// present. Returns false, leaving `ht_out` alone, when the block is all zero.
+    fn ht_block(&mut self, block: &Block<'a>, mb: u32, causal: bool) -> Result<bool> {
         let (w, h) = (block.rect.w() as usize, block.rect.h() as usize);
-        self.ht_out.clear();
-        self.ht_out.resize(w * h, 0);
         let Some(p0) = block.ht_p0 else {
             // Placeholder passes only (or never included): zero.
-            return Ok(());
+            return Ok(false);
         };
         let avail = block.passes - p0;
         if avail > 3 * mb || p0 > 3 * mb {
             return Err(invalid("HT code-block with more passes than bit-planes"));
         }
         let sets = avail.div_ceil(3) as usize;
-        // (cleanup bytes, refinement bytes) per set, as ranges into one buffer per kind.
-        let mut cleanup: Vec<Vec<u8>> = vec![Vec::new(); sets];
-        let mut refine: Vec<Vec<u8>> = vec![Vec::new(); sets];
+        // Cleanup and refinement segment lengths per set.
+        let lens = &mut self.ht_sets;
+        lens.clear();
+        lens.resize(sets, (0, 0));
+        let set_of = |ch: &crate::geometry::Chunk<'_>| -> Option<(usize, bool)> {
+            let last = ch.first_pass + ch.passes - 1;
+            let rel = last.checked_sub(p0)?;
+            Some(((rel / 3) as usize, rel % 3 == 0))
+        };
         for ch in &block.chunks {
             if ch.passes == 0 {
                 continue;
             }
-            let last = ch.first_pass + ch.passes - 1;
-            if last < p0 {
-                if ch.len != 0 {
-                    return Err(invalid("HT placeholder passes with data"));
-                }
-                continue;
-            }
-            let rel = last - p0;
-            let set = (rel / 3) as usize;
-            if rel % 3 == 0 {
-                cleanup[set].extend_from_slice(ch.data);
-            } else {
-                refine[set].extend_from_slice(ch.data);
+            match set_of(ch) {
+                None if ch.len != 0 => return Err(invalid("HT placeholder passes with data")),
+                None => {}
+                Some((set, true)) => lens[set].0 += ch.data.len(),
+                Some((set, false)) => lens[set].1 += ch.data.len(),
             }
         }
         let mut chosen = None;
-        for j in 0..sets {
-            let cl = cleanup[j].len();
+        for (j, &(cl, rl)) in lens.iter().enumerate() {
             if cl == 1 || (j == 0 && cl == 0) {
                 return Err(invalid("HT cleanup segment of length 1 (or an empty first one)"));
             }
-            if cl == 0 && !refine[j].is_empty() {
+            if cl == 0 && rl != 0 {
                 return Err(invalid("HT refinement segment without a cleanup segment"));
             }
             if cl > 0 {
                 chosen = Some(j);
             }
         }
-        let Some(j) = chosen else { return Ok(()) };
+        let Some(j) = chosen else { return Ok(false) };
+        let (len_cleanup, len_refinement) = lens[j];
         let in_set = (avail - 3 * j as u32).min(3);
-        let num_passes = if refine[j].is_empty() { 1 } else { in_set };
+        let num_passes = if len_refinement == 0 { 1 } else { in_set };
         let s_blk = block.missing + p0 / 3 + j as u32;
         if s_blk >= mb {
             return Err(invalid("HT code-block skips more bit-planes than the sub-band has"));
         }
         self.ht_coded.clear();
-        self.ht_coded.extend_from_slice(&cleanup[j]);
-        let len_cleanup = cleanup[j].len();
-        self.ht_coded.extend_from_slice(&refine[j]);
-        // The block decoder places the cleanup plane at bit 30 − missing, i.e. relative to
-        // 31 bit-planes; shift by 31 − Mb more.
-        let missing = s_blk;
+        for want_cleanup in [true, false] {
+            for ch in &block.chunks {
+                if ch.passes > 0 && set_of(ch) == Some((j, want_cleanup)) {
+                    self.ht_coded.extend_from_slice(ch.data);
+                }
+            }
+        }
+        // decode_block writes every sample, so the buffer is only resized.
+        self.ht_out.resize(w * h, 0);
         crate::ht::decode_block(
             &mut self.ht,
             &self.ht_coded,
-            &mut self.ht_out,
+            &mut self.ht_out[..w * h],
             w,
             h,
             w,
-            missing,
-            &crate::ht::BlockPasses { num_passes, len_cleanup, len_refinement: refine[j].len() },
+            s_blk,
+            &crate::ht::BlockPasses { num_passes, len_cleanup, len_refinement },
             causal,
         )
         .map_err(|e| match e {
             crate::ht::HtError::Invalid(m) => invalid(format!("HT code-block: {m}")),
             crate::ht::HtError::Unsupported(m) => unsupported(format!("HT code-block: {m}")),
-        })
+        })?;
+        Ok(true)
     }
 
     /// Write each tile-component into its component plane.
     fn store(&mut self, tile: &Tile<'a>, tcs: &[TileComponent<'a>], outs: Vec<Plane>) -> Result<()> {
-        let sole = self.cs.tiles.len() == 1;
         let _ = tile;
         for ((tc, out), comp) in tcs.iter().zip(outs).zip(self.planes.iter_mut()) {
             let r = tc.rect.scale_down(self.reduce);
@@ -504,24 +516,37 @@ impl<'c, 'a> Decoder<'c, 'a> {
             if ox + w > pw || oy + h > ph {
                 return Err(invalid("tile outside the image"));
             }
+            let whole = ox == 0 && oy == 0 && w == pw && h == ph;
             match (&mut comp.plane, out) {
                 (Plane::Int(dst), Plane::Int(src)) => {
-                    if sole && ox == 0 && oy == 0 && w == pw && h == ph {
+                    if dst.is_empty() && whole {
                         *dst = src;
                     } else {
+                        if dst.is_empty() {
+                            *dst = alloc(pw * ph)?;
+                        }
                         copy_rows(dst, pw, &src, w, h, ox, oy);
                     }
                 }
                 (Plane::Float(dst), Plane::Float(src)) => {
-                    if sole && ox == 0 && oy == 0 && w == pw && h == ph {
+                    if dst.is_empty() && whole {
                         *dst = src;
                     } else {
+                        if dst.is_empty() {
+                            *dst = alloc(pw * ph)?;
+                        }
                         copy_rows(dst, pw, &src, w, h, ox, oy);
                     }
                 }
                 (Plane::Float(dst), Plane::Int(src)) => {
-                    let src: Vec<f32> = src.into_iter().map(|v| v as f32).collect();
-                    copy_rows(dst, pw, &src, w, h, ox, oy);
+                    if dst.is_empty() {
+                        *dst = alloc(pw * ph)?;
+                    }
+                    for y in 0..h {
+                        for (d, &v) in dst[(oy + y) * pw + ox..][..w].iter_mut().zip(&src[y * w..][..w]) {
+                            *d = v as f32;
+                        }
+                    }
                 }
                 (Plane::Int(_), Plane::Float(_)) => return Err(invalid("component kind changed between tiles")),
             }

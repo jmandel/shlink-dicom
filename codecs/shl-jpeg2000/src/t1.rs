@@ -271,15 +271,21 @@ impl T1 {
             let pos = bitplanes - 1 - pass.div_ceil(3);
             match pass % 3 {
                 0 => {
-                    cleanup(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, zc, style.causal);
+                    if style.causal {
+                        cleanup::<D, true>(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, zc);
+                    } else {
+                        cleanup::<D, false>(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, zc);
+                    }
                     if style.segmark {
                         for _ in 0..4 {
                             d.bit(&mut self.cx, CX_UNI);
                         }
                     }
                 }
-                1 => sigprop(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, zc, style.causal),
-                _ => refine(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, style.causal),
+                1 if style.causal => sigprop::<D, true>(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, zc),
+                1 => sigprop::<D, false>(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos, zc),
+                _ if style.causal => refine::<D, true>(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos),
+                _ => refine::<D, false>(d, &mut self.cx, &mut self.words, &mut self.mag, g, pos),
             }
             if style.reset {
                 self.cx = initial_contexts();
@@ -288,65 +294,60 @@ impl T1 {
         }
     }
 
-    /// Visit every sample: (row, column, magnitude, negative, lowest decoded plane).
+    /// For each row: its words, magnitudes and row index within the stripe.
     #[inline(always)]
-    fn samples(&self, mut f: impl FnMut(usize, usize, u32, bool, u32)) {
-        let ws = self.w + 2;
-        let Some((kind, pos)) = self.last else {
-            for y in 0..self.h {
-                for x in 0..self.w {
-                    f(y, x, 0, false, 0);
-                }
-            }
-            return;
-        };
-        for y in 0..self.h {
-            let (k, r) = (y / 4, (y % 4) as u32);
-            let words = &self.words[k * ws + 1..k * ws + 1 + self.w];
-            let mags = &self.mag[y * self.w..(y + 1) * self.w];
-            for (x, (&word, &m)) in words.iter().zip(mags).enumerate() {
-                let neg = word >> (CHI0 + r + 1) & 1 != 0;
-                // After a significance propagation pass, samples significant before it have
-                // their lowest decoded plane one above it.
-                let plane = if kind == 1 && word >> (VIS0 + r) & 1 == 0 { pos + 1 } else { pos };
-                f(y, x, m, neg, plane);
-            }
-        }
+    fn rows(&self) -> impl Iterator<Item = (usize, &[u32], &[u32], u32)> {
+        let (w, ws) = (self.w, self.w + 2);
+        (0..self.h).map(move |y| {
+            let k = y / 4;
+            (y, &self.words[k * ws + 1..k * ws + 1 + w], &self.mag[y * w..(y + 1) * w], (y % 4) as u32)
+        })
     }
 
     /// Write the block's integer coefficients (reversible, unquantised) into `out`, rows
     /// `stride` apart. Samples not decoded to the last bit-plane get half the remaining range.
     pub(crate) fn write_i32(&self, out: &mut [i32], stride: usize) {
-        self.samples(|y, x, m, neg, p| {
-            let mut v = m as i32;
-            if m != 0 {
-                if p > 0 {
-                    v += 1 << (p - 1);
-                }
-                if neg {
-                    v = -v;
-                }
+        let Some((kind, pos)) = self.last else {
+            for y in 0..self.h {
+                out[y * stride..y * stride + self.w].fill(0);
             }
-            out[y * stride + x] = v;
-        });
+            return;
+        };
+        // Half of the range below the lowest decoded plane: for samples decoded down to
+        // `pos`, and (after a significance propagation pass) to `pos + 1`.
+        let half = |p: u32| if p > 0 { 1i32 << (p - 1) } else { 0 };
+        let (h0, h1) = (half(pos), half(pos + 1));
+        for (y, words, mags, r) in self.rows() {
+            let row = &mut out[y * stride..y * stride + self.w];
+            for ((o, &word), &m) in row.iter_mut().zip(words).zip(mags) {
+                let up = kind == 1 && word >> (VIS0 + r) & 1 == 0;
+                let v = if m == 0 { 0 } else { m as i32 + if up { h1 } else { h0 } };
+                *o = if word >> (CHI0 + r + 1) & 1 != 0 { -v } else { v };
+            }
+        }
     }
 
     /// Write the block's coefficients times `step` into `out` (E-6 reconstruction, with the
     /// mid-point rule of the decoder this replaces: always for irreversible, for reversible
     /// only below the lowest decoded plane).
     pub(crate) fn write_f32(&self, out: &mut [f32], stride: usize, irreversible: bool, step: f32) {
-        self.samples(|y, x, m, neg, p| {
-            let mut v = m as i32 as f32;
-            if m != 0 {
-                if irreversible || p != 0 {
-                    v += 0.5 * (1u32 << p) as f32;
-                }
-                if neg {
-                    v = -v;
-                }
+        let Some((kind, pos)) = self.last else {
+            for y in 0..self.h {
+                out[y * stride..y * stride + self.w].fill(0.0);
             }
-            out[y * stride + x] = v * step;
-        });
+            return;
+        };
+        let half = |p: u32| if irreversible || p != 0 { 0.5 * (1u32 << p) as f32 } else { 0.0 };
+        let (h0, h1) = (half(pos), half(pos + 1));
+        for (y, words, mags, r) in self.rows() {
+            let row = &mut out[y * stride..y * stride + self.w];
+            for ((o, &word), &m) in row.iter_mut().zip(words).zip(mags) {
+                let up = kind == 1 && word >> (VIS0 + r) & 1 == 0;
+                let v = if m == 0 { 0.0 } else { m as i32 as f32 + if up { h1 } else { h0 } };
+                let v = if word >> (CHI0 + r + 1) & 1 != 0 { -v } else { v };
+                *o = v * step;
+            }
+        }
     }
 }
 
@@ -402,14 +403,14 @@ fn sign<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], words: &[u32], i: usize, r: u
 /// Significance propagation of one sample, row `r` of the column at word `i`.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn sp_sample<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, k: usize, x: usize, i: usize, r: u32, one: u32, zc: &[u8; 512], causal: bool) {
+fn sp_sample<D: PassBits, const CAUSAL: bool>(d: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, k: usize, x: usize, i: usize, r: u32, one: u32, zc: &[u8; 512]) {
     let word = words[i];
-    let nb = neighbourhood(word, r, causal);
+    let nb = neighbourhood(word, r, CAUSAL);
     if nb & SELF == 0 && nb != 0 {
         let bit = d.bit(cx, usize::from(zc[nb as usize]));
         words[i] |= 1 << (VIS0 + r);
         if bit != 0 {
-            let neg = sign(d, cx, words, i, r, nb, causal);
+            let neg = sign(d, cx, words, i, r, nb, CAUSAL);
             mag[(4 * k + r as usize) * g.w + x] = one;
             set_significant(words, g, k, i, r, neg);
         }
@@ -419,7 +420,7 @@ fn sp_sample<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: 
 /// Significance propagation pass (D.3.1).
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-fn sigprop<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, pos: u32, zc: &[u8; 512], causal: bool) {
+fn sigprop<D: PassBits, const CAUSAL: bool>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, pos: u32, zc: &[u8; 512]) {
     let mut local = *dst;
     let d = &mut local;
     let one = 1u32 << pos;
@@ -433,13 +434,13 @@ fn sigprop<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: 
                 continue;
             }
             if rows == 4 {
-                sp_sample(d, cx, words, mag, g, k, x, i, 0, one, zc, causal);
-                sp_sample(d, cx, words, mag, g, k, x, i, 1, one, zc, causal);
-                sp_sample(d, cx, words, mag, g, k, x, i, 2, one, zc, causal);
-                sp_sample(d, cx, words, mag, g, k, x, i, 3, one, zc, causal);
+                sp_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 0, one, zc);
+                sp_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 1, one, zc);
+                sp_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 2, one, zc);
+                sp_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 3, one, zc);
             } else {
                 for r in 0..rows {
-                    sp_sample(d, cx, words, mag, g, k, x, i, r, one, zc, causal);
+                    sp_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, r, one, zc);
                 }
             }
         }
@@ -450,12 +451,12 @@ fn sigprop<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: 
 /// Refinement of one sample; returns the word with its refined bit set.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn mr_sample<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], word: u32, mag: &mut [u32], m: usize, r: u32, pos: u32, causal: bool) -> u32 {
+fn mr_sample<D: PassBits, const CAUSAL: bool>(d: &mut D, cx: &mut [Cx; 19], word: u32, mag: &mut [u32], m: usize, r: u32, pos: u32) -> u32 {
     // Significant, and not just made so in this bit-plane's SP pass.
     if word & sigma(r + 1, 1) != 0 && word >> (VIS0 + r) & 1 == 0 {
         let ctx = if word >> (REF0 + r) & 1 != 0 {
             16
-        } else if neighbourhood(word, r, causal) & !SELF != 0 {
+        } else if neighbourhood(word, r, CAUSAL) & !SELF != 0 {
             15
         } else {
             14
@@ -470,7 +471,7 @@ fn mr_sample<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], word: u32, mag: &mut [u3
 /// Magnitude refinement pass (D.3.3).
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-fn refine<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, pos: u32, causal: bool) {
+fn refine<D: PassBits, const CAUSAL: bool>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, pos: u32) {
     let mut local = *dst;
     let d = &mut local;
     for k in 0..g.stripes {
@@ -484,13 +485,13 @@ fn refine<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &
             let m = 4 * k * g.w + x;
             let mut set = 0;
             if rows == 4 {
-                set |= mr_sample(d, cx, word, mag, m, 0, pos, causal);
-                set |= mr_sample(d, cx, word, mag, m + g.w, 1, pos, causal);
-                set |= mr_sample(d, cx, word, mag, m + 2 * g.w, 2, pos, causal);
-                set |= mr_sample(d, cx, word, mag, m + 3 * g.w, 3, pos, causal);
+                set |= mr_sample::<D, CAUSAL>(d, cx, word, mag, m, 0, pos);
+                set |= mr_sample::<D, CAUSAL>(d, cx, word, mag, m + g.w, 1, pos);
+                set |= mr_sample::<D, CAUSAL>(d, cx, word, mag, m + 2 * g.w, 2, pos);
+                set |= mr_sample::<D, CAUSAL>(d, cx, word, mag, m + 3 * g.w, 3, pos);
             } else {
                 for r in 0..rows {
-                    set |= mr_sample(d, cx, word, mag, m + r as usize * g.w, r, pos, causal);
+                    set |= mr_sample::<D, CAUSAL>(d, cx, word, mag, m + r as usize * g.w, r, pos);
                 }
             }
             words[i] = word | set;
@@ -502,13 +503,13 @@ fn refine<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &
 /// Cleanup coding of one sample (not significant, not coded in the SP pass).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn cu_sample<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, k: usize, x: usize, i: usize, r: u32, one: u32, zc: &[u8; 512], causal: bool) {
+fn cu_sample<D: PassBits, const CAUSAL: bool>(d: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, k: usize, x: usize, i: usize, r: u32, one: u32, zc: &[u8; 512]) {
     let word = words[i];
-    let nb = neighbourhood(word, r, causal);
+    let nb = neighbourhood(word, r, CAUSAL);
     if nb & SELF == 0 && word >> (VIS0 + r) & 1 == 0 {
         let bit = d.bit(cx, usize::from(zc[nb as usize]));
         if bit != 0 {
-            let neg = sign(d, cx, words, i, r, nb, causal);
+            let neg = sign(d, cx, words, i, r, nb, CAUSAL);
             mag[(4 * k + r as usize) * g.w + x] = one;
             set_significant(words, g, k, i, r, neg);
         }
@@ -518,58 +519,59 @@ fn cu_sample<D: PassBits>(d: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: 
 /// Cleanup pass (D.3.4), with run-length coding of empty columns.
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-fn cleanup<D: PassBits>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, pos: u32, zc: &[u8; 512], causal: bool) {
+fn cleanup<D: PassBits, const CAUSAL: bool>(dst: &mut D, cx: &mut [Cx; 19], words: &mut [u32], mag: &mut [u32], g: Geom, pos: u32, zc: &[u8; 512]) {
     let mut local = *dst;
     let d = &mut local;
     let one = 1u32 << pos;
-    let rl_mask = if causal { (SIGMA_ALL & !SIGMA_BELOW) | VIS_ALL } else { SIGMA_ALL | VIS_ALL };
+    let rl_mask = if CAUSAL { (SIGMA_ALL & !SIGMA_BELOW) | VIS_ALL } else { SIGMA_ALL | VIS_ALL };
     for k in 0..g.stripes {
         let rows = (g.h - 4 * k).min(4) as u32;
         for x in 0..g.w {
             let i = k * g.ws + x + 1;
             let word = words[i];
             if rows == 4 {
-                // Every sample significant or coded already: nothing to do.
-                let done = (word >> 4 & 1 | word >> 6 & 2 | word >> 8 & 4 | word >> 10 & 8) | (word >> VIS0 & 0xF);
-                if done == 0xF {
-                    words[i] = word & !VIS_ALL;
-                    continue;
-                }
                 let mut start = 0;
-                if word & rl_mask == 0 {
+                if word & rl_mask != 0 {
+                    // Every sample significant or coded already: nothing to do.
+                    let done = (word >> 4 & 1 | word >> 6 & 2 | word >> 8 & 4 | word >> 10 & 8) | (word >> VIS0 & 0xF);
+                    if done == 0xF {
+                        words[i] = word & !VIS_ALL;
+                        continue;
+                    }
+                } else {
                     // Run-length coding.
                     if d.bit(cx, CX_RL) == 0 {
                         continue;
                     }
                     let r = d.bit(cx, CX_UNI) << 1 | d.bit(cx, CX_UNI);
-                    let nb = neighbourhood(word, r, causal);
-                    let neg = sign(d, cx, words, i, r, nb, causal);
+                    let nb = neighbourhood(word, r, CAUSAL);
+                    let neg = sign(d, cx, words, i, r, nb, CAUSAL);
                     mag[(4 * k + r as usize) * g.w + x] = one;
                     set_significant(words, g, k, i, r, neg);
                     start = r + 1;
                 }
                 match start {
                     0 => {
-                        cu_sample(d, cx, words, mag, g, k, x, i, 0, one, zc, causal);
-                        cu_sample(d, cx, words, mag, g, k, x, i, 1, one, zc, causal);
-                        cu_sample(d, cx, words, mag, g, k, x, i, 2, one, zc, causal);
-                        cu_sample(d, cx, words, mag, g, k, x, i, 3, one, zc, causal);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 0, one, zc);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 1, one, zc);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 2, one, zc);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 3, one, zc);
                     }
                     1 => {
-                        cu_sample(d, cx, words, mag, g, k, x, i, 1, one, zc, causal);
-                        cu_sample(d, cx, words, mag, g, k, x, i, 2, one, zc, causal);
-                        cu_sample(d, cx, words, mag, g, k, x, i, 3, one, zc, causal);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 1, one, zc);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 2, one, zc);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 3, one, zc);
                     }
                     2 => {
-                        cu_sample(d, cx, words, mag, g, k, x, i, 2, one, zc, causal);
-                        cu_sample(d, cx, words, mag, g, k, x, i, 3, one, zc, causal);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 2, one, zc);
+                        cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 3, one, zc);
                     }
-                    3 => cu_sample(d, cx, words, mag, g, k, x, i, 3, one, zc, causal),
+                    3 => cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, 3, one, zc),
                     _ => {}
                 }
             } else {
                 for r in 0..rows {
-                    cu_sample(d, cx, words, mag, g, k, x, i, r, one, zc, causal);
+                    cu_sample::<D, CAUSAL>(d, cx, words, mag, g, k, x, i, r, one, zc);
                 }
             }
             words[i] &= !VIS_ALL;
