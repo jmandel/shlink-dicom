@@ -2,6 +2,7 @@
 //! (DC = block mean) and its recursive factorisation, so results agree to rounding.
 
 use super::acs::AcStrategy;
+use crate::simd::F4;
 
 const SQRT2: f32 = std::f32::consts::SQRT_2;
 
@@ -115,7 +116,24 @@ pub fn dct_rows(d: &mut [f32], n: usize, l: usize, scratch: &mut [f32]) {
     }
 }
 
+/// `dst` (cols × rows) = `src` (rows × cols) transposed; in 4×4 lane blocks when both sides
+/// are multiples of 4 (every VarDCT size from 4 up).
 fn transpose(src: &[f32], rows: usize, cols: usize, dst: &mut [f32]) {
+    if !rows.is_multiple_of(4) || !cols.is_multiple_of(4) {
+        return transpose_scalar(src, rows, cols, dst);
+    }
+    for r in (0..rows).step_by(4) {
+        for c in (0..cols).step_by(4) {
+            let t = F4::transpose4(core::array::from_fn(|i| F4::load(&src[(r + i) * cols + c..])));
+            for (i, v) in t.into_iter().enumerate() {
+                v.store(&mut dst[(c + i) * rows + r..]);
+            }
+        }
+    }
+}
+
+/// The reference for `transpose` (and its path for other sizes).
+fn transpose_scalar(src: &[f32], rows: usize, cols: usize, dst: &mut [f32]) {
     for r in 0..rows {
         for c in 0..cols {
             dst[c * rows + r] = src[r * cols + c];
@@ -326,7 +344,18 @@ pub fn dct2d(data: &mut [f32], rows: usize, cols: usize, scratch: &mut [f32]) {
 
 /// Upsampling scale for the lowest-frequency coefficients of an `n`-block dimension
 /// (libjxl's DCTResampleScales<n, 8n>): 1 / (cos(iπ/16n) cos(iπ/8n) cos(iπ/4n)).
+/// `resample_scale_exact`, tabulated once for n = 1, 2, 4, …, 32 covered blocks.
 fn resample_scale(n: usize, i: usize) -> f32 {
+    use std::sync::OnceLock;
+    static T: OnceLock<Vec<Vec<f32>>> = OnceLock::new();
+    let t = T.get_or_init(|| (0..6).map(|l| (0..1usize << l).map(|i| resample_scale_exact(1 << l, i)).collect()).collect());
+    match t.get(n.trailing_zeros() as usize).and_then(|r| r.get(i)) {
+        Some(&v) if n.is_power_of_two() => v,
+        _ => resample_scale_exact(n, i),
+    }
+}
+
+fn resample_scale_exact(n: usize, i: usize) -> f32 {
     let nn = (8 * n) as f64;
     let i = i as f64;
     let pi = std::f64::consts::PI;
@@ -573,6 +602,26 @@ pub fn transform_to_pixels(acs: AcStrategy, c: &mut [f32], out: &mut [f32], stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transpose_matches_scalar() {
+        for (rows, cols) in [(4, 4), (8, 8), (8, 16), (32, 8), (64, 256), (3, 8), (8, 2)] {
+            let src: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.5 - 7.0).collect();
+            let (mut a, mut b) = (vec![0f32; rows * cols], vec![0f32; rows * cols]);
+            transpose(&src, rows, cols, &mut a);
+            transpose_scalar(&src, rows, cols, &mut b);
+            assert_eq!(a, b, "{rows}x{cols}");
+        }
+    }
+
+    #[test]
+    fn resample_scale_table_is_exact() {
+        for l in 0..6 {
+            for i in 0..1usize << l {
+                assert_eq!(resample_scale(1 << l, i).to_bits(), resample_scale_exact(1 << l, i).to_bits());
+            }
+        }
+    }
 
     fn naive_idct(coef: &[f32], n: usize) -> Vec<f32> {
         // out[x] = c0 + sum_k sqrt2 * ck * cos((2x+1) k pi / 2n)
