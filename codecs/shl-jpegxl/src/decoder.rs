@@ -21,16 +21,19 @@ pub struct Decoder<'a> {
     cs: &'a [u8],
     pos: usize,
     refs: [Option<Reference>; 4],
+    lf_frames: [Option<Vec<Plane>>; 4],
     done: bool,
     /// Allow the exact integer output for a lone lossless frame.
     pub allow_int: bool,
+    /// Largest frame (width × height × channels) accepted.
+    pub max_samples: u64,
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(cs: &'a [u8]) -> Result<Self> {
         let mut br = BitReader::new(cs);
         let hd = read_headers(&mut br)?;
-        let mut d = Decoder { hd, cs, pos: br.byte_pos(), refs: [None, None, None, None], done: false, allow_int: true };
+        let mut d = Decoder { hd, cs, pos: br.byte_pos(), refs: [None, None, None, None], lf_frames: [None, None, None, None], done: false, allow_int: true, max_samples: 1 << 30 };
         if d.hd.metadata.preview.is_some() {
             d.pos = d.skip_frame(true)?;
         }
@@ -54,6 +57,10 @@ impl<'a> Decoder<'a> {
         while !self.done {
             let mut br = BitReader::new(self.cs.get(self.pos..).ok_or(Error::Invalid("frame offset"))?);
             let fh = FrameHeader::read(&mut br, &self.hd, false)?;
+            let nch = 3 + self.hd.metadata.extra_channels.len() as u64;
+            if u64::from(fh.width) * u64::from(fh.height) * nch > self.max_samples {
+                return Err(Error::Limit("frame too large"));
+            }
             let dims = fh.dims();
             let toc = read_toc(&mut br, &dims, fh.passes.num_passes as usize)?;
             let start = self.pos + br.byte_pos();
@@ -63,7 +70,7 @@ impl<'a> Decoder<'a> {
             if fh.is_last {
                 self.done = true;
             }
-            let df = decode_frame_sections(&mut sections, &self.hd, &fh, &self.refs)?;
+            let df = decode_frame_sections(&mut sections, &self.hd, &fh, &self.refs, &self.lf_frames)?;
             if self.allow_int && first && self.int_eligible(&fh, &df) {
                 self.done = true;
                 let nb = df.nb_color;
@@ -103,39 +110,111 @@ impl<'a> Decoder<'a> {
 
     /// Renders a decoded frame; returns the canvas when the frame is displayed.
     fn render(&mut self, fh: &FrameHeader, df: DecodedFrame) -> Result<Option<FrameImage>> {
+        use crate::stages;
         let m = &self.hd.metadata;
+        let dims = fh.dims();
         let mut img = to_planes(&self.hd, fh, &df)?;
-        if fh.loop_filter.gab || fh.loop_filter.epf_iters > 0 {
-            return Err(Error::Unsupported("loop filters"));
+        // Chroma upsampling.
+        if fh.ycbcr && !fh.is_444() {
+            for c in 0..3 {
+                let hs = fh.hshift(c);
+                let vs = fh.vshift(c);
+                if hs != 0 {
+                    img.planes[c] = stages::chroma_upsample_h(&img.planes[c], dims.xsize.div_ceil(1 << (hs - 1)))?;
+                }
+                if vs != 0 {
+                    img.planes[c] = stages::chroma_upsample_v(&img.planes[c], dims.ysize.div_ceil(1 << (vs - 1)))?;
+                }
+            }
         }
-        if fh.upsampling != 1 || fh.ec_upsampling.iter().any(|&u| u != 1) {
-            return Err(Error::Unsupported("upsampling"));
+        let lf = &fh.loop_filter;
+        if lf.gab {
+            stages::gaborish(&mut img.planes[..3], lf);
+        }
+        if lf.epf_iters > 0 {
+            let (sigma, bw) = match &df.vardct {
+                Some(v) => (v.epf_inv_sigma(lf), v.xb),
+                None => {
+                    #[allow(clippy::excessive_precision)]
+                    const INV_SIGMA_NUM: f32 = -1.1715728752538099024;
+                    let bw = dims.xsize.div_ceil(8);
+                    (vec![INV_SIGMA_NUM / lf.epf_sigma_for_modular; bw * dims.ysize.div_ceil(8)], bw)
+                }
+            };
+            if lf.epf_iters >= 3 {
+                stages::epf(&mut img.planes[..3], lf, &sigma, bw, 0);
+            }
+            stages::epf(&mut img.planes[..3], lf, &sigma, bw, 1);
+            if lf.epf_iters >= 2 {
+                stages::epf(&mut img.planes[..3], lf, &sigma, bw, 2);
+            }
+        }
+        let late_ec = fh.upsampling != 1 && fh.ec_upsampling.iter().all(|&u| u == fh.upsampling);
+        let (uw, uh) = (dims.xsize_upsampled, dims.ysize_upsampled);
+        if !late_ec {
+            for (i, &u) in fh.ec_upsampling.iter().enumerate() {
+                if u != 1 {
+                    let shift = crate::entropy::ceil_log2(u);
+                    let k = self.kernel(shift);
+                    img.planes[3 + i] = stages::upsample(&img.planes[3 + i], &k, shift, uw, uh)?;
+                }
+            }
         }
         if !df.patches.is_empty() {
             apply_patches(&mut img, &df.patches, &self.refs, &m.extra_channels)?;
         }
+        if fh.upsampling != 1 {
+            let shift = crate::entropy::ceil_log2(fh.upsampling);
+            let k = self.kernel(shift);
+            let n = if late_ec { img.planes.len() } else { 3 };
+            for c in 0..n {
+                img.planes[c] = stages::upsample(&img.planes[c], &k, shift, uw, uh)?;
+            }
+        }
         if fh.frame_type == FrameType::Lf {
-            return Err(Error::Unsupported("LF frames"));
+            let lvl = fh.lf_level as usize;
+            if lvl == 0 || lvl > 4 {
+                return invalid("LF frame level");
+            }
+            self.lf_frames[lvl - 1] = Some(img.planes[..3].to_vec());
+            return Ok(None);
         }
         if fh.can_be_referenced() && fh.save_before_ct {
             self.refs[fh.save_as_reference as usize] = Some(Reference { image: img.clone(), before_ct: true });
         }
-        if fh.xyb || fh.ycbcr {
-            return Err(Error::Unsupported("colour transforms"));
-        }
         let display = matches!(fh.frame_type, FrameType::Regular | FrameType::SkipProgressive);
-        let canvas = if display { Some(self.blend(fh, img)?) } else { None };
-        if let Some(c) = &canvas {
-            if fh.can_be_referenced() && !fh.save_before_ct {
-                self.refs[fh.save_as_reference as usize] = Some(Reference { image: c.clone(), before_ct: false });
+        let needs_ct = !fh.save_before_ct || display;
+        if needs_ct {
+            if fh.xyb {
+                let (op, tf) = output_params(&self.hd)?;
+                stages::xyb_to_linear(&mut img.planes[..3], &op);
+                stages::from_linear(&mut img.planes[..3], tf);
+            } else if fh.ycbcr {
+                stages::ycbcr_to_rgb(&mut img.planes[..3]);
             }
-        } else if fh.can_be_referenced() && !fh.save_before_ct {
-            return Err(Error::Unsupported("reference-only frame saved after colour transform"));
+        }
+        let canvas = if display { Some(self.blend(fh, img)?) } else { None };
+        if fh.can_be_referenced() && !fh.save_before_ct {
+            match &canvas {
+                Some(c) => self.refs[fh.save_as_reference as usize] = Some(Reference { image: c.clone(), before_ct: false }),
+                None => return Err(Error::Unsupported("reference-only frame saved after colour transform")),
+            }
         }
         if display && fh.is_visible() {
             return Ok(canvas);
         }
         Ok(None)
+    }
+
+    fn kernel(&self, shift: u32) -> Vec<f32> {
+        use crate::stages::{upsampling_kernel, UPS2, UPS4, UPS8};
+        let t = &self.hd.transform;
+        let w: &[f32] = match shift {
+            1 => t.upsampling2.as_deref().unwrap_or(&UPS2),
+            2 => t.upsampling4.as_deref().unwrap_or(&UPS4),
+            _ => t.upsampling8.as_deref().unwrap_or(&UPS8),
+        };
+        upsampling_kernel(w, shift)
     }
 
     fn blend(&self, fh: &FrameHeader, img: FrameImage) -> Result<FrameImage> {
@@ -238,7 +317,21 @@ fn to_planes(hd: &Headers, fh: &FrameHeader, df: &DecodedFrame) -> Result<FrameI
     let chans = &df.modular.channels;
     let mut planes = Vec::with_capacity(3 + m.extra_channels.len());
     match df.nb_color {
-        0 => return Err(Error::Unsupported("VarDCT colour")),
+        0 => {
+            let v = df.vardct.as_ref().ok_or(Error::Invalid("frame without colour"))?;
+            let dims = fh.dims();
+            for c in 0..3 {
+                let w = dims.xsize.div_ceil(1 << fh.hshift(c));
+                let h = dims.ysize.div_ceil(1 << fh.vshift(c));
+                let src = &v.planes[c];
+                let mut p = Plane::new(w, h)?;
+                for y in 0..h.min(src.h) {
+                    let n = w.min(src.w);
+                    p.data[y * w..y * w + n].copy_from_slice(&src.data[y * src.w..y * src.w + n]);
+                }
+                planes.push(p);
+            }
+        }
         1 => {
             let p = channel_to_plane(&chans[0], &m.bit_depth)?;
             planes.push(p.clone());
@@ -274,4 +367,57 @@ fn to_planes(hd: &Headers, fh: &FrameHeader, df: &DecodedFrame) -> Result<FrameI
         planes.push(channel_to_plane(&chans[df.nb_color + i], &ec.bit_depth)?);
     }
     Ok(FrameImage { planes })
+}
+
+/// Opsin inverse parameters and transfer function for the image's output colour space.
+fn output_params(hd: &Headers) -> Result<(crate::stages::OpsinParams, crate::stages::OutputTf)> {
+    use crate::headers::{ColourSpace, Primaries, TransferFunction, WhitePoint};
+    use crate::stages::OutputTf;
+    let m = &hd.metadata;
+    let ce = &m.colour;
+    let o = &hd.transform.opsin;
+    let mut inv = [[0f32; 3]; 3];
+    for j in 0..3 {
+        for i in 0..3 {
+            inv[j][i] = o.matrix[j][i];
+        }
+    }
+    let can_output = !ce.want_icc
+        && matches!(ce.tf, TransferFunction::Pq | TransferFunction::Srgb | TransferFunction::Gamma(_) | TransferFunction::Linear | TransferFunction::Hlg | TransferFunction::Dci | TransferFunction::Bt709)
+        && !(ce.is_gray() && ce.white_point != WhitePoint::D65);
+    let tf = if !can_output {
+        OutputTf::Linear
+    } else {
+        match ce.tf {
+            TransferFunction::Srgb => OutputTf::Srgb,
+            TransferFunction::Linear => OutputTf::Linear,
+            TransferFunction::Gamma(g) => OutputTf::Gamma(g as f32),
+            TransferFunction::Dci => OutputTf::Gamma(1.0 / 2.6),
+            TransferFunction::Bt709 => OutputTf::Bt709,
+            TransferFunction::Pq => OutputTf::Pq(m.tone_mapping.intensity_target),
+            TransferFunction::Hlg => OutputTf::Hlg,
+            TransferFunction::Unknown => OutputTf::Linear,
+        }
+    };
+    let gray = ce.is_gray();
+    if can_output && !gray && ce.colour_space == ColourSpace::Rgb && (ce.primaries != Primaries::Srgb || ce.white_point != WhitePoint::D65) {
+        return Err(Error::Unsupported("XYB output to non-sRGB primaries"));
+    }
+    if gray {
+        let lum = [0.2126f32, 0.7152, 0.0722];
+        let mut g = [0f32; 3];
+        for i in 0..3 {
+            g[i] = lum[0] * inv[0][i] + lum[1] * inv[1][i] + lum[2] * inv[2][i];
+        }
+        inv = [g, g, g];
+    }
+    let scale = 255.0 / m.tone_mapping.intensity_target;
+    for row in inv.iter_mut() {
+        for v in row.iter_mut() {
+            *v *= scale;
+        }
+    }
+    let bias = o.bias;
+    let bias_cbrt = [bias[0].cbrt(), bias[1].cbrt(), bias[2].cbrt()];
+    Ok((crate::stages::OpsinParams { inverse: inv, bias, bias_cbrt }, tf))
 }

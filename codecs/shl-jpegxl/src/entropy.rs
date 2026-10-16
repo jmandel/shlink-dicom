@@ -760,7 +760,8 @@ impl EntropyCode {
         }
         Ok(SymbolReader {
             state,
-            window: if self.lz77.enabled { vec![0; WINDOW_SIZE] } else { Vec::new() },
+            window: Vec::new(),
+            lz77: self.lz77.enabled,
             num_to_copy: 0,
             copy_pos: 0,
             num_decoded: 0,
@@ -768,6 +769,11 @@ impl EntropyCode {
             num_special,
         })
     }
+}
+
+/// Reads a context map of `map.len()` entries; returns the number of clusters.
+pub fn read_context_map_pub(br: &mut BitReader, map: &mut [u8]) -> Result<usize> {
+    read_context_map(br, map)
 }
 
 fn read_context_map(br: &mut BitReader, map: &mut [u8]) -> Result<usize> {
@@ -824,7 +830,9 @@ fn inverse_mtf(v: &mut [u8]) {
 /// Decoding state for one symbol stream.
 pub struct SymbolReader {
     state: u32,
+    /// LZ77 window: grows to WINDOW_SIZE, then wraps. Unwritten entries read as 0.
     window: Vec<u32>,
+    lz77: bool,
     num_to_copy: u64,
     copy_pos: u64,
     num_decoded: u64,
@@ -916,18 +924,27 @@ impl SymbolReader {
             Some(c) => c.decode(token, br),
             None => 0,
         };
-        self.window[(self.num_decoded as usize) & WINDOW_MASK] = v;
-        self.num_decoded += 1;
+        self.push_window(v);
         v
     }
 
     #[inline(always)]
+    fn push_window(&mut self, v: u32) {
+        let i = (self.num_decoded as usize) & WINDOW_MASK;
+        if let Some(e) = self.window.get_mut(i) {
+            *e = v;
+        } else {
+            self.window.push(v);
+        }
+        self.num_decoded += 1;
+    }
+
+    #[inline(always)]
     fn copy_one(&mut self) -> u32 {
-        let v = self.window[(self.copy_pos as usize) & WINDOW_MASK];
+        let v = self.window.get((self.copy_pos as usize) & WINDOW_MASK).copied().unwrap_or(0);
         self.copy_pos += 1;
         self.num_to_copy -= 1;
-        self.window[(self.num_decoded as usize) & WINDOW_MASK] = v;
-        self.num_decoded += 1;
+        self.push_window(v);
         v
     }
 
@@ -938,10 +955,9 @@ impl SymbolReader {
 
     /// Records `n` copies of `v` as decoded (for the LZ77 window), after a fast-path fill.
     pub fn advance_single(&mut self, v: u32, n: u64) {
-        if !self.window.is_empty() {
+        if self.lz77 {
             for _ in 0..n.min(WINDOW_SIZE as u64) {
-                self.window[(self.num_decoded as usize) & WINDOW_MASK] = v;
-                self.num_decoded += 1;
+                self.push_window(v);
             }
             self.num_decoded += n.saturating_sub(WINDOW_SIZE as u64);
         }

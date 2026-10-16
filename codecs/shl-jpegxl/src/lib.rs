@@ -15,7 +15,9 @@ mod frame_header;
 pub mod headers;
 mod icc;
 mod modular;
+mod vardct;
 mod render;
+mod stages;
 
 pub use error::{Error, Result};
 pub use headers::{BitDepth, ColourEncoding, ColourSpace, ExtraChannelType, TransferFunction};
@@ -106,6 +108,7 @@ pub fn decode_frames(data: &[u8], opts: &Options, max: usize) -> Result<Vec<Imag
         return Err(Error::Limit("image too large"));
     }
     dec.allow_int = max == 1;
+    dec.max_samples = opts.max_pixels.saturating_mul(4);
     let mut out = Vec::new();
     while out.len() < max {
         let Some((_, r)) = dec.next_displayed()? else { break };

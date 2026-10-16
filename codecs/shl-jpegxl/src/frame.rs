@@ -23,6 +23,29 @@ impl<'a> Sections<'a> {
         Ok(Sections { data, toc, shared })
     }
 
+    /// Runs `f` on the readers of several sections at once (the passes of one group).
+    pub fn with_many<T>(&mut self, idxs: &[usize], f: impl FnOnce(&mut [BitReader<'a>]) -> Result<T>) -> Result<T> {
+        if let Some(br) = self.shared.take() {
+            let mut v = vec![br];
+            let r = f(&mut v);
+            let br = v.pop().ok_or(Error::Invalid("section reader"))?;
+            br.check_end()?;
+            self.shared = Some(br);
+            return r;
+        }
+        let mut readers = Vec::with_capacity(idxs.len());
+        for &idx in idxs {
+            let &(off, size) = self.toc.entries.get(idx).ok_or(Error::Invalid("section index"))?;
+            let slice = self.data.get(off..off + size).ok_or(Error::Invalid("section out of range"))?;
+            readers.push(BitReader::new(slice));
+        }
+        let v = f(&mut readers)?;
+        for br in &readers {
+            br.check_end()?;
+        }
+        Ok(v)
+    }
+
     /// Runs `f` on the reader for section `idx`; checks the reader stayed in bounds.
     pub fn with<T>(&mut self, idx: usize, f: impl FnOnce(&mut BitReader<'a>) -> Result<T>) -> Result<T> {
         if let Some(br) = self.shared.as_mut() {
@@ -71,6 +94,10 @@ pub struct ModularFrame {
 }
 
 impl ModularFrame {
+    pub fn global_tree(&self) -> Option<&TreeCode> {
+        self.global.as_ref()
+    }
+
     /// The global modular section: optional global tree, then the global stream.
     pub fn read_global(br: &mut BitReader, hd: &Headers, fh: &FrameHeader, dims: &FrameDims) -> Result<Self> {
         let m = &hd.metadata;
@@ -190,6 +217,8 @@ pub struct DecodedFrame {
     pub nb_color: usize,
     pub lf_dequant: [f32; 3],
     pub patches: Vec<crate::render::Patch>,
+    /// VarDCT frames: the decoded colour planes and per-block data.
+    pub vardct: Option<crate::vardct::VarDct>,
 }
 
 pub fn decode_frame_sections(
@@ -197,42 +226,82 @@ pub fn decode_frame_sections(
     hd: &Headers,
     fh: &FrameHeader,
     refs: &[Option<crate::render::Reference>; 4],
+    lf_frames: &[Option<Vec<crate::render::Plane>>; 4],
 ) -> Result<DecodedFrame> {
     let dims = fh.dims();
     if fh.flags & (FLAG_SPLINES | FLAG_NOISE) != 0 {
         return Err(Error::Unsupported("splines or noise"));
     }
-    if fh.encoding == Encoding::VarDct {
-        return Err(Error::Unsupported("VarDCT frames"));
-    }
     let num_ec = hd.metadata.extra_channels.len();
-    let (lf_dequant, patches, mut mf) = sections.with(0, |br| {
+    let is_vardct = fh.encoding == Encoding::VarDct;
+    let quant_bias = {
+        let o = &hd.transform.opsin;
+        [o.quant_bias[0], o.quant_bias[1], o.quant_bias[2], o.quant_bias_numerator]
+    };
+    let (lf_dequant, patches, mut vd, mut mf) = sections.with(0, |br| {
         let patches = if fh.flags & FLAG_PATCHES != 0 {
             read_patches(br, dims.xsize_padded, dims.ysize_padded, num_ec, refs)?
         } else {
             Vec::new()
         };
         let q = read_lf_dequant(br)?;
+        let vd = if is_vardct { Some(crate::vardct::read_lf_global(br, fh, &dims, &q, quant_bias)?) } else { None };
         let mf = ModularFrame::read_global(br, hd, fh, &dims)?;
-        Ok((q, patches, mf))
+        Ok((q, patches, vd, mf))
     })?;
+    if let Some(v) = vd.as_mut() {
+        if v.use_lf_frame {
+            let lf = lf_frames.get(fh.lf_level as usize).and_then(|l| l.as_ref()).ok_or(Error::Invalid("no LF frame for this level"))?;
+            v.set_lf_from_frame(lf)?;
+        }
+    }
+    let is444 = fh.is_444();
     for g in 0..dims.num_lf_groups {
         let gx = g % dims.xsize_lf_groups;
         let gy = g / dims.xsize_lf_groups;
         let d = dims.lf_group_dim;
         let sid = 1 + dims.num_lf_groups + g;
-        sections.with(lf_group_index(&dims, g), |br| mf.read_group(br, gx * d, gy * d, d, 3, 1000, sid))?;
+        sections.with(lf_group_index(&dims, g), |br| {
+            if let Some(v) = vd.as_mut() {
+                if !v.use_lf_frame {
+                    v.read_lf_dc(br, &mf, &dims, g)?;
+                }
+            }
+            mf.read_group(br, gx * d, gy * d, d, 3, 1000, sid)?;
+            if let Some(v) = vd.as_mut() {
+                v.read_ac_metadata(br, &mf, &dims, g, is444)?;
+            }
+            Ok(())
+        })?;
     }
-    sections.with(hf_global_index(&dims), |_| Ok(()))?;
-    for p in 0..fh.passes.num_passes as usize {
-        let (min_s, max_s) = fh.passes.downsampling_bracket(p as u32);
-        for g in 0..dims.num_groups {
-            let gx = g % dims.xsize_groups;
-            let gy = g / dims.xsize_groups;
-            let d = dims.group_dim;
-            let sid = 1 + 3 * dims.num_lf_groups + 17 + dims.num_groups * p + g;
-            sections.with(pass_group_index(&dims, p, g), |br| mf.read_group(br, gx * d, gy * d, d, min_s, max_s, sid))?;
+    if let Some(v) = vd.as_mut() {
+        if !v.use_lf_frame && fh.flags & crate::frame_header::FLAG_SKIP_ADAPTIVE_LF_SMOOTHING == 0 {
+            v.smooth_lf(&lf_dequant);
         }
+    }
+    let num_passes = fh.passes.num_passes as usize;
+    sections.with(hf_global_index(&dims), |br| {
+        if let Some(v) = vd.as_mut() {
+            v.read_hf_global(br, &mf, &dims, num_passes)?;
+        }
+        Ok(())
+    })?;
+    for g in 0..dims.num_groups {
+        let idxs: Vec<usize> = (0..num_passes).map(|p| pass_group_index(&dims, p, g)).collect();
+        let gx = g % dims.xsize_groups;
+        let gy = g / dims.xsize_groups;
+        let d = dims.group_dim;
+        sections.with_many(&idxs, |readers| {
+            if let Some(v) = vd.as_mut() {
+                v.decode_group(readers, &dims, g, &fh.passes.shift[..num_passes])?;
+            }
+            for (p, br) in readers.iter_mut().enumerate() {
+                let (min_s, max_s) = fh.passes.downsampling_bracket(p as u32);
+                let sid = 1 + 3 * dims.num_lf_groups + 17 + dims.num_groups * p + g;
+                mf.read_group(br, gx * d, gy * d, d, min_s, max_s, sid)?;
+            }
+            Ok(())
+        })?;
     }
     let nb_color = mf.nb_color;
     let mut image = mf.image;
@@ -240,7 +309,7 @@ pub fn decode_frame_sections(
     if image.channels.len() != nb_color + num_ec {
         return invalid("modular image has the wrong number of channels");
     }
-    Ok(DecodedFrame { modular: image, nb_color, lf_dequant, patches })
+    Ok(DecodedFrame { modular: image, nb_color, lf_dequant, patches, vardct: vd })
 }
 
 /// Patch dictionary (K.3.1). `xsize`/`ysize` bound the patch positions (the padded frame).

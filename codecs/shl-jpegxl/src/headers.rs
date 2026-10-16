@@ -425,13 +425,17 @@ pub fn read_metadata(br: &mut BitReader) -> Result<ImageMetadata> {
     Ok(m)
 }
 
+#[allow(clippy::excessive_precision)]
 pub const DEFAULT_INVERSE_OPSIN: [[f32; 3]; 3] = [
-    [11.031_567, -9.866_944, -0.164_623],
-    [-3.254_147_4, 4.418_770_3, -0.164_623],
-    [-3.658_851_2, 2.712_923, 1.945_928_2],
+    [11.031566901960783, -9.866943921568629, -0.16462299647058826],
+    [-3.254147380392157, 4.418770392156863, -0.16462299647058826],
+    [-3.6588512862745097, 2.7129230470588235, 1.9459282392156863],
 ];
-pub const DEFAULT_OPSIN_BIAS: [f32; 3] = [-0.003_793_073_3; 3];
-pub const DEFAULT_QUANT_BIAS: [f32; 4] = [1.0 - 0.054_650_073, 1.0 - 0.070_054_5, 1.0 - 0.049_935_103, 0.145];
+#[allow(clippy::excessive_precision)]
+pub const DEFAULT_OPSIN_BIAS: [f32; 3] = [-0.0037930732552754493; 3];
+#[allow(clippy::excessive_precision)]
+pub const DEFAULT_QUANT_BIAS: [f32; 4] =
+    [1.0 - 0.05465007330715401, 1.0 - 0.07005449891748593, 1.0 - 0.049935103337343655, 0.145];
 
 #[derive(Clone, Debug)]
 pub struct OpsinInverse {

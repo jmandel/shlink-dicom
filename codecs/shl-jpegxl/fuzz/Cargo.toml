@@ -1,0 +1,22 @@
+# cargo-fuzz targets for shl-jpegxl: `cargo +nightly fuzz run decode` from this directory.
+[package]
+name = "shl-jpegxl-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shl-jpegxl = { path = ".." }
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
