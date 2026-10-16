@@ -145,6 +145,10 @@ Resolved 15 Oct:
     - PROPOSAL §11.1;
     - copy honesty: "pixel-identical" vs "byte for byte".
     - Branch `pack-compress`, worktree ../shlink-dicom-pack. It integrates the encoder when that reports.
+  - **Decisions made in this round:**
+    - No Bundle extension marks re-encoded files. A re-encoded file instead carries shlink-dicom's Implementation Class UID and Version Name in its file meta (PS3.10).
+    - Recipient Downloads copy reads "The DICOM files in this share". "Byte for byte" appears only where it's true.
+    - Transcoder API: crate codecs/shl-dicom-transcode (and -wasm), `transcode_part10_sv1`, deterministic output, a mandatory self-check. Implicit VR LE input is required, because the sample's CT and CR use it.
   - **Measurement agent (a18873dede250f0de):** ratios and speeds for SV1, JPEG-LS, J2K, HTJ2K and Deflate on the Josh Example studies.
   - **After merge and deploy:** the visuals agent re-measures everything numeric in the post. Sample size, file and record counts, the link-to-pixels trace, bytes to the first slice, footnotes 1 and 3, and the owner page's "30 MB stored" all change. Also every "byte for byte" claim in the post and on the site. Then sync LinkedIn and update the post message. Add the measured ratios as a comment on smart-imaging PR #5.
 
