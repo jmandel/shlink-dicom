@@ -21,7 +21,7 @@ Our time ÷ the reference's time, single-threaded, same frames; below 1 means we
 
 | Encoder, MB/s (higher is better) | Ours native | Reference native | Ours wasm | Reference wasm |
 |---|---|---|---|---|
-| JPEG Lossless SV1 | 113 | libjpeg-turbo 72 | 98.6 | none |
+| JPEG Lossless SV1 (live CT / MR / XR series) | 343 / 329 / 355 | libjpeg-turbo 74.6 / 58.0 / 65.8 | – | none |
 | JPEG 2000 lossless | 14.5 | OpenJPEG 17.6 | 13.1 | OpenJPEG about 17.4 |
 
 ## Rules for every change
