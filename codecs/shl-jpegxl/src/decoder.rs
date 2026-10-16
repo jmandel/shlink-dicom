@@ -23,6 +23,8 @@ pub struct Decoder<'a> {
     refs: [Option<Reference>; 4],
     lf_frames: [Option<Vec<Plane>>; 4],
     done: bool,
+    visible_index: u32,
+    nonvisible_index: u32,
     /// Allow the exact integer output for a lone lossless frame.
     pub allow_int: bool,
     /// Largest frame (width × height × channels) accepted.
@@ -33,7 +35,7 @@ impl<'a> Decoder<'a> {
     pub fn new(cs: &'a [u8]) -> Result<Self> {
         let mut br = BitReader::new(cs);
         let hd = read_headers(&mut br)?;
-        let mut d = Decoder { hd, cs, pos: br.byte_pos(), refs: [None, None, None, None], lf_frames: [None, None, None, None], done: false, allow_int: true, max_samples: 1 << 30 };
+        let mut d = Decoder { hd, cs, pos: br.byte_pos(), refs: [None, None, None, None], lf_frames: [None, None, None, None], done: false, visible_index: 0, nonvisible_index: 0, allow_int: true, max_samples: 1 << 30 };
         if d.hd.metadata.preview.is_some() {
             d.pos = d.skip_frame(true)?;
         }
@@ -58,7 +60,7 @@ impl<'a> Decoder<'a> {
             let mut br = BitReader::new(self.cs.get(self.pos..).ok_or(Error::Invalid("frame offset"))?);
             let fh = FrameHeader::read(&mut br, &self.hd, false)?;
             let nch = 3 + self.hd.metadata.extra_channels.len() as u64;
-            if u64::from(fh.width) * u64::from(fh.height) * nch > self.max_samples {
+            if u64::from(fh.width).saturating_mul(u64::from(fh.height)).saturating_mul(nch) > self.max_samples {
                 return Err(Error::Limit("frame too large"));
             }
             let dims = fh.dims();
@@ -69,6 +71,12 @@ impl<'a> Decoder<'a> {
             self.pos = start + toc.total;
             if fh.is_last {
                 self.done = true;
+            }
+            if fh.is_visible() {
+                self.visible_index += 1;
+                self.nonvisible_index = 0;
+            } else {
+                self.nonvisible_index += 1;
             }
             let df = decode_frame_sections(&mut sections, &self.hd, &fh, &self.refs, &self.lf_frames)?;
             if self.allow_int && first && self.int_eligible(&fh, &df) {
@@ -163,12 +171,28 @@ impl<'a> Decoder<'a> {
         if !df.patches.is_empty() {
             apply_patches(&mut img, &df.patches, &self.refs, &m.extra_channels)?;
         }
+        let (ytox, ytob) = match &df.vardct {
+            Some(v) => (v.cfl.ytox(0), v.cfl.ytob(0)),
+            None => (0.0, 1.0),
+        };
+        if let Some(sp) = &df.splines {
+            crate::splines::draw(sp, &mut img.planes[..3], ytox, ytob)?;
+        }
         if fh.upsampling != 1 {
             let shift = crate::entropy::ceil_log2(fh.upsampling);
             let k = self.kernel(shift);
             let n = if late_ec { img.planes.len() } else { 3 };
             for c in 0..n {
                 img.planes[c] = stages::upsample(&img.planes[c], &k, shift, uw, uh)?;
+            }
+        }
+        if let Some(lut) = &df.noise {
+            if lut.iter().any(|&v| v.abs() > 1e-3) {
+                let mut rnd = stages::noise_planes(uw, uh, dims.group_dim, self.visible_index, self.nonvisible_index)?;
+                for p in rnd.iter_mut() {
+                    stages::convolve_noise(p);
+                }
+                stages::add_noise(&mut img.planes[..3], &rnd, lut, ytox, ytob);
             }
         }
         if fh.frame_type == FrameType::Lf {

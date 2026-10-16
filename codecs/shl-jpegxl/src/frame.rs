@@ -219,6 +219,8 @@ pub struct DecodedFrame {
     pub patches: Vec<crate::render::Patch>,
     /// VarDCT frames: the decoded colour planes and per-block data.
     pub vardct: Option<crate::vardct::VarDct>,
+    pub splines: Option<crate::splines::Splines>,
+    pub noise: Option<[f32; 8]>,
 }
 
 pub fn decode_frame_sections(
@@ -229,25 +231,32 @@ pub fn decode_frame_sections(
     lf_frames: &[Option<Vec<crate::render::Plane>>; 4],
 ) -> Result<DecodedFrame> {
     let dims = fh.dims();
-    if fh.flags & (FLAG_SPLINES | FLAG_NOISE) != 0 {
-        return Err(Error::Unsupported("splines or noise"));
-    }
     let num_ec = hd.metadata.extra_channels.len();
     let is_vardct = fh.encoding == Encoding::VarDct;
     let quant_bias = {
         let o = &hd.transform.opsin;
         [o.quant_bias[0], o.quant_bias[1], o.quant_bias[2], o.quant_bias_numerator]
     };
-    let (lf_dequant, patches, mut vd, mut mf) = sections.with(0, |br| {
+    let (lf_dequant, patches, splines, noise, mut vd, mut mf) = sections.with(0, |br| {
         let patches = if fh.flags & FLAG_PATCHES != 0 {
             read_patches(br, dims.xsize_padded, dims.ysize_padded, num_ec, refs)?
         } else {
             Vec::new()
         };
+        let splines = if fh.flags & FLAG_SPLINES != 0 { Some(crate::splines::read_splines(br, dims.xsize * dims.ysize)?) } else { None };
+        let noise = if fh.flags & FLAG_NOISE != 0 {
+            let mut lut = [0f32; 8];
+            for v in lut.iter_mut() {
+                *v = br.read(10) as f32 / 1024.0;
+            }
+            Some(lut)
+        } else {
+            None
+        };
         let q = read_lf_dequant(br)?;
         let vd = if is_vardct { Some(crate::vardct::read_lf_global(br, fh, &dims, &q, quant_bias)?) } else { None };
         let mf = ModularFrame::read_global(br, hd, fh, &dims)?;
-        Ok((q, patches, vd, mf))
+        Ok((q, patches, splines, noise, vd, mf))
     })?;
     if let Some(v) = vd.as_mut() {
         if v.use_lf_frame {
@@ -309,7 +318,7 @@ pub fn decode_frame_sections(
     if image.channels.len() != nb_color + num_ec {
         return invalid("modular image has the wrong number of channels");
     }
-    Ok(DecodedFrame { modular: image, nb_color, lf_dequant, patches, vardct: vd })
+    Ok(DecodedFrame { modular: image, nb_color, lf_dequant, patches, vardct: vd, splines, noise })
 }
 
 /// Patch dictionary (K.3.1). `xsize`/`ysize` bound the patch positions (the padded frame).

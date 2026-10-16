@@ -17,6 +17,7 @@ mod icc;
 mod modular;
 mod vardct;
 mod render;
+mod splines;
 mod stages;
 
 pub use error::{Error, Result};

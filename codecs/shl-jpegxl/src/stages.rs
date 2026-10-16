@@ -462,3 +462,146 @@ pub const UPS8: [f32; 210] = [
     0.02727416, 0.19446600, 0.00159832, -0.02232473, 0.74982506,
     0.11452620, -0.03348048, -0.01605681, -0.02070339, -0.00458223,
 ];
+
+/// libjxl's 8-lane xorshift128+ generator used for noise.
+struct Xorshift128Plus {
+    s0: [u64; 8],
+    s1: [u64; 8],
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+impl Xorshift128Plus {
+    fn new(seed1: u32, seed2: u32, seed3: u32, seed4: u32) -> Self {
+        let mut s0 = [0u64; 8];
+        let mut s1 = [0u64; 8];
+        s0[0] = splitmix64(((u64::from(seed1) << 32).wrapping_add(u64::from(seed2))).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        s1[0] = splitmix64(((u64::from(seed3) << 32).wrapping_add(u64::from(seed4))).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        for i in 1..8 {
+            s0[i] = splitmix64(s0[i - 1]);
+            s1[i] = splitmix64(s1[i - 1]);
+        }
+        Xorshift128Plus { s0, s1 }
+    }
+
+    fn fill(&mut self, out: &mut [u64; 8]) {
+        for i in 0..8 {
+            let mut s1 = self.s0[i];
+            let s0 = self.s1[i];
+            out[i] = s1.wrapping_add(s0);
+            self.s0[i] = s0;
+            s1 ^= s1 << 23;
+            s1 ^= s0 ^ (s1 >> 18) ^ (s0 >> 5);
+            self.s1[i] = s1;
+        }
+    }
+}
+
+#[inline(always)]
+fn bits_to_float(b: u32) -> f32 {
+    f32::from_bits((b >> 9) | 0x3F80_0000)
+}
+
+/// The three random planes (w × h) for noise, tiled in `group_dim` squares.
+pub fn noise_planes(w: usize, h: usize, group_dim: usize, visible: u32, nonvisible: u32) -> Result<[Plane; 3]> {
+    let mut planes = [Plane::new(w, h)?, Plane::new(w, h)?, Plane::new(w, h)?];
+    let mut b64 = [0u64; 8];
+    for ty in (0..h).step_by(group_dim) {
+        for tx in (0..w).step_by(group_dim) {
+            let mut rng = Xorshift128Plus::new(visible, nonvisible, tx as u32, ty as u32);
+            let tw = group_dim.min(w - tx);
+            let th = group_dim.min(h - ty);
+            for p in planes.iter_mut() {
+                for y in ty..ty + th {
+                    let row = &mut p.data[y * w + tx..y * w + tx + tw];
+                    let mut x = 0;
+                    while x + 16 < tw {
+                        rng.fill(&mut b64);
+                        for i in 0..16 {
+                            let v = (b64[i / 2] >> (32 * (i % 2))) as u32;
+                            row[x + i] = bits_to_float(v);
+                        }
+                        x += 16;
+                    }
+                    rng.fill(&mut b64);
+                    let mut i = 0;
+                    while x < tw {
+                        let v = (b64[i / 2] >> (32 * (i % 2))) as u32;
+                        row[x] = bits_to_float(v);
+                        x += 1;
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(planes)
+}
+
+/// Convolves a noise plane with libjxl's 5×5 high-pass kernel.
+pub fn convolve_noise(p: &mut Plane) {
+    let (src, pw) = padded(p, 2);
+    for y in 0..p.h {
+        let rows: [&[f32]; 5] = core::array::from_fn(|i| &src[(y + i) * pw..(y + i + 1) * pw]);
+        let o = p.row_mut(y);
+        for x in 0..o.len() {
+            let xx = x + 2;
+            let p00 = rows[2][xx];
+            let mut others = 0f32;
+            for i in 0..5 {
+                let xi = x + i;
+                others += rows[0][xi];
+                others += rows[1][xi];
+                others += rows[3][xi];
+                others += rows[4][xi];
+            }
+            others += rows[2][xx - 2];
+            others += rows[2][xx - 1];
+            others += rows[2][xx + 1];
+            others += rows[2][xx + 2];
+            o[x] = others * 0.16 + p00 * -3.84;
+        }
+    }
+}
+
+fn noise_strength(lut: &[f32; 8], x: f32) -> f32 {
+    let scaled = (x * 6.0).max(0.0);
+    let mut fl = scaled.floor();
+    let mut frac = scaled - fl;
+    if scaled >= 7.0 {
+        fl = 6.0;
+        frac = 1.0;
+    }
+    let i = fl as usize;
+    let low = lut[i];
+    let hi = lut[i + 1];
+    ((hi - low) * frac + low).min(1.0).max(0.0)
+}
+
+/// Adds noise (already convolved random planes) to the XYB planes.
+pub fn add_noise(planes: &mut [Plane], rnd: &[Plane; 3], lut: &[f32; 8], ytox: f32, ytob: f32) {
+    let n = planes[0].data.len();
+    let (px, rest) = planes.split_at_mut(1);
+    let (py, pb) = rest.split_at_mut(1);
+    for i in 0..n {
+        let vx = px[0].data[i];
+        let vy = py[0].data[i];
+        let in_g = vy - vx;
+        let in_r = vy + vx;
+        let sg = noise_strength(lut, in_g * 0.5);
+        let sr = noise_strength(lut, in_r * 0.5);
+        let nr = rnd[0].data[i] * 0.22;
+        let ng = rnd[1].data[i] * 0.22;
+        let nc = rnd[2].data[i] * 0.22;
+        let red = sr * (0.0078125 * nr + 0.9921875 * nc);
+        let green = sg * (0.0078125 * ng + 0.9921875 * nc);
+        let rg = red + green;
+        px[0].data[i] = (ytox * rg + (red - green)) + vx;
+        py[0].data[i] = vy + rg;
+        pb[0].data[i] = ytob * rg + pb[0].data[i];
+    }
+}
