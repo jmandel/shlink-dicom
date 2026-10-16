@@ -1,7 +1,0 @@
-# Standalone survey workspace: deliberately NOT a member of codecs/Cargo.toml.
-[workspace]
-resolver = "2"
-members = ["common", "adapters/*", "wasmcheck/*"]
-
-[profile.release]
-debug = 1

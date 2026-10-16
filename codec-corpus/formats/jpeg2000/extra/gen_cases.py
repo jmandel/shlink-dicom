@@ -1,4 +1,4 @@
-"""Extra JPEG 2000 cases for coding options the base corpus lacks (SURVEY.md, "Corpus gaps found"):
+"""Extra JPEG 2000 cases for coding options the base corpus lacks:
 progression orders RPCL/PCRL/CPRL, explicit precincts, code-block style flags, small
 code-blocks, multiple tiles (with image and tile offsets, tile-parts and PLT), SOP/EPH
 markers, several quality layers, one and many resolution levels, and RGB without MCT.

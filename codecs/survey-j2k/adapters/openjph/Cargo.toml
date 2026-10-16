@@ -1,9 +1,0 @@
-[package]
-name = "a-openjph"
-version = "0.0.0"
-edition = "2021"
-publish = false
-
-[dependencies]
-openjph-core = "=0.1.0"
-survey-common = { path = "../../common" }

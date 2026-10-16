@@ -1,9 +1,0 @@
-[package]
-name = "a-hayro"
-version = "0.0.0"
-edition = "2021"
-publish = false
-
-[dependencies]
-hayro-jpeg2000 = "=0.4.1"
-survey-common = { path = "../../common" }

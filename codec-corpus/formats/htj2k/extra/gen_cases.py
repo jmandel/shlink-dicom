@@ -1,4 +1,4 @@
-"""Extra HTJ2K cases for what the base corpus lacks (SURVEY.md, "Corpus gaps found"): signed
+"""Extra HTJ2K cases for what the base corpus lacks: signed
 input (12- and 16-bit, lossless and lossy), progression orders other than RPCL under .201
 and .203, multiple tiles, tile-parts, small code-blocks and explicit precincts, and a real
 16-bit MR slice.

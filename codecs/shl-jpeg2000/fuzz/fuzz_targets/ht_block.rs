@@ -1,8 +1,7 @@
 //! The HT block decoder on arbitrary segments and arguments: it must not panic, and it must
-//! agree with the vendored decoder it replaces (success, and every output word).
+//! not write outside the block.
 #![no_main]
 
-use hayro_jpeg2000::ht_reference as reference;
 use libfuzzer_sys::fuzz_target;
 use shl_jpeg2000::ht::{decode_block, BlockPasses, Scratch};
 
@@ -20,25 +19,12 @@ fuzz_target!(|data: &[u8]| {
     let stride = width + usize::from(args[5] >> 5 & 3);
 
     let len = (height - 1) * stride + width;
-    let mut ours = vec![0x5A5A_5A5Au32; len];
-    let mut theirs = ours.clone();
+    let mut out = vec![0x5A5A_5A5Au32; len + 3];
     let passes = BlockPasses { num_passes, len_cleanup, len_refinement };
-    let a = decode_block(&mut Scratch::default(), coded, &mut ours, width, height, stride, missing_msbs, &passes, vertically_causal);
-    let b = reference::decode_block(
-        &mut reference::Scratch::default(),
-        coded,
-        &mut theirs,
-        width,
-        height,
-        stride,
-        missing_msbs,
-        num_passes,
-        len_cleanup,
-        len_refinement,
-        vertically_causal,
-    );
-    assert_eq!(a.is_ok(), b.is_ok(), "ours {a:?}, reference {b:?}");
-    if a.is_ok() {
-        assert!(ours == theirs, "output differs");
+    let _ = decode_block(&mut Scratch::default(), coded, &mut out, width, height, stride, missing_msbs, &passes, vertically_causal);
+    for (i, &w) in out.iter().enumerate() {
+        if i % stride >= width || i / stride >= height {
+            assert_eq!(w, 0x5A5A_5A5A, "word {i} outside the block was written");
+        }
     }
 });

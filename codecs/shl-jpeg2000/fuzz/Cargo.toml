@@ -11,8 +11,6 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 shl-jpeg2000 = { path = ".." }
-# Test scaffolding: the vendored HT decoder as a reference (goes with hayro).
-hayro-jpeg2000 = { path = "../../shl-codec-jpeg2000/vendor/hayro-jpeg2000", features = ["ht-reference"] }
 
 [[bin]]
 name = "ht_block"

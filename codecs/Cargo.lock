@@ -90,12 +90,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fearless_simd"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3296eb97d869113eaf148a6bdf01884e90b3828ad7ae2340b0f93362fc158611"
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -103,14 +97,6 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
-]
-
-[[package]]
-name = "hayro-jpeg2000"
-version = "0.4.1+shl.1"
-dependencies = [
- "fearless_simd",
- "log",
 ]
 
 [[package]]
@@ -296,12 +282,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
-name = "log"
-version = "0.4.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -315,10 +295,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "oxideav-jpeg2000"
-version = "0.0.17"
 
 [[package]]
 name = "pin-project-lite"
@@ -369,7 +345,6 @@ version = "0.1.0"
 name = "shl-codec-htj2k"
 version = "0.1.0"
 dependencies = [
- "oxideav-jpeg2000",
  "shl-codec-common",
  "shl-codec-jpeg2000",
 ]
@@ -473,9 +448,6 @@ dependencies = [
 [[package]]
 name = "shl-jpeg2000"
 version = "0.1.0"
-dependencies = [
- "hayro-jpeg2000",
-]
 
 [[package]]
 name = "syn"

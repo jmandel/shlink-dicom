@@ -1,1 +1,0 @@
-adapter=hayro execs=25640 {'ok': 10673, 'skipped(wrapper rejects SIZ)': 3915, 'err': 14967}

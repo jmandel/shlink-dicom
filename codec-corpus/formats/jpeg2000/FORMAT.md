@@ -1,6 +1,6 @@
 # jpeg2000
 
-**Crate:** `shl-codec-jpeg2000`
+**Crates:** `shl-codec-jpeg2000` (the DICOM wrapper) and `shl-jpeg2000` (the decoder)
 
 **Specifications:** ITU-T T.800 | ISO/IEC 15444-1; ITU-T T.801 | ISO/IEC 15444-2 Annex J (multiple component transformations, for .92 and .93); DICOM PS3.5 8.2.4 and A.4.4 (raw codestream; a JP2 wrapper occasionally appears in the wild)
 
@@ -30,63 +30,40 @@ Weak oracle (fewer than two independent reference families agree): `pydicom-693_
 - Images smaller than one code-block, odd sizes, and a reduced number of resolution levels.
 - 3 DISPUTED cases (`gen-synth-s12-40x40-openjpeg-rev`, `pydicom-693_J2KR`, `pydicom-J2K_pixelrep_mismatch`): rule on each in this file.
 
-## Candidate crates
+## Decoder
 
-`hayro-jpeg2000` (pure Rust, memory-safe, widely downloaded through the hayro PDF renderer), `openjp2` (a transpilation of OpenJPEG; check how much `unsafe` it uses), `openjpeg2-pure-rs`, `oxideav-jpeg2000` (also HTJ2K), `j2k` (also HTJ2K). Evaluated in phase 1 by the j2k-survey agent.
+`shl-codec-jpeg2000` is a thin wrapper around `shl-jpeg2000` (`codecs/shl-jpeg2000`), a JPEG 2000 decoder written for this project: pure Rust, `#![forbid(unsafe_code)]`, no dependencies, and it builds for `wasm32-unknown-unknown`. The same decoder reads HTJ2K ([htj2k FORMAT.md](../htj2k/FORMAT.md)).
 
-## Decision
+**What it decodes:**
+- T.800 Part 1: all five progression orders, with progression order changes (POC) in the main and tile-part headers; tiles and tile-parts; precincts; up to 65,535 quality layers; every code-block style (arithmetic coding bypass, context reset, termination on each pass, vertically causal context, predictable termination, segmentation symbols); packet headers in PPM or PPT marker segments; SOP and EPH markers; COC and QCC in the main and tile-part headers; the reversible 5/3 wavelet in integers and the irreversible 9/7 in f32; RCT and ICT; subsampled components.
+- T.814 HTJ2K code-blocks, including MIXED tile-components and several HT sets per code-block.
+- T.801 Annex J array-based multiple component transformations ([Part 2](#jpeg-2000-part-2-multi-component-92-93)).
+- Reduced resolution: the s highest resolution levels discarded ([Reduced-resolution decode](#reduced-resolution-decode)).
 
-**Adopt `hayro-jpeg2000` 0.4.x** behind a thin wrapper. This was decided by the phase 1 j2k-survey; the full evidence is in [SURVEY.md](SURVEY.md).
+**Refused as unsupported (exit 3):** region of interest (RGN); Part 2 wavelet kernels and Part 2 capabilities other than the multiple component transformation; and, in the wrapper, precision above 16 bits.
 
-**Evidence:**
-- Pure Rust, `#![forbid(unsafe_code)]`, MIT/Apache-2.0, and builds for `wasm32-unknown-unknown`.
-- 4 M downloads through the hayro PDF renderer; actively maintained.
-- 9.5 k readable lines.
-- Corpus: 35/36 with the wrapper steps below. The one miss is two pixels off by 2 on the lossy case `gen-synth-u16-3frame-32x32-openjpeg-cr20`, where every independent decoder disagrees with OpenJPEG; a tolerance change is requested.
-- No panics, aborts or hangs in 43 k mutation-fuzz executions.
+**Malformed data.** A packet header that cannot be read ends its tile-part: the rest of that tile-part's packets are skipped, and the decode returns what it has without an error, as OpenJPEG does with truncated codestreams. Problems in the main or tile-part headers are errors.
 
-**Wrapper steps:**
-- Strip any JP2 wrapper by taking the `jp2c` payload to the end of the buffer.
-- Validate SIZ against Rows, Columns and Samples per Pixel before decoding. Hayro tries to allocate 15 TB on a corrupt SIZ, and aborts.
-- Round the f32 samples.
-- Subtract 2^(p−1) for SIZ-signed components. Hayro discards the SIZ sign bit.
-- Clamp to the SIZ range.
+**Output.** Reversible components come back as exact integers, irreversible ones as f32. The decoder adds no DC level shift.
 
-**Rejected:**
-- `openjp2`: C allocator calls stop it building for wasm32, and it has 482 `unsafe`.
-- `openjpeg2-pure-rs`: 36/36, but an LLM translation of C with 228 `unsafe`. Kept as a differential fuzz oracle.
-- `j2k`: a hayro fork with off-by-1 or 2 errors on 16-bit lossless frames.
-- `oxideav-jpeg2000`: correct, but 6–15x slower than hayro on Part 1, and it rejects the GDCM file's tile-part count.
-- `rust-j2k`: the same GDCM failure, and no JP2.
-- Six others: incomplete.
+**The wrapper** (`src/lib.rs`), with the checks and output packing it shares with `shl-codec-htj2k` (`src/prep.rs`):
+- strips any JP2 wrapper;
+- checks the main header against the data set before anything is allocated: size, components, one precision of at most Bits Allocated and at most 16, no more than 65,535 tiles, a valid tile grid;
+- adds the DC level shift 2^(p−1) to unsigned components while converting, rounds irreversible samples, and clamps to the SIZ range;
+- applies pydicom's sign rule for MONOCHROME images;
+- returns RGB for colour frames, as set out in [Colour](#colour-of-three-component-frames);
+- converts 4:2:2 and 4:2:0 chroma to RGB as OpenJPEG does.
 
-**Disputed cases:** the oracle is right in all three. The `openjpeg-cli` reference reads `opj_decompress` RAWL output without sign extension. The evidence is in [SURVEY.md, Rulings](SURVEY.md#rulings-on-disputed-and-questioned-cases); the format agent copies the rulings into the Rulings section.
-
-**The plan:** see [SURVEY.md, Phase 2 plan](SURVEY.md#phase-2-plan).
-
-**Phase 2 outcome.** Adopted as planned, except that hayro is now vendored: `codecs/shl-codec-jpeg2000/vendor/hayro-jpeg2000` is crates.io 0.4.1 with ten patches. The [vendor README](../../../codecs/shl-codec-jpeg2000/vendor/README.md) is the authoritative list, with each patch's reason and tests. In short:
-
-1. more than 32 quality layers ([33-layer slides](#rarecyte-slides-with-33-quality-layers));
-2. no panic in the LRCP iterator when components have different decomposition levels (a fuzz finding);
-3. RGN refused as unsupported instead of skipped (skipping it decodes wrong samples);
-4. a 1 in a stuffed packet-header bit skipped as OpenJPEG does ([Aperio frame](#aperio-frame-with-a-nonzero-stuffed-bit));
-5. HTJ2K block decoding inside hayro, used by `shl-codec-htj2k` ([htj2k FORMAT.md](../htj2k/FORMAT.md));
-6. to 9. speed only (`floor`, the horizontal and vertical wavelet passes, the level shift and copies), with outputs byte-identical before and after ([htj2k PERF.md, Phase 2d](../htj2k/PERF.md#phase-2d-ht-decoding-in-hayro));
-10. reduced-resolution decoding: an exact `reduce` setting, and three fixes on that path ([Reduced-resolution decode](#reduced-resolution-decode)).
-
-The wrapper (`src/lib.rs`) and the checks and output packing shared with `shl-codec-htj2k` (`src/prep.rs`) do the following:
-- strip any JP2 wrapper;
-- check the main header against the data set before hayro allocates anything: size, components, one precision of at most Bits Allocated and at most 16, no more than 65,535 tiles, a valid tile grid;
-- take 2^(p−1) off signed components, round, and clamp to the SIZ range;
-- apply pydicom's sign rule for MONOCHROME images;
-- return RGB for colour frames, as set out in [Colour](#colour-of-three-component-frames);
-- convert 4:2:2 and 4:2:0 chroma to RGB as OpenJPEG does.
+**How it is checked**, besides the corpus ([STATUS](#status)):
+- `codecs/shl-jpeg2000/tests/regressions.rs` decodes OpenJPEG codestreams with features the corpus lacks (POC over several tiles, precincts with an image offset, every code-block style, tile-parts by layer, tiles with offsets) and compares them with `opj_decompress`;
+- `tests/ht_golden.rs` checks the HT block decoder against stored results of an independent block decoder ([htj2k FORMAT.md](../htj2k/FORMAT.md#decoder));
+- fuzzing ([Robustness](#robustness)).
 
 ## Rulings
 
-### Cases ruled in the survey (formerly disputed)
+### Formerly disputed cases
 
-The rulings below are copied from [SURVEY.md, Rulings](SURVEY.md#rulings-on-disputed-and-questioned-cases). All three cases had the same cause: the `openjpeg-cli` reference in `scripts/ref_decode.py` read `opj_decompress` RAWL output as `<i2` without sign extension. For a signed component of precision p < 16, `opj_decompress` writes the p-bit two's-complement pattern, so every negative sample came back 2^p too large. The coordinator has since made that reference sign-extend from the SIZ precision, and none of the three is disputed now.
+All three cases had the same cause: the `openjpeg-cli` reference in `scripts/ref_decode.py` read `opj_decompress` RAWL output as `<i2` without sign extension. For a signed component of precision p < 16, `opj_decompress` writes the p-bit two's-complement pattern, so every negative sample came back 2^p too large. The coordinator has since made that reference sign-extend from the SIZ precision, and none of the three is disputed now.
 
 | Case | SIZ | DICOM | Ruling |
 |---|---|---|---|
@@ -94,9 +71,7 @@ The rulings below are copied from [SURVEY.md, Rulings](SURVEY.md#rulings-on-disp
 | `pydicom-693_J2KR` | signed, 14-bit | BS 16, PR 1 | The oracle is correct. Decode as signed 14-bit (−2000…2492), which fits in BS 16 unchanged. SIZ precision below Bits Stored is legal. |
 | `pydicom-J2K_pixelrep_mismatch` | **unsigned**, 13-bit | BS 13, **PR 1** | The oracle is correct. Pixel Representation governs. Decode as SIZ says, then take the 13-bit values as stored bits and sign-extend from bit 12. That gives a CT range of −2000…1896. Do not apply a signed DC shift. |
 
-`gen-synth-u16-3frame-32x32-openjpeg-cr20` now allows `max_abs` 2, as the survey asked. Hayro, oxideav and rust-j2k all differ from OpenJPEG by 2 on two pixels of frame 0, and agree with each other within 1.
-
-Both shared-file requests from the survey are applied, and these cases pass.
+`gen-synth-u16-3frame-32x32-openjpeg-cr20` allows `max_abs` 2: three other Rust decoders (`hayro-jpeg2000`, `oxideav-jpeg2000` and `rust-j2k`) differ from OpenJPEG by 2 on two pixels of frame 0, and agree with each other within 1.
 
 ### Sign handling
 
@@ -116,7 +91,7 @@ What `prep::pack` returns:
 
 | Codestream | Data set says | We return | Why |
 |---|---|---|---|
-| MCT on | anything | RGB (hayro and oxideav undo RCT/ICT) | §8.2.4 |
+| MCT on | anything | RGB (the decoder undoes RCT/ICT) | §8.2.4 |
 | no MCT | YBR_ICT or YBR_RCT (`ext-orthanc-jp2k91YBR-ICT`, `ext-issue-cornerstoneWADOImageLoader_367-1_1`) | RGB, samples as decoded | Coordinator ruling. The label is wrong; all three references output the samples unchanged. |
 | no MCT | RGB | RGB | §8.2.4 |
 | no MCT | YBR_FULL | as declared, so the CLI converts YBR_FULL to RGB as pydicom does | §8.2.4 says these components are YCbCr. This departs from the letter of the coordinator's "no MCT ⇒ RGB" ruling. No corpus case has this combination; the coordinator may override. |
@@ -134,7 +109,7 @@ The codestream says 10-bit and the data set says Bits Stored 8. Coordinator ruli
 
 ### Invalid marker mid-codestream (`ext-pylibjpeg-966`)
 
-This is now `expect=decode`, with its oracle from `ext-pylibjpeg-966_fixed`, the same image with the bad marker removed. Hayro skips the marker leniently, and the case passes exactly.
+This is `expect=decode`, with its oracle from `ext-pylibjpeg-966_fixed`, the same image with the bad marker removed. The bad marker is a comment (COM) segment after the last tile-part. The decoder stops reading at the first marker after a tile-part that is neither SOT nor EOC, so the case passes exactly.
 
 ### Subsampled chroma: Leica Aperio slides, YBR_FULL_422
 
@@ -164,21 +139,15 @@ The cases pass today only because `max_abs` is 215–220 (the pylibjpeg vs openj
 
 ### Aperio frame with a nonzero stuffed bit
 
-`idc-j2kr-rct-u8of8-p0-mf-sm-leicabiosy-d680304a`, frame 75 of 110, is a lossless frame on which we were off by up to 89.
-
-- **Cross-check:** OpenJPEG, `openjp2`, `openjpeg2-pure-rs` and rust-j2k decode the frame exactly. hayro (0.4.1 and upstream master) was silently wrong. oxideav and j2k refuse it ("InvalidPacketHeader"; "code-block segment length is truncated").
-- **Localising it:** forward RCT + 5/3 DWT of the OpenJPEG output (checked exact against hayro's own coefficients on frame 74) showed hayro's coefficients exact for resolutions 0–3. From resolution 4 on, every code-block was empty. Instrumenting the packet parser showed the cause: a packet header for resolution 3, component 2 has a 1 in the bit stuffed after an 0xFF byte (byte 2089 of the frame).
-- **Standard:** T.800 B.10.1 says that bit is 0. OpenJPEG reads only the low 7 bits of the byte after 0xFF, so it ignores the bit.
-- **Hayro:** it treated the bit as an error, and in its lenient mode stopped reading the tile's packets without reporting it.
-- **Fix:** vendored hayro patch 4 skips the bit. The frame now matches exactly, and the case passes. Regression test `nonzero_stuffed_bit_in_packet_header`.
+`idc-j2kr-rct-u8of8-p0-mf-sm-leicabiosy-d680304a`, frame 75 of 110, is lossless. A packet header for resolution 3, component 2 has a 1 in the bit stuffed after an 0xFF byte (byte 2089 of the frame). T.800 B.10.1 says that bit is 0. OpenJPEG reads only the low 7 bits of the byte after 0xFF, so it ignores the bit, and the frame decodes exactly; a decoder that treats the bit as an error drops the rest of the tile's packets (max |diff| 89 on this frame). The decoder skips the stuffed bit whatever its value, in packet headers and in raw (bypass) coding passes. Regression test `nonzero_stuffed_bit_in_packet_header`.
 
 ### RareCyte slides with 33 quality layers
 
-`idc-j2kr-mono2-u16of16-*-rarecyte-*` (four cases) use 33 quality layers, and hayro 0.4.1 capped layers at 32 ("failed to parse COD marker"). The cap has no other basis: layers are counted in a `u8`. Vendored hayro patch 1 raises it to 255, and all four cases now pass exactly. Regression test `thirty_three_quality_layers`. The standard allows up to 65,535 layers; a codestream with more than 255 is refused as invalid.
+`idc-j2kr-mono2-u16of16-*-rarecyte-*` (four cases) use 33 quality layers. COD allows up to 65,535, and the decoder takes any number. Regression test `thirty_three_quality_layers`.
 
 ## JPEG 2000 Part 2 multi-component (.92, .93)
 
-DICOM allows only the Annex J multiple component transformations under these syntaxes (PS3.5 A.4.4). The codestream's Rsiz announces the capability, COD's SGcod is 2 (array-based), and CBD, MCT, MCC and MCO marker segments describe the transformation. Vendored hayro patch 11 implements it ([vendor/README.md](../../../codecs/shl-codec-jpeg2000/vendor/README.md)).
+DICOM allows only the Annex J multiple component transformations under these syntaxes (PS3.5 A.4.4). The codestream's Rsiz announces the capability, COD's SGcod is 2 (array-based), and CBD, MCT, MCC and MCO marker segments describe the transformation. `shl-jpeg2000` implements it in `src/mct2.rs`.
 
 **Decoded:**
 - array-based decorrelation and dependency transformations, reversible (integer) and irreversible (f32);
@@ -187,7 +156,7 @@ DICOM allows only the Annex J multiple component transformations under these syn
 - output components from CBD, with no DC level shift (Annex J);
 - reduced-resolution decode: the transformation is applied to the reduced components.
 
-**Refused as unsupported (exit 3):** the wavelet-based transformation (J.3.2; no sample exists), any other Part 2 capability bit in Rsiz, these marker segments in a tile-part header, subsampled components, Part 2 inside a JP2/JPX wrapper. A Part 1 codestream (Rsiz without the capability) that carries these marker segments is refused too.
+**Refused as unsupported (exit 3):** the wavelet-based transformation (J.3.2; no sample exists), any other Part 2 capability bit in Rsiz, these marker segments in a tile-part header, subsampled components. A Part 1 codestream (Rsiz without the capability) that carries these marker segments is refused too.
 
 **Volumes.** PS3.5 A.4.4 lets the frames of a multi-frame image be the components of one codestream, or of one codestream per component collection, each in its own fragments. `decode_frames` decodes such a codestream into its frames, and `codestreams` groups fragments into codestreams. When a .92/.93 file has fewer codestreams than frames, `shl-dicom-decode` decodes it this way, whole; a frame range is cut from the whole volume.
 
@@ -225,7 +194,7 @@ The forward equations the generator uses are their exact inverses, and round-tri
 
 ## STATUS
 
-Phase 2, 2026-10-14; reduced-resolution decode and this update 2026-10-15.
+2026-10-16, with `shl-jpeg2000`.
 
 ### check.py
 
@@ -235,15 +204,17 @@ cd ../codec-corpus && uv run python scripts/check.py --name j2k --format jpeg200
   --candidate "../codecs/target/j2k/release/shl-dicom-decode {in} {out}" --quiet
 ```
 
-**jpeg2000: 177/177 pass** (2026-10-15, with the 9 Part 2 cases; the table below is the October 14 count of 166), and no case is disputed. By source:
+**jpeg2000: 177/177 pass**, and no case is disputed. By source:
 
 | Source | Cases |
 |---|---|
-| IDC | 82 |
+| IDC | 83 |
 | external (quirk hunter) | 26 |
 | generated by `generate.py` | 24 |
-| generated by this agent | 15 |
+| generated by `extra/gen_cases.py` | 15 |
+| generated by `scripts/sources/j2k_part2.py` | 9 |
 | pydicom | 19 |
+| repaired (`scripts/repairs.py`) | 1 |
 
 **htj2k: 42/42 pass** (see [htj2k STATUS](../htj2k/FORMAT.md#status)).
 
@@ -251,7 +222,7 @@ One pass stands on a wrong oracle. The 7 Leica YBR_FULL_422 cases pass only beca
 
 ### New cases: `extra/gen_cases.py`
 
-The 15 cases fill the gaps the survey listed. They are made with `opj_compress` from raw samples of the existing seeds and registered with `generate.register`; the oracle comes from `scripts/oracle.py --format jpeg2000`. Lossless cases take the seed as ground truth.
+The 15 cases fill gaps in coding options. They are made with `opj_compress` from raw samples of the existing seeds and registered with `generate.register`; the oracle comes from `scripts/oracle.py --format jpeg2000`. Lossless cases take the seed as ground truth.
 
 | Case (`gen-<seed>-…`) | Covers |
 |---|---|
@@ -273,7 +244,7 @@ The 15 cases fill the gaps the survey listed. They are made with `opj_compress` 
 
 ### Robustness
 
-**Header checks.** Before hayro or oxideav sees a frame, `prep::prepare` checks:
+**Header checks.** Before the decoder sees a frame, `prep::prepare` checks:
 - SOC then SIZ;
 - the SIZ length;
 - a non-empty image area;
@@ -284,68 +255,58 @@ The 15 cases fill the gaps the survey listed. They are made with `opj_compress` 
 
 Every truncated prefix of a header is refused. The 15 TB SIZ from `pydicom-JPEG2000-embedded-sequence-delimiter` is refused before any allocation (unit test `huge_siz_is_refused`).
 
-**Fuzzing.** `cargo fuzz` in `codecs/shl-codec-jpeg2000/fuzz`, without a sanitizer. The nightly toolchain here dates from 2023, so the runs use the system 1.99 toolchain with `RUSTC_BOOTSTRAP=1 cargo-fuzz run -O -s none`. The first input byte chooses one of two modes:
-- the FrameInfo taken from the mutant's own SIZ, so mutants reach hayro;
-- a fixed 64×64 frame, so every SIZ, oversize ones included, meets the header check with a mismatch.
+**Fuzzing.** `cargo fuzz` in `codecs/shl-codec-jpeg2000/fuzz`, without a sanitizer and with overflow checks on (`-a`). The nightly toolchain here dates from 2023, so the runs use the system toolchain with `RUSTC_BOOTSTRAP=1 cargo-fuzz run -O -a -s none`. Two targets:
+- `decode`: the first input byte chooses the FrameInfo, either taken from the mutant's own SIZ (so mutants reach the decoder) or a fixed 64×64 frame (so every SIZ, oversize ones included, meets the header check with a mismatch), and varies Bits Allocated, Pixel Representation and photometric. Bit 6 makes it call `decode_frames` with one sample per pixel, so a codestream may hold several frames (Part 2).
+- `decode_scaled`: `decode_frame_scaled`, with bits 6–7 picking 1/2 to 1/16.
 
-The same byte varies Bits Allocated, Pixel Representation and photometric. Seeds are the corpus frames under 300 KB.
+Seeds: the earlier fuzz corpora of the JPEG 2000 `decode` target and the HTJ2K target (15,336 inputs: corpus frames, Part 2 codestreams, MIXED, refinement-pass and multiple-HT-set streams, and mutants), and in later runs the inputs earlier runs added. Every seed was first run once through each target.
 
-| Run | Execs | Crashes | Timeouts | OOMs |
-|---|---|---|---|---|
-| 1 (10 min, 4 workers) | 91,915 | **1**: panic in hayro's LRCP iterator (patch 2) | 0 | 0 |
-| 2 (10 min, 4 workers, after the patches; new cases and frame 75 added as seeds) | 111,174 | 0 | 0 | 0 |
+| Run | Target | Execs | Crashes | Timeouts | OOMs |
+|---|---|---|---|---|---|
+| 1 (15 min, 4 workers) | `decode` | – | **2**: a COD code-block size byte of 255 (u8 overflow); an HT packet header that failed after its first cleanup pass | 0 | 0 |
+| 2 (15 min, 4 workers) | `decode` | 368,687 before a crash | **1**: a 4:2:2 codestream as a volume of one-component frames, packed as if full size | 0 | 0 |
+| 3 (15 min each, 4 workers) | `decode` / `decode_scaled` | – / 1,269,928 | **1** in `decode`: i32 overflow in the 5/3 synthesis of damaged code-blocks (overflow checks only) | 0 | 0 |
+| 4 (15 min each, 4 workers) | `decode` / `decode_scaled` | 568,178 / 291,954 | 0 | 0 | 0 |
+| 5 (25 min, 4 workers) | `decode_scaled` | 211,411 | 0 | 0 | 0 |
+| 6 (25 min, 4 workers, final code) | `decode` | 1,401,751 | 0 | 0 | 0 |
 
-The crash input is kept as `tests/data/lrcp-coc-fewer-levels.j2c`, regression test `lrcp_with_fewer_levels_in_one_component_does_not_panic`.
+Each finding is fixed, and its input is a regression test: `codecs/shl-jpeg2000/tests/data/fuzz-*.j2c` (`fuzz_findings_are_errors_not_panics`), and in this crate `tests/data/lrcp-coc-fewer-levels.j2c` and `tests/data/reduced-fuzz-*.bin`.
 
-The `decode_scaled` target (2026-10-15) drives `decode_frame_scaled` through both the JPEG 2000 and the HT path. Bits 6–7 of the first byte pick 1/2 to 1/16; seeds are the jpeg2000 and htj2k corpus frames under 300 KB.
-
-| Run | Execs | Crashes | Timeouts | OOMs |
-|---|---|---|---|---|
-| 3 (7 min, 4 workers) | – | **4**, all on hayro's reduced path: an empty tile at the reduced level, a tile-part COD with fewer levels than the reduction, and subsampled components indexed from the full-size tile origin (fixed in patch 10) | 0 | 0 |
-| 4 (10 min, 4 workers, after the fixes) | about 446,000 (3,833 edges) | 0 | 0 | 0 |
-
-Part 2 (2026-10-15): bit 6 of the first byte makes the `decode` target call `decode_frames` with one sample per pixel, so a codestream may hold several frames. Seeds added: the Part 2 corpus codestreams and the `tests/data/part2-*` fixtures.
-
-| Run | Execs | Crashes | Timeouts | OOMs |
-|---|---|---|---|---|
-| 5 (10 min, 4 workers) | 194,246 (3,469 edges) | 0 | 0 | 0 |
-
-A first attempt also stopped on an overflow in the harness itself (SIZ width × height × components in `u64`), fixed with saturating multiplication in both targets. The four inputs are `tests/data/reduced-fuzz-*.bin`, regression test `reduced_decode_fuzz_findings_do_not_panic`.
-
-**Checks.** `cargo test` passes: 14 unit tests, 5 regression tests in `tests/regressions.rs`, 9 Part 2 tests in `tests/part2.rs`, and hayro's own tests (7 of them for patch 11). The two corpus-backed regression tests compare with the oracle and skip if frames are not extracted. Also clean:
-- `cargo clippy -p shl-codec-jpeg2000 -p shl-codec-htj2k -p hayro-jpeg2000 --all-targets -D warnings`;
-- `cargo build --target wasm32-unknown-unknown` for both crates, with rustup stable 1.97.
+**Checks.** `cargo test` passes for `shl-jpeg2000` (HT unit tests, `tests/regressions.rs`, `tests/ht_golden.rs`), and for this crate (unit tests, `tests/regressions.rs`, `tests/part2.rs`). The two corpus-backed regression tests here compare with the oracle and skip if frames are not extracted. Also clean:
+- `cargo clippy -p shl-jpeg2000 -p shl-codec-jpeg2000 -p shl-codec-htj2k --all-targets -- -D warnings`;
+- `cargo build --target wasm32-unknown-unknown` for all three crates, with rustup stable.
 
 ### Speed
 
-Current figures are in [htj2k PERF.md, Phase 2d](../htj2k/PERF.md#phase-2d-ht-decoding-in-hayro). That round sped up hayro's wavelet and copy stages (patches 6–9) for JPEG 2000 and HTJ2K alike, and puts JPEG 2000 at about 1.2× OpenJPEG natively. The table this section held before (October 14, before those patches) is superseded. The cost of reduced-resolution decodes is in [htj2k PERF.md, Reduced-resolution decode](../htj2k/PERF.md#reduced-resolution-decode).
+Natively, JPEG 2000 frames decode in 1.03–1.28× OpenJPEG's time (lossless about 1.15–1.2×; a 4:2:2 slide tile, whose time includes the colour conversion, 2×), and in wasm32 with simd128 within about 10% of native. Method, figures and the cost of reduced-resolution decodes: [htj2k PERF.md](../htj2k/PERF.md).
 
 ### Reduced-resolution decode
 
-`decode_frame_scaled` (CONTRACT.md, "Reduced-resolution decode") discards the s highest resolution levels, as OpenJPEG's `reduce` does. The code-blocks of those levels are not decoded and their wavelet synthesis is skipped (vendored patch 10). The result is ceil(rows / 2^s) × ceil(columns / 2^s). `shl-codec-htj2k` uses the same path through hayro's HT decoder.
+`decode_frame_scaled` (CONTRACT.md, "Reduced-resolution decode") discards the s highest resolution levels, as OpenJPEG's `reduce` does: the code-blocks of those levels are not decoded and their wavelet synthesis is skipped. The result is ceil(rows / 2^s) × ceil(columns / 2^s). HTJ2K frames take the same path.
 
 **Checked against OpenJPEG** by [`scaled/check_scaled.py`](scaled/check_scaled.py), which runs `opj_decompress -r s` on every jpeg2000 and htj2k frame (the first two of multi-frame cases) at 1/2, 1/4 and 1/8 and compares modulo 2^precision:
 - **5/3 reversible:** exact everywhere.
 - **9/7:** within the larger of the case's `max_abs` and our full-size difference from OpenJPEG on that frame. That is 1, or 2 on one case, the same as at full size.
-- **Totals:** 588 exact and 183 within tolerance; 15 refused, each for a reason below.
-- **`ext-pylibjpeg-966`:** OpenJPEG does not decode it at any scale (see [Invalid marker](#invalid-marker-mid-codestream-ext-pylibjpeg-966)).
+- **Totals:** 590 exact and 181 within tolerance; 9 refused by us and 9 by OpenJPEG, each for a reason below.
+- **OpenJPEG refuses** `ext-pylibjpeg-966` at every scale (see [Invalid marker](#invalid-marker-mid-codestream-ext-pylibjpeg-966)), and the two MIXED HTJ2K frames. We decode the MIXED frames at reduced size, unchecked.
 - **The 7 Leica YBR_FULL_422 slides:** single-tile 4:2:2 at 256², all reduced and compared.
 
 **Unsupported (the CLI then decodes in full and box-downsamples):**
 - a component with fewer decomposition levels than s, in the main header or a tile-part (6 of the frame-scale pairs above);
-- an image origin other than (0, 0): the CONTRACT size rule differs there, and hayro's reduced placement mixes full-size offsets with reduced coordinates (3);
-- subsampled components, unless the frame is one tile whose size is a multiple of the subsampling × 2^s;
-- HTJ2K frames that only oxideav decodes (MIXED code-blocks, several HT sets) (6).
+- an image origin other than (0, 0), where the CONTRACT size rule differs from the reduced grid (3);
+- subsampled components, unless the frame is one tile whose size is a multiple of the subsampling × 2^s.
+
+Reduced decodes of tiled, offset and subsampled OpenJPEG codestreams were also compared with `opj_decompress -r` at 1/2 and 1/4; all matched.
 
 **Values** are OpenJPEG's reduced reconstruction, the wavelet LL band, not a box average of the full decode. The 5/3 LL is (−1, 2, 6, 2, −1)/8 per level, so on sharp or noisy content the difference from a box average can be large. pydicom's MONOCHROME sign rule is applied after the reduction, as for a full decode.
 
 ### Known gaps
 
-- **POC** (progression order change) is refused as unsupported (exit 3) by hayro 0.4.1, and so is **RGN** after patch 3. Upstream master supports both; neither appears in the corpus.
-- **Tile-level MCT:** colour is decided from the main-header COD. Hayro also applies the first tile's MCT flag to every tile. A codestream whose tiles differ in MCT would be wrong. This is legal, but none is known.
+- **RGN** (region of interest) is refused as unsupported (exit 3). No corpus case has it.
+- **Tile-level MCT:** colour is decided from the main-header COD. The decoder applies each tile's own MCT, but a codestream whose tiles differ in MCT would get one colour label. This is legal, but none is known.
 - **Subsampling** other than 4:2:2 and 4:2:0 chroma, or with an odd image offset: exit 3.
 - **Part 2:** see [its section](#jpeg-2000-part-2-multi-component-92-93) for what is refused.
 - **Precision above 16 bits** is refused: exit 3 with Bits Allocated 32, exit 2 when it exceeds Bits Allocated.
-- **Silent truncation:** in lenient mode, hayro stops reading a tile's packets at the first malformed packet header and returns what it has, without an error, as OpenJPEG does with truncated codestreams. That is why the stuffed-bit bug was silent. A strict-mode decode would report such errors, but would also refuse files the references read.
+- **Silent truncation:** a malformed packet header ends its tile-part without an error ([Decoder](#decoder)), as OpenJPEG does with truncated codestreams. A strict mode would report such errors, but would also refuse files the references read.
 - **Reduced resolution:** see the Unsupported list in [Reduced-resolution decode](#reduced-resolution-decode).
-- **No differential fuzzing:** the survey suggested `openjpeg2-pure-rs` as a differential oracle in the fuzz target; it was not done. The fuzz target checks only the absence of panics and the output size.
+- **No differential fuzzing** at the codestream level: the fuzz targets check only the absence of panics and the output size.

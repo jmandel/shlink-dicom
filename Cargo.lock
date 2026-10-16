@@ -706,12 +706,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
-name = "fearless_simd"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3296eb97d869113eaf148a6bdf01884e90b3828ad7ae2340b0f93362fc158611"
-
-[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -876,14 +870,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
 dependencies = [
  "hashbrown 0.14.5",
-]
-
-[[package]]
-name = "hayro-jpeg2000"
-version = "0.4.1+shl.1"
-dependencies = [
- "fearless_simd",
- "log",
 ]
 
 [[package]]
@@ -1576,10 +1562,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "oxideav-jpeg2000"
-version = "0.0.17"
-
-[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2061,7 +2043,6 @@ version = "0.1.0"
 name = "shl-codec-htj2k"
 version = "0.1.0"
 dependencies = [
- "oxideav-jpeg2000",
  "shl-codec-common",
  "shl-codec-jpeg2000",
 ]
@@ -2194,9 +2175,6 @@ dependencies = [
 [[package]]
 name = "shl-jpeg2000"
 version = "0.1.0"
-dependencies = [
- "hayro-jpeg2000",
-]
 
 [[package]]
 name = "shlex"

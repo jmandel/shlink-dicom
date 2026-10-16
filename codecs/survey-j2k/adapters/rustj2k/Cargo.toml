@@ -1,9 +1,0 @@
-[package]
-name = "a-rustj2k"
-version = "0.0.0"
-edition = "2021"
-publish = false
-
-[dependencies]
-rust-j2k = "=0.3.0"
-survey-common = { path = "../../common" }

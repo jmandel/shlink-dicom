@@ -1,9 +1,0 @@
-[package]
-name = "a-ojpure"
-version = "0.0.0"
-edition = "2021"
-publish = false
-
-[dependencies]
-openjpeg2-pure-rs = "=0.1.1"
-survey-common = { path = "../../common" }

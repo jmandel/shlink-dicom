@@ -140,8 +140,6 @@ These recommendations are based on the codecs/bench results (`results/latest.jso
 |---|---|---|---|
 | RLE | 0.30 ms | 0.40 ms | Leave it. It is close to a memory copy already; at most, write runs with `fill` and `copy_from_slice`. |
 | JPEG-LS | 7.3 ms | 6.1 ms | Scalar work, not SIMD (see below). |
-| JPEG 2000 (`hayro-jpeg2000`), reversible | 63.8 ms | 24.0 ms | Check the native SIMD build first (see below). |
-| HTJ2K (`oxideav-jpeg2000`), reversible | 238 ms | 148 ms | Profile; the cost is algorithmic (see below). |
 
 - **JPEG-LS:** decoding is serial per sample (context selection, Golomb codes and bias correction all depend on the previous sample), so SIMD has little to work on. The scalar changes that paid off here apply directly:
   - a bit reader that loads several bytes at once (JPEG-LS stuffs one bit after 0xFF instead of a zero byte, so the 0xFF test is the same);
@@ -150,9 +148,6 @@ These recommendations are based on the codecs/bench results (`results/latest.jso
   - the bit buffer kept in registers across the sample loop.
 
   Steps 3, 4, 5 and 12 here, which were the same kind of change, gave about 2–2.5× on lossless JPEG (dx2048: 50.3 → 21.0 ms; ct512: 2.84 → 1.52 ms).
-- **JPEG 2000 (`hayro-jpeg2000`):** the native build is 2.6× slower than wasm with simd128. This suggests its `simd` feature takes a scalar fallback on the default x86-64 target, where only SSE2 is enabled at compile time. Compiling the hot paths with AVX2 enabled, chosen at run time as `simd.rs` does here, or checking how the crate selects its SIMD level, should be the first step. The tier-1 (MQ/EBCOT) decoder is serial, so scalar work applies there. The inverse wavelet and colour transforms are where SIMD pays.
-- **HTJ2K (`oxideav-jpeg2000`):** about 240 ms for one 512×512 slice. HT block coding was designed for high throughput, so this points to an algorithmic cost rather than missing SIMD. Profile it first. If the cost is in the HT block decoder, a focused rewrite of that one stage in the vendored crate is likely to pay more than any vector work.
-
 
 ## Reduced-resolution decode
 

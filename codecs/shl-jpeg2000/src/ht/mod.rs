@@ -50,11 +50,9 @@ const MAX_SCUP: usize = 4079;
 
 /// Decode one HT code-block of `width` × `height` samples into `out` (`stride` apart).
 ///
-/// Contract: identical to the block decoder this replaces (`decode_block` in
-/// codecs/shl-codec-jpeg2000/vendor/hayro-jpeg2000/src/j2c/ht/decode.rs, vendored patch 5):
-/// the same arguments and the same output words for every input, errors included in kind.
 /// Samples are sign (bit 31) and magnitude, the cleanup pass's bit-plane at bit
 /// `30 − missing_msbs`, with the half-bin bit below each nonzero sample's last decoded plane.
+/// `tests/ht_golden.rs` checks every output word against an independent block decoder's.
 ///
 /// `out` is overwritten for every sample of the block and untouched elsewhere. Code-blocks
 /// are at most 1024 samples wide or high and 4096 in area (T.800 B.7). Refinement passes

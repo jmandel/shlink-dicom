@@ -1,9 +1,0 @@
-[package]
-name = "a-oxideav"
-version = "0.0.0"
-edition = "2021"
-publish = false
-
-[dependencies]
-oxideav-jpeg2000 = "=0.0.17"
-survey-common = { path = "../../common" }

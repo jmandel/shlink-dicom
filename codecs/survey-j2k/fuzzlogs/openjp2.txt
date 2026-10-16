@@ -1,1 +1,0 @@
-adapter=openjp2 execs=21989 {'skipped(wrapper rejects SIZ)': 3711, 'err': 16940, 'ok': 5049}

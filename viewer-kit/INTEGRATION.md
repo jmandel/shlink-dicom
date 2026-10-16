@@ -144,8 +144,8 @@ Each decode needs its ciphertext fetched first. The pool's queue orders only dec
 
 **What it costs:**
 - **JPEG baseline and extended** (`.50`, `.51`, the common lossy syntax), and the retired progressive and arithmetic-coded DCT processes, decode through the codec's own reduced decode (scaled IDCT). It does much less work: in one Chromium run, a 2048² colour image took 9.9 ms at 1/8 against 42.6 ms at full size.
-- **JPEG 2000 and HTJ2K** (`.90`, `.91`, `.201`–`.203`) discard the finest wavelet resolution levels, so their code-blocks are never decoded. At 1/8, natively, a 2048² lossless 12-bit JPEG 2000 frame takes about 7 ms instead of 413 ms, and the HTJ2K version about 2 ms instead of 60 ms ([htj2k PERF.md](../codec-corpus/formats/htj2k/PERF.md#reduced-resolution-decode)). This is the case to use for whole-slide pyramids and large radiographs.
-  - A frame these codecs cannot reduce falls back to the full decode and box average: too few levels, a non-zero image origin, unusual subsampling, or MIXED HTJ2K.
+- **JPEG 2000 and HTJ2K** (`.90`, `.91`, `.201`–`.203`) discard the finest wavelet resolution levels, so their code-blocks are never decoded. At 1/8, natively, a 2048² lossless 12-bit JPEG 2000 frame takes about 6.5 ms instead of 400 ms, and the HTJ2K version about 0.6 ms instead of 37 ms ([htj2k PERF.md](../codec-corpus/formats/htj2k/PERF.md#reduced-resolution-decode)). This is the case to use for whole-slide pyramids and large radiographs.
+  - A frame these codecs cannot reduce falls back to the full decode and box average: too few levels, a non-zero image origin, or unusual subsampling.
 - **Every other syntax** (JPEG lossless and hierarchical, JPEG-LS, JPEG XL, RLE, native, float) is decoded at full size, then box-averaged in the worker. That saves transfer and cache memory but not decode time.
 - **What the values are:** a wavelet reduction is a smoothed low-pass, not a box average, and it matches OpenJPEG's own reduced decode.
 - **Pixels.** At any scale, they match the native `shl_dicom_decode::decode_file_scaled` (`viewer-kit/test/scaled.ts`).

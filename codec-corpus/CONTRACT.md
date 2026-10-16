@@ -177,11 +177,10 @@ Before any downsampling, each codec result is normalised at the size it was deco
 
 **JPEG 2000 and HTJ2K (`shl-codec-jpeg2000`, `shl-codec-htj2k`).**
 
-- **Method.** Any s at which the stream has enough levels: the s highest resolution levels are discarded, as OpenJPEG's `reduce` does. Their code-blocks are not decoded and their wavelet synthesis is skipped (vendored hayro patch 10).
+- **Method.** Any s at which the stream has enough levels: the s highest resolution levels are discarded, as OpenJPEG's `reduce` does. Their code-blocks are not decoded and their wavelet synthesis is skipped (`shl-jpeg2000`).
 - **Values.** The wavelet LL band, not a box average; pydicom's MONOCHROME sign rule is applied after it, as at full size.
 - **Checked by** `formats/jpeg2000/scaled/check_scaled.py` against `opj_decompress -r s` on every jpeg2000 and htj2k corpus frame: exact for 5/3 streams, and within the full-size tolerance for 9/7.
 - **Unsupported**, so the caller falls back, for:
   - a component with fewer than s decomposition levels (main header or tile-part);
   - an image origin other than (0, 0);
-  - subsampled components, except a single tile whose size is a multiple of the subsampling × 2^s;
-  - HTJ2K frames that only the oxideav fallback decodes.
+  - subsampled components, except a single tile whose size is a multiple of the subsampling × 2^s.
