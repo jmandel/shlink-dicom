@@ -56,13 +56,28 @@ pub(crate) const TABLE: [u32; 47] = [
     e(0x5601, 46, 46, 0),
 ];
 
-/// A context: its state's Qe (bits 0–15), MPS (bit 16), and the state's index (bits 24–29).
+/// A context: its state's Qe (bits 0–15), MPS (bit 16), and `2 index + MPS` (bits 24–30),
+/// which indexes [`NEXT`].
 pub(crate) type Cx = u32;
 
 #[inline(always)]
 const fn cx_state(index: u32, mps: u32) -> Cx {
-    (TABLE[index as usize] & 0xFFFF) | mps << 16 | index << 24
+    (TABLE[index as usize] & 0xFFFF) | mps << 16 | (2 * index + mps) << 24
 }
+
+/// For each context value's `2 index + MPS`: the context after an MPS and after an LPS
+/// (C.3.2, Figures C.17 and C.18), so that a renormalising decode updates it with one load.
+static NEXT: [[Cx; 2]; 94] = {
+    let mut t = [[0; 2]; 94];
+    let mut i = 0;
+    while i < 94 {
+        let (index, mps) = ((i / 2) as u32, (i % 2) as u32);
+        let e = TABLE[index as usize];
+        t[i] = [cx_state(e >> 16 & 0x3F, mps), cx_state(e >> 22 & 0x3F, mps ^ (e >> 28))];
+        i += 1;
+    }
+    t
+};
 
 /// The 19 contexts of Annex D in their initial states (Table D.7): all at state 0 except
 /// zero-coding context 0 (state 4), run-length (state 3) and uniform (state 46).
@@ -155,9 +170,7 @@ impl<'a> Mq<'a> {
         let a = if lps_interval { qe } else { a };
         self.a = a;
         if a & 0x8000 == 0 {
-            let e = TABLE[(state >> 24) as usize];
-            let next = if d == mps { cx_state(e >> 16 & 0x3F, mps) } else { cx_state(e >> 22 & 0x3F, mps ^ (e >> 28)) };
-            *cx = next;
+            *cx = NEXT[(state >> 24) as usize & 0x7F][usize::from(d != mps)];
             self.renorm();
         }
         d
