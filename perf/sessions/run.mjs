@@ -31,7 +31,7 @@ const kinds = arg("kinds", Object.keys(SESSIONS).join(",")).split(",");
 const out = arg("out", "sessions.jsonl");
 const run0 = Number(arg("run0", "0"));
 /** Longest wait for one operation, by profile. */
-const CAP = { home: 30000, fast4g: 60000, slow4g: 120000 }[net] ?? 60000;
+const CAP = { home: 30000, fast4g: 60000, slow4g: 60000 }[net] ?? 60000;
 /** A scrub step slower than this is a stall. */
 const STALL_MS = 250;
 
