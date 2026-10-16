@@ -14,7 +14,7 @@ Our time ÷ the reference's time, single-threaded, same frames; below 1 means we
 | JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.58–0.67 | no wasm reference decodes 12-bit; ours beats native libjpeg-turbo |
 | JPEG Lossless SV1 | libjpeg-turbo 3.2 | about 0.6 (2048²); 0.64 (live 512² CT series) | 0.45 |
 | JPEG-LS | CharLS 2.4.4 | 0.74–0.96 grey; 1.05–1.24 colour | 0.94–1.12 |
-| JPEG 2000 | OpenJPEG 2.5.4 | about 0.9–1.2 (Leica 4:2:2 tile 2.0) | 0.76–0.79 |
+| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.88–0.99; lossy 1.05–1.39; Leica 4:2:2 tile 0.96 (T3) | 0.76–0.79 |
 | HTJ2K | OpenJPH 0.32 | 1.7–3.3 | 1.2–1.25 large frames; faster on small |
 | JPEG XL lossless | libjxl 0.12 | 0.73–1.47 | 0.96–2.14 |
 | JPEG XL lossy | libjxl 0.12 | 1.8–2.2 | 1.12–1.31 at distance 1 (after T6) |
