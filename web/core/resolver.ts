@@ -72,6 +72,24 @@ export interface OpenedLink {
 
 const isNetworkError = (e: unknown) => e instanceof TypeError;
 
+/**
+ * A Bundle request a page started before its scripts loaded (web/view/index.html starts it for a
+ * direct link in the address), so the Bundle downloads while the code does.
+ */
+interface EarlyBundle {
+  url: string;
+  res: Promise<Response>;
+  t0: number;
+}
+
+function takeEarlyBundle(url: string): EarlyBundle | null {
+  const g = globalThis as { __shlBundle?: EarlyBundle };
+  const e = g.__shlBundle;
+  if (!e || e.url !== url) return null;
+  delete g.__shlBundle;
+  return e;
+}
+
 export class LinkResolver {
   readonly payload: ShlPayload;
   readonly recipient: string;
@@ -129,7 +147,8 @@ export class LinkResolver {
       manifest = await this.postManifest();
       bundleUrl = this.baseUrl!;
     }
-    const res = await this.timedFetch(bundleUrl, { purpose: "bundle" });
+    const early = this.isDirect ? takeEarlyBundle(bundleUrl) : null;
+    const res = (early && (await this.earlyFetch(bundleUrl, early))) || (await this.timedFetch(bundleUrl, { purpose: "bundle" }));
     if (!res.ok) throw this.httpError(res.status);
     const jwe = await res.text();
     let bundleBytes: Uint8Array;
@@ -154,8 +173,12 @@ export class LinkResolver {
    * may have expired: the link is re-resolved once (with the remembered passcode) and the read
    * retried. Checks that exactly the planned number of bytes arrived.
    */
-  /** The ciphertext of a plan. `onProgress` gets the bytes received so far against the plan's length. */
-  async fetchRange(plan: RangePlan, signal?: AbortSignal, onProgress?: (received: number, total: number) => void): Promise<Uint8Array> {
+  /**
+   * The ciphertext of a plan. `onProgress` gets the bytes received so far against the plan's
+   * length, and the buffer they are arriving in (bytes [0, received) are final), so a caller can
+   * use the front of a long read before the rest arrives.
+   */
+  async fetchRange(plan: RangePlan, signal?: AbortSignal, onProgress?: (received: number, total: number, buffer?: Uint8Array) => void): Promise<Uint8Array> {
     const want = plan.ciphertextEnd - plan.ciphertextStart;
     const attempt = async () =>
       this.timedFetch(this.fileUrl(plan.fileId), {
@@ -229,6 +252,24 @@ export class LinkResolver {
     return new LinkError("server", `The host could not answer (HTTP ${status}).`, status);
   }
 
+  /** The Bundle request the page started early (null if it failed: the caller asks again). */
+  private async earlyFetch(url: string, early: EarlyBundle): Promise<Response | null> {
+    try {
+      const res = await early.res;
+      this.onRequest?.({
+        method: "GET",
+        url,
+        status: res.status,
+        bytes: Number(res.headers.get("content-length") ?? 0),
+        ms: performance.now() - early.t0,
+        purpose: "bundle",
+      });
+      return res;
+    } catch {
+      return null;
+    }
+  }
+
   private async timedFetch(
     url: string,
     o: { purpose: RequestEvent["purpose"]; method?: "GET" | "POST"; body?: string; range?: string; signal?: AbortSignal },
@@ -275,7 +316,7 @@ export class LinkResolver {
 }
 
 /** Reads a response body of `total` bytes, reporting what has arrived. */
-async function readCounting(body: ReadableStream<Uint8Array>, total: number, onProgress: (received: number, total: number) => void): Promise<Uint8Array> {
+async function readCounting(body: ReadableStream<Uint8Array>, total: number, onProgress: (received: number, total: number, buffer: Uint8Array) => void): Promise<Uint8Array> {
   const out = new Uint8Array(total);
   let n = 0;
   const reader = body.getReader();
@@ -285,7 +326,7 @@ async function readCounting(body: ReadableStream<Uint8Array>, total: number, onP
     if (n + value.byteLength > total) throw new LinkError("server", `The host sent more than the ${total} bytes expected.`);
     out.set(value, n);
     n += value.byteLength;
-    onProgress(n, total);
+    onProgress(n, total, out);
   }
   return n === total ? out : out.subarray(0, n);
 }

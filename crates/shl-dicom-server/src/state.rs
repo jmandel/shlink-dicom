@@ -213,7 +213,22 @@ pub struct AppState {
     pool: Arc<Mutex<ShareDbPool>>,
     events: Arc<Mutex<HashMap<String, broadcast::Sender<AccessEvent>>>>,
     pub demo_shares: Arc<Mutex<Vec<DemoShareInfo>>>,
+    /// Access events not yet in their share's access_log (see `record_access`).
+    access: Arc<AccessQueue>,
 }
+
+/// Access events on their way to the share databases. Reads append here and return; a writer
+/// thread stores them every ACCESS_FLUSH_MS, one transaction per share, so a read never waits for
+/// a SQLite write (on a busy disk an INSERT can block for seconds). Anything that reads the access
+/// log calls `flush_access` first, so it sees every event recorded before it.
+#[derive(Default)]
+struct AccessQueue {
+    pending: Mutex<HashMap<String, Vec<AccessEvent>>>,
+    /// Held while events are taken from `pending` and written, so a flush sees them written.
+    writing: Mutex<()>,
+}
+
+const ACCESS_FLUSH_MS: u64 = 25;
 
 impl AppState {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self, String> {
@@ -246,7 +261,29 @@ impl AppState {
             pool: Arc::new(Mutex::new(ShareDbPool::new())),
             events: Arc::new(Mutex::new(HashMap::new())),
             demo_shares: Arc::new(Mutex::new(Vec::new())),
+            access: Arc::new(AccessQueue::default()),
         };
+        {
+            // The writer holds only a weak reference, so it ends when the state is dropped (tests).
+            let weak = Arc::downgrade(&state.access);
+            let st = state.clone();
+            std::thread::Builder::new()
+                .name("access-log".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(ACCESS_FLUSH_MS));
+                    let Some(q) = weak.upgrade() else { return };
+                    let _w = q.writing.lock().unwrap();
+                    let batch = std::mem::take(&mut *q.pending.lock().unwrap());
+                    for (sid, evs) in batch {
+                        st.write_access(&sid, &evs);
+                    }
+                    if Arc::strong_count(&q) <= 2 {
+                        // Only this thread's clone of the state is left.
+                        return;
+                    }
+                })
+                .map_err(|e| format!("access-log thread: {e}"))?;
+        }
         state.run_sweep()?;
         state.sweep_stale_uploads();
         Ok(state)
@@ -726,6 +763,7 @@ impl AppState {
 
     pub fn build_share_resource(&self, sid: &str, origin: &str) -> Option<ShareResource> {
         let (created_at, expires_at, read_only) = self.lookup_share_meta(sid)?;
+        self.flush_access(sid);
         let conn_arc = self.open_share_db(sid)?;
         let conn = conn_arc.lock().unwrap();
 
@@ -829,13 +867,37 @@ impl AppState {
         sender.subscribe()
     }
 
+    /// Records an access: queued for the share's access_log (written within ACCESS_FLUSH_MS, off
+    /// the request's path) and sent to SSE subscribers at once.
     pub fn record_access(&self, sid: &str, ev: AccessEvent) {
-        if let Some(conn_arc) = self.open_share_db(sid) {
-            let conn = conn_arc.lock().unwrap();
-            let _ = conn.execute(
+        if let Some(sender) = self.events.lock().unwrap().get(sid) {
+            let _ = sender.send(ev.clone());
+        }
+        self.access.pending.lock().unwrap().entry(sid.to_string()).or_default().push(ev);
+    }
+
+    /// Writes a share's queued access events now (call before reading its access_log).
+    pub fn flush_access(&self, sid: &str) {
+        let _w = self.access.writing.lock().unwrap();
+        let evs = self.access.pending.lock().unwrap().remove(sid);
+        if let Some(evs) = evs {
+            self.write_access(sid, &evs);
+        }
+    }
+
+    fn write_access(&self, sid: &str, evs: &[AccessEvent]) {
+        let Some(conn_arc) = self.open_share_db(sid) else { return };
+        let mut conn = conn_arc.lock().unwrap();
+        let Ok(tx) = conn.transaction() else { return };
+        {
+            let Ok(mut stmt) = tx.prepare_cached(
                 "INSERT INTO access_log (ts, lid, method, path, range, status, bytes, recipient)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
+            ) else {
+                return;
+            };
+            for ev in evs {
+                let _ = stmt.execute(params![
                     ev.ts,
                     ev.lid,
                     ev.method,
@@ -844,12 +906,10 @@ impl AppState {
                     ev.status as i64,
                     ev.bytes as i64,
                     ev.recipient
-                ],
-            );
+                ]);
+            }
         }
-        if let Some(sender) = self.events.lock().unwrap().get(sid) {
-            let _ = sender.send(ev);
-        }
+        let _ = tx.commit();
     }
 }
 

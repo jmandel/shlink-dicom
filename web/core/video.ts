@@ -206,6 +206,8 @@ export function cineTiming(h: MediaHeader, frames = h.frames): CineTiming {
 
 export interface ReadOptions {
   signal?: AbortSignal;
+  /** Fetch priority (FetchPriority; default Visible). */
+  priority?: number;
 }
 
 /**
@@ -216,8 +218,8 @@ export async function readInstanceBytes(share: OpenShare, series: SeriesEntry, i
   const inst = series.instances[i];
   const end = Math.min(b, inst.length);
   const plan = planBytes(series, inst.offset + a, inst.offset + end);
-  share.loader.report(plan, "fetching");
-  const ct = await share.resolver.fetchRange(plan, o.signal);
+  // Through the loader: its queue and record cache (the instance's full read reuses these records).
+  const ct = await share.loader.range(series, plan, { signal: o.signal, priority: o.priority });
   try {
     const pt = await share.decryptor.decrypt(series, plan, ct);
     share.loader.report(plan, "verified");

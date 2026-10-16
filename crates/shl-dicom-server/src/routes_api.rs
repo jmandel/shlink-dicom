@@ -1202,6 +1202,7 @@ pub async fn get_share_access(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
+    state.flush_access(&sid);
     let Some(conn_arc) = state.open_share_db(&sid) else {
         return StatusCode::NOT_FOUND.into_response();
     };

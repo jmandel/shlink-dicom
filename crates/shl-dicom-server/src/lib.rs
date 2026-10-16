@@ -53,11 +53,14 @@ pub fn build_app_router(state: AppState) -> Router {
             HeaderName::from_static("upload-limit"),
         ]);
 
+    // web/build.ts writes .br and .gz copies of compressible files; browsers that accept them get them.
     let serve_dir = ServeDir::new("dist/web")
-        .not_found_service(ServeFile::new("dist/web/index.html"));
+        .precompressed_br()
+        .precompressed_gzip()
+        .not_found_service(ServeFile::new("dist/web/index.html").precompressed_br().precompressed_gzip());
     // Experience pages (see docs/EXPERIENCES.md "Routes"). Served without a trailing-slash
     // redirect so `/view#shlink:/…` loads in one request; the pages use relative asset paths.
-    let page = |p: &str| ServeFile::new(format!("dist/web/{p}/index.html"));
+    let page = |p: &str| ServeFile::new(format!("dist/web/{p}/index.html")).precompressed_br().precompressed_gzip();
 
     Router::new()
         // Zero-Knowledge Share & Link Control API
@@ -115,6 +118,30 @@ pub fn build_app_router(state: AppState) -> Router {
         // Static files (assets, config.json); unknown paths get the landing page
         .fallback_service(serve_dir)
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // JSON and JWE bodies; encrypted files stream (routes_api::put_share_file)
+        .layer(axum::middleware::from_fn(static_cache))
         .layer(cors)
         .with_state(state)
+}
+
+/// Cache-Control for the site's own files (the API and SHL routes set their own). Assets named
+/// with their content hash (`?v=` from web/build.ts, or a `chunk-<hash>.js` name) never change,
+/// so browsers keep them for a year without asking; everything else is checked on each use
+/// (`no-cache`, answered with 304 when unchanged).
+async fn static_cache(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let path = req.uri().path().to_owned();
+    let versioned = req.uri().query().is_some_and(|q| q.split('&').any(|kv| kv.starts_with("v=")));
+    let mut res = next.run(req).await;
+    let own = ["/api/", "/shl/", "/cap/", "/sample"].iter().any(|p| path.starts_with(p));
+    if own || res.headers().contains_key(header::CACHE_CONTROL) {
+        return res;
+    }
+    let immutable = res.status().is_success()
+        && path.starts_with("/assets/")
+        && (versioned || path.rsplit('/').next().is_some_and(|f| f.starts_with("chunk-") && f.ends_with(".js")));
+    let value = if immutable { "public, max-age=31536000, immutable" } else { "no-cache" };
+    let h = res.headers_mut();
+    h.insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static(value));
+    // The .br/.gz copies are chosen by Accept-Encoding.
+    h.append(header::VARY, axum::http::HeaderValue::from_static("accept-encoding"));
+    res
 }

@@ -37,22 +37,6 @@ mkdirSync(assets, { recursive: true });
 
 const minify = process.env.MINIFY !== "0";
 
-// Entry points with code splitting: landing, view (and later how/share) share web/core chunks.
-const r = await Bun.build({
-  entrypoints: ["web/landing/landing.ts", "web/view/view.ts", "web/how/how.ts", "web/share/share.ts", "web/share/manage.ts"],
-  outdir: assets,
-  target: "browser",
-  format: "esm",
-  splitting: true,
-  minify,
-  sourcemap: "linked",
-  naming: { entry: "[name].[ext]", chunk: "chunk-[hash].[ext]" },
-});
-if (!r.success) {
-  for (const l of r.logs) console.error(l);
-  process.exit(1);
-}
-
 // Decoder worker: its own file (Workers need a URL).
 const w = await Bun.build({
   entrypoints: ["viewer-kit/src/decoder-worker.ts", "web/core/video-mpeg2-worker.ts", "web/share/lib/compress-worker.ts"],
@@ -108,6 +92,32 @@ cpSync("web/landing/landing.css", `${assets}/landing.css`);
 cpSync("web/how/how.css", `${assets}/how.css`);
 cpSync("web/share/share.css", `${assets}/share.css`);
 
+// Versions of the files the bundles load at run time (wasm, workers): `assetUrl(name)` adds
+// `?v=<hash>`, so the server can let browsers keep them for good (lib.rs static_cache).
+const versions: Record<string, string> = {};
+for (const f of new Bun.Glob("**/*").scanSync({ cwd: assets })) {
+  if (!/\.(js|mjs|wasm)$/.test(f)) continue;
+  versions[f] = new Bun.CryptoHasher("sha256").update(readFileSync(`${assets}/${f}`)).digest("hex").slice(0, 12);
+}
+
+// Entry points with code splitting: landing, view (and later how/share) share web/core chunks.
+const r = await Bun.build({
+  entrypoints: ["web/landing/landing.ts", "web/view/view.ts", "web/how/how.ts", "web/share/share.ts", "web/share/manage.ts"],
+  outdir: assets,
+  target: "browser",
+  format: "esm",
+  splitting: true,
+  minify,
+  sourcemap: "linked",
+  naming: { entry: "[name].[ext]", chunk: "chunk-[hash].[ext]" },
+  define: { __ASSET_VERSIONS__: JSON.stringify(versions) },
+});
+if (!r.success) {
+  for (const l of r.logs) console.error(l);
+  process.exit(1);
+}
+
+
 cpSync("web/landing/index.html", `${out}/index.html`);
 // Site configuration (see web/core/config.ts). Empty: the API is on the same origin as the pages.
 // A static deployment writes {"apiBase": "https://server.example"} here.
@@ -128,6 +138,45 @@ await Bun.write(
 // How it works: its worker, the receiver file, and the images and C decoders it uses.
 const { bakeHow } = await import("./how/bake.ts");
 await bakeHow(root, out);
+
+// Every page names its assets with `?v=<hash>` of their bytes (cached for good; a new build is
+// a new URL; chunks already carry their hash in their names, and are imported by those names), and compressible files get .br and .gz copies, which the server sends to browsers
+// that accept them.
+const hashes = new Map<string, string>();
+const hashOf = (f: string) => {
+  if (!hashes.has(f)) hashes.set(f, existsSync(`${assets}/${f}`) ? new Bun.CryptoHasher("sha256").update(readFileSync(`${assets}/${f}`)).digest("hex").slice(0, 12) : "");
+  return hashes.get(f)!;
+};
+// The chunks a bundle imports (static imports, transitively): preloaded with the page, so they
+// download with the entry instead of one round trip after it.
+const staticDeps = (name: string, seen = new Set<string>()): Set<string> => {
+  const src = existsSync(`${assets}/${name}`) ? readFileSync(`${assets}/${name}`, "utf8") : "";
+  for (const m of src.matchAll(/(?:from|import)"\.\/(chunk-[a-z0-9]+\.js)"/g)) {
+    if (!seen.has(m[1])) seen.add(m[1]), staticDeps(m[1], seen);
+  }
+  return seen;
+};
+for (const f of new Bun.Glob("**/*.html").scanSync({ cwd: out })) {
+  const path = `${out}/${f}`;
+  let html = readFileSync(path, "utf8");
+  const entry = /<script type="module" src="((?:\.\.\/)*assets\/)([a-z-]+\.js)">/.exec(html);
+  if (entry) {
+    const links = [...staticDeps(entry[2])].map((c) => `<link rel="modulepreload" href="${entry[1]}${c}" />`).join("\n  ");
+    if (links) html = html.replace(/(\s*)<link rel="stylesheet"/, `$1${links}$1<link rel="stylesheet"`);
+  }
+  const next = html.replace(/((?:\.\.\/)*assets\/)([A-Za-z0-9_.\/-]+\.(?:js|mjs|css|wasm))(?=["'])/g, (m, pre, name) => (hashOf(name) && !name.startsWith("chunk-") ? `${pre}${name}?v=${hashOf(name)}` : m));
+  await Bun.write(path, next);
+}
+const { brotliCompressSync, gzipSync, constants } = await import("node:zlib");
+for (const f of new Bun.Glob("**/*.{js,mjs,css,html,json,wasm,svg,txt}").scanSync({ cwd: out })) {
+  const path = `${out}/${f}`;
+  const bytes = readFileSync(path);
+  if (bytes.length < 1024) continue;
+  const br = brotliCompressSync(bytes, { params: { [constants.BROTLI_PARAM_QUALITY]: bytes.length > 4e6 ? 9 : 11, [constants.BROTLI_PARAM_SIZE_HINT]: bytes.length } });
+  const gz = gzipSync(bytes, { level: 9 });
+  if (br.length < bytes.length * 0.9) await Bun.write(`${path}.br`, br);
+  if (gz.length < bytes.length * 0.9) await Bun.write(`${path}.gz`, gz);
+}
 
 const old = `${site}.old-${process.pid}`;
 if (existsSync(site)) renameSync(site, old);

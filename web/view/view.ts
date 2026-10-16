@@ -125,6 +125,20 @@ let panY = 0;
 let viewport: Viewport | null = null;
 let seriesAbort = new AbortController();
 let studyAbort = new AbortController();
+/**
+ * The overview's thumbnails and its prefetch: stopped when a study opens, resumed on return. A
+ * second render of the overview (once accessions or study times are known) starts its own work,
+ * which joins the loads already running.
+ */
+let overviewAborts: { study: number | null; ac: AbortController }[] = [];
+/** The ImageStore, once the decoder pool has started. */
+let imagesReady: Promise<ImageStore> | null = null;
+let overviewWork: (() => void) | null = null;
+/** Stops the overview's work, except the thumbnail of `keep` (the study opening: its image comes next). */
+const stopOverviewWork = (keep?: number) => {
+  for (const c of overviewAborts) if (c.study !== keep) c.ac.abort();
+  overviewAborts = overviewAborts.filter((c) => c.study === keep);
+};
 let shownKey = "";
 /** Whole-slide (SM) series are shown by a tiled deep-zoom view instead of the slice viewer. */
 let slideView: SlideView | null = null;
@@ -876,12 +890,10 @@ async function open(passcode?: string) {
     showError(new LinkError("invalid", "This link opened, but it contains no imaging studies."));
     return;
   }
-  try {
-    images = new ImageStore(share.loader, await poolPromise);
-  } catch (e) {
-    showError(new Error(`The image decoder could not start in this browser (${(e as Error).message}).`));
-    return;
-  }
+  // The overview shows at once; its thumbnails wait for the decoder (overviewWork).
+  const loader = share.loader;
+  imagesReady = poolPromise.then((pool) => (images = new ImageStore(loader, pool)));
+  imagesReady.catch((e) => showError(new Error(`The image decoder could not start in this browser (${(e as Error).message}).`)));
   setHeader();
   renderOverview();
   const st = history.state as { screen?: string; study?: number } | null;
@@ -994,9 +1006,10 @@ function renderOverview() {
 
   const list = $("ov-studies");
   list.textContent = "";
-  const thumbs: Promise<void>[] = [];
-  const big: { bytes: number; run: () => Promise<void> }[] = [];
-  const after: (() => Promise<unknown>)[] = [];
+  type Run = (signal: AbortSignal) => () => Promise<void>;
+  const small: { study: number; run: Run }[] = [];
+  const big: { study: number; bytes: number; run: Run }[] = [];
+  const after: ((signal: AbortSignal) => Promise<unknown>)[] = [];
   idx.studies.forEach((st, si) => {
     const card = el("article", "card study-card");
     const openBtn = el("button", "study-open");
@@ -1038,19 +1051,45 @@ function renderOverview() {
     const se = st.series[pickInitialSeries(st)];
     if (!se) return;
     const target = { se, inst: thumbInstance(se) };
-    // Large files (radiographs) one after another, smallest first, so the first arrives early
-    // rather than all together at the end; small ones at once.
-    const run = () => seriesThumb(thumb, target.se, Priority.Visible, undefined, target.inst).then(() => mark("first-thumb"));
-    const bytes = target.se.instances[target.inst].length;
-    if (!isSlideSeries(target.se) && bytes > 2 * 1024 * 1024) {
+    // Small files at once; large ones (radiographs, slides) after them, one after another,
+    // smallest first, so they don't share the connection with the small ones.
+    const run = (signal: AbortSignal) => () =>
+      thumb.dataset.drawn ? Promise.resolve() : seriesThumb(thumb, target.se, Priority.Visible, signal, target.inst).then(() => mark("first-thumb"));
+    // A slide's thumbnail is its coarsest level and the headers before it: a few MB.
+    const slide = isSlideSeries(target.se);
+    const bytes = slide ? 4 * 1024 * 1024 : target.se.instances[target.inst].length;
+    if (slide || bytes > 2 * 1024 * 1024) {
       primeTile(thumb, target.se, target.inst);
-      big.push({ bytes, run });
-    } else thumbs.push(run());
-    if (!isSlideSeries(se) && !media.isVideo(se)) after.push(() => images!.get(se, Math.floor(se.instances.length / 2), { priority: Priority.Prefetch }));
+      big.push({ study: si, bytes, run });
+    } else small.push({ study: si, run });
+    if (!isSlideSeries(se) && !media.isVideo(se)) after.push((signal) => images!.get(se, Math.floor(se.instances.length / 2), { priority: Priority.Prefetch, signal }));
   });
-  let chain: Promise<void> = Promise.resolve();
-  for (const b of big.sort((x, y) => x.bytes - y.bytes)) thumbs.push((chain = chain.then(b.run, b.run)));
-  void Promise.allSettled(thumbs).then(() => after.forEach((f) => void f().catch(() => {})));
+  // Stopped when a study opens (its images come first), and resumed when the overview shows again.
+  big.sort((x, y) => x.bytes - y.bytes);
+  overviewWork = () => {
+    const ac = new AbortController();
+    overviewAborts.push({ study: null, ac });
+    const signal = ac.signal;
+    void imagesReady?.then(() => {
+      if (!signal.aborted) work(signal);
+    }, () => {});
+  };
+  const work = (signal: AbortSignal) => {
+    // Each thumbnail can be stopped on its own (opening a study keeps that study's).
+    const card = (study: number) => {
+      const ac = new AbortController();
+      overviewAborts.push({ study, ac });
+      return ac.signal;
+    };
+    const first = small.map((x) => x.run(card(x.study))().catch(() => {}));
+    let chain: Promise<unknown> = Promise.allSettled(first);
+    const rest = big.map((b) => (chain = chain.then(() => (signal.aborted ? undefined : b.run(card(b.study))().catch(() => {})))));
+    void Promise.allSettled([...first, ...rest]).then(() => {
+      if (!signal.aborted) after.forEach((f) => void f(signal).catch(() => {}));
+    });
+  };
+  // Shown already (a second render, once accessions or times are known): its own thumbnails now.
+  if (!$("screen-overview").classList.contains("hidden")) overviewWork();
   // Reports that match no study in the share still appear, on their own.
   const loose = reportLinks().filter((l) => l.studyId === null);
   if (loose.length) {
@@ -1079,7 +1118,7 @@ async function learnAccessions() {
       const se = st.series[0];
       if (!se) return;
       try {
-        const bytes = await readInstanceBytes(share!, se, 0, 0, RECORD_PLAINTEXT);
+        const bytes = await readInstanceBytes(share!, se, 0, 0, RECORD_PLAINTEXT, { priority: FetchPriority.Prefetch });
         noteAccession(idx, st.id, parseDicomSync(bytes, { untilPixelData: true }).ds.str(T.AccessionNumber));
       } catch {}
     }),
@@ -1102,7 +1141,7 @@ async function learnStudyTimes() {
   await Promise.all(
     need.map(async (st) => {
       try {
-        const bytes = await readInstanceBytes(share!, st.series[0], 0, 0, RECORD_PLAINTEXT);
+        const bytes = await readInstanceBytes(share!, st.series[0], 0, 0, RECORD_PLAINTEXT, { priority: FetchPriority.Prefetch });
         const t = parseDicomSync(bytes, { untilPixelData: true }).ds.str(T.StudyTime);
         studyTimes.set(st.id, t && /^\d{4}/.test(t) ? `${t.slice(0, 2)}:${t.slice(2, 4)}` : "");
       } catch {
@@ -1214,17 +1253,25 @@ function showOverview() {
   leaveSlide();
   media.leave();
   window.scrollTo(0, 0);
+  // Thumbnails stopped when a study opened.
+  overviewWork?.();
 }
 
 // ------------------------------------------------------------------------------------- viewer
 
 function openStudy(si: number, push = true) {
+  if (!images) {
+    // The decoder is still starting.
+    void imagesReady?.then(() => openStudy(si, push), () => {});
+    return;
+  }
   if (push) history.pushState({ screen: "viewer", study: si }, "");
   document.body.classList.remove("scrolling");
   window.scrollTo(0, 0);
   studyIdx = si;
   seriesIdx = -1;
   mpr = null;
+  stopOverviewWork(si);
   studyAbort.abort();
   studyAbort = new AbortController();
   show("viewer");

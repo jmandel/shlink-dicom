@@ -20,9 +20,19 @@ export function siteUrl(path: string): string {
   return new URL(path.replace(/^\//, ""), siteRoot).toString();
 }
 
-/** A file shipped next to the bundles (wasm, workers). */
+/** Content hashes of the files next to the bundles, written by web/build.ts (absent under Bun). */
+declare const __ASSET_VERSIONS__: Record<string, string> | undefined;
+let assetVersions: Record<string, string> = {};
+try {
+  assetVersions = __ASSET_VERSIONS__ ?? {};
+} catch {}
+
+/** A file shipped next to the bundles (wasm, workers), with `?v=` its content hash when the build knows it. */
 export function assetUrl(name: string): string {
-  return new URL(name, import.meta.url).toString();
+  const u = new URL(name, import.meta.url);
+  const v = assetVersions[name];
+  if (v) u.searchParams.set("v", v);
+  return u.toString();
 }
 
 function defaultConfig(): SiteConfig {

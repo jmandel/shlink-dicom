@@ -5,7 +5,10 @@ import type { SeriesEntry, StudyEntry } from "./bundle";
 import { buildDicomdir, type DicomdirEntry } from "./dicomdir";
 import { readDicomHeader } from "./dicom-header";
 import { FetchPriority, type InstanceLoader } from "./loader";
-import { planRuns } from "./range";
+import { planRuns, type RangePlan } from "./range";
+
+/** Runs (of up to 8 MiB) read ahead of the one being written. */
+const READ_AHEAD = 3;
 import { ZipWriter, type ByteSink } from "./zip";
 
 export interface ExportProgress {
@@ -55,26 +58,34 @@ export async function exportZip(
   onProgress?.(progress);
   try {
     const studies = scopeStudies(scope);
-    for (let t = 0; t < studies.length; t++) {
-      for (let s = 0; s < studies[t].length; s++) {
-        const series = studies[t][s];
-        for (const plan of planRuns(series)) {
-          if (signal?.aborted) throw new DOMException("export cancelled", "AbortError");
-          const files = await loader.run(series, plan, { priority: FetchPriority.Background, signal });
-          for (let k = 0; k < files.length; k++) {
-            const i = plan.firstInstance + k;
-            const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
-            await zip.add(id.join("/"), files[k]);
-            try {
-              dir.push({ fileId: id, header: await readDicomHeader(files[k]) });
-            } catch {
-              // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
-            }
-            progress.files++;
-            progress.bytes += files[k].byteLength;
-            onProgress?.(progress);
-          }
+    // Every run in order. A few are read ahead (fetched and verified) while earlier ones are
+    // written, so the connection stays busy while the ZIP is written.
+    const runs: { t: number; s: number; series: SeriesEntry; plan: RangePlan }[] = [];
+    studies.forEach((list, t) => list.forEach((series, s) => planRuns(series).forEach((plan) => runs.push({ t, s, series, plan }))));
+    const ahead: (Promise<Uint8Array[]> | undefined)[] = [];
+    const start = (k: number) => {
+      if (k >= runs.length || ahead[k]) return;
+      ahead[k] = loader.run(runs[k].series, runs[k].plan, { priority: FetchPriority.Background, signal });
+      ahead[k]!.catch(() => {});
+    };
+    for (let k = 0; k < runs.length; k++) {
+      if (signal?.aborted) throw new DOMException("export cancelled", "AbortError");
+      for (let j = k; j < k + READ_AHEAD; j++) start(j);
+      const { t, s, plan } = runs[k];
+      const files = await ahead[k]!;
+      delete ahead[k];
+      for (let n = 0; n < files.length; n++) {
+        const i = plan.firstInstance + n;
+        const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
+        await zip.add(id.join("/"), files[n]);
+        try {
+          dir.push({ fileId: id, header: await readDicomHeader(files[n]) });
+        } catch {
+          // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
         }
+        progress.files++;
+        progress.bytes += files[n].byteLength;
+        onProgress?.(progress);
       }
     }
     await zip.add("DICOMDIR", buildDicomdir(dir));

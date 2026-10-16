@@ -6,8 +6,25 @@
   <meta name="referrer" content="no-referrer" />
   <title>Shared imaging</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5fbf'/><path d='M9 9h14v14H9z' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='3.5' fill='white'/></svg>" />
+  <script>
+    // A direct (U) link in the address: start its Bundle request now, so it downloads while the
+    // viewer's code does. web/core/resolver.ts takes it when the URL matches what it would ask for.
+    (function () {
+      try {
+        var h = location.hash, i = h.indexOf("shlink:/");
+        if (i < 0) return;
+        var p = JSON.parse(atob(h.slice(i + 8).replace(/-/g, "+").replace(/_/g, "/")));
+        if (!/U/.test(p.flag || "") || (p.exp && p.exp * 1000 <= Date.now())) return;
+        var u = new URL(p.url);
+        u.searchParams.set("recipient", "Web viewer");
+        window.__shlBundle = { url: u.toString(), t0: performance.now(), res: fetch(u.toString(), { cache: "no-store" }) };
+        window.__shlBundle.res.catch(function () {});
+      } catch (e) {}
+    })();
+  </script>
   <link rel="modulepreload" href="../assets/view.js" />
   <link rel="preload" href="../assets/shl_dicom_decode.wasm" as="fetch" type="application/wasm" crossorigin />
+  <link rel="preload" href="../assets/decoder-worker.js" as="fetch" crossorigin />
   <link rel="stylesheet" href="../assets/base.css" />
   <link rel="stylesheet" href="../assets/view.css" />
 </head>

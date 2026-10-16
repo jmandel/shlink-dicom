@@ -132,6 +132,21 @@ interface Slot {
 
 const abortError = () => new DOMException("decode aborted", "AbortError");
 
+/**
+ * A blob: URL holding the worker script (a single bundle, with no imports), or the script's own
+ * URL when it can't be fetched here.
+ */
+async function workerScript(url: string | URL): Promise<string | URL> {
+  if (typeof Blob === "undefined" || typeof URL.createObjectURL !== "function") return url;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return url;
+    return URL.createObjectURL(new Blob([await res.text()], { type: "text/javascript" }));
+  } catch {
+    return url;
+  }
+}
+
 export function defaultWorkerCount(): number {
   const hc = (globalThis.navigator?.hardwareConcurrency ?? 2) - 1;
   return Math.max(1, Math.min(8, hc));
@@ -172,12 +187,18 @@ export class DecoderPool {
     pool.jxlSource = opts.jxlWasm !== undefined ? opts.jxlWasm
       : opts.wasm instanceof WebAssembly.Module ? null
       : new URL("shl_dicom_decode_jxl.wasm", new URL(opts.wasm, globalThis.location?.href));
-    const module = opts.wasm instanceof WebAssembly.Module ? opts.wasm : await WebAssembly.compileStreaming(fetch(opts.wasm));
+    // The workers start (and fetch their script) while the module compiles; each gets the
+    // module once it is ready.
+    const compiled = opts.wasm instanceof WebAssembly.Module ? Promise.resolve(opts.wasm) : WebAssembly.compileStreaming(fetch(opts.wasm));
     const n = opts.workers ?? defaultWorkerCount();
-    await Promise.all(
-      Array.from({ length: n }, () => new Promise<void>((resolve, reject) => {
-        const worker = new Worker(opts.workerUrl, { type: "module", name: "shl-dicom-decode" });
-        const slot: Slot = { worker, job: null };
+    // The worker script is fetched once and the workers start from that copy: n requests for one
+    // URL wait on each other in the browser's cache, one round trip each.
+    const scriptUrl = await workerScript(opts.workerUrl);
+    const started = Array.from({ length: n }, () => {
+      const worker = new Worker(scriptUrl, { type: "module", name: "shl-dicom-decode" });
+      const slot: Slot = { worker, job: null };
+      pool.slots.push(slot);
+      return new Promise<void>((resolve, reject) => {
         worker.onmessage = (ev) => {
           if (ev.data?.type === "ready") {
             worker.onmessage = (e) => (e.data?.type === "need-jxl" ? pool.sendJxl(worker) : pool.onResult(slot, e.data));
@@ -185,10 +206,17 @@ export class DecoderPool {
           }
         };
         worker.onerror = (e) => reject(new Error(`decoder worker failed to start: ${e.message}`));
-        worker.postMessage({ type: "init", module });
-        pool.slots.push(slot);
-      })),
-    );
+      });
+    });
+    let module: WebAssembly.Module;
+    try {
+      module = await compiled;
+    } catch (e) {
+      for (const s of pool.slots) s.worker.terminate();
+      throw e;
+    }
+    for (const s of pool.slots) s.worker.postMessage({ type: "init", module });
+    await Promise.all(started);
     return pool;
   }
 
