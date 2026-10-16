@@ -2,7 +2,7 @@
 // one share per case, packed as the Share page packs (pack-share.ts).
 //   bun web/checks/sop-sweep-fixtures.ts [base] [root] [caseId…]
 // root (default /media/barracuda/sop-sweep) holds cases.json, cases-extra.json and dl/<SeriesInstanceUID>/.
-// Writes root/fixtures.json: { [caseId]: { link, sid, token, files, skipped } }.
+// Writes root/shares.json: { [caseId]: { link, sid, token, files, skipped } }.
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { packAndShare } from "./pack-share";
 
@@ -13,7 +13,7 @@ const cases = [
   ...JSON.parse(readFileSync(`${root}/cases.json`, "utf8")).cases,
   ...(existsSync(`${root}/cases-extra.json`) ? JSON.parse(readFileSync(`${root}/cases-extra.json`, "utf8")).cases : []),
 ];
-const outPath = `${root}/fixtures.json`;
+const outPath = `${root}/shares.json`;
 const prev: Record<string, any> = existsSync(outPath) ? JSON.parse(readFileSync(outPath, "utf8")) : {};
 const out: Record<string, any> = { ...prev };
 for (const c of cases) {

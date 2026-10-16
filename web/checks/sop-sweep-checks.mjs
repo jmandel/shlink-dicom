@@ -3,9 +3,13 @@
 // from pydicom (sop-sweep/expect.py) and reformats from SimpleITK (sop-sweep/mpr-oracle.py).
 //   uv run --project codec-corpus python -I web/checks/sop-sweep/expect.py /media/barracuda/sop-sweep
 //   bun web/checks/sop-sweep-fixtures.ts http://localhost:3471
-//   BASE=http://localhost:3471 node web/checks/sop-sweep-checks.mjs [--only=case,case] [--fixtures]
-// --fixtures runs only the named failing cases of sop-sweep/fixtures.json (the regression set).
-// Writes ROOT/results.json; screenshots of failures go to ROOT/shots/ (ROOT=/media/barracuda/sop-sweep).
+//   BASE=http://localhost:3471 node web/checks/sop-sweep-checks.mjs [--only=case,case]
+// Writes ROOT/results.json; screenshots go to ROOT/shots/ (ROOT: $SWEEP, default /media/barracuda/sop-sweep).
+// The regression set (the sweep's failing cases, named in sop-sweep/fixtures.json, fetched from IDC by UID):
+//   cd codec-corpus && uv run --with idc-index --with pydicom --with highdicom python scripts/sources/sopclass_fetch.py --fixtures ../web/checks/sop-sweep/fixtures.json /media/barracuda/sop-sweep-fixtures
+//   uv run --project codec-corpus python -I web/checks/sop-sweep/expect.py /media/barracuda/sop-sweep-fixtures
+//   bun web/checks/sop-sweep-fixtures.ts http://localhost:3471 /media/barracuda/sop-sweep-fixtures
+//   SWEEP=/media/barracuda/sop-sweep-fixtures BASE=http://localhost:3471 node web/checks/sop-sweep-checks.mjs
 import { launchBrowser } from "./browser.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -17,14 +21,13 @@ const SHOTS = `${ROOT}/shots/`;
 const REFS = `${ROOT}/refs/`;
 mkdirSync(SHOTS, { recursive: true });
 mkdirSync(REFS, { recursive: true });
-const F = JSON.parse(readFileSync(`${ROOT}/fixtures.json`, "utf8"));
+const F = JSON.parse(readFileSync(`${ROOT}/shares.json`, "utf8"));
 const E = JSON.parse(readFileSync(`${ROOT}/expect.json`, "utf8"));
 const CASES = [
   ...JSON.parse(readFileSync(`${ROOT}/cases.json`, "utf8")).cases,
   ...(existsSync(`${ROOT}/cases-extra.json`) ? JSON.parse(readFileSync(`${ROOT}/cases-extra.json`, "utf8")).cases : []),
 ];
-let only = process.argv.find((a) => a.startsWith("--only="))?.slice(7).split(",");
-if (process.argv.includes("--fixtures")) only = JSON.parse(readFileSync(new URL("./sop-sweep/fixtures.json", import.meta.url), "utf8")).fixtures.map((f) => f.case);
+const only = process.argv.find((a) => a.startsWith("--only="))?.slice(7).split(",");
 const resultsPath = `${ROOT}/results.json`;
 const RESULTS = existsSync(resultsPath) && only ? JSON.parse(readFileSync(resultsPath, "utf8")) : {};
 
@@ -137,11 +140,14 @@ async function seriesChecks(page, c, r, e, deep, check, out) {
     }
     check(`${cat}: opens and draws`, true, r.count, uid);
     const st = await page.evaluate(() => window.__viewHooks.state());
-    const n = e.slices.length;
-    check(`${cat}: one slice per ${e.frames.length === 1 && n > 1 ? "frame" : "instance"}`, st.sliceCount === n, `${st.sliceCount} of ${n}`, uid);
+    // One multi-frame instance: a slice per frame. Several instances: a slice per instance (a
+    // multi-frame one plays its frames with the cine control).
+    const single = e.frames.length === 1;
+    const n = single ? e.slices.length : e.frames.length;
+    check(`${cat}: one slice per ${single && n > 1 ? "frame" : "instance"}`, st.sliceCount === n, `${st.sliceCount} of ${n}${!single && e.frames.some((f) => f > 1) ? ` (instances of ${[...new Set(e.frames)].join(", ")} frames)` : ""}`, uid);
     // Dimensions of what is drawn.
     const tr = (await page.textContent("#hud-tr")).split("\n")[0];
-    const s0 = e.slices[st.sliceIdx] ?? e.slices[0];
+    const s0 = (await sliceAt(page, e, st.sliceIdx)) ?? e.slices[0];
     const dims = `${s0.cols}×${s0.rows}`;
     check(`${cat}: dimensions`, tr === dims, `${tr}; expected ${dims}`, uid);
     // Not a silent blank.
@@ -183,7 +189,7 @@ async function seriesChecks(page, c, r, e, deep, check, out) {
       }
     }
     if (valChecked || badVals.length) check(`${cat}: values under the cursor are the stored values through each slice's own rescale`, badVals.length === 0, badVals.length ? `${badVals.length} wrong: ${badVals.slice(0, 3).join("; ")}` : `${valChecked} pixels`, uid);
-    if (pos.every((p) => p !== null && p !== undefined) && pos.length >= 3 && (cat === "volume" || e.regularVolume)) {
+    if (pos.every((p) => p !== null && p !== undefined) && pos.length >= 3 && (cat === "volume" || e.regularVolume) && (single || e.frames.every((f) => f === 1))) {
       const d = pos.slice(1).map((p, k) => p - pos[k]);
       const mono = d.every((x) => x > 1e-4) || d.every((x) => x < -1e-4);
       const dup = new Set(e.slices.map((s) => s.pos?.toFixed(3))).size < e.slices.length;
@@ -195,19 +201,25 @@ async function seriesChecks(page, c, r, e, deep, check, out) {
     const rescVaries = new Set(e.slices.map((s) => `${s.slope}/${s.intercept}`)).size > 1;
     if (rescVaries) check(`${cat}: per-slice rescale (info)`, null, `${new Set(e.slices.map((s) => `${s.slope}/${s.intercept}`)).size} distinct rescales`, uid);
     // Cine: a multi-frame instance gets a play bar, and playing moves the frame.
-    if (e.frames.some((f) => f > 1) && e.frames.length === 1) {
+    if (e.frames.some((f) => f > 1)) {
+      if (!single) await showSlice(page, e.frames.findIndex((f) => f > 1), n);
       const bar = await page.isVisible(".play-bar button[aria-label='Play']");
       check(`${cat}: multi-frame: play control shown`, bar, "", uid);
       if (bar) {
-        const s0i = (await page.evaluate(() => window.__viewHooks.state())).sliceIdx;
+        // The frame counter of the play bar ("4 / 9"; one multi-frame instance: also the slice).
+        const where = () => page.evaluate(() => `${window.__viewHooks.state().sliceIdx} ${document.querySelector(".play-bar .play-info")?.textContent ?? ""}`);
+        const s0i = await where();
         await page.click(".play-bar button[aria-label='Play']");
-        const moved = await page.waitForFunction((s) => window.__viewHooks.state().sliceIdx !== s, s0i, { timeout: 8000 }).then(() => true, () => false);
+        const moved = await page.waitForFunction((s) => `${window.__viewHooks.state().sliceIdx} ${document.querySelector(".play-bar .play-info")?.textContent ?? ""}` !== s, s0i, { timeout: 8000 }).then(() => true, () => false);
         await page.click(".play-bar button[aria-label='Pause']").catch(() => page.click(".play-bar button[aria-label='Play']").catch(() => {}));
         check(`${cat}: multi-frame: frames play`, moved, "", uid);
       }
     }
     // Reformats.
-    if (cat === "volume" && MPR_MODALITIES.includes(e.modality) && n >= 10 && e.spp === 1) await reformats(page, c, r, e, check);
+    if (cat === "volume" && MPR_MODALITIES.includes(e.modality) && n >= 10 && e.spp === 1) {
+      if (e.slices[0].iop) await reformats(page, c, r, e, check);
+      else check("volume: reformats", null, "no Image Orientation (Patient): not a volume", uid);
+    }
     return;
   }
   if (cat === "seg" || cat === "rtstruct") {
@@ -239,24 +251,34 @@ async function seriesChecks(page, c, r, e, deep, check, out) {
         const cv = document.querySelector(".layer-canvas");
         if (!cv) return null;
         const d = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
-        let sx = 0, sy = 0, k = 0;
-        for (let y = 0; y < cv.height; y++) for (let x = 0; x < cv.width; x++) if (d[(y * cv.width + x) * 4 + 3] > 0) (sx += x), (sy += y), k++;
+        let k = 0, x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+        for (let y = 0; y < cv.height; y++)
+          for (let x = 0; x < cv.width; x++)
+            if (d[(y * cv.width + x) * 4 + 3] > 0) {
+              k++;
+              if (x < x0) x0 = x;
+              if (x > x1) x1 = x;
+              if (y < y0) y0 = y;
+              if (y > y1) y1 = y;
+            }
         if (!k) return { drawn: +cv.dataset.drawn, n: 0 };
         const r = cv.getBoundingClientRect();
-        const cx = r.left + ((sx / k + 0.5) * r.width) / cv.width, cy = r.top + ((sy / k + 0.5) * r.height) / cv.height;
-        return { drawn: +cv.dataset.drawn, n: k, px: window.__viewHooks.pixelAtClient(cx, cy) };
+        const cl = (x, y) => window.__viewHooks.pixelAtClient(r.left + ((x + 0.5) * r.width) / cv.width, r.top + ((y + 0.5) * r.height) / cv.height);
+        return { drawn: +cv.dataset.drawn, n: k, a: cl(x0, y0), b: cl(x1, y1) };
       });
       if (!m || !m.n) {
         bad.push(`image ${slice + 1}: nothing drawn (expected ${want} ${cat === "seg" ? "segment frame(s)" : "contour(s)"})`);
         continue;
       }
-      const dist = m.px ? Math.hypot(m.px.x - t.x, m.px.y - t.y) : Infinity;
-      const tol = Math.max(6, 0.03 * 512);
+      // The drawn pixels' bounding box (image pixels) against the mask's or contour's.
+      const box = m.a && m.b ? [m.a.x, m.a.y, m.b.x + 1, m.b.y + 1] : null;
+      const off = box ? Math.max(...box.map((v, j) => Math.abs(v - t.box[j]))) : Infinity;
+      const tol = 4;
       if (m.drawn !== want && cat === "seg") bad.push(`image ${slice + 1}: ${m.drawn} segment frame(s) drawn, ${want} expected`);
-      else if (!(dist <= tol)) bad.push(`image ${slice + 1}: drawn around (${m.px?.x}, ${m.px?.y}), expected (${t.x.toFixed(0)}, ${t.y.toFixed(0)})`);
+      else if (!(off <= tol)) bad.push(`image ${slice + 1}: drawn over x ${box?.[0]}–${box?.[2]}, y ${box?.[1]}–${box?.[3]}; expected x ${t.box[0].toFixed(0)}–${t.box[2].toFixed(0)}, y ${t.box[1].toFixed(0)}–${t.box[3].toFixed(0)}`);
       else good++;
     }
-    check(`${cat}: lands on the referenced images, in the right place`, bad.length === 0, bad.length ? bad.join("; ") : `${good} image(s): count and centroid match`, uid);
+    check(`${cat}: lands on the referenced images, in the right place`, bad.length === 0, bad.length ? bad.join("; ") : `${good} image(s): count and bounding box match`, uid);
     await page.click("#btn-layers").catch(() => {});
     const legend = await page.locator(".legend-item").count();
     const wantLegend = cat === "seg" ? e.segments : e.rois;
@@ -374,8 +396,10 @@ async function reformats(page, c, r, e, check) {
       const info = JSON.parse(execFileSync("uv", ["run", "-q", "--project", `${REPO}codec-corpus`, "--with", "simpleitk", "--with", "pillow", "python", "-I", `${REPO}web/checks/sop-sweep/mpr-oracle.py`, `${REFS}${tag}.json`], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 1 << 24 }).trim().split("\n").pop());
       const url = `data:image/png;base64,${readFileSync(job.out).toString("base64")}`;
       const cmp = await page.evaluate((u) => window.__viewHooks.compareWith(u), url);
-      const ok = cmp && !cmp.error && cmp.max <= 2 && cmp.over2 < 0.001;
-      check(`${label}: matches SimpleITK`, ok, cmp?.error ?? `max |Δ| ${cmp?.max}, mean ${cmp?.mean?.toFixed(3)}, >2: ${((cmp?.over2 ?? 0) * 100).toFixed(2)}% (${m.spec.width}×${m.spec.height}${info.uniformRescale ? "" : "; rescale differs between slices"})`, uid);
+      // One stored unit in grey levels: with a narrow window a rounding tie (x.5) is several levels.
+      const unit = (255 * Math.abs(e.slices[0].slope)) / Math.max(1, st.ww - 1);
+      const ok = cmp && !cmp.error && cmp.max <= Math.max(2, Math.ceil(unit) + 1) && cmp.over2 < (unit > 2 ? 0.005 : 0.001);
+      check(`${label}: matches SimpleITK`, ok, cmp?.error ?? `max |Δ| ${cmp?.max}, mean ${cmp?.mean?.toFixed(3)}, >2: ${((cmp?.over2 ?? 0) * 100).toFixed(2)}% (${m.spec.width}×${m.spec.height}; 1 stored unit = ${unit.toFixed(1)} grey levels${info.uniformRescale ? "" : "; rescale differs between slices"})`, uid);
       if (!ok) await page.screenshot({ path: `${SHOTS}${tag}-mpr.png` }).catch(() => {});
     } catch (err) {
       check(`${label}`, false, String(err?.message ?? err).split("\n")[0], uid);

@@ -244,9 +244,12 @@ def main():
                             continue
                         ys, xs = np.nonzero(m)
                         c = None if pos is None else to_patient(pos, row, col, sp, float(xs.mean()), float(ys.mean()))
+                        corners = None if pos is None else [[float(v) for v in to_patient(pos, row, col, sp, x, y)]
+                                                            for x in (xs.min() - 0.5, xs.max() + 0.5) for y in (ys.min() - 0.5, ys.max() + 0.5)]
                         seg_id = fg(ds, k, "SegmentIdentificationSequence")
                         fr.append({"frame": k, "src": src, "centroid": None if c is None else [float(v) for v in c],
-                                   "segment": int(seg_id.ReferencedSegmentNumber) if seg_id is not None else None, "pixels": int(m.sum())})
+                                   "segment": int(seg_id.ReferencedSegmentNumber) if seg_id is not None else None, "pixels": int(m.sum()),
+                                   "corners": corners})
                     e["segFrames"] = fr
                 elif cat == "rtstruct":
                     ds = pydicom.dcmread(files[0])
@@ -263,6 +266,7 @@ def main():
                     e["contours"] = sum(per.values())
                     e["contoursPerImage"] = per
                     e["contourCentroid"] = {k: [float(v) for v in np.concatenate(v).mean(0)] for k, v in pts.items() if len(np.concatenate(v))}
+                    e["contourPoints"] = {k: [[float(a) for a in q] for q in np.concatenate(v)] for k, v in pts.items() if len(np.concatenate(v))}
                 elif cat == "pr":
                     ds = pydicom.dcmread(files[0])
                     e["voi"] = [[first_num(v.WindowCenter), first_num(v.WindowWidth)] for v in ds.get("SoftcopyVOILUTSequence", []) if "WindowCenter" in v]
@@ -308,10 +312,10 @@ def main():
             if e.get("category") == "seg":
                 land = {}
                 for f in e.get("segFrames", []):
+                    # By position first (Plane Position is normative; Source Image references are
+                    # informative and sometimes wrong), else by the source image reference.
                     tgt = None
-                    if f["src"] and tuple(f["src"]) in geo_by_sop:
-                        tgt = geo_by_sop[tuple(f["src"])]
-                    elif f["centroid"] is not None:
+                    if f["centroid"] is not None:
                         best = None
                         for s in geo_by_sop.values():
                             if s["ipp"] is None or s["iop"] is None or s["spacing"] is None:
@@ -322,16 +326,24 @@ def main():
                                 best = (abs(dist), s)
                         if best and best[0] < 2.5:
                             tgt = best[1]
+                    if tgt is None and f["src"] and tuple(f["src"]) in geo_by_sop:
+                        tgt = geo_by_sop[tuple(f["src"])]
+                    if tgt is not None and f["src"] and (tgt["uid"], tgt["frame"]) != tuple(f["src"]) and tuple(f["src"]) in geo_by_sop:
+                        e["srcDisagrees"] = e.get("srcDisagrees", 0) + 1
                     if tgt is None or f["centroid"] is None:
                         continue
                     r, c = np.array(tgt["iop"][:3]), np.array(tgt["iop"][3:])
                     x, y, _ = to_pixel(np.array(tgt["ipp"]), r, c, tgt["spacing"], f["centroid"])
                     k = f"{tgt['uid']}/{tgt['frame']}"
-                    land.setdefault(k, {"frames": 0, "pts": []})
+                    land.setdefault(k, {"frames": 0, "pts": [], "box": []})
                     land[k]["frames"] += 1
                     land[k]["pts"].append([x, y, f["pixels"]])
+                    land[k]["box"] += [to_pixel(np.array(tgt["ipp"]), r, c, tgt["spacing"], q)[:2] for q in f["corners"]]
+                # Where the mask lands on the image: its bounding box in the image's pixels (edges of pixels).
                 e["lands"] = {k: {"frames": v["frames"], "x": sum(p[0] * p[2] for p in v["pts"]) / sum(p[2] for p in v["pts"]),
-                                  "y": sum(p[1] * p[2] for p in v["pts"]) / sum(p[2] for p in v["pts"])} for k, v in land.items()}
+                                  "y": sum(p[1] * p[2] for p in v["pts"]) / sum(p[2] for p in v["pts"]),
+                                  "box": [min(b[0] for b in v["box"]), min(b[1] for b in v["box"]), max(b[0] for b in v["box"]), max(b[1] for b in v["box"])]}
+                              for k, v in land.items()}
                 e.pop("segFrames", None)
             if e.get("category") == "rtstruct":
                 land = {}
@@ -341,8 +353,11 @@ def main():
                         continue
                     r, c = np.array(tgt["iop"][:3]), np.array(tgt["iop"][3:])
                     x, y, dist = to_pixel(np.array(tgt["ipp"]), r, c, tgt["spacing"], cen)
-                    land[f"{k}/0"] = {"contours": e["contoursPerImage"][k], "x": x, "y": y}
+                    pts = [to_pixel(np.array(tgt["ipp"]), r, c, tgt["spacing"], q)[:2] for q in e["contourPoints"][k]]
+                    land[f"{k}/0"] = {"contours": e["contoursPerImage"][k], "x": x, "y": y,
+                                      "box": [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)]}
                 e["lands"] = land
+                e.pop("contourPoints", None)
         out[case["id"]] = exp
         print(f"{case['id']}: " + ", ".join(f"{v.get('category')}{'!' if v.get('expectError') else ''}" for v in exp.values()), file=sys.stderr, flush=True)
     json.dump(out, open(out_path, "w"))

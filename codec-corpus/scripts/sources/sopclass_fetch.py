@@ -1,6 +1,7 @@
 """Download the object-type sweep's series, with the series they reference, and group them into cases.
 
     uv run --with idc-index --with pydicom python scripts/sources/sopclass_fetch.py SELECTION.json ROOT
+    uv run --with idc-index --with pydicom --with highdicom python scripts/sources/sopclass_fetch.py --fixtures web/checks/sop-sweep/fixtures.json ROOT
 
 SELECTION.json is sopclass_select.py's output. Files go to ROOT/dl/<SeriesInstanceUID>/ (public
 S3 bucket idc-open-data via idc-index's s5cmd); ROOT/cases.json lists the cases:
@@ -9,6 +10,10 @@ A case is one picked series plus every series it references that IDC has (Refere
 Sequence items, the SR evidence sequences, a segmentation's or structure set's referenced frame
 of reference series, a registration's moving and fixed series), capped at REF_CAP_MB per case.
 Data stays outside git.
+
+--fixtures takes the sweep's regression list instead (web/checks/sop-sweep/fixtures.json): the series
+of each named failing case, by UID, and derived cases rebuilt with sopclass_derive.py; it writes
+ROOT/cases.json and ROOT/cases-extra.json in the same form, so the same checks run on ROOT.
 """
 from __future__ import annotations
 
@@ -59,11 +64,43 @@ def referenced_series(ds) -> set[str]:
     return out
 
 
+def fixtures(path: Path, root: Path, c) -> None:
+    import subprocess
+    import sys
+    fx = json.load(open(path))["fixtures"]
+    dl = root / "dl"
+    dl.mkdir(parents=True, exist_ok=True)
+    need = sorted({u for f in fx for u in f["series"]})
+    todo = [u for u in need if not (dl / u).is_dir() or not any((dl / u).iterdir())]
+    if todo:
+        c.download_from_selection(seriesInstanceUID=todo, downloadDir=str(dl), dirTemplate="%SeriesInstanceUID", quiet=True, show_progress_bar=False)
+    cases, extra = [], []
+    for f in fx:
+        if "derive" not in f:
+            cases.append({k: v for k, v in f.items() if k not in ("fixture", "failure", "case")} | {"fixture": f["fixture"]})
+            continue
+        d = f["derive"]
+        out = root / "extra" / f["case"] / "1.dcm"
+        if not out.exists():
+            subprocess.run([sys.executable, str(Path(__file__).with_name("sopclass_derive.py")), str(dl / d["from"]), str(out), d["kind"], "--order", d["order"]], check=True)
+        h = pydicom.dcmread(out, stop_before_pixels=True)
+        uid = str(h.SeriesInstanceUID)
+        extra.append({"id": f["case"], "fixture": f["fixture"], "sopClass": str(h.SOPClassUID), "short": f["case"], "primary": uid, "series": [uid],
+                      "dirs": {uid: str(out.parent)}, "why": f"derived ({d['order']} frames) from IDC series {d['from']}",
+                      "collection": f["collection"], "manufacturer": str(h.get("Manufacturer", "")), "modality": str(h.Modality), "licence": f["licence"]})
+    json.dump({"cases": cases}, open(root / "cases.json", "w"), indent=1)
+    json.dump({"cases": extra}, open(root / "cases-extra.json", "w"), indent=1)
+    print(f"{len(cases) + len(extra)} fixture cases in {root}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("selection")
     ap.add_argument("root", type=Path)
+    ap.add_argument("--fixtures", action="store_true", help="SELECTION is web/checks/sop-sweep/fixtures.json")
     a = ap.parse_args()
+    if a.fixtures:
+        return fixtures(Path(a.selection), a.root, index.IDCClient())
     sel = json.load(open(a.selection))["series"]
     dl = a.root / "dl"
     dl.mkdir(parents=True, exist_ok=True)
