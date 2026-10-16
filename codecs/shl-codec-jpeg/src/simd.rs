@@ -502,19 +502,42 @@ pub(crate) mod wasm {
             let a = ycc8(y0, cb0, cr0);
             let b = ycc8(y1, cb1, cr1);
             let [r, g, bl] = [0, 1, 2].map(|c| u8x16_narrow_i16x8(a[c], b[c]));
-            let t0 = i8x16_shuffle::<0, 16, 0, 1, 17, 0, 2, 18, 0, 3, 19, 0, 4, 20, 0, 5>(r, g);
-            let o0 = i8x16_shuffle::<0, 1, 16, 3, 4, 17, 6, 7, 18, 9, 10, 19, 12, 13, 20, 15>(t0, bl);
-            let t1 = i8x16_shuffle::<21, 0, 6, 22, 0, 7, 23, 0, 8, 24, 0, 9, 25, 0, 10, 26>(r, g);
-            let o1 = i8x16_shuffle::<0, 21, 2, 3, 22, 5, 6, 23, 8, 9, 24, 11, 12, 25, 14, 15>(t1, bl);
-            let t2 = i8x16_shuffle::<0, 11, 27, 0, 12, 28, 0, 13, 29, 0, 14, 30, 0, 15, 31, 0>(r, g);
-            let o2 = i8x16_shuffle::<26, 1, 2, 27, 4, 5, 28, 7, 8, 29, 10, 11, 30, 13, 14, 31>(t2, bl);
-            let dst = &mut out[3 * x..3 * x + 48];
-            // SAFETY: dst has exactly 48 bytes.
-            unsafe {
-                v128_store(dst.as_mut_ptr().cast(), o0);
-                v128_store(dst.as_mut_ptr().add(16).cast(), o1);
-                v128_store(dst.as_mut_ptr().add(32).cast(), o2);
-            }
+            store_rgb(r, g, bl, &mut out[3 * x..3 * x + 48]);
+            x += 16;
+        }
+        x
+    }
+
+    /// 16 pixels of 8-bit R, G, B interleaved into `dst` (exactly 48 bytes).
+    #[inline(always)]
+    fn store_rgb(r: v128, g: v128, bl: v128, dst: &mut [u8]) {
+        let t0 = i8x16_shuffle::<0, 16, 0, 1, 17, 0, 2, 18, 0, 3, 19, 0, 4, 20, 0, 5>(r, g);
+        let o0 = i8x16_shuffle::<0, 1, 16, 3, 4, 17, 6, 7, 18, 9, 10, 19, 12, 13, 20, 15>(t0, bl);
+        let t1 = i8x16_shuffle::<21, 0, 6, 22, 0, 7, 23, 0, 8, 24, 0, 9, 25, 0, 10, 26>(r, g);
+        let o1 = i8x16_shuffle::<0, 21, 2, 3, 22, 5, 6, 23, 8, 9, 24, 11, 12, 25, 14, 15>(t1, bl);
+        let t2 = i8x16_shuffle::<0, 11, 27, 0, 12, 28, 0, 13, 29, 0, 14, 30, 0, 15, 31, 0>(r, g);
+        let o2 = i8x16_shuffle::<26, 1, 2, 27, 4, 5, 28, 7, 8, 29, 10, 11, 30, 13, 14, 31>(t2, bl);
+        assert!(dst.len() == 48);
+        // SAFETY: the assert above: dst has exactly 48 bytes.
+        unsafe {
+            v128_store(dst.as_mut_ptr().cast(), o0);
+            v128_store(dst.as_mut_ptr().add(16).cast(), o1);
+            v128_store(dst.as_mut_ptr().add(32).cast(), o2);
+        }
+    }
+
+    /// Three 8-bit components interleaved into RGB bytes, 16 pixels at a time; returns how many
+    /// pixels it wrote (the caller writes the rest). Samples are at most 255, so the narrows are
+    /// exact.
+    pub(crate) fn rgb_row8<T: Sample>(r: &[T], g: &[T], b: &[T], out: &mut [u8]) -> usize {
+        let n = r.len().min(g.len()).min(b.len()).min(out.len() / 3);
+        let mut x = 0;
+        while x + 16 <= n {
+            let [r, g, bl] = [r, g, b].map(|s| {
+                let (lo, hi) = load16(&s[x..]);
+                u8x16_narrow_i16x8(lo, hi)
+            });
+            store_rgb(r, g, bl, &mut out[3 * x..3 * x + 48]);
             x += 16;
         }
         x

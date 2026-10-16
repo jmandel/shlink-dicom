@@ -76,7 +76,31 @@ pub(crate) fn put_row<T: Sample>(src: &[T], out: &mut [u8], bps: usize) {
 }
 
 /// Interleave one row of each component into `out`.
+#[inline(always)]
 pub(crate) fn interleave_row<T: Sample>(srcs: &[&[T]], out: &mut [u8], bps: usize) {
+    if let [a, b, c] = srcs {
+        match bps {
+            1 => {
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                let done = crate::simd::wasm::rgb_row8(a, b, c, out);
+                #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+                let done = 0;
+                let (a, b, c, out) = (&a[done..], &b[done..], &c[done..], &mut out[3 * done..]);
+                for (o, ((&a, &b), &c)) in out.chunks_exact_mut(3).zip(a.iter().zip(b.iter()).zip(c.iter())) {
+                    o.copy_from_slice(&[a.into() as u8, b.into() as u8, c.into() as u8]);
+                }
+                return;
+            }
+            2 => {
+                for (o, ((&a, &b), &c)) in out.chunks_exact_mut(6).zip(a.iter().zip(b.iter()).zip(c.iter())) {
+                    let [a, b, c] = [a, b, c].map(|v| (v.into() as u16).to_le_bytes());
+                    o.copy_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
     let n = srcs.len();
     for (c, src) in srcs.iter().enumerate() {
         for (x, &s) in src.iter().enumerate() {
