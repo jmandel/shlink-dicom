@@ -7,7 +7,7 @@
 - **Frames:** `../jpeg2000/extra/bench_frames.py OUT_DIR` writes synthetic smooth-plus-noise 16-bit frames (512² and 2048²) coded lossless by `opj_compress` and `ojph_compress`, and 640×480 RGB frames from the corpus. Added to them: frame 0 of corpus cases (`frames/<case>/frame-0.bin` and `info.json`), named in the tables by case.
 - **Ours:** `codecs/shl-codec-jpeg2000/bench`, a crate outside the workspace (`lto`, one codegen unit). `shl-j2k-bench DIR` times `decode_frame` natively; `bench.mjs` times the same crate built for wasm32 with `+simd128` in node 24. Each figure is the median of 7 decodes (3 for codestreams over 2 MB), and includes the header checks and the output packing.
 - **C libraries:** OpenJPEG 2.5.4 (one thread) and OpenJPH 0.32, both through imagecodecs 2026.10.10, timed in-process from Python on the same codestreams, median of 7 (3) decodes.
-- **Machine:** Ryzen 5 3600 (12 threads), rustup stable; load average 2–4 while measuring.
+- **Machine:** Ryzen 5 3600 (12 threads), rustup stable. The [results](#results) come from the quiet run `quiet-full3` of 16 October 2026 (load average 1.2 when it started, the other agents idle), with the tools built from main at db16333.
 
 ## Results
 
@@ -15,31 +15,32 @@ Times in ms per frame; the last column is our native time over the faster C libr
 
 | Frame | native | wasm32 simd128 | OpenJPEG | OpenJPH | native ÷ fastest C |
 |---|---|---|---|---|---|
-| J2K 512² 16-bit lossless (synthetic) | 48.8 | 50.0 | 41.3 | – | 1.18× |
-| J2K 2048² 16-bit lossless (synthetic) | 793.5 | 803.8 | 657.2 | – | 1.21× |
-| J2K 640×480 RGB lossless | 29.6 | 31.0 | 25.7 | – | 1.15× |
-| J2K 512² signed 16-bit CT lossless | 18.6 | 19.4 | 16.0 | – | 1.16× |
-| J2K `pydicom-RG1_J2KR` (1841×1955, 15-bit, lossless) | 551.7 | 565.8 | 472.8 | – | 1.17× |
-| J2K `pydicom-RG1_J2KI` (same, 9/7) | 121.2 | 118.8 | 94.4 | – | 1.28× |
-| J2K `pydicom-US1_J2KR` (640×480 RGB, lossless) | 29.8 | 31.4 | 25.9 | – | 1.15× |
-| J2K `pydicom-MR2_J2KI` (1024², 12-bit, 9/7) | 20.3 | 21.5 | 19.3 | – | 1.05× |
-| J2K `gen-bench-ct512-u16-openjpeg-cr20` (9/7, 20:1) | 5.70 | 6.20 | 5.53 | – | 1.03× |
-| J2K `gen-bench-photo-rgb8-2048-openjpeg-cr20` (RGB, ICT, 9/7) | 158.7 | 166.5 | 150.2 | – | 1.06× |
-| J2K slide tile 256², Hamamatsu (ICT, 9/7) | 2.30 | 2.50 | 1.96 | – | 1.17× |
-| J2K slide tile, Zeiss (ICT, 9/7) | 2.20 | 2.40 | 1.96 | – | 1.12× |
-| J2K slide tile, BioImagene (ICT, 9/7) | 3.50 | 3.90 | 2.98 | – | 1.17× |
-| J2K slide tile 240², Leica (4:2:2, 9/7) | 1.70 | 2.50 | 0.86 | – | 1.98× |
-| HTJ2K 512² 16-bit lossless (synthetic) | 1.70 | 2.10 | 2.55 | 1.00 | 1.70× |
-| HTJ2K 2048² 16-bit lossless (synthetic) | 40.0 | 38.8 | 48.9 | 17.1 | 2.34× |
-| HTJ2K 640×480 RGB lossless | 6.40 | 7.40 | 9.00 | 3.24 | 1.98× |
-| HTJ2K `pydicom-HTJ2K_08_RGB` (640×480 RGB) | 6.80 | 8.20 | 8.13 | 3.74 | 1.82× |
-| HTJ2K `gen-bench-dx2048-u12-openjph-q` (2048², 12-bit, 9/7) | 31.0 | 30.4 | 30.6 | 9.43 | 3.29× |
-| HTJ2K `gen-bench-photo-rgb8-2048-openjph-q` (RGB, 9/7) | 127.7 | 142.0 | 141.2 | 58.0 | 2.20× |
+| J2K 512² 16-bit lossless (synthetic) | 36.6 | 39.1 | 41.1 | – | 0.89× |
+| J2K 2048² 16-bit lossless (synthetic) | 590.4 | 625.1 | 662.6 | – | 0.89× |
+| J2K 640×480 RGB lossless | 25.9 | 28.2 | 26.5 | – | 0.98× |
+| J2K 512² signed 16-bit CT lossless | 16.0 | 17.5 | 16.2 | – | 0.99× |
+| J2K `pydicom-RG1_J2KR` (1841×1955, 15-bit, lossless) | 425.7 | 450.6 | 473.1 | – | 0.90× |
+| J2K `pydicom-RG1_J2KI` (same, 9/7) | 100.1 | 108.6 | 93.8 | – | 1.07× |
+| J2K `pydicom-US1_J2KR` (640×480 RGB, lossless) | 25.8 | 28.3 | 25.9 | – | 1.00× |
+| J2K `pydicom-MR2_J2KI` (1024², 12-bit, 9/7) | 17.8 | 19.9 | 18.9 | – | 0.94× |
+| J2K `gen-bench-ct512-u16-openjpeg-cr20` (9/7, 20:1) | 6.00 | 6.60 | 5.80 | – | 1.03× |
+| J2K `gen-bench-photo-rgb8-2048-openjpeg-cr20` (RGB, ICT, 9/7) | 146.8 | 162.0 | 150.2 | – | 0.98× |
+| J2K slide tile 256², Hamamatsu (ICT, 9/7) | 2.10 | 2.50 | 2.03 | – | 1.03× |
+| J2K slide tile, Zeiss (ICT, 9/7) | 2.00 | 2.40 | 1.97 | – | 1.02× |
+| J2K slide tile, BioImagene (ICT, 9/7) | 3.30 | 3.70 | 3.10 | – | 1.06× |
+| J2K slide tile 240², Leica (4:2:2, 9/7) | 1.00 | 1.40 | 0.90 | – | 1.11× |
+| HTJ2K 512² 16-bit lossless (synthetic) | 1.70 | 2.10 | 2.60 | 1.01 | 1.68× |
+| HTJ2K 2048² 16-bit lossless (synthetic) | 38.9 | 38.9 | 47.4 | 17.4 | 2.23× |
+| HTJ2K 640×480 RGB lossless | 6.50 | 7.40 | 9.19 | 3.29 | 1.98× |
+| HTJ2K `pydicom-HTJ2K_08_RGB` (640×480 RGB) | 6.80 | 8.30 | 8.04 | 3.68 | 1.85× |
+| HTJ2K `gen-bench-dx2048-u12-openjph-q` (2048², 12-bit, 9/7) | 30.7 | 31.4 | 31.2 | 9.34 | 3.29× |
+| HTJ2K `gen-bench-photo-rgb8-2048-openjph-q` (RGB, 9/7) | 129.3 | 142.4 | 143.7 | 58.5 | 2.21× |
 
 
-- **JPEG 2000** natively takes 1.03–1.28× OpenJPEG's time, and lossless frames about 1.15–1.2×, where tier-1 (MQ) decoding is about 90% of the work. The Leica tile is the outlier: our time includes the sYCC-to-RGB conversion of its subsampled chroma, which imagecodecs leaves undone.
-- **HTJ2K** natively takes 1.7–3.3× OpenJPH's time and at most about OpenJPEG's (within 1%); the HT block decoder is about 55% of a decode.
-- **wasm32 with simd128** runs within about 10% of native on most frames, and up to 1.5× native on the small slide tiles.
+- **JPEG 2000** natively takes 0.89–1.11× OpenJPEG's time: 0.89–1.00× on lossless frames, where tier-1 (MQ) decoding is about 90% of the work, and 0.94–1.11× on 9/7 frames. The Leica tile is the slowest relative to OpenJPEG; our time includes the sYCC-to-RGB conversion of its subsampled chroma, which imagecodecs leaves undone.
+- **HTJ2K** natively takes 1.7–3.3× OpenJPH's time and at most OpenJPEG's; the HT block decoder is about 55% of a decode.
+- **wasm32 with simd128** runs within about 10% of native on most frames, and up to 1.4× native on the small slide tiles.
+- **Against the C libraries in wasm**, from `codecs/bench/run.mjs` in the same quiet window (Chromium 154 worker, our codec stage against the Cornerstone packages' `decode()` only): JPEG 2000 takes 0.72–0.88× the time of `@cornerstonejs/codec-openjpeg`, and HTJ2K 1.17–1.20× that of `@cornerstonejs/codec-openjph` on 2048² frames and 0.82–1.04× on 640×480 and smaller.
 
 ## Reduced-resolution decode
 

@@ -54,18 +54,18 @@ Rows 0–5 and 7 were measured in sequence during the work. Rows 8–12 come fro
 
 ## Final comparison
 
-Measured back to back on a quiet machine (load about 3). The values are the minimum ms per frame over the passes.
+"Now" and the references come from the quiet run `quiet-full3` of 16 October 2026 (load average 1.2 when it started, the other agents idle), built from main at db16333; "Original" is the first measurement of the original decoder. The values are the minimum ms per frame over the passes.
 
 **Native.** Every reference decoder decodes from memory except `dcmdjpeg`, which runs as a separate process with DICOM file I/O.
 
 | Case | Original | Now | Speed-up | libjpeg-turbo 3.2 (tj3) | libjpeg-turbo (Pillow) | pylibjpeg | dcmdjpeg |
 |---|---|---|---|---|---|---|---|
-| colour 640×480 | 4.96 | 0.88 | 5.6× | 0.82 | 1.07 | 7.78 | 3.02 |
-| photo 2048² colour | 58.4 | 14.2 | 4.1× | 11.7 | 13.2 | 102.4 | 59.6 |
-| wrist 2320×2920 12-bit | 54.8 | 18.3 | 3.0× | 31.8 | n/a | 121.9 | 72.0 |
-| dx2048 12-bit DCT | 39.7 | 15.3 | 2.6× | 22.8 | n/a | 84.6 | 56.2 |
-| dx2048 lossless | 73.9 | 21.0 | 3.5× | 24.0 | n/a | 155.8 | 64.3 |
-| ct512 16-bit lossless | 4.22 | 1.52 | 2.8× | 1.33 | n/a | 8.71 | 19.1 |
+| colour 640×480 | 4.96 | 0.89 | 5.6× | 0.82 | 0.86 | 7.70 | 3.15 |
+| photo 2048² colour | 58.4 | 14.0 | 4.2× | 11.8 | 14.3 | 103.7 | 57.8 |
+| wrist 2320×2920 12-bit | 54.8 | 18.9 | 2.9× | 31.5 | n/a | 121.1 | 70.9 |
+| dx2048 12-bit DCT | 39.7 | 14.7 | 2.7× | 22.6 | n/a | 86.3 | 58.4 |
+| dx2048 lossless | 73.9 | 15.5 | 4.8× | 23.9 | n/a | 155.4 | 60.7 |
+| ct512 16-bit lossless | 4.22 | 1.16 | 3.6× | 1.49 | n/a | 8.66 | 18.4 |
 
 Pillow decodes only 8-bit JPEG. libjpeg-turbo's 12-bit and lossless paths go through `tj3Decompress12/16`.
 
@@ -81,6 +81,8 @@ Pillow decodes only 8-bit JPEG. libjpeg-turbo's 12-bit and lossless paths go thr
 | ct512 16-bit lossless | 6.06 | 6.07 | 1.60 | 1.47 | 4.1× |
 
 The original decoder gained nothing from simd128, because almost none of its code vectorised. The build without SIMD gains from every scalar change.
+
+**Against libjpeg-turbo in wasm.** In the same quiet window, `codecs/bench/run.mjs` timed our wasm simd128 codec stage and `@cornerstonejs/codec-libjpeg-turbo-8bit` 1.2.8 (`decode()` only) in one Chromium 154 worker. Ours takes 0.46–0.56× its time on 8-bit colour (cine, color3d, the mirax slide tiles and the 2048² photo) and 0.45× on the 8-bit lossless GE series. That package decodes only 8-bit images; on 12-bit DCT and lossless frames our wasm build takes 0.63–0.84× the time of native libjpeg-turbo.
 
 ## What helped
 
@@ -176,6 +178,11 @@ Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv
 (Ours in wasm: codec-stage medians from the bench module; load 2–5.)
 
 - **YCbCr → RGB in wasm on 16-bit lanes.** The simd128 colour kernel widened everything to 32-bit lanes and multiplied with `i32x4.mul`. Each term (k·x + 2^15) >> 16 is now j·x + ((k'·x + 2^15) >> 16) with k = j·2^16 + k' and |k'| < 2^15, so the products become `i32x4.dot_i16x8_s` of (x, 2)·(k', 2^14) pairs and everything else stays in 16-bit lanes (identity checked for every 8-bit chroma pair by `ycc_terms_regrouped_for_16_bit_lanes`). Cycles per decode in Node, minimum of 4 rounds: cine 766M → 689M (−10%), slide tiles 170M → 158M (−7%). Outputs identical: corpus and live JPEG (481 files) and the long tail's 190 baseline files, against the previous wasm build.
+
+Rejected:
+
+- **An explicit native AVX2 colour kernel** (`pmaddwd` on the same 16-bit regrouping, `pshufb` to interleave RGB, no new `unsafe`). Cycles: cine −2.2 to −2.7%, slide tiles about −3% within noise; instructions +8%. LLVM already vectorises the scalar loop well with AVX2, so the gain is under the 3% bar.
+- **4:2:2 upsampling fused with colour conversion in wasm.** One simd128 pass computed `h2v1_fancy` of both chroma rows in registers and fed them straight to the colour kernel, with no scratch rows. Instructions −4% (cine 2,158M → 2,071M, slide tiles 486M → 463M) but cycles +3% on cine (679M → 698M) and +1.4% on the slide tiles (157M → 159M), minimum of 4 rounds in Node. The scratch rows stay in L1, so writing and reading them again costs little; the longer kernel with six live chroma vectors per step ran slower in V8. Outputs were identical (481 corpus and live files, 190 long-tail files).
 
 ## Exactness
 
