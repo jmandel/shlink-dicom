@@ -60,9 +60,8 @@ In order of user impact. Each track runs on its own short branch and lands as so
 ### T0. Measurement first
 
 - One quiet `run.mjs` over every format, against every reference, natively and in Chromium; it replaces the tables above.
-- Fix the stale pages: htj2k PERF.md (the broken SCALED table) and the jpeg-dct PERF.md lossless rows.
-- A regression check: `run.mjs --quick` against a stored baseline, flagging any case more than 5% slower. It would have caught the HTJ2K wasm regression below.
-- Find the cause of the 3–7% slowdown on small HTJ2K frames in wasm, which appeared when only JPEG code changed.
+- ~~Find the cause of the 3–7% slowdown on small HTJ2K frames in wasm.~~ Done (cc784a5): it was in the measurement. The bench warmed up for only 2 decodes, so timed runs straddled V8's tier-up from Liftoff to TurboFan (about 25 decodes for a 2 ms frame). Warm-up now lasts at least 250 ms, and base and main match within 1.2%.
+- ~~Stale pages and regression check.~~ Done (ddd23c8, 7dceba6): `node codecs/bench/check.mjs`.
 
 ### T1. SV1, decode and encode
 
