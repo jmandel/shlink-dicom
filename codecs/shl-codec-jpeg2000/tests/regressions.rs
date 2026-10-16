@@ -139,11 +139,7 @@ fn reduced_decode_fuzz_findings_do_not_panic() {
             transfer_syntax: String::new(),
         };
         let s = 1 + (sel >> 6);
-        let results = [
-            shl_codec_jpeg2000::decode_frame_scaled(cs, &info, s),
-            shl_codec_jpeg2000::decode_frame_scaled_high_throughput(cs, &info, s),
-        ];
-        for d in results.into_iter().flatten() {
+        if let Ok(d) = shl_codec_jpeg2000::decode_frame_scaled(cs, &info, s) {
             let n = 1u32 << s;
             assert_eq!((d.rows, d.columns), (rows.div_ceil(n), cols.div_ceil(n)));
             let small = FrameInfo { rows: d.rows, columns: d.columns, ..info.clone() };

@@ -106,15 +106,11 @@ fn other_part2_capabilities_are_unsupported() {
 fn part2_markers_in_a_part1_codestream_are_unsupported() {
     // Rsiz 0: CBD, MCT, MCC and MCO are not Part 1 marker segments, and COD's transformation
     // type 2 means nothing in Part 1. The SIZ components (11-bit) are then the output, which
-    // the data set's 8 bits refuse; hayro alone refuses the markers.
+    // the data set's 8 bits refuse; the decoder alone refuses the markers.
     let mut cs = RGB.to_vec();
     cs[6..8].copy_from_slice(&0u16.to_be_bytes());
     assert!(decode_frame(&cs, &rgb_info()).is_err());
-    let settings = hayro_jpeg2000::DecodeSettings::default();
-    assert!(matches!(
-        hayro_jpeg2000::Image::new(&cs, &settings).err(),
-        Some(hayro_jpeg2000::DecodeError::Marker(hayro_jpeg2000::MarkerError::Unsupported))
-    ));
+    assert!(matches!(shl_jpeg2000::decode(&cs, &Default::default()), Err(shl_jpeg2000::Error::Unsupported(_))));
 }
 
 #[test]

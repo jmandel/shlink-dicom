@@ -31,7 +31,7 @@ fn main() {
             continue;
         }
         for codec in [0u32, 1].into_iter().filter(|c| only.is_none_or(|o| o == *c)) {
-            let name = ["hayro", "oxideav"][codec as usize];
+            let name = ["jpeg2000", "htj2k"][codec as usize];
             if shl_htj2k_bench::decode(codec, &cs, &info) < 0 {
                 println!("{:28} {name:8} error", p.file_name().unwrap().to_string_lossy());
                 continue;

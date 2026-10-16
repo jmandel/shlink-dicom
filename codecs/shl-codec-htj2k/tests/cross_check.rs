@@ -1,10 +1,11 @@
-//! Every HTJ2K corpus frame decoded through hayro's HT path and through oxideav must give
-//! byte-identical output, and hayro must decode every frame except the MIXED ones (which
-//! go to oxideav). Frames come from codec-corpus `scripts/extract_frames.py`; the test
-//! skips with a note when they are not there.
+//! Every HTJ2K corpus frame decoded by this crate and by the vendored oxideav-jpeg2000 (the
+//! decoder it replaced) must give byte-identical output (lossless) or differ by at most 1
+//! (lossy). Frames come from codec-corpus `scripts/extract_frames.py`; the test skips with a
+//! note when they are not there.
 use std::path::PathBuf;
 
-use shl_codec_common::{FrameInfo, Photometric};
+use shl_codec_common::{DecodeError, DecodedFrame, FrameInfo, Photometric, Result};
+use shl_codec_jpeg2000::prep;
 
 fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let k = format!("\"{key}\":");
@@ -27,7 +28,21 @@ fn info(json: &str) -> FrameInfo {
     }
 }
 
-/// Decode every frame under `dir` both ways; returns (frames, frames hayro declined).
+/// Decode with oxideav, packed as the wrapper packs.
+fn decode_oxideav(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame> {
+    let prep = prep::prepare(codestream, info)?;
+    let image = oxideav_jpeg2000::decode_j2k(prep.codestream).map_err(|e| DecodeError::Invalid(format!("{e}")))?;
+    if image.width != info.columns || image.height != info.rows || image.components.len() != prep.header.components.len() {
+        return Err(DecodeError::Invalid("oxideav output disagrees with SIZ".into()));
+    }
+    let planes: Vec<(&[i32], usize)> = image.components.iter().map(|c| (c.samples.as_slice(), c.width as usize)).collect();
+    prep::pack(info, &prep, |c, cx, cy| {
+        let (plane, cw) = planes[c];
+        plane[cy * cw + cx]
+    })
+}
+
+/// Decode every frame under `dir` both ways; returns (frames, frames this crate declined).
 pub fn cross_check(dir: &std::path::Path) -> (usize, Vec<String>, i64) {
     let (mut frames, mut declined, mut lossy_max) = (0, Vec::new(), 0);
     let mut cases: Vec<_> = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).collect();
@@ -38,14 +53,14 @@ pub fn cross_check(dir: &std::path::Path) -> (usize, Vec<String>, i64) {
         let mut k = 0;
         while let Ok(cs) = std::fs::read(case.join(format!("frame-{k}.bin"))) {
             let name = format!("{}/frame-{k}", case.file_name().unwrap().to_string_lossy());
-            let ox = shl_codec_htj2k::decode_frame_oxideav(&cs, &fi);
-            match shl_codec_htj2k::decode_frame_hayro(&cs, &fi) {
+            let ox = decode_oxideav(&cs, &fi);
+            match shl_codec_htj2k::decode_frame(&cs, &fi) {
                 Ok(h) => {
-                    let ox = ox.unwrap_or_else(|e| panic!("{name}: hayro decodes, oxideav fails: {e:?}"));
+                    let ox = ox.unwrap_or_else(|e| panic!("{name}: we decode, oxideav fails: {e:?}"));
                     assert_eq!(h.data.len(), ox.data.len(), "{name}");
                     let diff = max_diff(&h.data, &ox.data, &fi);
                     if fi.transfer_syntax.ends_with(".203") {
-                        // Lossy (9/7): hayro's f32 and oxideav's f64 wavelets may round a
+                        // Lossy (9/7): our f32 and oxideav's f64 wavelets may round a
                         // sample differently; the oracle tolerance for these cases is 1.
                         lossy_max = lossy_max.max(diff);
                         assert!(diff <= 1, "{name}: lossy samples differ by {diff}");
@@ -80,7 +95,7 @@ fn max_diff(a: &[u8], b: &[u8], fi: &FrameInfo) -> i64 {
 }
 
 #[test]
-fn hayro_matches_oxideav_on_every_corpus_frame() {
+fn matches_oxideav_on_every_corpus_frame() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../codec-corpus/formats/htj2k/frames");
     if !dir.is_dir() {
         eprintln!("skipping: {} not found (run codec-corpus/scripts/extract_frames.py)", dir.display());
@@ -88,22 +103,20 @@ fn hayro_matches_oxideav_on_every_corpus_frame() {
     }
     let (frames, declined, lossy_max) = cross_check(&dir);
     eprintln!(
-        "{frames} frames cross-checked (lossless identical, lossy max |diff| {lossy_max}); hayro declined {}: {declined:#?}",
+        "{frames} frames cross-checked (lossless identical, lossy max |diff| {lossy_max}); declined {}: {declined:#?}",
         declined.len()
     );
     assert!(frames > 0);
-    for d in &declined {
-        assert!(d.contains("-mixed/"), "hayro declined a non-MIXED frame: {d}");
-    }
+    assert!(declined.is_empty(), "declined: {declined:#?}");
 }
 
 /// Extra frame directories (same layout) named in `HTJ2K_CROSS_CHECK_DIRS`, colon-separated:
-/// for streams outside the corpus. Here hayro may decline frames; they are listed.
+/// for streams outside the corpus. Declined frames are listed.
 #[test]
 fn extra_dirs() {
     let Ok(dirs) = std::env::var("HTJ2K_CROSS_CHECK_DIRS") else { return };
     for dir in dirs.split(':').filter(|d| !d.is_empty()) {
         let (frames, declined, lossy_max) = cross_check(std::path::Path::new(dir));
-        eprintln!("{dir}: {frames} frames (lossy max |diff| {lossy_max}); hayro declined {}: {declined:#?}", declined.len());
+        eprintln!("{dir}: {frames} frames (lossy max |diff| {lossy_max}); declined {}: {declined:#?}", declined.len());
     }
 }

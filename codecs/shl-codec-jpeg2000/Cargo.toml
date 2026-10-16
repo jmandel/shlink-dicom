@@ -6,5 +6,4 @@ license.workspace = true
 
 [dependencies]
 shl-codec-common = { path = "../shl-codec-common" }
-# hayro-jpeg2000 0.4.1, vendored with fixes (vendor/README.md). Pure Rust, #![forbid(unsafe_code)].
-hayro-jpeg2000 = { path = "vendor/hayro-jpeg2000", default-features = false, features = ["std", "simd"] }
+shl-jpeg2000 = { path = "../shl-jpeg2000" }

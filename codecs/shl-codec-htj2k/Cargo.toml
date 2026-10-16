@@ -8,5 +8,7 @@ license.workspace = true
 shl-codec-common = { path = "../shl-codec-common" }
 # Header checks and output packing are shared with the JPEG 2000 wrapper.
 shl-codec-jpeg2000 = { path = "../shl-codec-jpeg2000" }
-# oxideav-jpeg2000 0.0.17, vendored with speed patches (vendor/README.md). Pure Rust, no unsafe, no dependencies.
+
+[dev-dependencies]
+# The decoder the new one replaced, for tests/cross_check.rs until it is removed.
 oxideav-jpeg2000 = { path = "vendor/oxideav-jpeg2000" }

@@ -41,12 +41,10 @@ fuzz_target!(|data: &[u8]| {
         transfer_syntax: String::new(),
     };
     let s = 1 + (sel >> 6);
-    for r in [shl_codec_jpeg2000::decode_frame_scaled(cs, &info, s), shl_codec_jpeg2000::decode_frame_scaled_high_throughput(cs, &info, s)] {
-        if let Ok(d) = r {
-            let n = 1u32 << s;
-            assert_eq!((d.rows, d.columns), (rows.div_ceil(n), cols.div_ceil(n)));
-            let small = FrameInfo { rows: d.rows, columns: d.columns, ..info.clone() };
-            assert_eq!(Some(d.frame.data.len()), small.frame_bytes());
-        }
+    if let Ok(d) = shl_codec_jpeg2000::decode_frame_scaled(cs, &info, s) {
+        let n = 1u32 << s;
+        assert_eq!((d.rows, d.columns), (rows.div_ceil(n), cols.div_ceil(n)));
+        let small = FrameInfo { rows: d.rows, columns: d.columns, ..info.clone() };
+        assert_eq!(Some(d.frame.data.len()), small.frame_bytes());
     }
 });

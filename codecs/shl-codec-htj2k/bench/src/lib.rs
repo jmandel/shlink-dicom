@@ -16,13 +16,12 @@ pub fn info(rows: u32, cols: u32, spp: u16, ba: u16, bs: u16, pr: u16, photometr
     }
 }
 
-/// codec 0 = shl-codec-jpeg2000 (hayro), 1 = shl-codec-htj2k (hayro HT path, oxideav
-/// fallback), 2 = shl-codec-htj2k's oxideav path only. Returns the decoded frame.
+/// codec 0 = shl-codec-jpeg2000, otherwise shl-codec-htj2k (the same decoder). Returns the
+/// decoded frame.
 pub fn decode_bytes(codec: u32, cs: &[u8], info: &FrameInfo) -> Option<Vec<u8>> {
     let r = match codec {
         0 => shl_codec_jpeg2000::decode_frame(cs, info),
-        1 => shl_codec_htj2k::decode_frame(cs, info),
-        _ => shl_codec_htj2k::decode_frame_oxideav(cs, info),
+        _ => shl_codec_htj2k::decode_frame(cs, info),
     };
     r.ok().map(|f| f.data)
 }

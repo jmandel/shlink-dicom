@@ -392,8 +392,8 @@ dependencies = [
 name = "shl-codec-jpeg2000"
 version = "0.1.0"
 dependencies = [
- "hayro-jpeg2000",
  "shl-codec-common",
+ "shl-jpeg2000",
 ]
 
 [[package]]
