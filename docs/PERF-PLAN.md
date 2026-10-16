@@ -6,18 +6,20 @@ Status: proposed (16 Oct 2026). Phase 1 was the decoder and encoder speed rounds
 
 ## Where we stand
 
-Our time ÷ the reference's time, single-threaded, same frames; below 1 means we're faster. The machine was shared during most runs, so read these as ±10%. [T0](#t0-measurement-first) replaces this table with one quiet run.
+Our time ÷ the reference's time, single-threaded, same frames; below 1 means we're faster. From the quiet full run of 16 Oct, 13:53 (`codecs/bench/results/2026-10-16-18-53-28-quiet-full3.json`; load 1.2 when it started, no other benchmarks). Ours is the bench's codec stage per frame. The native references are the bench's own; the browser references are the C/C++ libraries built to wasm (Cornerstone, and libjxl 0.12 with SIMD), timed in the same Chromium worker. JPEG 2000 native uses `shl-j2k-bench` against OpenJPEG 2.5.4 through imagecodecs.
 
-| Format | Reference | Native | Browser (wasm, vs the reference built to wasm) |
+| Format | Reference | Native | Browser (wasm) |
 |---|---|---|---|
-| JPEG baseline, 8-bit colour | libjpeg-turbo 3.2 | 1.07–1.21 | 0.50–0.68 |
-| JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.58–0.67 | no wasm reference decodes 12-bit; ours beats native libjpeg-turbo |
-| JPEG Lossless SV1 | libjpeg-turbo 3.2 | about 0.6 (2048²); 0.64 (live 512² CT series) | 0.45 |
-| JPEG-LS | CharLS 2.4.4 | 0.74–0.96 grey; 1.05–1.24 colour | 0.94–1.12 |
-| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.88–0.99; lossy 1.05–1.17, about level in cycles on MR2; Leica 4:2:2 tile 0.96 (T3 stopped) | 0.76–0.79 |
-| HTJ2K | OpenJPH 0.32 | 1.7–3.3 | 1.2–1.25 large frames; faster on small |
-| JPEG XL lossless | libjxl 0.12 | effort 1: 1.05–1.22; effort 7: 0.79 | effort 1: 1.14–1.17; effort 7: about 1.0 |
-| JPEG XL lossy | libjxl 0.12 | 1.8–2.3 | 1.09–1.26 at distance 1; 1.34 at distance 3 (T6 stopped) |
+| JPEG baseline, 8-bit colour | libjpeg-turbo 3.2 | 1.08–1.27 (2048² photo 1.27) | 0.46–0.56 |
+| JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.55–0.58 | no wasm reference decodes 12-bit; 0.80–0.84 of *native* libjpeg-turbo's time |
+| JPEG Lossless SV1 | libjpeg-turbo 3.2 | 0.46–0.65 | 0.45 (8-bit GE file, the only one the wasm reference decodes) |
+| JPEG-LS | CharLS | grey 0.77–1.01; colour 1.07–1.18 | 0.82–1.19 |
+| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.89–1.00; lossy 0.94–1.11 | 0.72–0.88 |
+| HTJ2K | OpenJPH | 1.63–2.66 | large frames 1.17–1.20; small 0.82–1.04 |
+| JPEG XL lossless | libjxl 0.12 | effort 1: 1.62–1.91; effort 7: 0.97–1.01 | effort 1: 1.67–1.81; effort 7: 1.06–1.09 |
+| JPEG XL lossy | libjxl 0.12 | 2.28–2.99 | 1.28–1.77 |
+
+**JPEG XL is being reconciled.** The bench measures our JPEG XL decodes 30–60% slower than the JPEG XL agent's own harness did, while libjxl's times agree between the two. The T6 figures (browser lossy 1.09–1.26×) came from that harness. Until the gap is explained, the bench figures above stand.
 
 | Encoder, MB/s (higher is better) | Ours native | Reference native | Ours wasm | Reference wasm |
 |---|---|---|---|---|
