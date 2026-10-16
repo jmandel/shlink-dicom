@@ -160,6 +160,8 @@ Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv
   - Keeping all differences from the counting pass (16 bits each) instead of computing them again in the coding pass. It cost about 4% more cycles than recomputing them, and memory for the whole frame instead of three rows.
   - Inlining the per-row `differences`: 1.5% fewer wasm instructions, no cycle change.
   - Holding the bit buffer in locals across the coding loop, apart from the output `Vec`: about 2% fewer wasm instructions, native unchanged; not worth a second write path.
+  - The extra-bit mask of each category in the code table, removing a shift, a mask and a select per sample: 11% fewer native and 5% fewer wasm instructions, but only 1.7% fewer native cycles and about 2% fewer in wasm.
+- **Stopped:** the encoder is 4.6–5.4× faster than libjpeg-turbo on these series, and the last ideas each saved under 3% of cycles. In the wasm transcode the encoder is now about 40% and the self-check's SV1 decode about a third, so further gains there are decoder work ([SV1 on real CT series](#sv1-on-real-ct-series)).
 - **Exactness:** SV1 outputs of every live file (735 encoded, 4 declined, as before) and every corpus file are byte-identical to the previous build natively, and the wasm build's outputs equal the native ones.
 
 ## Exactness
