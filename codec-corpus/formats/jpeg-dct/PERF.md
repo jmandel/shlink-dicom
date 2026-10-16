@@ -127,6 +127,15 @@ The original decoder gained nothing from simd128, because almost none of its cod
 - **Cache.** We decode the whole frame into component planes, then upsample and convert. libjpeg-turbo works one MCU row at a time in buffers that stay in cache, which is why the gap is larger on the 2048² photo than on the 640×480 frame. Streaming by MCU row is the largest remaining change, and the one most likely to pay on large colour images.
 - **wasm** has only 128-bit vectors and V8's code generation. The 4:2:0 (h2v2) upsampler and 12-bit colour conversion still rely on auto-vectorisation there. Explicit kernels for them would help the less common layouts.
 
+## SV1 on real CT series
+
+Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv1-decode-and-encode), on the live sample's abdomen CT (30 SV1 slices, 512², 16-bit signed), at load 1–2:
+
+- **Speed:** our codec stage takes 31.2 ms for the 30 slices (sum of each slice's minimum over 20 decodes, natively, one core); libjpeg-turbo 3.2 (`tj3Decompress16`, from Python as in `perf_refs.py`) takes 49.0 ms (minimum of 9 passes). That is 0.64× libjpeg-turbo, so the 512² CT case is no longer behind; the 1.1× figure came from before steps 13 and 14.
+- **Where the time goes:** on the first slice, `decode_rows` is 85% of the decode, about 12 cycles per sample. The serial chain of lookahead shift, table load and consume takes roughly 10, and 7% of that slice's samples need more than the 10-bit table (the slow lookup).
+- **Rejected:** an 11-bit lookahead for lossless scans only (DCT tables kept at 10). It saved 4–5% cycles on one slice and cost 2% on another; over the 30 slices it was 0.7% slower (130.8M against 129.9M cycles), because building the larger tables for every slice costs about what the extra fast lookups save.
+- **Stopped:** the remaining time is that serial chain, and libjpeg-turbo is already 1.6× slower here. The next idea, decoding two fast-path differences per buffer check, would save about one compare and branch per sample, off the chain.
+
 ## Exactness
 
 Every step had to keep every jpeg-dct and jpeg-lossless corpus result unchanged:
