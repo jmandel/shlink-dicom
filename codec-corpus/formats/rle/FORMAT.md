@@ -65,9 +65,11 @@ There are no `expect=error` cases.
 - `cargo clippy --all-targets -- -D warnings`.
 - `cargo build --target wasm32-unknown-unknown`, using toolchain 1.96.0 via rustup; the system toolchain has no wasm target.
 
-**Fuzzing:** cargo-fuzz is not installed, so `tests/fuzz_mutate.rs` mutates corpus frames instead: byte flips, insertions, deletions, truncation, header-word rewrites and PackBits control-byte fills. A quarter of the inputs also perturb FrameInfo (rows, columns, samples, bits, including huge dimensions). It asserts no panic, and that every successful decode returns exactly `frame_bytes`. It runs 20,000 iterations under `cargo test`; set `RLE_FUZZ_ITERS` and `RLE_FUZZ_SEED` for longer runs.
-- Before the shortfall ruling: 4 seeds × 50 million inputs, no panics or hangs.
-- After it: 4 seeds × 25 million inputs (100 million in total, about 90 CPU-minutes, seeded from all 53 cases), no panics or hangs. About 30% of the mutated inputs still decoded, each to the right length.
+**Fuzzing:** two harnesses.
+- `fuzz/fuzz_targets/decode.rs` (cargo-fuzz) checks every frame `decode_frame` accepts against a direct per-segment reading of PS3.5 Annex G (each segment decoded on its own, its bytes placed sample by sample). The input picks rows, columns, samples per pixel and Bits Allocated. Seeded with the corpus frames, with debug assertions on: 1.7 million runs, no crash and no difference. It ran with `-s none` under `RUSTC_BOOTSTRAP=1 cargo fuzz`, as for [JPEG-LS](../jpeg-ls/FORMAT.md#status).
+- `tests/fuzz_mutate.rs` mutates corpus frames under `cargo test`: byte flips, insertions, deletions, truncation, header-word rewrites and PackBits control-byte fills. A quarter of the inputs also perturb FrameInfo (rows, columns, samples, bits, including huge dimensions). It asserts no panic, and that every successful decode returns exactly `frame_bytes`. It runs 20,000 iterations under `cargo test`; set `RLE_FUZZ_ITERS` and `RLE_FUZZ_SEED` for longer runs.
+  - Before the shortfall ruling: 4 seeds × 50 million inputs, no panics or hangs.
+  - After it: 4 seeds × 25 million inputs (100 million in total, about 90 CPU-minutes, seeded from all 53 cases), no panics or hangs. About 30% of the mutated inputs still decoded, each to the right length.
 
 There were no findings, so no regression tests came from fuzzing.
 
