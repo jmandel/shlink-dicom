@@ -45,6 +45,10 @@ Native, ms per frame, as measured after each step. Later rows were measured at a
 | 10 | 8-bit planes stored as `u8` instead of `u16` | 0.90 | 20.9 | 23.3 | 1.62 | yes |
 | 11 | wasm simd128 kernels for YCbCr→RGB and h2v1 upsampling | native code unchanged | | | | yes |
 | 12 | Bit buffer kept in registers in the lossless loop | 0.88 | 18.3 | 21.0 | 1.52 | yes |
+| 13 | Lossless rows decoded by a loop specialised per predictor, with the left and upper neighbours in registers; the marker scan reads 8 bytes at a time | DCT unchanged | | 24.5 → 19.1 | 1.55 → 1.22 | yes |
+| 14 | One-component lossless rows written straight to the output buffer | DCT unchanged | | 19.1 → 17.5 | 1.22 → 1.16 | yes |
+
+Rows 13 and 14 are from the second speed round (decoder-perf, October 2026), measured back to back on saved binaries at load average 3–4 (minimum of 3 runs of `examples/bench`), so their absolute times are above row 12's quiet-machine figures; compare them with each other. Instructions per decode: dx2048 lossless 271M → 136M → 129M, ct512 17M → 9M → 8M. The [final comparison](#final-comparison) has quiet-machine numbers.
 
 Rows 0–5 and 7 were measured in sequence during the work. Rows 8–12 come from the final run, which alternated the saved binaries back to back. Row 6 was measured under heavy load, so only its instruction count is given. Rows 8–10 move by up to 2 ms on the 12-bit and lossless cases from run to run; those code paths did not change in steps 9–11.
 
@@ -91,6 +95,7 @@ The original decoder gained nothing from simd128, because almost none of its cod
   - The IDCT runs 8 columns, then 8 rows, per instruction, with the range limit computed arithmetically instead of by table lookup.
   - Upsampling and colour conversion vectorise: auto-vectorised on x86 with AVX2 enabled, explicit kernels on wasm.
   - Dequantising inside the vector IDCT removed a multiply and a load from every coefficient in the serial entropy loop.
+- **A lossless loop per predictor (steps 13 and 14).** Monomorphising the row loop on the predictor removes a per-sample branch and keeps Ra, Rb and Rc in registers between samples instead of reloading them from the row buffers; one-component rows then go straight into the output. This halved the instructions per lossless sample.
 - **Half the memory traffic for 8-bit images (step 10).** 8-bit components stored as `u16` doubled the bytes written by the IDCT and read by upsampling and colour conversion. With `u8` planes, the 640×480 colour case went from 1.68 to 0.92 ms.
 
 ## What did not help
@@ -99,6 +104,9 @@ The original decoder gained nothing from simd128, because almost none of its cod
 - **Refilling to 32 bits once per symbol** instead of 16 (part of step 8's rework) was neutral on its own.
 - **Lookahead tables of 11 or 12 bits** were slower than 10: they are larger tables with no fewer misses on typical data.
 - **Relying on auto-vectorisation for the IDCT.** Written over `[i32; 8]` rows, LLVM vectorised the passes only partly and transposed through scalar moves, which was slower than the scalar code. Explicit intrinsics were needed.
+- **Two lossless differences per table lookup.** A 12-bit table returning two codes and values at once cost 15–35% more cycles on four of five SV1 images: the branch between the one- and two-symbol cases mispredicts.
+- **A 16-bit-lane IDCT** (libjpeg-turbo's `pmaddwd` regrouping, exact against `idct_small`). In wasm (`i32x4.dot_i16x8_s`) it ran 2–5% fewer instructions with no change in cycles; the SSE2 form ran 20% more instructions than the AVX2 32-bit kernel.
+- **End-of-block and ZRL entries in the AC fast table,** so a block's end skips the slower lookup: no change in native cycles or wasm instructions.
 - **`u8` planes on wasm without explicit kernels.** On x86 they were a large gain. On wasm, LLVM's auto-vectorisation of the `u8` upsampling and colour loops was worse than for `u16`, a 10–20% loss. The explicit simd128 kernels (step 11) made it a gain there too.
 
 ## Remaining gap to libjpeg-turbo
@@ -115,7 +123,7 @@ The original decoder gained nothing from simd128, because almost none of its cod
 
 **Where the remaining time goes, and what could close it:**
 - **Entropy decoding** is now about 40% of the 8-bit colour time and most of the 12-bit and lossless time. Each coefficient's table lookup depends on the previous one (about 7–8 cycles each), and SIMD cannot help with that. libjpeg-turbo is in the same position.
-- **libjpeg-turbo's IDCT uses 16-bit lanes,** 16 per AVX2 register against our 8. Doing the same exactly would need a bound proof like `small_bound_holds` for 16-bit intermediates, with a fallback.
+- **libjpeg-turbo's IDCT uses 16-bit lanes,** 16 per AVX2 register against our 8. The 128-bit form of that was tried (see [What did not help](#what-did-not-help)); a 256-bit form would have to transform two blocks at once.
 - **Cache.** We decode the whole frame into component planes, then upsample and convert. libjpeg-turbo works one MCU row at a time in buffers that stay in cache, which is why the gap is larger on the 2048² photo than on the 640×480 frame. Streaming by MCU row is the largest remaining change, and the one most likely to pay on large colour images.
 - **wasm** has only 128-bit vectors and V8's code generation. The 4:2:0 (h2v2) upsampler and 12-bit colour conversion still rely on auto-vectorisation there. Explicit kernels for them would help the less common layouts.
 

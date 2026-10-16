@@ -46,32 +46,25 @@ Times in ms per frame; the last column is our native time over the faster C libr
 `decode_frame_scaled` decodes at 1/2^s by discarding the s highest resolution levels ([jpeg2000 FORMAT.md, Reduced-resolution decode](../jpeg2000/FORMAT.md#reduced-resolution-decode)). Their code-blocks are never decoded. The table compares it with what a thumbnail costs without it: a full decode followed by a box downsample.
 
 - **Tool:** `cargo run --release -p shl-codec-htj2k --example scaled_bench -- <frames dir> 20`, on frame 0; the minimum of 20 decodes, natively. The box downsample alone costs about 1 ms (12-bit mono) and 2 ms (RGB) at 1/8 on the 2048² frames.
+- **Counts:** user-mode instructions per decode from `perf stat` over 20 decodes of `scaled_bench <dir> 20 loop S` (reduced) and `loopfull S` (full decode plus box), start-up and reading the file included. Times are the minimum of 20 decodes; the load average was 3–4, so times are only a guide and the instruction counts are the firmer figure.
 
-SCALEDTimes in ms per frame; the last column is our native time over the faster C library's.
-
-| Frame | native | wasm32 simd128 | OpenJPEG | OpenJPH | native ÷ fastest C |
-|---|---|---|---|---|---|
-| J2K 512² 16-bit lossless (synthetic) | 48.8 | 50.0 | 41.3 | – | 1.18× |
-| J2K 2048² 16-bit lossless (synthetic) | 793.5 | 803.8 | 657.2 | – | 1.21× |
-| J2K 640×480 RGB lossless | 29.6 | 31.0 | 25.7 | – | 1.15× |
-| J2K 512² signed 16-bit CT lossless | 18.6 | 19.4 | 16.0 | – | 1.16× |
-| J2K `pydicom-RG1_J2KR` (1841×1955, 15-bit, lossless) | 551.7 | 565.8 | 472.8 | – | 1.17× |
-| J2K `pydicom-RG1_J2KI` (same, 9/7) | 121.2 | 118.8 | 94.4 | – | 1.28× |
-| J2K `pydicom-US1_J2KR` (640×480 RGB, lossless) | 29.8 | 31.4 | 25.9 | – | 1.15× |
-| J2K `pydicom-MR2_J2KI` (1024², 12-bit, 9/7) | 20.3 | 21.5 | 19.3 | – | 1.05× |
-| J2K `gen-bench-ct512-u16-openjpeg-cr20` (9/7, 20:1) | 5.70 | 6.20 | 5.53 | – | 1.03× |
-| J2K `gen-bench-photo-rgb8-2048-openjpeg-cr20` (RGB, ICT, 9/7) | 158.7 | 166.5 | 150.2 | – | 1.06× |
-| J2K slide tile 256², Hamamatsu (ICT, 9/7) | 2.30 | 2.50 | 1.96 | – | 1.17× |
-| J2K slide tile, Zeiss (ICT, 9/7) | 2.20 | 2.40 | 1.96 | – | 1.12× |
-| J2K slide tile, BioImagene (ICT, 9/7) | 3.50 | 3.90 | 2.98 | – | 1.17× |
-| J2K slide tile 240², Leica (4:2:2, 9/7) | 1.70 | 2.50 | 0.86 | – | 1.98× |
-| HTJ2K 512² 16-bit lossless (synthetic) | 1.70 | 2.10 | 2.55 | 1.00 | 1.70× |
-| HTJ2K 2048² 16-bit lossless (synthetic) | 40.0 | 38.8 | 48.9 | 17.1 | 2.34× |
-| HTJ2K 640×480 RGB lossless | 6.40 | 7.40 | 9.00 | 3.24 | 1.98× |
-| HTJ2K `pydicom-HTJ2K_08_RGB` (640×480 RGB) | 6.80 | 8.20 | 8.13 | 3.74 | 1.82× |
-| HTJ2K `gen-bench-dx2048-u12-openjph-q` (2048², 12-bit, 9/7) | 31.0 | 30.4 | 30.6 | 9.43 | 3.29× |
-| HTJ2K `gen-bench-photo-rgb8-2048-openjph-q` (RGB, 9/7) | 127.7 | 142.0 | 141.2 | 58.0 | 2.20× |
-
+| Case | Scale | Full decode + box: instructions / min time | Reduced decode: instructions / min time | Instruction ratio |
+|---|---|---|---|---|
+| JPEG 2000 `gen-bench-dx2048-u12-openjpeg-rev` (2048², 12-bit, lossless) | 1/8 | 2,603M / 337 ms | 45M / 5.5 ms | 58× |
+|  | 1/4 | 2,621M / 338 ms | 159M / 19.7 ms | 16× |
+|  | 1/2 | 2,683M / 338 ms | 632M / 80.7 ms | 4.2× |
+| JPEG 2000 `gen-bench-dx2048-u12-openjpeg-cr20` (2048², 12-bit, 9/7 at 20:1) | 1/8 | 507M / 62.4 ms | 27M / 3.0 ms | 19× |
+|  | 1/4 | 524M / 63.0 ms | 63M / 6.8 ms | 8.3× |
+|  | 1/2 | 586M / 64.9 ms | 164M / 17.9 ms | 3.6× |
+| JPEG 2000 `gen-bench-photo-rgb8-2048-openjpeg-cr20` (2048², 8-bit RGB, ICT, 9/7) | 1/8 | 1,312M / 151 ms | 95M / 12.1 ms | 14× |
+|  | 1/4 | 1,345M / 153 ms | 231M / 27.4 ms | 5.8× |
+|  | 1/2 | 1,453M / 163 ms | 567M / 64.2 ms | 2.6× |
+| HTJ2K `gen-bench-dx2048-u12-openjph-rev` (2048², 12-bit, lossless) | 1/8 | 392M / 40.9 ms | 8M / 0.83 ms | 49× |
+|  | 1/4 | 410M / 40.4 ms | 25M / 1.96 ms | 16× |
+|  | 1/2 | 472M / 41.9 ms | 96M / 7.2 ms | 4.9× |
+| HTJ2K `gen-bench-photo-rgb8-2048-openjph-q` (2048², 8-bit RGB, 9/7) | 1/8 | 1,241M / 137 ms | 27M / 2.1 ms | 46× |
+|  | 1/4 | 1,274M / 141 ms | 86M / 7.2 ms | 15× |
+|  | 1/2 | 1,383M / 149 ms | 312M / 28.8 ms | 4.4× |
 
 Each level discarded removes about three quarters of the remaining code-blocks and of the wavelet synthesis, so the saving compounds. It is largest for lossless JPEG 2000, where MQ tier-1 decoding of the finest levels is almost all of the full decode's cost.
 
