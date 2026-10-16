@@ -437,6 +437,9 @@ async fn serve_series_file(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, len.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
+        // Share data is kept in memory only, never across page loads (Josh, 16 Oct): no browser
+        // or shared cache stores encrypted files.
+        .header(header::CACHE_CONTROL, "no-store")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,

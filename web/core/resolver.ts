@@ -285,7 +285,8 @@ export class LinkResolver {
         headers,
         body: o.body,
         signal: o.signal,
-        // Not through the HTTP cache. The server lets nothing be cached, and while a request may be
+        // Not through the HTTP cache. Share data stays in memory only (the loader's record cache and
+        // the frame cache), and the server sends files with no-store. Also, while a request may be
         // cached the browser holds every other request for the same URL until its headers arrive
         // (Chromium's cache lock): concurrent Range reads of one file went one round trip apart.
         cache: "no-store",

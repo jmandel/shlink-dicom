@@ -144,8 +144,7 @@ In the viewer, Range reads of one file went one round trip apart, held by the br
 
 **Known regression.** Slide first tile on Fast 4G: 527 → 1153 ms (home: 247 → 164 ms). Main loads the 4 MB slide thumbnail during the overview, competing with everything else. The branch loads it after the small thumbnails, so a slide opened at once starts from nothing. Making the slide view show its coarsest level without waiting for the thumbnail is the next item.
 
-**Tried and dropped.**
-- `Cache-Control: private, immutable` on `.bin` responses. It lets a second visit skip the download. But the browser's cache lock then serialised all reads of a file, and the cached partial entries broke the expiry of passcode capability URLs (the `cap-expiry` check). A cache by file id would need the Cache Storage API.
+**Tried and dropped.** `Cache-Control: private, immutable` on `.bin` responses would let a second visit skip the download. It also made the browser's cache lock serialise every read of a file, and the cached partial entries broke the expiry of passcode capability URLs (the `cap-expiry` check). Josh's decision (16 Oct): share data is kept in memory only (the loader's record cache and the frame cache), never across page loads. The server now sends encrypted files with `Cache-Control: no-store`.
 
 ## Proposals (protocol or product: Josh's decision)
 
