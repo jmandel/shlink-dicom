@@ -166,11 +166,38 @@ async function run(width, dark) {
   const native = ["1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2"].includes(ts);
   check(L(`8 DICOM: header tags, implementation and the pixels (${ts})`), /Example\^Josh/.test(dh) && /Pixel Data/.test(dh) && /512/.test(dh) && /Implementation Version Name/.test(dh) && (await page.locator("#dicom .stage canvas").count()) === 1);
   const enc = await text(page, "#dicom-encoding");
-  if (native) check(L("8 DICOM: native Pixel Data described as uncompressed"), /uncompressed/.test(enc) && !/Basic Offset Table/.test(dh), enc);
+  // The byte views, read back as rows of fields: { title, fields: [{ name, hex: [..], dec }] }.
+  const readRows = (sel) =>
+    page.evaluate((sel) => {
+      const out = [];
+      for (const r of document.querySelectorAll(`${sel} .brow`)) {
+        const fields = [];
+        let cur = null;
+        for (const f of r.querySelectorAll(".bfield")) {
+          const name = f.querySelector(".bname").textContent;
+          const hex = [...f.querySelectorAll(".bx")].map((x) => x.textContent);
+          const chars = [...f.querySelectorAll(".bc")].map((x) => x.textContent).join("");
+          if (cur && name === `${cur.name}, cont.`) (cur.hex.push(...hex), (cur.dec += chars));
+          else fields.push((cur = { name, hex, dec: f.querySelector(".bd")?.textContent ?? chars }));
+        }
+        out.push({ title: r.querySelector(".brow-title").textContent, fields });
+      }
+      return out;
+    }, sel);
+  const rows8 = await readRows("#dicom .pic");
+  const field = (row, name) => row?.fields.find((f) => f.name === name);
+  const rowAt = (re) => rows8.find((r) => re.test(r.title));
+  if (native) check(L("8 DICOM: native Pixel Data described as uncompressed, with its first values"), /uncompressed/.test(enc) && !rowAt(/Basic Offset Table/) && !!rowAt(/first pixel values/), enc);
   else {
-    check(L("8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment"), /Basic Offset Table/.test(dh) && /the compressed image|fragment 1/.test(dh) && /end of the items/.test(dh), ts);
-    if (/\.4\.(57|70)$/.test(ts)) check(L("8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)"), /SOI/.test(dh) && /SOF3\s+lossless frame: \d+-bit, 512 rows, 512 columns/.test(dh) && /SOS/.test(dh));
-    if (/\.4\.(90|91|201|202|203)$/.test(ts)) check(L("8 DICOM: JPEG 2000 markers labelled (SOC, SIZ, COD, SOT, SOD)"), /SOC/.test(dh) && /SIZ\s+image and tile size: 512 × 512, 1 component, (signed )?\d+-bit/.test(dh) && /COD\s+coding style: \d+ wavelet levels/.test(dh) && /SOT/.test(dh) && /SOD/.test(dh), dh.split("\n").filter((l) => /SIZ|COD/.test(l)).join(" | "));
+    check(L("8 DICOM: encapsulated Pixel Data byte by byte: Basic Offset Table, the image item, the end of the items"), !!rowAt(/Basic Offset Table/) && !!rowAt(/the compressed image|fragment 1/) && !!rowAt(/end of the items/) && field(rowAt(/^Pixel Data/), "length")?.dec === "undefined", ts);
+    if (/\.4\.(57|70)$/.test(ts)) {
+      const sof = rowAt(/SOF3, lossless frame/);
+      check(L("8 DICOM: JPEG markers labelled (SOI, SOF3 with bit depth and size, SOS)"), !!rowAt(/SOI, start of image/) && /^\d+-bit$/.test(field(sof, "precision")?.dec ?? "") && field(sof, "rows")?.dec === "512" && field(sof, "columns")?.dec === "512" && !!rowAt(/SOS, start of scan/));
+    }
+    if (/\.4\.(90|91|201|202|203)$/.test(ts)) {
+      const siz = rowAt(/SIZ, image and tile size/), cod = rowAt(/COD, coding style/);
+      check(L("8 DICOM: JPEG 2000 markers labelled (SOC, SIZ, COD, SOT, SOD)"), !!rowAt(/SOC/) && field(siz, "width")?.dec === "512" && field(siz, "height")?.dec === "512" && /wavelet levels/.test(field(cod, "levels")?.dec ?? "") && !!rowAt(/SOT/) && !!rowAt(/SOD/));
+    }
     check(L("8 DICOM: says the compression is without loss, and names the writer"), /without loss/.test(enc) && /names the program that wrote this file/.test(enc), enc);
     const impl = /Implementation Version Name\s+(\S+)/.exec(dh)?.[1] ?? "";
     if (/shl/i.test(impl)) check(L(`8 DICOM: written by shlink-dicom (${impl}), and says so`), /shlink-dicom compressed it when the study was shared/.test(enc), enc);
@@ -183,7 +210,10 @@ async function run(width, dark) {
   const missing = Object.entries(before).filter(([, v]) => !v.length || v.some((x) => !x.vis)).map(([s]) => s);
   check(L("closed: every plain element present and visible"), missing.length === 0, missing.join(", "));
   await shot("closed", true);
-  const closedOverflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+  // Against the device width: a phone browser widens its layout viewport to fit wide content, so
+  // scrollWidth − innerWidth alone can read 0 while the page is too wide.
+  const overflow = () => page.evaluate((vw) => Math.max(document.documentElement.scrollWidth, innerWidth) - vw, WIDTHS[width].viewport.width);
+  const closedOverflow = await overflow();
   for (const d of await page.$$("details.exact")) await d.evaluate((e) => (e.open = true));
   await page.waitForTimeout(500);
   const after = await measure(page, sels);
@@ -195,7 +225,39 @@ async function run(width, dark) {
   const added = await page.evaluate(() => [...document.querySelectorAll(".exact-body")].every((b) => b.getBoundingClientRect().height > 20));
   check(L("open: every expander shows its details"), added);
   await shot("open", true);
-  const openOverflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+  const openOverflow = await overflow();
+  // Step 8's byte views: every decoded character sits in its own hex pair's column, every decoding
+  // under its own field's bytes; and the decodings are right.
+  const align = await page.evaluate(() => {
+    const bad = [];
+    let chars = 0;
+    for (const f of document.querySelectorAll(".bfield")) {
+      const hx = [...f.querySelectorAll(".bx")];
+      for (const c of f.querySelectorAll(".bc")) {
+        chars++;
+        const col = c.style.gridColumn;
+        const x = hx.find((e) => e.style.gridColumn === col);
+        const a = c.getBoundingClientRect(), b = x?.getBoundingClientRect();
+        if (!b || a.left < b.left - 0.5 || a.right > b.right + 0.5 || Math.abs((a.left + a.right) / 2 - (b.left + b.right) / 2) > 0.75 || a.top < b.bottom - 0.5) bad.push(`${c.textContent} under ${x?.textContent}`);
+      }
+      const d = f.querySelector(".bd");
+      if (d && hx.length) {
+        const a = d.getBoundingClientRect(), l = hx[0].getBoundingClientRect(), r = hx[hx.length - 1].getBoundingClientRect();
+        const fb = f.getBoundingClientRect();
+        if (a.left < fb.left - 0.5 || a.right > fb.right + 0.5 || a.top < l.bottom - 0.5 || r.right > fb.right + 0.5) bad.push(`"${d.textContent}" outside its bytes`);
+      }
+    }
+    return { bad, chars, fields: document.querySelectorAll(".bfield").length };
+  });
+  check(L("8 DICOM: each decoded character in its hex pair's column; each decoding under its own bytes"), align.bad.length === 0 && align.chars > 20, `${align.fields} fields, ${align.chars} characters; ${align.bad.slice(0, 4).join(", ")}`);
+  const hdr = await readRows("#dicom .exact-body");
+  const pn = hdr.find((r) => /Patient's Name/.test(r.title));
+  const le = (hex) => hex.reduceRight((a, x) => a * 256 + parseInt(x, 16), 0);
+  check(
+    L("8 DICOM: Patient's Name decoded field by field (tag, VR, length, value)"),
+    !!pn && field(pn, "tag")?.dec === "(0010,0010) Patient's Name" && field(pn, "tag")?.hex.join(" ") === "10 00 10 00" && (field(pn, "VR") ? field(pn, "VR").dec === String.fromCharCode(...field(pn, "VR").hex.map((x) => parseInt(x, 16))) : true) && Number(field(pn, "length")?.dec.replace(/,/g, "")) === le(field(pn, "length")?.hex ?? []) && field(pn, "value")?.dec.startsWith("Example^Josh") && field(pn, "value")?.hex.length === Number(field(pn, "length")?.dec),
+    pn ? pn.fields.map((f) => `${f.name}: ${f.hex.join(" ")} = ${f.dec}`).join(" | ") : "no row",
+  );
   check(L("no horizontal scroll, closed and open"), closedOverflow <= 0 && openOverflow <= 0, `${closedOverflow} / ${openOverflow}`);
   if (touch) {
     const small = await page.evaluate(() => {
