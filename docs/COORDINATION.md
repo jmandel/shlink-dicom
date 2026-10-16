@@ -135,6 +135,8 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **16 Oct, early: all decoders become ours (Josh).** The JPEG 2000/HTJ2K decoder is ours (c3ed9a2). A new agent (a26e1d2aaf1165705) is writing our own JPEG XL decoder on branch jxl-decoder (../shlink-dicom-jxl), staged Modular, then VarDCT, then JPEG recompression/brotli, then delete jxl-oxide, against the libjxl conformance oracles. The decoder agent (a4b3a594727c938f4) is doing a decoder performance round on branch decoder-perf. The LinkedIn sentence on patched crates must be fixed after the 9 am ET publish (scheduled articles can't be edited).
+
 - **15 Oct, about 21:50: the LinkedIn article is SCHEDULED** for Fri 16 Oct, 8:00 am CDT (9:00 am ET), Post to Anyone, with the post message from $CLAUDE_JOB_DIR/tmp/post-message.txt (Josh's opener; no links; 1.5 MB of 313 MB). The draft was verified identical to the blog md (44 blocks, 40 links, 8 images). Known stale item: shot-viewer.png predates the thumbnail fix (empty DWI/ADC tiles); Josh said not to chase every screenshot. Josh can change or cancel it via LinkedIn's "View scheduled articles".
 
 - **Josh (15 Oct, about 21:00): schedule the LinkedIn article for Fri 16 Oct, 9:00 am ET,** once the compressed web app is deployed and tested. Steps:
