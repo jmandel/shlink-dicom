@@ -30,6 +30,10 @@ const HELP = `node codecs/bench/run.mjs [options]
   --builds LIST     wasm builds: base,simd,relaxed,base-opt,simd-opt (default all five; -opt = after wasm-opt)
   --quick           = --runners native,node --builds simd, budget 150 ms
   --no-build        use the last builds in codecs/target/bench/out
+  --throttle N      slow Chromium's CPU N times (DevTools emulation, a stand-in for a slower
+                    device). It reaches the page's main thread only, not dedicated workers, so
+                    use it with --runners chromium-main. Browser results are then compared only
+                    with runs at the same rate
   --label NAME      added to the results file name
   --baseline FILE   compare with this results file (default results/baseline.json if present)
   --fail-on-regression  exit 1 when a regression is found (verification failures always exit 1)`;
@@ -38,7 +42,7 @@ const { values: a } = parseArgs({
   options: {
     format: { type: "string", multiple: true }, case: { type: "string" }, tag: { type: "string", multiple: true },
     runners: { type: "string" }, builds: { type: "string" }, quick: { type: "boolean" }, "no-build": { type: "boolean" },
-    label: { type: "string" }, baseline: { type: "string" }, "fail-on-regression": { type: "boolean" }, help: { type: "boolean" },
+    label: { type: "string" }, throttle: { type: "string" }, baseline: { type: "string" }, "fail-on-regression": { type: "boolean" }, help: { type: "boolean" },
   },
 });
 if (a.help) { console.log(HELP); process.exit(0); }
@@ -78,6 +82,9 @@ const busy = () => {
   if (o) log(`WARN ${o} other bench run(s) in progress; timings will be noisy`);
   return { load: l, other_runs: o };
 };
+if (a.throttle && runners.some((r) => r === "chromium-worker" || r === "chromium-cwasm")) {
+  log("WARN --throttle does not reach dedicated workers: chromium-worker and chromium-cwasm run unthrottled");
+}
 const b0 = busy();
 env.load_avg = { start: b0.load };
 env.other_bench_runs = { start: b0.other_runs };
@@ -91,7 +98,7 @@ const jobs = [
 if (runners.includes("chromium-cwasm")) env.cwasm_packages = cwasmPackages();
 for (const [k, b] of Object.entries(builds)) if (b.path?.endsWith(".wasm") && needBuilds.includes(k)) b.simd_instructions = simdInstructions(b.path);
 if (jobs.length) {
-  const r = await runBrowser(cases, jobs, opts, log);
+  const r = await runBrowser(cases, jobs, opts, log, Number(a.throttle ?? 1));
   records.push(...r.records);
   env.browser = r.env;
 }
@@ -140,6 +147,10 @@ writeFileSync(file, JSON.stringify(result));
 writeFileSync(join(BENCH, "results", "latest.json"), JSON.stringify(result));
 
 const baseline = findBaseline(a.baseline, result);
+// Browser times at different CPU throttle rates are not comparable.
+if (baseline && (baseline.env?.browser?.cpu_throttle ?? 1) !== (result.env.browser?.cpu_throttle ?? 1)) {
+  baseline.records = baseline.records.filter((r) => !r.runner.startsWith("chromium"));
+}
 const cmp = baseline ? compare(result, baseline) : null;
 const html = writeReport(result, baseline, cmp);
 console.log(terminalSummary(result, baseline, cmp));

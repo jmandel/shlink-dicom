@@ -24,8 +24,11 @@ node codecs/bench/run.mjs                          # everything: builds, all run
 node codecs/bench/run.mjs --format jpeg-dct        # one format, all runners
 node codecs/bench/run.mjs --quick --format jpeg-dct    # native + Node, simd build only (seconds)
 node codecs/bench/run.mjs --case dx2048 --runners native,chromium-worker,chromium-cwasm --builds simd
+node codecs/bench/run.mjs --runners chromium-main --builds simd --throttle 4   # a 4x slower CPU
 node codecs/bench/run.mjs --help
 ```
+
+`--throttle N` uses DevTools CPU throttling, which slows only the page's main thread: dedicated workers, and so `chromium-worker` and `chromium-cwasm`, run at full speed whatever the rate. Throttled runs are therefore `chromium-main` runs, and their browser results are compared only with baselines taken at the same rate.
 
 Several runs can safely happen at once, for example from different agents:
 
