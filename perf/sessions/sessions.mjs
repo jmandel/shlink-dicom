@@ -40,7 +40,7 @@ export const SESSIONS = {
   mg: { share: "extras", study: /MG_Chest/, steps: [{ op: "open" }, { op: "scrub", label: "views", from: "here", count: 6, pace: 1 }] },
   tomo: { share: "extras", study: /TOMOSYNTHESIS/, steps: [{ op: "open" }, ...scrubSeries({ slow: 20, fast: 20 })] },
   dx: { share: "extras", study: /FLAT PLATE/, steps: [{ op: "open" }] },
-  slidej2k: { share: "extras", study: /Histopathology/, steps: slideSteps() },
+  slidej2k: { share: "j2k", study: /./, steps: slideSteps() },
   slidejxl: { share: "jxl", study: /./, steps: slideSteps() },
   video: { share: "extras", study: /Test video/, steps: [{ op: "open" }, { op: "play", seconds: 4 }] },
 };

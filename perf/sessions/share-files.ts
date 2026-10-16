@@ -8,4 +8,4 @@ if (base.startsWith("https")) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const files = readdirSync(dir).filter((f) => f.endsWith(".dcm")).map((f) => ({ name: f, bytes: new Uint8Array(readFileSync(`${dir}/${f}`)) }));
 const s = await packAndShare(base, files, { addOffsetTables: true });
 const { shlink } = await s.mint(s.bundle, { label });
-console.log(`${base}/view#${shlink.slice(shlink.indexOf("shlink:/"))}`);
+console.log(shlink.slice(shlink.indexOf("shlink:/")));

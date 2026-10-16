@@ -11,8 +11,18 @@ import { SESSIONS } from "./sessions.mjs";
 const arg = (k, d) => process.argv.find((a) => a.startsWith(`--${k}=`))?.split("=").slice(1).join("=") ?? d;
 const build = arg("build", "build");
 const bases = { sample: arg("sample"), extras: arg("extras") };
-/** Shares made with the Share page's packer instead of the server's seed, as full viewer links. */
-const links = { jxl: arg("jxl") };
+/**
+ * Shares made with the Share page's packer instead of the server's seed (share-files.ts), as
+ * `shlink:/…` strings on the extras server; pointed at --extras like the seeded ones.
+ */
+const packed = { jxl: arg("jxl"), j2k: arg("j2k") };
+function packedLink(name) {
+  const s = packed[name];
+  if (!s) return null;
+  const payload = JSON.parse(Buffer.from(s.split("shlink:/")[1], "base64url").toString());
+  payload.url = bases.extras + new URL(payload.url).pathname;
+  return `${bases.extras}/view#shlink:/${Buffer.from(JSON.stringify(payload)).toString("base64url")}`;
+}
 const net = arg("net", "home");
 const device = arg("device", "desktop");
 const cpu = Number(arg("cpu", device === "phone" ? "4" : "1"));
@@ -212,7 +222,7 @@ async function session(browser, kind, run) {
   const ops = [];
   const t0 = Date.now();
   try {
-    await page.goto(links[def.share] ?? (await linkFor(bases[def.share])), { waitUntil: "commit" });
+    await page.goto(packedLink(def.share) ?? (await linkFor(bases[def.share])), { waitUntil: "commit" });
     await page.waitForSelector("#screen-overview:not(.hidden)", { timeout: CAP * 2 });
     // Matched on the card's title (the study's description).
     const card = await page.evaluate(
