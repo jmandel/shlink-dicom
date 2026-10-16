@@ -235,7 +235,10 @@ fn decode_gradient_rle(br: &mut BitReader, r: &mut SymbolReader, code: &EntropyC
     };
     let (last, run) = r.rle_state();
     let mut src = Rle { parts, last, run };
-    gradient_loop(br, &mut src, data, w, h);
+    // A local copy of the reader, so its state can live in registers across the loop.
+    let mut lbr = br.clone();
+    gradient_loop(&mut lbr, &mut src, data, w, h);
+    *br = lbr;
     r.rle_finish((w * h) as u64, src.last, src.run);
 }
 
