@@ -241,32 +241,40 @@ impl LosslessDecoder {
             return Err(invalid("JPEG precision exceeds Bits Allocated 8"));
         }
         let mut sink = Sink::new(w, h, n, bps)?;
-        let mut rows: Vec<Vec<u16>> = vec![vec![0u16; w]; n];
-        for y in 0..h {
-            for ((ci, p), row) in self.planes.iter().enumerate().zip(rows.iter_mut()) {
-                let c = &f.comps[ci];
-                // Lossless frames with subsampled components are rare; replicate samples.
-                let (hf, vf) = ((f.hmax / c.h).max(1), (f.vmax / c.v).max(1));
-                let (cw, ch) = f.comp_size(ci);
-                let sy = (y / vf).min(ch - 1);
-                let src = &p.data[sy * p.stride..sy * p.stride + cw];
-                let pt = u32::from(p.pt);
-                if hf == 1 {
-                    for (o, &v) in row.iter_mut().zip(src) {
-                        *o = ((u32::from(v) << pt) & 0xFFFF) as u16;
-                    }
-                } else {
-                    for (x, o) in row.iter_mut().enumerate() {
-                        let v = src[(x / hf).min(cw - 1)];
-                        *o = ((u32::from(v) << pt) & 0xFFFF) as u16;
+        // One full-size component without a point transform: rows go straight to the output.
+        if n == 1 && self.planes[0].pt == 0 && f.comp_size(0) == (w, h) {
+            let p = &self.planes[0];
+            for y in 0..h {
+                put_row(&p.data[y * p.stride..y * p.stride + w], sink.row(y), bps);
+            }
+        } else {
+            let mut rows: Vec<Vec<u16>> = vec![vec![0u16; w]; n];
+            for y in 0..h {
+                for ((ci, p), row) in self.planes.iter().enumerate().zip(rows.iter_mut()) {
+                    let c = &f.comps[ci];
+                    // Lossless frames with subsampled components are rare; replicate samples.
+                    let (hf, vf) = ((f.hmax / c.h).max(1), (f.vmax / c.v).max(1));
+                    let (cw, ch) = f.comp_size(ci);
+                    let sy = (y / vf).min(ch - 1);
+                    let src = &p.data[sy * p.stride..sy * p.stride + cw];
+                    let pt = u32::from(p.pt);
+                    if hf == 1 {
+                        for (o, &v) in row.iter_mut().zip(src) {
+                            *o = ((u32::from(v) << pt) & 0xFFFF) as u16;
+                        }
+                    } else {
+                        for (x, o) in row.iter_mut().enumerate() {
+                            let v = src[(x / hf).min(cw - 1)];
+                            *o = ((u32::from(v) << pt) & 0xFFFF) as u16;
+                        }
                     }
                 }
-            }
-            if n == 1 {
-                put_row(&rows[0], sink.row(y), bps);
-            } else {
-                let srcs: Vec<&[u16]> = rows.iter().map(|r| &r[..]).collect();
-                interleave_row(&srcs, sink.row(y), bps);
+                if n == 1 {
+                    put_row(&rows[0], sink.row(y), bps);
+                } else {
+                    let srcs: Vec<&[u16]> = rows.iter().map(|r| &r[..]).collect();
+                    interleave_row(&srcs, sink.row(y), bps);
+                }
             }
         }
         let same_sampling = f.comps.iter().all(|c| c.h == f.comps[0].h && c.v == f.comps[0].v);
