@@ -229,6 +229,7 @@ pub fn decode_frame_sections(
     fh: &FrameHeader,
     refs: &[Option<crate::render::Reference>; 4],
     lf_frames: &[Option<Vec<crate::render::Plane>>; 4],
+    jpeg: Option<(bool, [usize; 3])>,
 ) -> Result<DecodedFrame> {
     let dims = fh.dims();
     let num_ec = hd.metadata.extra_channels.len();
@@ -254,7 +255,16 @@ pub fn decode_frame_sections(
             None
         };
         let q = read_lf_dequant(br)?;
-        let vd = if is_vardct { Some(crate::vardct::read_lf_global(br, fh, &dims, &q, quant_bias)?) } else { None };
+        let vd = if is_vardct {
+            let mut v = crate::vardct::read_lf_global(br, fh, &dims, &q, quant_bias, jpeg.is_some())?;
+            if let (Some(j), Some((gray, c_map))) = (v.jpeg.as_mut(), jpeg) {
+                j.gray = gray;
+                j.c_map = c_map;
+            }
+            Some(v)
+        } else {
+            None
+        };
         let mf = ModularFrame::read_global(br, hd, fh, &dims)?;
         Ok((q, patches, splines, noise, vd, mf))
     })?;

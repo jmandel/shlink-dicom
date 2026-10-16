@@ -78,7 +78,7 @@ impl<'a> Decoder<'a> {
             } else {
                 self.nonvisible_index += 1;
             }
-            let df = decode_frame_sections(&mut sections, &self.hd, &fh, &self.refs, &self.lf_frames)?;
+            let df = decode_frame_sections(&mut sections, &self.hd, &fh, &self.refs, &self.lf_frames, None)?;
             if self.allow_int && first && self.int_eligible(&fh, &df) {
                 self.done = true;
                 let nb = df.nb_color;

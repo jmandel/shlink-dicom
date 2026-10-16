@@ -283,6 +283,12 @@ impl FrameHeader {
     pub fn vshift(&self, c: usize) -> u32 {
         self.max_vshift() - V_SHIFT[self.chroma_mode[c] as usize]
     }
+    pub fn raw_hshift(&self, c: usize) -> u32 {
+        H_SHIFT[self.chroma_mode[c] as usize]
+    }
+    pub fn raw_vshift(&self, c: usize) -> u32 {
+        V_SHIFT[self.chroma_mode[c] as usize]
+    }
     pub fn is_444(&self) -> bool {
         (0..3).all(|c| self.hshift(c) == 0 && self.vshift(c) == 0)
     }

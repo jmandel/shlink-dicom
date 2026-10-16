@@ -172,6 +172,18 @@ impl Cfl {
     }
 }
 
+/// Quantised coefficients of a recompressed JPEG frame, per JPEG component.
+pub struct JpegCoeffs {
+    /// (width in blocks, height in blocks, 64 coefficients per block in natural order).
+    pub comps: Vec<(usize, usize, Vec<i16>)>,
+    pub c_map: [usize; 3],
+    pub gray: bool,
+    scaled_qtable: [i32; 192],
+    dcoff: [i32; 3],
+    /// The raw table of the frame (3 × 64, JPEG transposed order: index y * 8 + x).
+    pub qtable: Vec<i32>,
+}
+
 /// VarDCT state of one frame.
 pub struct VarDct {
     pub global_scale: u32,
@@ -208,9 +220,12 @@ pub struct VarDct {
     pub use_lf_frame: bool,
     /// Per-group work buffers, sized for the largest transform in use.
     bufs: Option<(Vec<i32>, Vec<f32>, Vec<f32>)>,
+    /// JPEG reconstruction: collect quantised coefficients instead of pixels.
+    pub jpeg: Option<JpegCoeffs>,
+    ycbcr: bool,
 }
 
-pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf_dequant: &[f32; 3], quant_bias: [f32; 4]) -> Result<VarDct> {
+pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf_dequant: &[f32; 3], quant_bias: [f32; 4], jpeg: bool) -> Result<VarDct> {
     let global_scale = br.u32([bits_offset(11, 1), bits_offset(11, 2049), bits_offset(12, 4097), bits_offset(16, 8193)]);
     let quant_dc = br.u32([val(16), bits_offset(5, 1), bits_offset(8, 1), bits_offset(16, 1)]);
     let block_ctx = BlockCtxMap::read(br)?;
@@ -219,7 +234,7 @@ pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf
     let inv_global_scale = (65536.0f64 / f64::from(global_scale)) as f32;
     let inv_quant_dc = inv_global_scale / quant_dc as f32;
     let use_lf = fh.flags & crate::frame_header::FLAG_USE_LF_FRAME != 0;
-    let mul_dc = if use_lf { [1.0; 3] } else { [inv_quant_dc * lf_dequant[0], inv_quant_dc * lf_dequant[1], inv_quant_dc * lf_dequant[2]] };
+    let mul_dc = if use_lf || jpeg { [1.0; 3] } else { [inv_quant_dc * lf_dequant[0], inv_quant_dc * lf_dequant[1], inv_quant_dc * lf_dequant[2]] };
     let (xb, yb) = (dims.xsize_blocks, dims.ysize_blocks);
     let n = xb.checked_mul(yb).ok_or(Error::Limit("frame too large"))?;
     let hs = [fh.hshift(0) as usize, fh.hshift(1) as usize, fh.hshift(2) as usize];
@@ -259,6 +274,12 @@ pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf
         vs,
         use_lf_frame: use_lf,
         bufs: None,
+        jpeg: if jpeg {
+            Some(JpegCoeffs { comps: Vec::new(), c_map: [0; 3], gray: false, scaled_qtable: [0; 192], dcoff: [0; 3], qtable: Vec::new() })
+        } else {
+            None
+        },
+        ycbcr: fh.ycbcr,
     })
 }
 
@@ -484,6 +505,9 @@ impl VarDct {
                 self.encodings[t] = quant::read_encoding(br, t, &mut raw)?;
             }
         }
+        if self.jpeg.is_some() {
+            self.setup_jpeg(dims)?;
+        }
         for s in 0..NUM_STRATEGIES {
             if self.used_acs & (1 << s) != 0 {
                 let t = AcStrategy(s).quant_table();
@@ -681,7 +705,11 @@ impl VarDct {
                         }
                     }
                 }
-                self.dequant_and_transform(acs, gx, gy, &coeffs, &mut block, &mut scratch, &mut pixels)?;
+                if self.jpeg.is_some() {
+                    self.jpeg_block(acs, gx, gy, &coeffs)?;
+                } else {
+                    self.dequant_and_transform(acs, gx, gy, &coeffs, &mut block, &mut scratch, &mut pixels)?;
+                }
                 bx += cxb;
             }
         }
@@ -762,6 +790,118 @@ impl VarDct {
             let stride = p.w;
             let off = sby * 8 * stride + sbx * 8;
             idct::transform_to_pixels(acs, b, &mut p.data[off..], stride, scratch);
+        }
+        Ok(())
+    }
+
+    /// JPEG reconstruction setup from the frame's RAW quantisation table (libjxl's
+    /// ProcessACGlobal and DecodeGroupImpl).
+    fn setup_jpeg(&mut self, dims: &FrameDims) -> Result<()> {
+        let qt = match &self.encodings[0] {
+            quant::Encoding::Raw(den, t) if (den - 1.0 / (8.0 * 255.0)).abs() <= 1e-8 && t.len() == 192 => t.clone(),
+            _ => return invalid("quantisation table is not a JPEG table"),
+        };
+        if self.cfl.base_x != 0.0 || self.cfl.base_b != 0.0 || (self.cfl.color_scale - 1.0 / 84.0).abs() > 0.0 || self.cfl.ytox_dc != 0 || self.cfl.ytob_dc != 0 {
+            return invalid("chroma from luma map is not JPEG-compatible");
+        }
+        let ycbcr = self.ycbcr;
+        let (xb, yb) = (dims.xsize_blocks, dims.ysize_blocks);
+        let (hs, vs) = (self.hs, self.vs);
+        let j = self.jpeg.as_mut().ok_or(Error::Invalid("JPEG state"))?;
+        for c in 0..3 {
+            if !ycbcr {
+                j.dcoff[c] = 1024 / qt[64 * c].max(1);
+            }
+            for i in 0..64 {
+                let num = qt[64 + i];
+                let den = qt[64 * c + i];
+                if num <= 0 || den <= 0 || num >= 65536 || den >= 65536 {
+                    return invalid("JPEG quantisation table");
+                }
+                j.scaled_qtable[64 * c + (i % 8) * 8 + i / 8] = (1 << 11) * num / den;
+            }
+        }
+        if j.comps.is_empty() {
+            let n = if j.gray { 1 } else { 3 };
+            for c in 0..n {
+                let jc = if j.gray { 1 } else { c };
+                let _ = jc;
+                j.comps.push((0, 0, Vec::new()));
+            }
+            for c in 0..3 {
+                if j.gray && c != 1 {
+                    continue;
+                }
+                let k = j.c_map[c];
+                let w = xb >> hs[c];
+                let h = yb >> vs[c];
+                let n = w.checked_mul(h).and_then(|v| v.checked_mul(64)).ok_or(Error::Limit("JPEG too large"))?;
+                j.comps[k] = (w, h, vec![0i16; n]);
+            }
+        }
+        j.qtable = qt;
+        Ok(())
+    }
+
+    /// Stores one block's quantised coefficients for JPEG reconstruction.
+    fn jpeg_block(&mut self, acs: AcStrategy, gx: usize, gy: usize, coeffs: &[i32]) -> Result<()> {
+        if acs.0 != 0 {
+            return invalid("JPEG reconstruction needs DCT 8×8 blocks only");
+        }
+        let is444 = self.hs == [0; 3] && self.vs == [0; 3];
+        let tile = (gy / 8) * self.ctiles_x + gx / 8;
+        let (ytox, ytob) = (i32::from(self.ytox[tile]), i32::from(self.ytob[tile]));
+        let hs = self.hs;
+        let vs = self.vs;
+        let dcv: [f32; 3] = core::array::from_fn(|c| {
+            let p = &self.dc[c];
+            p.data.get((gy >> vs[c]) * p.w + (gx >> hs[c])).copied().unwrap_or(0.0)
+        });
+        let j = self.jpeg.as_mut().ok_or(Error::Invalid("JPEG state"))?;
+        let mut y_t = [0i32; 64];
+        for c in [1usize, 0, 2] {
+            if j.gray && c != 1 {
+                continue;
+            }
+            if (gx >> hs[c]) << hs[c] != gx || (gy >> vs[c]) << vs[c] != gy {
+                continue;
+            }
+            let mut t = [0i32; 64];
+            t.copy_from_slice(&coeffs[c * 64..c * 64 + 64]);
+            for y in 0..8 {
+                for x in y + 1..8 {
+                    t.swap(y * 8 + x, x * 8 + y);
+                }
+            }
+            let k = j.c_map[c];
+            let (w, _h, ref mut out) = j.comps[k];
+            let bi = (gy >> vs[c]) * w + (gx >> hs[c]);
+            let pos = out.get_mut(bi * 64..bi * 64 + 64).ok_or(Error::Invalid("JPEG block position"))?;
+            let sat = |v: i32| v.clamp(-32768, 32767) as i16;
+            if !is444 || (ytox == 0 && ytob == 0) {
+                for i in 0..64 {
+                    pos[i] = sat(t[i]);
+                }
+            } else if c == 1 {
+                y_t = t;
+                for i in 0..64 {
+                    pos[i] = sat(t[i]);
+                }
+            } else {
+                let f = if c == 0 { ytox } else { ytob };
+                let scale = f * (1 << 11) / 84;
+                let round = 1 << 10;
+                for i in 0..64 {
+                    let qt = j.scaled_qtable[c * 64 + i];
+                    let coeff_scale = qt.wrapping_mul(scale).wrapping_add(round) >> 11;
+                    let cfl = y_t[i].wrapping_mul(coeff_scale).wrapping_add(round) >> 11;
+                    pos[i] = sat(t[i].wrapping_add(cfl));
+                }
+            }
+            pos[0] = (dcv[c] - j.dcoff[c] as f32).clamp(-2047.0, 2047.0) as i16;
+            if pos.iter().any(|&v| !(-4095..=4095).contains(&v)) {
+                return invalid("JPEG DCT coefficients out of range");
+            }
         }
         Ok(())
     }

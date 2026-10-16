@@ -9,12 +9,15 @@ const SIGNATURE: [u8; 12] = [0, 0, 0, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 
 pub struct Parsed<'a> {
     pub codestream: Cow<'a, [u8]>,
     pub jbrd: Option<&'a [u8]>,
+    /// `Exif` and `xml ` boxes, or `brob` boxes holding them (body, is_brotli).
+    pub exif: Option<(&'a [u8], bool)>,
+    pub xmp: Option<(&'a [u8], bool)>,
 }
 
 /// Splits a JPEG XL file into its codestream (and JPEG reconstruction data, if any).
 pub fn parse(data: &[u8]) -> Result<Parsed<'_>> {
     if data.len() >= 2 && data[0] == 0xFF && data[1] == 0x0A {
-        return Ok(Parsed { codestream: Cow::Borrowed(data), jbrd: None });
+        return Ok(Parsed { codestream: Cow::Borrowed(data), jbrd: None, exif: None, xmp: None });
     }
     if data.len() < 12 || data[..12] != SIGNATURE {
         return invalid("not a JPEG XL file");
@@ -25,6 +28,8 @@ pub fn parse(data: &[u8]) -> Result<Parsed<'_>> {
     let mut last_part_seen = false;
     let mut next_index = 0u32;
     let mut jbrd = None;
+    let mut exif = None;
+    let mut xmp = None;
     while pos < data.len() {
         let rest = &data[pos..];
         if rest.len() < 8 {
@@ -78,6 +83,14 @@ pub fn parse(data: &[u8]) -> Result<Parsed<'_>> {
                 parts.push(&body[4..]);
             }
             b"jbrd" => jbrd = Some(body),
+            b"Exif" if exif.is_none() => exif = Some((body, false)),
+            b"xml " if xmp.is_none() => xmp = Some((body, false)),
+            b"brob" if body.len() >= 4 => match &body[..4] {
+                b"Exif" if exif.is_none() => exif = Some((&body[4..], true)),
+                b"xml " if xmp.is_none() => xmp = Some((&body[4..], true)),
+                b"jxlc" | b"jxlp" | b"jbrd" | b"brob" => return invalid("brob box with a forbidden type"),
+                _ => {}
+            },
             _ => {}
         }
         pos += size as usize;
@@ -95,5 +108,5 @@ pub fn parse(data: &[u8]) -> Result<Parsed<'_>> {
     } else {
         return invalid("no codestream box");
     };
-    Ok(Parsed { codestream, jbrd })
+    Ok(Parsed { codestream, jbrd, exif, xmp })
 }

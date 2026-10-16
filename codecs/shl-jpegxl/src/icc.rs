@@ -46,6 +46,7 @@ pub fn read_icc(br: &mut BitReader) -> Result<Vec<u8>> {
     if enc_size > MAX_SIZE {
         return invalid("ICC profile too large");
     }
+    let start_bits = br.bits_consumed();
     let code = EntropyCode::read(br, NUM_CONTEXTS)?;
     let mut r = code.reader(br, 0)?;
     let n = enc_size as usize;
@@ -61,6 +62,10 @@ pub fn read_icc(br: &mut BitReader) -> Result<Vec<u8>> {
         enc.push(r.read(&code, br, context(i, b1, b2)) as u8);
         if i % 4096 == 0 && br.overrun() {
             return invalid("truncated ICC profile");
+        }
+        // As libjxl: the profile cannot be more than 256 times the bytes it has consumed.
+        if i > 0 && i % 65536 == 0 && i as u64 > (br.bits_consumed() - start_bits) / 8 * 256 {
+            return invalid("ICC profile larger than its data allows");
         }
     }
     br.check_end()?;
