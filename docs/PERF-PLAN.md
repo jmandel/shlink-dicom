@@ -87,7 +87,7 @@ The share option, at 75–82% of OpenJPEG's speed. The remaining cost is about o
 
 ### T5. HTJ2K block decoder
 
-The largest native gap (1.7–3.3× OpenJPH), and 1.2–1.25× in wasm. OpenJPH's speed comes from AVX2 per-lane variable shifts in MagSgn decoding, which wasm SIMD lacks. Start with a spike: a safe simd128 MagSgn/VLC prototype on the corpus blocks. **Gate:** if the prototype doesn't save at least 10% on large frames in wasm, record the result and stop the track.
+**Stopped at the gate.** In wasm, MagSgn is 16–36% and VLC/MEL 16–21% of a large-frame decode; the VLC chain is serial, so only MagSgn could use SIMD. Two attempts, neither near 10%: a scalar per-quad rewrite (no change) and a safe simd128 quad decoder in OpenJPH's style (byte swizzle, table shifts; no faster in two A/B rounds). In the same session, against OpenJPH's Cornerstone wasm build we take 1.17× its time on 2048² DX lossless and lossy, and 0.78× on RGB. Natively OpenJPH 0.32 is 2.3–2.8× faster. The likely limit is per-quad control flow, which wasn't measured separately. See htj2k PERF.md, "Changes in track T5".
 
 ### T6. JPEG XL lossy
 
