@@ -14,10 +14,10 @@ Our time ÷ the reference's time, single-threaded, same frames; below 1 means we
 | JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.58–0.67 | no wasm reference decodes 12-bit; ours beats native libjpeg-turbo |
 | JPEG Lossless SV1 | libjpeg-turbo 3.2 | about 0.6 (2048²); 0.64 (live 512² CT series) | 0.45 |
 | JPEG-LS | CharLS 2.4.4 | 0.74–0.96 grey; 1.05–1.24 colour | 0.94–1.12 |
-| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.88–0.99; lossy 1.05–1.39; Leica 4:2:2 tile 0.96 (T3) | 0.76–0.79 |
+| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.88–0.99; lossy 1.05–1.17, about level in cycles on MR2; Leica 4:2:2 tile 0.96 (T3 stopped) | 0.76–0.79 |
 | HTJ2K | OpenJPH 0.32 | 1.7–3.3 | 1.2–1.25 large frames; faster on small |
-| JPEG XL lossless | libjxl 0.12 | 0.73–1.47 | 0.96–2.14 |
-| JPEG XL lossy | libjxl 0.12 | 1.8–2.2 | 1.12–1.31 at distance 1 (after T6) |
+| JPEG XL lossless | libjxl 0.12 | effort 1: 1.05–1.22; effort 7: 0.79 | effort 1: 1.14–1.17; effort 7: about 1.0 |
+| JPEG XL lossy | libjxl 0.12 | 1.8–2.3 | 1.09–1.26 at distance 1; 1.34 at distance 3 (T6 stopped) |
 
 | Encoder, MB/s (higher is better) | Ours native | Reference native | Ours wasm | Reference wasm |
 |---|---|---|---|---|
@@ -75,7 +75,7 @@ The share option, at 75–82% of OpenJPEG's speed. The remaining cost is about o
 
 ### T3. JPEG 2000 decoder
 
-MQ tier-1 decoding is about 90% of a lossless decode. Re-measure natively after the MQ table change, then try branch and table work in tier-1. The Leica 4:2:2 tile (2.0×) is mostly colour conversion that the reference leaves undone; check that before working on it.
+**Stopped.** The Leica 4:2:2 tile's colour output now works by rows and computes each shared chroma term once (78db6be): 2.0 → 1.3 ms against OpenJPEG's 1.35. Three tier-1 changes in a row then missed (padding stripes, a column state word held in a register, OpenJPEG-style MQ branching). On the lossy MR2 frame we run 40% more instructions than OpenJPEG but about the same cycles. The next idea, a rewrite of t1.rs in OpenJPEG's style, isn't worth it at 0.88–0.99× for lossless and 1.05–1.09× for slide tiles. See htj2k PERF.md.
 
 ### T4. JPEG baseline, 8-bit colour
 
@@ -87,7 +87,7 @@ The largest native gap (1.7–3.3× OpenJPH), and 1.2–1.25× in wasm. OpenJPH'
 
 ### T6. JPEG XL lossy
 
-Running now on the scratch branch jxl-simd-spike (wasm SIMD first). It continues under these rules. Lossless is already level with libjxl.
+**Stopped.** Kept: a safe four-lane type for the edge-preserving filter (EPF), dequantisation and transposes; tabulated scales; a fast path for effort-1 lossless; skipping the EPF on 8×8 blocks below the minimum sigma. Browser lossy went from 1.4–2.1× libjxl to 1.09–1.26× at distance 1. Three changes in a row then missed (per-group AC tables, 4-lane IDCT bundles, one copy fewer in the IDCT). Native lossy stays at 1.8–2.3× libjxl single-threaded; closing that needs AVX2 or threads within an image, both deferred. `run.mjs` now has nine JPEG XL cases with libjxl as the reference. See jpeg-xl PERF.md.
 
 ### T7. JPEG-LS colour (ILV 2)
 
