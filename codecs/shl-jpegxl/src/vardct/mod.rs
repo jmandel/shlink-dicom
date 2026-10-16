@@ -12,6 +12,7 @@ use crate::frame::ModularFrame;
 use crate::frame_header::{coeff_order_context, read_permutation_with, FrameDims, FrameHeader};
 use crate::modular::{self, Channel, ModularImage, StreamOptions};
 use crate::render::Plane;
+use crate::simd::F4;
 use acs::{AcStrategy, COEFF_ORDER_OFFSET, NUM_STRATEGIES};
 
 const INVALID_ACS: u8 = 0xFF;
@@ -746,32 +747,32 @@ impl VarDct {
         let x_cc = self.cfl.ytox(i32::from(self.ytox[tile]));
         let b_cc = self.cfl.ytob(i32::from(self.ytob[tile]));
         let bias = self.quant_bias;
-        let adjust = |c: usize, q: i32| -> f32 {
-            let qf = q as f32;
-            let a = qf.abs();
-            if a < 1.125 {
-                if a > 0.0 {
-                    bias[c].copysign(qf)
-                } else {
-                    0.0
-                }
-            } else {
-                qf - bias[3] / qf
-            }
-        };
         let (bx_, rest) = block.split_at_mut(size);
         let (by_, rest) = rest.split_at_mut(size);
         let bb_ = &mut rest[..size];
-        for k in 0..size {
-            let x_mul = table[k] * sdx;
-            let y_mul = table[tsize + k] * sdy;
-            let b_mul = table[2 * tsize + k] * sdb;
-            let dx_cc = adjust(0, coeffs[k]) * x_mul;
-            let dy = adjust(1, coeffs[size + k]) * y_mul;
-            let db_cc = adjust(2, coeffs[2 * size + k]) * b_mul;
-            bx_[k] = x_cc * dy + dx_cc;
-            by_[k] = dy;
-            bb_[k] = b_cc * dy + db_cc;
+        // Four coefficients at a time (`size` is a multiple of 64). libjxl's AdjustQuantBias:
+        // |q| < 1.125 becomes ±bias[c] (0 stays 0), larger values q − bias[3]/q.
+        let (tx, ty, tb) = (&table[..size], &table[tsize..tsize + size], &table[2 * tsize..2 * tsize + size]);
+        let (cx, cy, cb) = (&coeffs[..size], &coeffs[size..2 * size], &coeffs[2 * size..3 * size]);
+        let adjust = |c: usize, q: &[i32]| -> F4 {
+            let qf = F4::from_i32(q);
+            let a = qf.abs();
+            let zero = F4::splat(0.0);
+            let small = a.gt_select(zero, F4::splat(bias[c]).copysign(qf), zero);
+            let big = qf.sub(F4::splat(bias[3]).div(qf));
+            F4::splat(1.125).gt_select(a, small, big)
+        };
+        let (vsdx, vsdy, vsdb, vx_cc, vb_cc) = (F4::splat(sdx), F4::splat(sdy), F4::splat(sdb), F4::splat(x_cc), F4::splat(b_cc));
+        for k in (0..size).step_by(4) {
+            let x_mul = F4::load(&tx[k..]).mul(vsdx);
+            let y_mul = F4::load(&ty[k..]).mul(vsdy);
+            let b_mul = F4::load(&tb[k..]).mul(vsdb);
+            let dx_cc = adjust(0, &cx[k..]).mul(x_mul);
+            let dy = adjust(1, &cy[k..]).mul(y_mul);
+            let db_cc = adjust(2, &cb[k..]).mul(b_mul);
+            vx_cc.mul(dy).add(dx_cc).store(&mut bx_[k..]);
+            dy.store(&mut by_[k..]);
+            vb_cc.mul(dy).add(db_cc).store(&mut bb_[k..]);
         }
         let blocks = [bx_, by_, bb_];
         for (c, b) in blocks.into_iter().enumerate() {
