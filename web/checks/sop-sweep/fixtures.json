@@ -1,0 +1,126 @@
+{
+ "description": "Failing cases of the object-type sweep (codec-corpus/prevalence/SOPCLASS_SWEEP.md), by IDC UID; fetched at test time, never committed. codec-corpus/scripts/sources/sopclass_fetch.py --fixtures fetches and derives them; then expect.py, sop-sweep-fixtures.ts and sop-sweep-checks.mjs run with that root.",
+ "fixtures": [
+  {
+   "fixture": "sweep-pet-rescale-mpr",
+   "failure": "Reformats of a PET series whose Rescale Slope differs between slices (two thirds of IDC's PET series) match neither SimpleITK nor each slice's values: the volume interpolates stored values and applies one slice's rescale to all.",
+   "case": "pt-qinpetphantom-41748796",
+   "id": "pt-qinpetphantom-41748796",
+   "sopClass": "1.2.840.10008.5.1.4.1.1.128",
+   "short": "pt",
+   "primary": "1.2.826.0.1.3417726.3.988097.20131002141748796",
+   "series": [
+    "1.2.826.0.1.3417726.3.988097.20131002141748796"
+   ],
+   "why": "rescale differs between slices (80 rescales over 81 instances; Siemens / qin_pet_phantom)",
+   "collection": "qin_pet_phantom",
+   "manufacturer": "Siemens",
+   "modality": "PT",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "fixture": "sweep-lce-pt-perframe",
+   "failure": "Legacy Converted Enhanced PET (derived with highdicom) with a per-frame Pixel Value Transformation: frames after the first show values through frame 1's rescale.",
+   "case": "sweep-lce-pt-perframe",
+   "derive": {
+    "from": "1.3.6.1.4.1.9328.50.17.226358170368521797039545000785692515305",
+    "kind": "pt",
+    "order": "spatial"
+   },
+   "sourceCase": "pt-riderlungpetct-92515305",
+   "collection": "rider_lung_pet_ct",
+   "licence": "CC BY 3.0 (derived)",
+   "series": [
+    "1.3.6.1.4.1.9328.50.17.226358170368521797039545000785692515305"
+   ]
+  },
+  {
+   "fixture": "sweep-lce-ct-shuffled",
+   "failure": "Legacy Converted Enhanced CT (derived) whose frames are stored out of spatial order, with no dimension index: the viewer steps through the frames in stored order.",
+   "case": "sweep-lce-ct-shuffled",
+   "derive": {
+    "from": "1.2.840.113654.2.55.12981851159659490162016143805047287898",
+    "kind": "ct",
+    "order": "shuffled"
+   },
+   "sourceCase": "ctl-ct-nlst-47287898",
+   "collection": "nlst",
+   "licence": "CC BY 4.0 (derived)",
+   "series": [
+    "1.2.840.113654.2.55.12981851159659490162016143805047287898"
+   ]
+  },
+  {
+   "fixture": "sweep-seg-flipped",
+   "failure": "NLST TotalSegmentator segmentation whose Plane Orientation has the column direction reversed ([1,0,0,0,-1,0]) relative to its CT: drawn upside down on the CT.",
+   "case": "ctl-sr-enh-nlst-8627878",
+   "id": "ctl-sr-enh-nlst-8627878",
+   "sopClass": "1.2.840.10008.5.1.4.1.1.88.22",
+   "short": "sr-enh",
+   "primary": "1.2.276.0.7230010.3.1.3.313263360.4146.1706324218.627878",
+   "series": [
+    "1.2.276.0.7230010.3.1.3.313263360.4146.1706324218.627878",
+    "1.2.276.0.7230010.3.1.3.313263360.103.1706324083.77721",
+    "1.2.840.113654.2.55.309697768333634642168112642216965253392"
+   ],
+   "why": "random control",
+   "collection": "nlst",
+   "manufacturer": "QIICR",
+   "modality": "SR",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "fixture": "sweep-gsps-ref-image",
+   "failure": "Grayscale Softcopy Presentation State naming one image of a 326-slice CT: chosen in the series list, the viewer opens the CT at another slice with the state's window applied.",
+   "case": "gsps-qibact1c-2281288",
+   "id": "gsps-qibact1c-2281288",
+   "sopClass": "1.2.840.10008.5.1.4.1.1.11.1",
+   "short": "gsps",
+   "primary": "1.2.276.0.7230010.3.1.3.3496549722.3800.1316092281.288",
+   "series": [
+    "1.2.276.0.7230010.3.1.3.3496549722.3800.1316092281.288",
+    "1.2.840.113619.2.267.3.346830868.413.1298911367.54"
+   ],
+   "why": "spread by manufacturer then collection (GE MEDICAL SYSTEMS / qiba_ct_1c)",
+   "collection": "qiba_ct_1c",
+   "manufacturer": "GE MEDICAL SYSTEMS",
+   "modality": "PR",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "fixture": "sweep-seg-labelmap-deflated",
+   "failure": "Label Map Segmentation stored with the Deflated Explicit VR Little Endian transfer syntax: the Share page's reader skips it ('no Study or Series Instance UID').",
+   "case": "seg-lm-tcgakirp-3446926",
+   "id": "seg-lm-tcgakirp-3446926",
+   "sopClass": "1.2.840.10008.5.1.4.1.1.66.7",
+   "short": "seg-lm",
+   "primary": "1.2.276.0.7230010.3.1.3.0.63917.1787706133.446926",
+   "series": [
+    "1.2.276.0.7230010.3.1.3.0.63917.1787706133.446926",
+    "1.3.6.1.4.1.14519.5.2.1.3023.4010.320095865496651706833110909816"
+   ],
+   "why": "spread by manufacturer then collection (QIICR / tcga_kirp)",
+   "collection": "tcga_kirp",
+   "manufacturer": "QIICR",
+   "modality": "SEG",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "fixture": "sweep-bpx-proc-blank",
+   "failure": "Breast Projection X-Ray For Processing (Hologic): the Frame VOI LUT window (W 500, L 350) lies far below the stored values (about 5,400): every pixel draws black.",
+   "case": "bpx-proc-ea1141-36958137",
+   "id": "bpx-proc-ea1141-36958137",
+   "sopClass": "1.2.840.10008.5.1.4.1.1.13.1.5",
+   "short": "bpx-proc",
+   "primary": "1.3.6.1.4.1.14519.5.2.1.1620.1225.316144826512045644400636958137",
+   "series": [
+    "1.3.6.1.4.1.14519.5.2.1.1620.1225.316144826512045644400636958137"
+   ],
+   "why": "spread by manufacturer then collection (HOLOGIC, Inc. / ea1141)",
+   "collection": "ea1141",
+   "manufacturer": "HOLOGIC, Inc.",
+   "modality": "MG",
+   "licence": "CC BY 4.0"
+  }
+ ]
+}

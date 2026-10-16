@@ -1133,6 +1133,48 @@ async function flowOverflow() {
         }
 }
 
+// Each series' thumbnail is its middle image by Instance Number (read here with pydicom from the
+// sample's files), not its smallest file.
+async function flowThumbMiddle() {
+  const label = "thumb-middle";
+  const O = JSON.parse(execFileSync("uv", ["run", "--project", new URL("../../codec-corpus", import.meta.url).pathname, "python", new URL("./sample-originals.py", import.meta.url).pathname], { maxBuffer: 1 << 26 }).toString());
+  const middle = JSON.parse(
+    execFileSync("uv", ["run", "--project", new URL("../../codec-corpus", import.meta.url).pathname, "python", "-c", `
+import json, sys, pydicom
+O = json.load(sys.stdin)
+by = {}
+for sop, o in O.items():
+    n = pydicom.dcmread(o["path"], stop_before_pixels=True, specific_tags=["InstanceNumber"]).get("InstanceNumber")
+    by.setdefault(o["series"], []).append((int(n) if n is not None else 0, sop))
+print(json.dumps({s: sorted(v)[len(v) // 2][1] for s, v in by.items()}))
+`], { input: JSON.stringify(O), maxBuffer: 1 << 26 }).toString(),
+  );
+  const { context, page, errors } = await newPage("desktop");
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  const n = await page.locator(".study-open").count();
+  let checked = 0;
+  for (let si = 0; si < n; si++) {
+    if (si) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    await page.locator(".study-open").nth(si).click();
+    await page.waitForSelector(".series-btn");
+    if (await page.evaluate(() => document.body.classList.contains("slide-mode"))) continue;
+    await page.waitForFunction(() => [...document.querySelectorAll(".series-btn canvas")].every((c) => c.dataset.drawn || c.dataset.error), null, { timeout: 180000 });
+    const tiles = await page.$$eval(".series-btn", (bs) => bs.map((b) => ({ uid: b.dataset.uid, name: b.querySelector(".s-name").textContent, sop: b.querySelector("canvas").dataset.sop })));
+    for (const t of tiles) {
+      if (!t.sop || !middle[t.uid]) continue; // reports, documents and other objects draw an icon
+      checked++;
+      check(`${label}: ${t.name}`, t.sop === middle[t.uid], t.sop === middle[t.uid] ? "middle by Instance Number" : `${t.sop} is not the middle (${middle[t.uid]})`);
+    }
+  }
+  check(`${label}: series checked`, checked >= 25, String(checked));
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 const flows = {
@@ -1148,6 +1190,7 @@ const flows = {
   dark: () => Promise.all(["desktop", "phone390"].map(flowDark)),
   "mpr-ui": () => Promise.all(["desktop", "phone390"].map(flowMprUi)),
   overflow: flowOverflow,
+  "thumb-middle": flowThumbMiddle,
   "touch-reset": async () => {
     for (const dev of ["phone390", "desktop"]) await flowTouchReset(dev);
   },

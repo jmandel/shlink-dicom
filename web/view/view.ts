@@ -17,7 +17,6 @@ import {
   modalityName,
   openShare,
   PasscodeError,
-  isLocalizer,
   pickInitialSeries,
   plural,
   studyTitle,
@@ -162,11 +161,12 @@ function slideFor(se: SeriesEntry): Promise<SlideSession> {
   });
 }
 
-/** The instance a series' thumbnail is made from: the middle one, or the smallest when sizes differ (less to fetch). */
+/** The instance a series' thumbnail is made from: its middle one, as the viewer opens on. */
 function thumbInstance(se: SeriesEntry): number {
-  const lens = se.instances.map((x) => x.length);
-  const min = Math.min(...lens), max = Math.max(...lens);
-  return max > min * 1.1 ? lens.indexOf(min) : Math.floor(lens.length / 2);
+  // The middle of the series by Instance Number (list order where numbers are missing). Not by
+  // size: compressed slices are smallest where they are emptiest.
+  const order = se.instances.map((x, i) => ({ i, n: x.number ?? i })).sort((a, b) => a.n - b.n || a.i - b.i);
+  return order[Math.floor(order.length / 2)]?.i ?? 0;
 }
 
 const tiles = new WeakMap<HTMLCanvasElement, ThumbTile>();
@@ -210,6 +210,7 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
     const img = await images!.get(se, inst, { priority, signal, scale: thumbScale(len, canvas.width), onProgress: (r, t) => tile.progress(r, t) });
     const h = await imageHeader(img)?.catch(() => null);
     drawThumbnail(canvas, img, Math.floor(img.frames / 2), h?.ds);
+    canvas.dataset.sop = se.instances[inst].uid;
     tile.drawn();
   } catch (e) {
     if ((e as any)?.name === "AbortError") throw e;
@@ -938,22 +939,6 @@ function showPasteScreen() {
 
 // ------------------------------------------------------------------------------------- overview
 
-/**
- * What a study card's thumbnail shows: the series the study opens on; for projection images
- * (radiographs and the like, a few large files) the smallest non-localizer image in the study,
- * since every byte of an uncompressed file must arrive before it can be drawn.
- */
-function overviewThumb(st: StudyEntry, se: SeriesEntry): { se: SeriesEntry; inst: number } {
-  if (["CT", "MR", "PT", "NM"].includes(se.modality ?? "") || kindOf(se) !== "image") return { se, inst: thumbInstance(se) };
-  let best = { se, inst: thumbInstance(se) };
-  for (const x of st.series) {
-    if (kindOf(x) !== "image" || isLocalizer(x)) continue;
-    const i = thumbInstance(x);
-    if (x.instances[i].length < best.se.instances[best.inst].length) best = { se: x, inst: i };
-  }
-  return best;
-}
-
 function renderOverview() {
   const idx = share!.index;
   $("ov-patient").textContent = patientLine();
@@ -1004,14 +989,14 @@ function renderOverview() {
     card.append(actions);
     list.append(card);
 
-    // Thumbnail: the series the study opens on (for radiographs, the smallest image in the study).
-    // Once every card has one, the slice the study opens on is fetched at full size at low
-    // priority, so opening the study shows it at once.
+    // Thumbnail: the middle image of the series the study opens on. Once every card has one, the
+    // slice the study opens on is fetched at full size at low priority, so opening the study
+    // shows it at once.
     const se = st.series[pickInitialSeries(st)];
     if (!se) return;
-    const target = overviewThumb(st, se);
-    // Large files (uncompressed radiographs) one after another, smallest first, so the first
-    // arrives early rather than all together at the end; small ones at once.
+    const target = { se, inst: thumbInstance(se) };
+    // Large files (radiographs) one after another, smallest first, so the first arrives early
+    // rather than all together at the end; small ones at once.
     const run = () => seriesThumb(thumb, target.se, Priority.Visible, undefined, target.inst).then(() => mark("first-thumb"));
     const bytes = target.se.instances[target.inst].length;
     if (!isSlideSeries(target.se) && bytes > 2 * 1024 * 1024) {

@@ -135,6 +135,8 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **15 Oct, about 21:50: the LinkedIn article is SCHEDULED** for Fri 16 Oct, 8:00 am CDT (9:00 am ET), Post to Anyone, with the post message from $CLAUDE_JOB_DIR/tmp/post-message.txt (Josh's opener; no links; 1.5 MB of 313 MB). The draft was verified identical to the blog md (44 blocks, 40 links, 8 images). Known stale item: shot-viewer.png predates the thumbnail fix (empty DWI/ADC tiles); Josh said not to chase every screenshot. Josh can change or cancel it via LinkedIn's "View scheduled articles".
+
 - **Josh (15 Oct, about 21:00): schedule the LinkedIn article for Fri 16 Oct, 9:00 am ET,** once the compressed web app is deployed and tested. Steps:
   1. Merge pack-compress and how-compressed, deploy, and verify live.
   2. The visuals agent re-measures and retakes everything (sample size, trace, bytes to the first slice, footnotes 1 and 3, How caption and screenshot, owner page).
