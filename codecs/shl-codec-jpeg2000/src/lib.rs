@@ -215,17 +215,32 @@ fn decode_multi(codestream: &[u8], full: &FrameInfo, reduce: u8, frames: bool) -
                 return r;
             }
         }
-        prep::pack(info, prep, |c, cx, cy| {
-            let c = base + c;
-            let comp = &image.components[c];
-            let i = cy * comp.width as usize + cx;
-            let (shift, unshift) = shifts[c];
-            match &comp.plane {
-                Plane::Int(v) => v[i].saturating_add(shift - unshift),
-                // Rounds as `round() as i32` (saturating, NaN to 0); pack clamps to the SIZ range.
-                Plane::Float(v) => prep::round_to_i32((v[i] + shift as f32) - unshift as f32),
-            }
-        })
+        prep::pack(
+            info,
+            prep,
+            prep::RowFn(|c: usize, cy: usize, row: &mut [i32]| {
+                let c = base + c;
+                let comp = &image.components[c];
+                let (at, n) = (cy * comp.width as usize, row.len());
+                let (shift, unshift) = shifts[c];
+                match &comp.plane {
+                    Plane::Int(v) => {
+                        for (d, &s) in row.iter_mut().zip(&v[at..at + n]) {
+                            *d = s.saturating_add(shift - unshift);
+                        }
+                    }
+                    // Clamped to the SIZ range before rounding, which gives what `pack` gives
+                    // (it clamps again), in a form that vectorises.
+                    Plane::Float(v) => {
+                        let (lo, hi) = bounds[c];
+                        let (shift, unshift) = (shift as f32, unshift as f32);
+                        for (d, &s) in row.iter_mut().zip(&v[at..at + n]) {
+                            *d = prep::round_clamped((s + shift) - unshift, lo, hi);
+                        }
+                    }
+                }
+            }),
+        )
     };
     if count == 1 {
         return pack_frame(0).map(|f| (1, f));

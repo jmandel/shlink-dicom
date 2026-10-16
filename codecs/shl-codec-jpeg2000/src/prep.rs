@@ -361,10 +361,10 @@ fn check_sycc(h: &MainHeader) -> Result<()> {
     Ok(())
 }
 
-/// Build the canonical frame. `sample(c, cx, cy)` returns component `c` at column `cx`,
-/// row `cy` of that component's own grid (the pixel position unless it is subsampled), as a
-/// signed integer in the component's SIZ range: for a signed component, already without the
-/// DC level shift. Values are clamped to that range here anyway.
+/// Build the canonical frame. `src` ([`Rows`]) gives component `c` on that component's own
+/// grid (the pixel position unless it is subsampled), as signed integers in the component's SIZ
+/// range: for a signed component, already without the DC level shift. Values are clamped to
+/// that range here anyway.
 ///
 /// Colour: three-component output is RGB: the codestream's RCT/ICT was undone, or there was
 /// none and the samples are returned as decoded (coordinator ruling), except that YBR_FULL
@@ -378,7 +378,7 @@ fn check_sycc(h: &MainHeader) -> Result<()> {
 /// reinterpreted from the codestream precision: unsigned samples of a signed data set are
 /// sign-extended from bit p−1, and signed samples of an unsigned data set keep their low
 /// p bits. Everything else is written as decoded; the CLI masks or sign-extends to Bits Stored.
-pub fn pack(info: &FrameInfo, prep: &Prepared<'_>, sample: impl Fn(usize, usize, usize) -> i32) -> Result<DecodedFrame> {
+pub fn pack(info: &FrameInfo, prep: &Prepared<'_>, src: impl Rows) -> Result<DecodedFrame> {
     let bytes = info.frame_bytes().ok_or_else(|| invalid("frame size overflows"))?;
     let (w, h) = (info.columns as usize, info.rows as usize);
     let bps = info.bytes_per_sample();
@@ -390,28 +390,54 @@ pub fn pack(info: &FrameInfo, prep: &Prepared<'_>, sample: impl Fn(usize, usize,
     };
     let comps = component_rules(info, prep);
     let mut color = color_out(info, prep);
+    out.reserve(bytes);
     if let Some((dx, dy)) = prep.sycc() {
-        out.reserve(bytes);
         let (dx, dy) = (usize::from(dx), usize::from(dy));
         let upb = comps[0].1;
         let offset = (upb + 1) / 2;
+        // Row by row: each chroma sample's three terms of `sycc_to_rgb` once, not once per
+        // pixel that shares it; then each pixel adds them to its luma.
+        let cw = if w == 0 { 0 } else { (w - 1) / dx + 1 };
+        let (mut luma, mut cb, mut cr) = (vec![0i32; w], vec![0i32; cw], vec![0i32; cw]);
+        let mut terms = vec![(0i32, 0i32, 0i32); cw];
         for y in 0..h {
-            for x in 0..w {
-                let yv = sample(0, x, y).clamp(0, upb);
-                let cb = sample(1, x / dx, y / dy).clamp(0, upb);
-                let cr = sample(2, x / dx, y / dy).clamp(0, upb);
-                for v in sycc_to_rgb(offset, upb, yv, cb, cr) {
+            if y % dy == 0 {
+                src.fill(1, y / dy, &mut cb);
+                src.fill(2, y / dy, &mut cr);
+                for ((t, &b), &r) in terms.iter_mut().zip(&cb).zip(&cr) {
+                    *t = sycc_terms(offset, b.clamp(0, upb), r.clamp(0, upb));
+                }
+            }
+            src.fill(0, y, &mut luma);
+            if bps == 1 {
+                // 8-bit: write the row's bytes in place.
+                let start = out.len();
+                out.resize(start + 3 * w, 0);
+                for (x, (px, &yv)) in out[start..].chunks_exact_mut(3).zip(&luma).enumerate() {
+                    let yv = yv.clamp(0, upb);
+                    let (r, g, b) = terms[x / dx];
+                    px.copy_from_slice(&[(yv + r).clamp(0, upb) as u8, (yv - g).clamp(0, upb) as u8, (yv + b).clamp(0, upb) as u8]);
+                }
+                continue;
+            }
+            for (x, &yv) in luma.iter().enumerate() {
+                let yv = yv.clamp(0, upb);
+                let (r, g, b) = terms[x / dx];
+                for v in [(yv + r).clamp(0, upb), (yv - g).clamp(0, upb), (yv + b).clamp(0, upb)] {
                     put(&mut out, v);
                 }
             }
         }
         color = ColorOut::Rgb;
     } else {
-        out.reserve(bytes);
+        let mut rows = vec![vec![0i32; w]; comps.len()];
         for y in 0..h {
+            for (c, row) in rows.iter_mut().enumerate() {
+                src.fill(c, y, row);
+            }
             for x in 0..w {
-                for (c, &(lo, hi, fix)) in comps.iter().enumerate() {
-                    let v = sample(c, x, y).clamp(lo, hi);
+                for (row, &(lo, hi, fix)) in rows.iter().zip(&comps) {
+                    let v = row[x].clamp(lo, hi);
                     let v = match fix {
                         Fix::None => v,
                         Fix::SignExtend(s) => (v << s) >> s,
@@ -426,6 +452,30 @@ pub fn pack(info: &FrameInfo, prep: &Prepared<'_>, sample: impl Fn(usize, usize,
         return Err(invalid("decoded frame has the wrong size"));
     }
     Ok(DecodedFrame { data: out, planar: false, color })
+}
+
+/// Where [`pack`] reads samples: `fill(c, cy, row)` writes row `cy` of component `c`, on that
+/// component's own grid, from column 0 for `row.len()` columns. A closure `sample(c, cx, cy)`
+/// is one, a sample at a time; [`RowFn`] wraps a closure that fills a whole row.
+pub trait Rows {
+    fn fill(&self, c: usize, cy: usize, row: &mut [i32]);
+}
+
+impl<F: Fn(usize, usize, usize) -> i32> Rows for F {
+    fn fill(&self, c: usize, cy: usize, row: &mut [i32]) {
+        for (cx, d) in row.iter_mut().enumerate() {
+            *d = self(c, cx, cy);
+        }
+    }
+}
+
+/// A [`Rows`] from a closure `fill(c, cy, row)`.
+pub struct RowFn<F>(pub F);
+
+impl<F: Fn(usize, usize, &mut [i32])> Rows for RowFn<F> {
+    fn fill(&self, c: usize, cy: usize, row: &mut [i32]) {
+        (self.0)(c, cy, row)
+    }
 }
 
 /// Per component: the SIZ range `(lo, hi)` samples are clamped to, and the signedness fix
@@ -524,11 +574,11 @@ fn write_rows<const BPS: usize>(
     }
 }
 
-/// `x.round() as i32` (round half away from zero, saturating, NaN to 0) without the libm
-/// `roundf` call, which is not inlined on baseline x86-64 or wasm32. `x - trunc(x)` is exact
-/// in f32, so the comparison with 0.5 decides exactly as `round` does.
-#[inline(always)]
-pub fn round_to_i32(x: f32) -> i32 {
+/// `x.round() as i32` (round half away from zero, saturating, NaN to 0); `x - trunc(x)` is
+/// exact in f32, so the comparison with 0.5 decides exactly as `round` does. The reference
+/// that [`round_clamped`] is tested against.
+#[cfg(test)]
+fn round_to_i32(x: f32) -> i32 {
     let t = x as i32;
     let f = x - t as f32;
     // Branch-free: on lossy data the fraction is random, and a branch would mispredict.
@@ -550,13 +600,13 @@ pub fn round_clamped(x: f32, lo: f32, hi: f32) -> i32 {
     r + i32::from(d == 0.5 && x > 0.0) - i32::from(d == -0.5 && x < 0.0)
 }
 
-/// OpenJPEG's `sycc_to_rgb` (src/bin/common/color.c): f64 products truncated toward zero.
-fn sycc_to_rgb(offset: i32, upb: i32, y: i32, cb: i32, cr: i32) -> [i32; 3] {
+/// OpenJPEG's `sycc_to_rgb` (src/bin/common/color.c) computes, with f64 products truncated
+/// toward zero, r = y + (1.402 cr), g = y − (0.344 cb + 0.714 cr), b = y + (1.772 cb), each
+/// clamped to 0..=upb. These are its three chroma terms (r, g, b).
+#[inline(always)]
+fn sycc_terms(offset: i32, cb: i32, cr: i32) -> (i32, i32, i32) {
     let (cb, cr) = (f64::from(cb - offset), f64::from(cr - offset));
-    let r = y + (1.402 * cr) as i32;
-    let g = y - (0.344 * cb + 0.714 * cr) as i32;
-    let b = y + (1.772 * cb) as i32;
-    [r.clamp(0, upb), g.clamp(0, upb), b.clamp(0, upb)]
+    ((1.402 * cr) as i32, (0.344 * cb + 0.714 * cr) as i32, (1.772 * cb) as i32)
 }
 
 #[derive(Debug, Clone, Copy)]

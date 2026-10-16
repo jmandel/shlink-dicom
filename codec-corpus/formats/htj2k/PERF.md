@@ -68,6 +68,12 @@ Times in ms per frame; the last column is our native time over the faster C libr
 
 Each level discarded removes about three quarters of the remaining code-blocks and of the wavelet synthesis, so the saving compounds. It is largest for lossless JPEG 2000, where MQ tier-1 decoding of the finest levels is almost all of the full decode's cost.
 
+## Changes in track T3
+
+Track T3 of the [performance plan](../../../docs/PERF-PLAN.md#t3-jpeg-2000-decoder). Each figure is beside OpenJPEG 2.5.4 (one thread, through imagecodecs, the same codestream, median of 7 decodes) measured in the same session; ours with `shl-j2k-bench`, one core.
+
+- **sYCC 4:2:2 and 4:2:0 output, by rows.** Subsampled colour (the Leica slide tiles) went through `pack` one sample at a time: a closure call per luma and per chroma sample, each rounding a float, then `sycc_to_rgb` per pixel. `pack` now takes whole rows (`Rows`), filled with the vectorisable `round_clamped` the other output path uses, and computes each chroma sample's three colour terms once for the pixels that share it. Leica 240×240 tile: 2.0 → 1.3 ms; OpenJPEG 1.35 ms, which does not convert the colour at all. The two Leica corpus files: 2,134M → 1,421M and 165M → 108M cycles per decode natively; in wasm 595M → 339M instructions on the second. Outputs identical (corpus at every scale, the long tail's 185 JPEG 2000 files, wasm equal to native).
+
 ## What is left
 
 - **Tier-1** is most of every decode: the MQ coder for JPEG 2000 (about 90% of a lossless decode) and the HT block decoder for HTJ2K (about 55%). Both are scalar. OpenJPH decodes MagSgn with SIMD; that approach needs per-lane variable shifts, and `#![forbid(unsafe_code)]` rules out raw intrinsics.
