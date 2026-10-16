@@ -12,7 +12,7 @@ Our time ÷ the reference's time, single-threaded, same frames; below 1 means we
 |---|---|---|---|
 | JPEG baseline, 8-bit colour | libjpeg-turbo 3.2 | 1.07–1.21 | 0.50–0.68 |
 | JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.58–0.67 | no wasm reference decodes 12-bit; ours beats native libjpeg-turbo |
-| JPEG Lossless SV1 | libjpeg-turbo 3.2 | about 0.6 (2048²); about 1.1 (512² CT) | 0.45 |
+| JPEG Lossless SV1 | libjpeg-turbo 3.2 | about 0.6 (2048²); 0.64 (live 512² CT series) | 0.45 |
 | JPEG-LS | CharLS 2.4.4 | 0.74–0.96 grey; 1.05–1.24 colour | 0.94–1.12 |
 | JPEG 2000 | OpenJPEG 2.5.4 | about 0.9–1.2 (Leica 4:2:2 tile 2.0) | 0.76–0.79 |
 | HTJ2K | OpenJPH 0.32 | 1.7–3.3 | 1.2–1.25 large frames; faster on small |
@@ -66,7 +66,7 @@ In order of user impact. Each track runs on its own short branch and lands as so
 ### T1. SV1, decode and encode
 
 This is the live path: every share is packed with SV1 in the browser, and every slice the viewer shows is decoded from it.
-- **Decoder:** close the 512² CT case (about 1.1× libjpeg-turbo). The likely cost is fixed work per frame, which matters on CT series with hundreds of small frames.
+- ~~**Decoder.**~~ Stopped (2c6c5ce). The 1.1× figure predated the last lossless changes: on the live abdomen CT, 30 slices, we take 0.64× libjpeg-turbo's time. 85% of a decode is the serial Huffman chain, and the one idea left (an 11-bit lookahead for lossless) was 0.7% slower over the series. See jpeg-dct PERF.md, "SV1 on real CT series".
 - **Encoder:** profile the browser packer (98.6 MB/s) with the end-to-end agent, which owns the packing pipeline.
 
 ### T2. JPEG 2000 lossless encoder
