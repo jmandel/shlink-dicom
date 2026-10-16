@@ -9,6 +9,7 @@ members = [
     "shl-codec-jpeg2000",
     "shl-codec-jpeg2000-encode",
     "shl-codec-htj2k",
+    "shl-jpeg2000",
     "shl-codec-jpegxl",
     "shl-dicom-decode",
     "shl-dicom-transcode",
