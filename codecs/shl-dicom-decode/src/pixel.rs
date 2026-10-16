@@ -169,53 +169,62 @@ fn interleave3<const B: usize, const IN: usize, const OUT: usize>(p0: &[u8], p1:
 /// Keep the low `bits_stored` bits (unsigned) or sign-extend from bit `bits_stored - 1` (signed).
 /// No-op when Bits Stored equals the sample width.
 pub fn fix_unused_bits(data: &mut [u8], bps: usize, bits_stored: u16, signed: bool) {
+    let Some(fix) = lane_fix(bps, bits_stored, signed) else { return };
+    let mut chunks = data.chunks_exact_mut(8);
+    for c in &mut chunks {
+        let x = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+        c.copy_from_slice(&fix(x).to_le_bytes());
+    }
+    fix_tail(chunks.into_remainder(), bps, &fix);
+}
+
+/// `dst` extended with `src` after [`fix_unused_bits`], in one pass.
+pub fn extend_fixing_unused_bits(dst: &mut Vec<u8>, src: &[u8], bps: usize, bits_stored: u16, signed: bool) {
+    let Some(fix) = lane_fix(bps, bits_stored, signed) else {
+        dst.extend_from_slice(src);
+        return;
+    };
+    let start = dst.len();
+    let chunks = src.chunks_exact(8);
+    let rest = chunks.remainder();
+    dst.extend(chunks.flat_map(|c| fix(u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])).to_le_bytes()));
+    dst.extend_from_slice(rest);
+    let tail = dst.len() - rest.len();
+    fix_tail(&mut dst[tail.max(start)..], bps, &fix);
+}
+
+/// The per-word function of [`fix_unused_bits`]: eight bytes at a time, each lane of `bps`
+/// bytes handled independently (no carries cross lanes). Keeps the low `bs` bits, and for signed
+/// samples copies bit `bs - 1` into the bits above. None when there is nothing to do.
+fn lane_fix(bps: usize, bits_stored: u16, signed: bool) -> Option<impl Fn(u64) -> u64> {
     let width = (bps * 8) as u32;
     let bs = u32::from(bits_stored);
-    if bs == 0 || bs >= width {
-        return;
+    if bs == 0 || bs >= width || !matches!(bps, 1 | 2 | 4) {
+        return None;
     }
-    let shift = width - bs;
-    match (bps, signed) {
-        (1, false) => {
-            let mask = (1u8 << bs) - 1;
-            data.iter_mut().for_each(|b| *b &= mask);
+    let lane_mask: u64 = (1u64 << bs) - 1;
+    let lane_high: u64 = ((1u64 << width) - 1) & !lane_mask;
+    let lanes = 8 / bps;
+    let rep = |v: u64| (0..lanes).fold(0u64, |a, i| a | v << (i * bps * 8));
+    let (mask, top) = (rep(lane_mask), rep(1u64 << (bs - 1)));
+    Some(move |x: u64| -> u64 {
+        let m = x & mask;
+        if signed {
+            // Each lane's sign bit moved to bit 0 (0 or 1 per lane), times the lane's high bits.
+            m | ((m & top) >> (bs - 1)).wrapping_mul(lane_high)
+        } else {
+            m
         }
-        (1, true) => data.iter_mut().for_each(|b| *b = (((*b << shift) as i8) >> shift) as u8),
-        (2, false) => {
-            let mask = (1u16 << bs) - 1;
-            for s in data.chunks_exact_mut(2) {
-                if let [a, b] = s {
-                    let v = u16::from_le_bytes([*a, *b]) & mask;
-                    [*a, *b] = v.to_le_bytes();
-                }
-            }
-        }
-        (2, true) => {
-            for s in data.chunks_exact_mut(2) {
-                if let [a, b] = s {
-                    let v = ((u16::from_le_bytes([*a, *b]) << shift) as i16) >> shift;
-                    [*a, *b] = v.to_le_bytes();
-                }
-            }
-        }
-        (4, false) => {
-            let mask = (1u32 << bs) - 1;
-            for s in data.chunks_exact_mut(4) {
-                if let [a, b, c, d] = s {
-                    let v = u32::from_le_bytes([*a, *b, *c, *d]) & mask;
-                    [*a, *b, *c, *d] = v.to_le_bytes();
-                }
-            }
-        }
-        (4, true) => {
-            for s in data.chunks_exact_mut(4) {
-                if let [a, b, c, d] = s {
-                    let v = ((u32::from_le_bytes([*a, *b, *c, *d]) << shift) as i32) >> shift;
-                    [*a, *b, *c, *d] = v.to_le_bytes();
-                }
-            }
-        }
-        _ => {}
+    })
+}
+
+/// Fewer than eight bytes (whole samples; a partial sample is left alone): one at a time.
+fn fix_tail(tail: &mut [u8], bps: usize, fix: &impl Fn(u64) -> u64) {
+    for s in tail.chunks_exact_mut(bps) {
+        let mut b = [0u8; 8];
+        b[..bps].copy_from_slice(s);
+        let v = fix(u64::from_le_bytes(b)).to_le_bytes();
+        s.copy_from_slice(&v[..bps]);
     }
 }
 
@@ -350,6 +359,47 @@ fn ybr_full_to_rgb_reference(px: [u8; 3]) -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
+    /// The word-at-a-time masking against the per-sample definition, every width and Bits
+    /// Stored, signed and unsigned, with lengths that leave tails.
+    #[test]
+    fn fix_unused_bits_matches_per_sample() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let data: Vec<u8> = (0..203)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        for bps in [1usize, 2, 4] {
+            for bs in 1..(bps as u16 * 8) {
+                for signed in [false, true] {
+                    for len in [0, 1, 7, 8, 9, 64, 203] {
+                        let len = len / bps * bps;
+                        let mut got = data[..len].to_vec();
+                        fix_unused_bits(&mut got, bps, bs, signed);
+                        let mut got2 = vec![7u8; 3];
+                        extend_fixing_unused_bits(&mut got2, &data[..len], bps, bs, signed);
+                        assert_eq!(&got2[3..], &got[..], "extend: bps {bps} bs {bs} signed {signed} len {len}");
+                        let want: Vec<u8> = data[..len]
+                            .chunks_exact(bps)
+                            .flat_map(|c| {
+                                let mut b = [0u8; 4];
+                                b[..bps].copy_from_slice(c);
+                                let v = u32::from_le_bytes(b);
+                                let shift = 32 - u32::from(bs);
+                                let r = if signed { (((v << shift) as i32) >> shift) as u32 } else { v & ((1u32 << bs) - 1) };
+                                r.to_le_bytes()[..bps].to_vec()
+                            })
+                            .collect();
+                        assert_eq!(got, want, "bps {bps} bs {bs} signed {signed} len {len}");
+                    }
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

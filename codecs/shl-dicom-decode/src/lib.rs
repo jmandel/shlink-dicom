@@ -862,6 +862,7 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
         && img.planar_configuration == 0;
     let mut photometric = img.photometric;
     let mut expanded = false;
+    let mut masked = false;
     let mut data = if img.bits_allocated == 1 {
         pixel::unpack_bits(raw, total_samples)?
     } else if img.packed12 {
@@ -885,6 +886,12 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
         if !little && bps == 1 && vr == Some(*b"OW") {
             // 8-bit data in an OW element under big endian: the file swapped 16-bit words.
             d.extend((0..needed).map(|i| raw.get(i ^ 1).copied().unwrap_or(0)));
+        } else if little && img.bits_allocated != 1 && !img.planar_unknown {
+            // Bits Stored is applied while copying (a per-sample step, so it may come before
+            // the planar interleave below), instead of in a second pass. Not when the planar
+            // configuration is inferred from the samples, which looks at the unmasked values.
+            pixel::extend_fixing_unused_bits(&mut d, stored, bps, img.bits_stored, img.pixel_representation == 1);
+            masked = true;
         } else {
             d.extend_from_slice(stored);
         }
@@ -917,7 +924,7 @@ fn decode_native(img: &Image, raw: &[u8], vr: Option<[u8; 2]>, little: bool) -> 
         }
     }
 
-    if img.bits_allocated != 1 {
+    if img.bits_allocated != 1 && !masked {
         pixel::fix_unused_bits(&mut data, bps, img.bits_stored, img.pixel_representation == 1);
     }
 
