@@ -1,5 +1,5 @@
-//! Round trips through this repository's JPEG 2000 decoder (hayro); the corpus tools check
-//! OpenJPEG, GDCM and dcmtk.
+//! Round trips through this repository's JPEG 2000 decoder (shl-jpeg2000, through
+//! shl-codec-jpeg2000); the corpus tools check OpenJPEG, GDCM and dcmtk.
 use super::*;
 use shl_codec_common::{FrameInfo, Photometric};
 

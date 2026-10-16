@@ -10,7 +10,7 @@ for (const f of readdirSync(dir).filter((f) => f.endsWith(".j2c")).sort()) {
   const ptr = bench_alloc(cs.length);
   new Uint8Array(memory.buffer, ptr, cs.length).set(cs);
   const rgb = info.samples_per_pixel === 3 ? 1 : 0;
-  for (const [codec, name] of [[0, "hayro"], [1, "oxideav"]]) {
+  for (const [codec, name] of [[0, "jpeg2000"], [1, "htj2k"]]) {
     const call = () => bench_decode(codec, ptr, cs.length, info.rows, info.columns, info.samples_per_pixel,
       info.bits_allocated, info.bits_stored, info.pixel_representation, rgb);
     if (call() < 0n) { console.log(`${f.padEnd(28)} ${name.padEnd(8)} error`); continue; }

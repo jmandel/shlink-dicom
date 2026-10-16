@@ -266,8 +266,8 @@ mod tests {
         }
     }
 
-    /// The SIZ of `pydicom-JPEG2000-embedded-sequence-delimiter` (Xsiz 0xFEFFDDE0) once made
-    /// hayro allocate about 15 TB and abort. It must be refused before hayro sees it.
+    /// The SIZ of `pydicom-JPEG2000-embedded-sequence-delimiter` (Xsiz 0xFEFFDDE0) describes
+    /// about 15 TB of samples. It must be refused before anything is allocated.
     #[test]
     fn huge_siz_is_refused() {
         let mut cs = prep::tests::header(0xFEFF_DDE0, 1024, &[(16, true)], (0xFEFF_DDE0, 1024), false);

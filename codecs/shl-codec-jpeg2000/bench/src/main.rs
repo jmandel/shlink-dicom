@@ -20,7 +20,7 @@ fn main() {
         let info = shl_j2k_bench::info(n("rows"), n("columns"), n("samples_per_pixel") as u16, n("bits_allocated") as u16,
             n("bits_stored") as u16, n("pixel_representation") as u16, &field(&j, "photometric"));
         for codec in [0u32, 1] {
-            let name = ["hayro", "oxideav"][codec as usize];
+            let name = ["jpeg2000", "htj2k"][codec as usize];
             if shl_j2k_bench::decode(codec, &cs, &info) < 0 {
                 println!("{:28} {name:8} error", p.file_name().unwrap().to_string_lossy());
                 continue;

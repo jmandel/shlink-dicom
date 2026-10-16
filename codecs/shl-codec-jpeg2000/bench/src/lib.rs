@@ -16,7 +16,7 @@ pub fn info(rows: u32, cols: u32, spp: u16, ba: u16, bs: u16, pr: u16, photometr
     }
 }
 
-/// codec 0 = shl-codec-jpeg2000 (hayro), 1 = shl-codec-htj2k (oxideav). Returns the decoded
+/// codec 0 = shl-codec-jpeg2000, 1 = shl-codec-htj2k (the same decoder). Returns the decoded
 /// length, or a negative number on error.
 pub fn decode(codec: u32, cs: &[u8], info: &FrameInfo) -> i64 {
     let r = if codec == 0 {

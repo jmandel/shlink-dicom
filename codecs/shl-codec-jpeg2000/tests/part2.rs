@@ -1,4 +1,4 @@
-//! JPEG 2000 Part 2 multiple component transformations (vendored hayro patch 11).
+//! JPEG 2000 Part 2 multiple component transformations (shl-jpeg2000, src/mct2.rs).
 //!
 //! Fixtures, made by codec-corpus/scripts/sources/j2k_part2.py's functions:
 //! - `part2-rgb-two-stages.j2c`: 16×16 RGB, two MCO stages (a reversible dependency over a

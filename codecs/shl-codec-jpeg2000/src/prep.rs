@@ -10,7 +10,7 @@
 use shl_codec_common::{ColorOut, DecodeError, DecodedFrame, FrameInfo, Photometric, Result};
 
 /// Highest component precision accepted. DICOM JPEG 2000 data is at most 16 bits stored, and
-/// hayro works in f32, which is exact only up to 24 bits.
+/// the decoder's irreversible path works in f32, which is exact only up to 24 bits.
 pub const MAX_PRECISION: u8 = 16;
 
 /// The standard limits a codestream to 65535 tiles (Isot is 16 bits, and 65535 is reserved).

@@ -47,7 +47,7 @@ mod tests {
         }
     }
 
-    /// A SIZ far larger than the data set must be refused before oxideav allocates.
+    /// A SIZ far larger than the data set must be refused before anything is allocated.
     #[test]
     fn huge_siz_is_refused() {
         let mut cs = vec![0xFF, 0x4F, 0xFF, 0x51, 0, 41, 0x40, 0];

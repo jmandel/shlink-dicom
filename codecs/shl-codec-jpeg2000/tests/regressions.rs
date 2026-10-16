@@ -1,4 +1,4 @@
-//! Regression tests for bugs found in phase 2 (FORMAT.md, Rulings and STATUS).
+//! Regression tests for decoding bugs and quirks (FORMAT.md, Rulings and STATUS).
 //!
 //! The corpus-backed tests use frames written by `scripts/extract_frames.py` and the oracle
 //! arrays from `scripts/oracle.py`; they are skipped, with a note, when those files are absent.
@@ -22,8 +22,8 @@ fn info(rows: u32, cols: u32, spp: u16, ba: u16, photometric: Photometric) -> Fr
 }
 
 /// Fuzz finding: components with different decomposition levels (COC in a tile-part header)
-/// under LRCP made hayro's progression iterator build a resolution the component lacks, and
-/// panic. Vendored hayro patch 2. Any result but a panic is fine for this mutated stream.
+/// under LRCP, where a packet order must skip the resolutions a component lacks. Any result
+/// but a panic is fine for this mutated stream.
 #[test]
 fn lrcp_with_fewer_levels_in_one_component_does_not_panic() {
     let cs = include_bytes!("data/lrcp-coc-fewer-levels.j2c");
@@ -47,8 +47,8 @@ fn frame(case: &str, k: usize) -> Option<Vec<u8>> {
 }
 
 /// A packet header in this Aperio frame has a 1 in the bit stuffed after 0xFF (B.10.1 says
-/// 0). Hayro rejected it and silently dropped the rest of the tile, giving max |diff| 89 on
-/// a lossless frame. Vendored hayro patch 4 skips the bit as OpenJPEG does.
+/// 0). The bit is skipped whatever its value, as OpenJPEG does; treating it as an error
+/// drops the rest of the tile (max |diff| 89 on this lossless frame).
 #[test]
 fn nonzero_stuffed_bit_in_packet_header() {
     let case = "idc-j2kr-rct-u8of8-p0-mf-sm-leicabiosy-d680304a";
@@ -62,8 +62,7 @@ fn nonzero_stuffed_bit_in_packet_header() {
     assert!(got.data == want, "frame 75 differs from the lossless oracle");
 }
 
-/// RareCyte slides use 33 quality layers; hayro capped layers at 32 and failed to parse COD.
-/// Vendored hayro patch 1.
+/// RareCyte slides use 33 quality layers (COD allows up to 65,535).
 #[test]
 fn thirty_three_quality_layers() {
     let case = "idc-j2kr-mono2-u16of16-mf-sm-rarecyte-1e744ed2";
@@ -76,8 +75,8 @@ fn thirty_three_quality_layers() {
     assert!(got.data == want, "frame 0 differs from the lossless oracle");
 }
 
-/// Region-of-interest coding is not implemented in hayro 0.4.1, which used to skip RGN and
-/// decode wrong samples. Vendored hayro patch 3 refuses it as unsupported.
+/// Region-of-interest coding is not implemented, and skipping RGN would decode wrong
+/// samples, so it is refused as unsupported.
 #[test]
 fn rgn_is_unsupported() {
     // SOC, SIZ 4x4 one 8-bit component, COD, QCD (no quantisation, 5 levels), RGN, SOT.
@@ -94,13 +93,11 @@ fn rgn_is_unsupported() {
     assert!(matches!(r, Err(DecodeError::Unsupported(_))), "{r:?}");
 }
 
-/// Fuzz findings in the reduced-resolution path (vendored hayro patch 10), from the
-/// `decode_scaled` target. Each input is the target's: one selector byte, then a codestream.
-/// The FrameInfo is rebuilt as the target builds it. They panicked in hayro: an empty tile at
-/// the reduced level (`chunks_exact(0)`), a tile-part COD with fewer levels than the
-/// reduction (subtraction overflow), and subsampled-component placement indexed against the
-/// full-size tile origin. Any result but a panic is fine; a decoded frame must have the
-/// reduced size.
+/// Fuzz findings in the reduced-resolution path, from the `decode_scaled` target: an empty
+/// tile at the reduced level, a tile-part COD with fewer levels than the reduction, and
+/// subsampled components in a reduced tile. Each input is the target's: one selector byte,
+/// then a codestream; the FrameInfo is rebuilt as the target builds it. Any result but a
+/// panic is fine; a decoded frame must have the reduced size.
 #[test]
 fn reduced_decode_fuzz_findings_do_not_panic() {
     fn siz_dims(cs: &[u8]) -> Option<(u32, u32, u16)> {
