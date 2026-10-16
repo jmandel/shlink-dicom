@@ -3,6 +3,7 @@
 
 use crate::error::Result;
 use crate::frame_header::LoopFilter;
+use crate::simd::F4;
 use crate::render::Plane;
 
 #[inline(always)]
@@ -45,7 +46,13 @@ struct RowRing {
 
 impl RowRing {
     fn new(w: usize, b: usize) -> Self {
-        RowRing { b, rows: vec![vec![0f32; w + 2 * b]; 2 * b + 1], tags: vec![i64::MIN; 2 * b + 1] }
+        Self::with_slack(w, b, 0)
+    }
+
+    /// Rows `slack` values longer than needed (left zero), so 4-lane loops can run past the
+    /// last column.
+    fn with_slack(w: usize, b: usize, slack: usize) -> Self {
+        RowRing { b, rows: vec![vec![0f32; w + 2 * b + slack]; 2 * b + 1], tags: vec![i64::MIN; 2 * b + 1] }
     }
 
     /// Makes the window for output row `y` available.
@@ -162,8 +169,12 @@ const MIN_SIGMA: f32 = -3.90524291751269967465540850526868;
 /// the neighbourhoods of p and p + d is a plus-shaped sum of E_d(r) = Σ_c scale_c·|P_c(r) −
 /// P_c(r + d)|, and the one for p − d is the same sum shifted by −d, so each direction's E_d
 /// is computed once per row and shared (libjxl sums per channel first; the rounding differs).
+///
+/// Every row loop runs four lanes at a time (`F4`) over the width rounded up to a multiple of
+/// 4; the row buffers have that much slack, and the extra lanes are never stored.
 pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, step: u32) {
     let (w, h) = (planes[0].w, planes[0].h);
+    let w4 = w.div_ceil(4) * 4;
     let b = match step {
         0 => 3usize,
         1 => 2,
@@ -171,7 +182,7 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
     };
     // P rows are padded by b + 2 columns so that E can be formed beyond the image edges.
     let pb = b + 2;
-    let mut rings = [RowRing::new(w, pb), RowRing::new(w, pb), RowRing::new(w, pb)];
+    let mut rings = [RowRing::with_slack(w, pb, 4), RowRing::with_slack(w, pb, 4), RowRing::with_slack(w, pb, 4)];
     let sm = match step {
         0 => (f64::from(lf.epf_pass0_sigma_scale) * 1.65) as f32,
         1 => 1.65f32,
@@ -197,14 +208,15 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
     let ew = w + 2 * pb; // E rows cover columns -pb .. w + pb (minus the shift), index x + pb.
     // E ring per direction: rows y - 1 - dy .. y + 1 (at most 5 rows).
     const ER: usize = 5;
-    let mut erows: Vec<Vec<Vec<f32>>> = dirs.iter().map(|_| vec![vec![0f32; ew]; ER]).collect();
+    let mut erows: Vec<Vec<Vec<f32>>> = dirs.iter().map(|_| vec![vec![0f32; ew + 4]; ER]).collect();
     let mut etags: Vec<Vec<i64>> = dirs.iter().map(|_| vec![i64::MIN; ER]).collect();
     let mut tail = TailRows::default();
-    let mut inv_s = vec![0f32; w];
-    let mut skip = vec![false; w];
-    let mut sad = vec![0f32; w];
-    let mut wsum = vec![0f32; w];
-    let mut acc = [vec![0f32; w], vec![0f32; w], vec![0f32; w]];
+    let mut inv_s = vec![0f32; w4];
+    // 1.0 where the filter is skipped (sigma below the minimum), else 0.0.
+    let mut skip = vec![0f32; w4];
+    let mut sad = vec![0f32; w4];
+    let mut wsum = vec![0f32; w4];
+    let mut acc = [vec![0f32; w4], vec![0f32; w4], vec![0f32; w4]];
     for y in 0..h {
         for (c, r) in rings.iter_mut().enumerate() {
             r.load(&planes[c], y);
@@ -226,12 +238,13 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                         let r1 = prow(c, (r - y as i64) as isize + ddy);
                         // e[i] covers column i - pb; needs P(col) and P(col + ddx).
                         let lo = (ddx.unsigned_abs()).min(pb);
-                        let n = ew - 2 * lo;
+                        let n = (ew - 2 * lo).div_ceil(4) * 4;
                         let a = &r0[lo..lo + n];
                         let bb = &r1[(lo as isize + ddx) as usize..(lo as isize + ddx) as usize + n];
                         let ee = &mut e[lo..lo + n];
-                        for i in 0..n {
-                            ee[i] += (a[i] - bb[i]).abs() * sc;
+                        let scv = F4::splat(sc);
+                        for i in (0..n).step_by(4) {
+                            F4::load(&ee[i..]).add(F4::load(&a[i..]).sub(F4::load(&bb[i..])).abs().mul(scv)).store(&mut ee[i..]);
                         }
                     }
                     etags[k][slot] = r;
@@ -240,26 +253,28 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
         }
         let border_row = y % 8 == 0 || y % 8 == 7;
         let srow = &inv_sigma[((y / 8) * bw).min(inv_sigma.len())..];
-        for x in 0..w {
-            let s = srow.get(x / 8).copied().unwrap_or(0.0);
-            skip[x] = s < MIN_SIGMA;
-            let vsm = if border_row || x % 8 == 0 || x % 8 == 7 { bsm } else { sm };
-            inv_s[x] = s * vsm;
+        for (bx, (sk, is)) in skip.chunks_mut(8).zip(inv_s.chunks_mut(8)).enumerate() {
+            let s = srow.get(bx).copied().unwrap_or(0.0);
+            sk.fill(if s < MIN_SIGMA { 1.0 } else { 0.0 });
+            let inner = if border_row { bsm } else { sm };
+            for (i, v) in is.iter_mut().enumerate() {
+                *v = s * if i == 0 || i == 7 { bsm } else { inner };
+            }
         }
         wsum.fill(1.0);
         for c in 0..3 {
-            acc[c].copy_from_slice(&prow(c, 0)[pb..pb + w]);
+            acc[c].copy_from_slice(&prow(c, 0)[pb..pb + w4]);
         }
         for &(dy, dx) in offs.iter() {
             if step == 2 {
                 sad.fill(0.0);
                 for c in 0..3 {
-                    let sc = scale[c];
-                    let r0 = &prow(c, 0)[pb..pb + w];
+                    let scv = F4::splat(scale[c]);
+                    let r0 = &prow(c, 0)[pb..pb + w4];
                     let o = (pb as isize + dx) as usize;
-                    let r1 = &prow(c, dy)[o..o + w];
-                    for x in 0..w {
-                        sad[x] += (r1[x] - r0[x]).abs() * sc;
+                    let r1 = &prow(c, dy)[o..o + w4];
+                    for x in (0..w4).step_by(4) {
+                        F4::load(&sad[x..]).add(F4::load(&r1[x..]).sub(F4::load(&r0[x..])).abs().mul(scv)).store(&mut sad[x..]);
                     }
                 }
             } else {
@@ -275,34 +290,39 @@ pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, 
                     &erows[k][r.rem_euclid(ER as i64) as usize]
                 };
                 let base = (pb as isize + sx) as usize;
-                let c0 = &er(sy)[base..base + w];
-                let up = &er(sy - 1)[base..base + w];
-                let left = &er(sy)[base - 1..base - 1 + w];
-                let down = &er(sy + 1)[base..base + w];
-                let right = &er(sy)[base + 1..base + 1 + w];
-                for x in 0..w {
-                    sad[x] = (((c0[x] + up[x]) + left[x]) + down[x]) + right[x];
+                let c0 = &er(sy)[base..base + w4];
+                let up = &er(sy - 1)[base..base + w4];
+                let left = &er(sy)[base - 1..base - 1 + w4];
+                let down = &er(sy + 1)[base..base + w4];
+                let right = &er(sy)[base + 1..base + 1 + w4];
+                for x in (0..w4).step_by(4) {
+                    let v = F4::load(&c0[x..]).add(F4::load(&up[x..])).add(F4::load(&left[x..])).add(F4::load(&down[x..])).add(F4::load(&right[x..]));
+                    v.store(&mut sad[x..]);
                 }
             }
             let o = (pb as isize + dx) as usize;
-            let n0 = &prow(0, dy)[o..o + w];
-            let n1 = &prow(1, dy)[o..o + w];
-            let n2 = &prow(2, dy)[o..o + w];
-            for x in 0..w {
-                let weight = (sad[x] * inv_s[x] + 1.0).max(0.0);
-                wsum[x] += weight;
-                acc[0][x] += weight * n0[x];
-                acc[1][x] += weight * n1[x];
-                acc[2][x] += weight * n2[x];
+            let n0 = &prow(0, dy)[o..o + w4];
+            let n1 = &prow(1, dy)[o..o + w4];
+            let n2 = &prow(2, dy)[o..o + w4];
+            let [a0, a1, a2] = &mut acc;
+            let one = F4::splat(1.0);
+            for x in (0..w4).step_by(4) {
+                let weight = F4::load(&sad[x..]).mul(F4::load(&inv_s[x..])).add(one).max0();
+                F4::load(&wsum[x..]).add(weight).store(&mut wsum[x..]);
+                F4::load(&a0[x..]).add(weight.mul(F4::load(&n0[x..]))).store(&mut a0[x..]);
+                F4::load(&a1[x..]).add(weight.mul(F4::load(&n1[x..]))).store(&mut a1[x..]);
+                F4::load(&a2[x..]).add(weight.mul(F4::load(&n2[x..]))).store(&mut a2[x..]);
             }
         }
         for c in 0..3 {
-            let center = &rings[c].get(y, 0)[pb..pb + w];
+            let center = &rings[c].get(y, 0)[pb..pb + w4];
             let o = &mut acc[c];
-            for x in 0..w {
-                o[x] = if skip[x] { center[x] } else { o[x] * (1.0 / wsum[x]) };
+            let (one, half) = (F4::splat(1.0), F4::splat(0.5));
+            for x in (0..w4).step_by(4) {
+                let f = F4::load(&o[x..]).mul(one.div(F4::load(&wsum[x..])));
+                F4::load(&skip[x..]).gt_select(half, F4::load(&center[x..]), f).store(&mut o[x..]);
             }
-            tail.put(&mut planes[c], c, y, pb, o);
+            tail.put(&mut planes[c], c, y, pb, &o[..w]);
         }
     }
     tail.flush(planes);
