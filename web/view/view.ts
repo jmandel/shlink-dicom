@@ -62,6 +62,8 @@ const sopKind = (c: string) => sopInfo(c).kind;
 const metrics = {
   marks: {} as Record<string, number>,
   draws: [] as number[],
+  /** Each drawn picture: [series id or "mpr", slice index, ms since navigation] (perf/sessions). */
+  drawLog: [] as [string, number, number][],
   renderer: "",
   slices: 0,
 };
@@ -769,6 +771,7 @@ function showMpr(i: number) {
   const { frame, pixelSpacing, spec } = onGpu ?? reformat(m.volume, m.grid, sliceIdx, m.slab);
   m.ms = performance.now() - t0;
   m.engine = onGpu ? "gpu" : "cpu";
+  if (metrics.drawLog.length < 50000) metrics.drawLog.push(["mpr", sliceIdx, Math.round(performance.now())]);
   m.spec = spec;
   m.frame = frame;
   shown = null;
@@ -1683,6 +1686,7 @@ function draw(img: DecodedImage, frame: number) {
   cineFrame = frame;
   shownKey = `${se.id}/${sliceIdx}`;
   metrics.slices++;
+  if (metrics.drawLog.length < 50000) metrics.drawLog.push([se.id, sliceIdx, Math.round(performance.now())]);
   if (!metrics.marks["first-slice"]) {
     mark("first-slice");
     // Thumbnails for the strip once the first image is up.
