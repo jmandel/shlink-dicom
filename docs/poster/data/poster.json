@@ -2,152 +2,152 @@
  "numbers": {
   "jwe_bytes": {
    "display": "59 KB",
-   "value": 58673,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "value": 58655,
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "files_count": {
    "display": "6",
    "value": 6,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "share_total": {
    "display": "313.4 MB",
    "value": 313390116,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "bundle_instances": {
    "display": "739",
    "value": 739,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "bundle_series": {
    "display": "36",
    "value": 36,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_fileBytes": {
    "display": 28584796,
    "value": 28584796,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_fileRecords": {
    "display": 437,
    "value": 437,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_firstRecord": {
    "display": 187,
    "value": 187,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_lastRecord": {
    "display": 193,
    "value": 193,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_range": {
    "display": "bytes=12255232-12713983",
    "value": "bytes=12255232-12713983",
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_responseBytes": {
    "display": 458752,
    "value": 458752,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_records": {
    "display": 7,
    "value": 7,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_instanceOffset": {
    "display": 12300546,
    "value": 12300546,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_instanceBytes": {
    "display": 353408,
    "value": 353408,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_seriesOffset": {
    "display": 8768688,
    "value": 8768688,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_seriesBytes": {
    "display": 6972350,
    "value": 6972350,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_seriesFirstRecord": {
    "display": 133,
    "value": 133,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_seriesLastRecord": {
    "display": 240,
    "value": 240,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_seriesBefore": {
    "display": 9,
    "value": 9,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_offsetInFirstRecord": {
    "display": 48306,
    "value": 48306,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_tagsOk": {
    "display": 7,
    "value": 7,
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "slice_transferSyntax": {
    "display": "1.2.840.10008.1.2.4.70",
    "value": "1.2.840.10008.1.2.4.70",
-   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 05:58Z)"
+   "source": "docs/poster/scripts/trace.mjs (live, 2026-10-16 09:19Z)"
   },
   "subagent_count": {
    "display": "47",
    "value": 47,
-   "source": "count of subagent transcripts (*.jsonl) in the coordinator session's subagents/ directory, 16 Oct 00:58; same method as the blog's footnote"
+   "source": "count of subagent transcripts (*.jsonl) in the coordinator session's subagents/ directory, 16 Oct 04:19; same method as the blog's footnote"
   },
   "sop_sweep_cases": {
    "display": "156",
    "value": "156",
-   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (c3ed9a2), Summary"
   },
   "sop_sweep_classes": {
    "display": "43",
    "value": "43",
-   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (c3ed9a2), Summary"
   },
   "sop_sweep_pass": {
    "display": "120",
    "value": "120",
-   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (c3ed9a2), Summary"
   },
   "sop_sweep_fail": {
    "display": "22",
    "value": "22",
-   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (c3ed9a2), Summary"
   },
   "sop_sweep_unsupported": {
    "display": "14",
    "value": "14",
-   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (c3ed9a2), Summary"
   },
   "sop_sweep_defects": {
    "display": "seven",
    "value": "seven",
-   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (04b92d6), Summary"
+   "source": "codec-corpus/prevalence/SOPCLASS_SWEEP.md on main (c3ed9a2), Summary"
   },
   "commits": {
-   "display": "96",
-   "value": 96,
+   "display": "111",
+   "value": 111,
    "source": "git rev-list --count main"
   },
   "first_commit": {
@@ -156,14 +156,9 @@
    "source": "git log on main"
   },
   "code_own": {
-   "display": "79,018",
-   "value": 79018,
-   "source": "docs/poster/scripts/codemap.py on main 04b92d6"
-  },
-  "code_upstream": {
-   "display": "68,487",
-   "value": 68487,
-   "source": "docs/poster/scripts/codemap.py on main 04b92d6"
+   "display": "84,031",
+   "value": 84031,
+   "source": "docs/poster/scripts/codemap.py on main c3ed9a2"
   },
   "code_generated": {
    "display": "5,293",
@@ -323,6 +318,19 @@
    "quote": "- display-conformance: 1,328 grayscale files; dcmtk agrees on 1,000 of 1,020, pydicom on 779 of 790, every difference triaged",
    "note": "Triage of the 20 is NOT written up in the repo (only 'every difference triaged' in the commit message); categories below are my reconstruction from report.json: 9 = our deliberate VOI LUT bit-depth rule (6 of Josh's CR hand views + 1 IDC RF + 2 synthetic edge cases; dcmtk takes the declared 16 bits and washes the image out \u2014 this is the Josh 'Hand OBLI shows white' bug); 8 = files with no window, rendered by min-max where auto-window choices differ (5 GE PET, Cornell JPEG, GE DLX private syntax, Siemens GBS III; no pydicom reference for these); 2 = within 2 grey levels on >=99.9% of pixels; 1 = Orthanc MalaterreCP246 JPEG-LS, where pydicom matches ours exactly and only dcmtk differs. What the 1,328 files are: 531 IDC files (objects cache), 500 real codec-corpus files, 277 corpus files from synthetic seeds, 9 of Josh's sample originals, 11 synthetic LUT edge cases. Of the 1,020 dcmtk comparisons, 135 involve synthetic pixels (124 corpus-synthetic + 11 edge cases); REAL-ONLY dcmtk agreement = 867 of 885. pydicom: 779/790."
   },
+  "j2k_recheck": {
+   "display": "JPEG 2000 and HTJ2K results re-checked with the new decoder: corpus byte-identical; 185 IDC long-tail JPEG 2000 files with the same outcome.",
+   "value": {
+    "corpus": "byte-identical",
+    "longtail_lossless_identical": 111,
+    "longtail_lossy_same_outcome": 74,
+    "jpeg2000_corpus": "177/177",
+    "htj2k_corpus": "42/42"
+   },
+   "source": "/media/barracuda/j2kdec/ (lt-results.jsonl, lt-lossy-ref.log; untracked gate data) and codec-corpus/formats/jpeg2000/FORMAT.md on main",
+   "quote": "lt-results.jsonl: 185 rows = 111 \u00d7 (.4.90, identical: true) + 74 \u00d7 .4.91; lt-lossy-ref.log: final counts: {'pass': 64, 'skipped-decoded-size': 5, 'mismatch': 5}",
+   "note": "Lossy files decode within 1\u20132 of the old decoder (max_abs in lt-results.jsonl) and give the same pass/mismatch/skip outcome against the references as the main sweep: 64 pass, 5 Leica mismatch, 5 too large to decode whole. The IDC random control's JPEG 2000 files were not separately re-run."
+  },
   "encoder_ratio_sv1": {
    "display": "2.46\u00d7 (403 MB \u2192 164 MB)",
    "value": 2.459,
@@ -370,5 +378,5 @@
   }
  },
  "missing": [],
- "built": "2026-10-16T00:58:44"
+ "built": "2026-10-16T04:19:26"
 }

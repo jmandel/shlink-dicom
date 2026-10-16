@@ -31,6 +31,7 @@ RULES = [
     ("codecs/shl-dicom-wasm-bench/", "Verification", "codec benchmarks"),
     ("codecs/shl-codec-jpeg/", "Rust codecs", "JPEG (all modes)"),
     ("codecs/shl-codec-jpeg-ls/", "Rust codecs", "JPEG-LS"),
+    ("codecs/shl-jpeg2000/", "Rust codecs", "JPEG 2000 and HTJ2K decoder"),
     ("codecs/shl-codec-jpeg2000-encode/", "Rust codecs", "JPEG 2000 encoder"),
     ("codecs/shl-codec-jpeg2000/", "Rust codecs", "JPEG 2000 glue"),
     ("codecs/shl-codec-htj2k/", "Rust codecs", "HTJ2K glue"),

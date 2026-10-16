@@ -1,12 +1,12 @@
 {
- "measuredAt": "2026-10-16T05:58:27.617Z",
+ "measuredAt": "2026-10-16T09:19:08.985Z",
  "site": "https://shlink-dicom.exe.xyz",
  "sampleRedirect": "https://shlink-dicom.exe.xyz/sample",
- "linkUrl": "https://shlink-dicom.exe.xyz/shl/SfvZRMjEo3V8UKj1p9u_Mg/bundle.jwe",
+ "linkUrl": "https://shlink-dicom.exe.xyz/shl/cl4fEtJihTkz5EUVLd9UdA/bundle.jwe",
  "linkFlag": "U",
  "linkKeyBytes": 32,
  "jwe": {
-  "bytes": 58673,
+  "bytes": 58655,
   "header": {
    "alg": "dir",
    "enc": "A256GCM",
@@ -26,7 +26,7 @@
  "files": [
   {
    "study": "CT ABDOMEN/PELVIS W CON",
-   "id": "qkEbGI_KLPu0JE_VYGd0gw",
+   "id": "_k-rIhH2iF31VZ1IN6GA-g",
    "plaintext": 89870064,
    "ciphertext": 89892016,
    "records": 1372,
@@ -34,7 +34,7 @@
   },
   {
    "study": "BRAIN 7/29/20",
-   "id": "mwh_OLbs1m6cO9BOcfAnxA",
+   "id": "eAnzzd0UetCCwUmPcHufaA",
    "plaintext": 28577804,
    "ciphertext": 28584796,
    "records": 437,
@@ -42,7 +42,7 @@
   },
   {
    "study": "Histopathology",
-   "id": "6Vs9W2TmKRTCcAiPm7HRBg",
+   "id": "NEtqi5zrc3TEzDU20SVs8A",
    "plaintext": 149450378,
    "ciphertext": 149486874,
    "records": 2281,
@@ -50,7 +50,7 @@
   },
   {
    "study": "HAND AND WRIST RT",
-   "id": "KZZYCnuSwhNBXiNJwY-YOA",
+   "id": "uTCRt3MZ_QllLsldZ-1uRw",
    "plaintext": 16150238,
    "ciphertext": 16154190,
    "records": 247,
@@ -58,7 +58,7 @@
   },
   {
    "study": "WRIST LEFT AP LAT & OBL",
-   "id": "xL9uG8heNeO4u6SLj6oF9w",
+   "id": "Wmgy1uOKk1g_NYVTA0t3PA",
    "plaintext": 16899676,
    "ciphertext": 16903804,
    "records": 258,
@@ -66,7 +66,7 @@
   },
   {
    "study": "HAND RGHT PA LAT OBL MIN 3 VW",
-   "id": "es74gDMxivxyHN6u1cHviw",
+   "id": "s4FdSITUrOxEZyLBU5Qh8A",
    "plaintext": 12365412,
    "ciphertext": 12368436,
    "records": 189,
@@ -92,7 +92,7 @@
   "instanceBytes": 353408,
   "firstRecord": 187,
   "lastRecord": 193,
-  "fileId": "mwh_OLbs1m6cO9BOcfAnxA",
+  "fileId": "eAnzzd0UetCCwUmPcHufaA",
   "sopClass": "urn:oid:1.2.840.10008.5.1.4.1.1.4",
   "fileBytes": 28584796,
   "fileRecords": 437,

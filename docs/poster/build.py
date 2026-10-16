@@ -169,22 +169,6 @@ UP_TOTAL = sum(v for v, _ in UPSTREAM)
 TM_H, TM_GAP, TM_W_ALL = 425, 40, 2210
 TM_W = round((TM_W_ALL - TM_GAP) / (1 + UP_TOTAL / OWN_TREE)); UP_W = TM_W_ALL - TM_GAP - TM_W
 
-def upstream_svg(w, h):
-    o = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" class="tm">',
-         '<defs><pattern id="ghatch" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="16" height="16" fill="#f3f2ee"/><line x1="0" y1="0" x2="0" y2="16" stroke="#dcd9d2" stroke-width="5"/></pattern></defs>']
-    o.append(f'<rect x="2" y="2" width="{w-4}" height="{h-4}" fill="#fbfaf8" stroke="#b9b5ad" stroke-width="2" stroke-dasharray="10 6"/>')
-    o.append(f'<text x="16" y="34" class="tmg" style="font-size:28px; fill:#55595f">Vendored upstream decoders · {UP_TOTAL:,}</text>')
-    names = {"oxideav JPEG 2000 / HTJ2K (upstream, patched)": ["oxideav", "JPEG 2000 and HTJ2K"], "hayro JPEG 2000 (upstream, patched)": ["hayro", "JPEG 2000"]}
-    for (v, name), x, y, ww, hh in [((v, n), *r[1:]) for (v, n), r in zip(sorted(UPSTREAM, reverse=True), squarify(sorted([(v, (v, n)) for v, n in UPSTREAM], reverse=True), 8, 50, w - 16, h - 58))]:
-        o.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{ww:.1f}" height="{hh:.1f}" fill="url(#ghatch)" stroke="#fff" stroke-width="3"/>')
-        if ww > 140 and hh > 60:
-            nm = names.get(name, [name])
-            o.append(f'<text x="{x+12:.1f}" y="{y+32:.1f}" style="font-size:24px; font-weight:700; fill:#55595f">{esc(nm[0])}</text>')
-            for j, t in enumerate(nm[1:] + [f"{v:,} lines", "patched"]):
-                o.append(f'<text x="{x+12:.1f}" y="{y+60+j*26:.1f}" style="font-size:21px; fill:#6b6f75">{esc(t)}</text>')
-    o.append("</svg>")
-    return "".join(o)
-
 # ---------------------------------------------------------------- the traced stack
 def stack_svg(w):
     rowh = 150; gap = 14; n = 10
@@ -322,7 +306,6 @@ else: MISSING.append("sop_sweep")
 num("commits", str(TL["commits"]), TL["commits"], "git rev-list --count main")
 num("first_commit", datetime.datetime.fromisoformat(TL["first"]["date"]).strftime("%a %d %b %H:%M"), TL["first"]["date"], "git log on main")
 num("code_own", c(CM["total_own"]), CM["total_own"], "docs/poster/scripts/codemap.py on main " + CM["commit"])
-num("code_upstream", c(CM["totals"].get("upstream", 0)), CM["totals"].get("upstream", 0), "docs/poster/scripts/codemap.py on main " + CM["commit"])
 gen = list(CM["generated"].values())[0] if CM["generated"] else None
 if gen: num("code_generated", c(gen["lines"]), gen["lines"], gen["path"])
 
@@ -401,7 +384,7 @@ code,.mono {{ font-family:"Source Code Pro",monospace; font-size:0.92em; }}
 .box {{ position:absolute; }}
 h2 {{ font-family:"Noto Serif",Georgia,serif; font-size:58px; line-height:1.1; margin:0 0 22px; padding-top:18px; border-top:6px solid var(--ink); }}
 h2 .k {{ color:var(--muted); font-weight:400; font-size:40px; margin-right:16px; }}
-h3 {{ font-size:31px; margin:20px 0 8px; letter-spacing:0.01em; }}
+h3 {{ font-size:31px; margin:16px 0 6px; letter-spacing:0.01em; }}
 p {{ margin:0 0 16px; }}
 ul {{ margin:0 0 12px; padding-left:34px; }} li {{ margin:0 0 8px; }}
 ul.two {{ columns:2; column-gap:40px; font-size:26px; line-height:1.3; }} ul.two li {{ break-inside:avoid; margin:0 0 6px; }}
@@ -524,14 +507,15 @@ footer b {{ font-weight:700; }}
   <div class="stat"><span class="n">9,522 / 9,537</span><span class="d">IDC files picked for rare scanners, software and encodings passed. The 15 others: 8 lack Planar Configuration (now inferred), 4 Leica JPEG 2000 off by ≤3 (ruled acceptable), 3 float maps (now decoded).{src('idc_longtail_pass')}</span></div>
   <div class="stat"><span class="n">{fv('corpus_real_cases','display','—').split(' ')[0]}</span><span class="d">real-image cases in the decoder test corpus, all passing{src('corpus_real_cases')}</span></div>
   <div class="stat"><span class="n">867 / 885</span><span class="d">renderings of real files on which dcmtk agrees within one grey level. The 18 others: 7 from our VOI LUT bit-depth rule, 8 with no stored window, 2 off by two levels, 1 where pydicom sides with us.{src('display_conformance')}</span></div>
+  <p class="small muted" style="margin:0 0 4px;">JPEG 2000 and HTJ2K results re-checked with the new decoder: corpus byte-identical; 185 IDC long-tail JPEG 2000 files with the same outcome.{src('j2k_recheck')}</p>
   <h3>Lossless encoders</h3>
   <div class="stat"><span class="n">2.46×</span><span class="d">smaller with lossless JPEG (SV1) on Josh's five studies, 403 → 164 MB. Every image decodes bit-exact in libjpeg, GDCM and dcmtk.{src('encoder_ratio_sv1')}</span></div>
   <div class="stat"><span class="n">2.96×</span><span class="d">with lossless JPEG 2000, 403 → 136 MB; bit-exact under three OpenJPEG-based decoders.{src('encoder_ratio_j2k')}</span></div>
   <h3>Scripted browser checks</h3>
-  <p class="small">Against the live sites: How it works 254 / 255 (the miss: one 109 ms main-thread task, limit 100 ms){src('e2e_checks_how')} · SMART Imaging sandbox 153 / 153.{src('e2e_checks')}</p>
+  <p class="small">Live: How it works 254 / 255 (one task took 109 ms; the limit is 100){src('e2e_checks_how')} · sandbox 153 / 153.{src('e2e_checks')}</p>
   <h3>Object types, viewed end to end</h3>
   <div class="stat"><span class="n">{SWEEP['pass']} / {SWEEP['cases']}</span><span class="d">cases pass, across {SWEEP['classes']} object types: all in IDC, plus five it lacks.{src('sop_census')} {SWEEP['fail']} fail, from {SWEEP['defects']} defects being fixed; {SWEEP['unsupported']} are labelled not displayed, with a download.</span></div>
-  <p class="small muted" style="margin:0;">IDC has no Enhanced or Legacy Converted CT, MR or PET, so those came from public test files and from series derived from IDC.</p>
+  <p class="small muted" style="margin:0;">IDC has no Enhanced or Legacy Converted CT, MR or PET; those came from public test files and series derived from IDC.</p>
 </div>
 
 <!-- bottom: code map -->
@@ -541,7 +525,7 @@ footer b {{ font-weight:700; }}
   {treemap_svg(2210, TM_H)}
   <p class="small" style="margin:10px 0 4px;">{groups_line()}</p>
   <p class="small muted" style="margin-top:0;">{c(CM['total_own'])} non-blank lines of the project's own code on main ({CM['commit']}){(', plus ' + c(OWN_TREE-CM['total_own']) + ' lines in review') if OWN_TREE > CM['total_own'] else ''}. The generated DICOM dictionary is not counted.</p>
-  <p class="small" style="margin:6px 0 0;">JPEG 2000 decoding uses hayro-jpeg2000, vendored with our patches, among them HTJ2K decoding built on ndic-htj2k's block decoder. oxideav-jpeg2000 decodes the rare HTJ2K files hayro declines, and cross-checks it. JPEG XL uses the jxl-oxide library. Everything else, including both encoders, is this project's code.</p>
+  <p class="small" style="margin:6px 0 0;">JPEG XL uses the jxl-oxide library. Everything else, including every JPEG 2000 and HTJ2K decoder and both encoders, is this project's code.</p>
 </div>
 
 <!-- bottom: how it was built -->

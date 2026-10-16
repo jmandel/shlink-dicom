@@ -322,5 +322,20 @@
   "how": "read (summary line of the log)",
   "ok": true,
   "note": "web/how/checks.mjs run against https://shlink-dicom.exe.xyz with API set to the live site and READ_ONLY=1 (step 10's share-and-revoke skipped), 16 Oct 2026. The one failure is a timing check: a 109 ms main-thread task at 390 px, limit 100 ms. view-checks.mjs has no read-only mode (its fixtures step clones the sample share and makes links on the target server), and wsi-checks.mjs needs packed fixtures, so neither was run live and their counts were removed from the poster."
+ },
+ "j2k_recheck": {
+  "value": {
+   "corpus": "byte-identical",
+   "longtail_lossless_identical": 111,
+   "longtail_lossy_same_outcome": 74,
+   "jpeg2000_corpus": "177/177",
+   "htj2k_corpus": "42/42"
+  },
+  "display": "JPEG 2000 and HTJ2K results re-checked with the new decoder: corpus byte-identical; 185 IDC long-tail JPEG 2000 files with the same outcome.",
+  "source": "/media/barracuda/j2kdec/ (lt-results.jsonl, lt-lossy-ref.log; untracked gate data) and codec-corpus/formats/jpeg2000/FORMAT.md on main",
+  "quote": "lt-results.jsonl: 185 rows = 111 \u00d7 (.4.90, identical: true) + 74 \u00d7 .4.91; lt-lossy-ref.log: final counts: {'pass': 64, 'skipped-decoded-size': 5, 'mismatch': 5}",
+  "how": "counted lt-results.jsonl by transfer syntax and 'identical'; lossy outcome counts read from lt-lossy-ref.log; corpus byte-identity and 177/177, 42/42 per the decoder agent (via the coordinator) and FORMAT.md",
+  "ok": true,
+  "note": "Lossy files decode within 1\u20132 of the old decoder (max_abs in lt-results.jsonl) and give the same pass/mismatch/skip outcome against the references as the main sweep: 64 pass, 5 Leica mismatch, 5 too large to decode whole. The IDC random control's JPEG 2000 files were not separately re-run."
  }
 }
