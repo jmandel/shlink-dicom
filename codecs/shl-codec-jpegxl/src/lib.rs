@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 
 use shl_codec_common::{ColorOut, DecodeError, DecodedFrame, FrameInfo, Result};
-use shl_jpegxl::{Error, Options, Plane};
+use shl_jpegxl::{Error, Options};
 
 fn invalid(m: impl Into<String>) -> DecodeError {
     DecodeError::Invalid(m.into())
@@ -28,14 +28,6 @@ fn map_err(e: Error) -> DecodeError {
         Error::Invalid(_) => invalid(e.to_string()),
         Error::Unsupported(_) | Error::Limit(_) => unsupported(e.to_string()),
     }
-}
-
-/// Round to nearest, ties to even, for 0 ≤ v < 2^23 (adding and removing 2^23 makes the FPU
-/// round; no libm call, as `round_ties_even` would be on targets without SSE4.1).
-#[inline(always)]
-fn round_even(v: f32) -> f32 {
-    const M: f32 = 8_388_608.0;
-    (v + M) - M
 }
 
 /// Decode one frame's codestream. See `shl_codec_common::DecodeFn`.
@@ -80,32 +72,7 @@ pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame>
     let mut data = Vec::new();
     data.try_reserve_exact(frame_bytes).map_err(|_| unsupported("cannot allocate the decoded frame"))?;
     data.resize(frame_bytes, 0);
-    for (c, plane) in img.planes.iter().take(spp).enumerate() {
-        let put = |data: &mut [u8], i: usize, q: u32| {
-            let o = (i * spp + c) * bps;
-            if bps == 1 {
-                data[o] = q as u8;
-            } else {
-                data[o..o + 2].copy_from_slice(&(q as u16).to_le_bytes());
-            }
-        };
-        match plane {
-            Plane::Int(d) if d.len() == n => {
-                for (i, &v) in d.iter().enumerate() {
-                    put(&mut data, i, v.clamp(0, max as i32) as u32);
-                }
-            }
-            Plane::Float(d) if d.len() == n => {
-                let m = max as f32;
-                for (i, &v) in d.iter().enumerate() {
-                    // NaN clamps to 0, as libjxl's Clamp does.
-                    let x = (v * m).max(0.0).min(m);
-                    put(&mut data, i, round_even(x) as u32);
-                }
-            }
-            _ => return Err(invalid("JPEG XL decoded plane has the wrong size")),
-        }
-    }
+    shl_jpegxl::interleave(&img.planes[..spp], n, max, bps, &mut data).map_err(map_err)?;
     Ok(DecodedFrame { data, planar: false, color: if spp == 3 { ColorOut::Rgb } else { ColorOut::AsDeclared } })
 }
 

@@ -199,6 +199,81 @@ fn orient<T: Copy>(data: Vec<T>, w: usize, h: usize, orientation: u32) -> Vec<T>
     out
 }
 
+/// Writes the colour planes `planes` (1 or 3, all `Int` or all `Float`, each `n` samples) to
+/// `out` as interleaved little-endian integers of `bps` (1 or 2) bytes in 0..=`max`. Integers
+/// are clamped; floats become `v × max`, rounded to nearest with ties to even and clamped (NaN
+/// gives 0), which is libjxl's float-to-integer conversion without its 8-bit dither.
+pub fn interleave(planes: &[Plane], n: usize, max: u32, bps: usize, out: &mut [u8]) -> Result<()> {
+    let ints: Option<Vec<&[i32]>> = planes.iter().map(|p| match p { Plane::Int(d) if d.len() == n => Some(&d[..]), _ => None }).collect();
+    let floats: Option<Vec<&[f32]>> = planes.iter().map(|p| match p { Plane::Float(d) if d.len() == n => Some(&d[..]), _ => None }).collect();
+    if out.len() != n * planes.len() * bps || !(bps == 1 || bps == 2) {
+        return Err(Error::Invalid("output buffer size"));
+    }
+    match (ints, floats, planes.len(), bps) {
+        (Some(p), _, 1, 1) => interleave_n::<_, 1, 1>(out, [p[0]], max),
+        (Some(p), _, 1, _) => interleave_n::<_, 1, 2>(out, [p[0]], max),
+        (Some(p), _, 3, 1) => interleave_n::<_, 3, 1>(out, [p[0], p[1], p[2]], max),
+        (Some(p), _, 3, _) => interleave_n::<_, 3, 2>(out, [p[0], p[1], p[2]], max),
+        (_, Some(p), 1, 1) => interleave_n::<_, 1, 1>(out, [p[0]], max),
+        (_, Some(p), 1, _) => interleave_n::<_, 1, 2>(out, [p[0]], max),
+        (_, Some(p), 3, 1) => interleave_n::<_, 3, 1>(out, [p[0], p[1], p[2]], max),
+        (_, Some(p), 3, _) => interleave_n::<_, 3, 2>(out, [p[0], p[1], p[2]], max),
+        _ => return Err(Error::Invalid("planes to interleave")),
+    }
+    Ok(())
+}
+
+/// Four samples converted to integers in 0..=max.
+trait Quantize: Copy + Default {
+    fn quantize4(v: [Self; 4], max: u32) -> [u32; 4];
+}
+
+impl Quantize for i32 {
+    #[inline(always)]
+    fn quantize4(v: [i32; 4], max: u32) -> [u32; 4] {
+        v.map(|x| x.clamp(0, max as i32) as u32)
+    }
+}
+
+impl Quantize for f32 {
+    #[inline(always)]
+    fn quantize4(v: [f32; 4], max: u32) -> [u32; 4] {
+        use simd::F4;
+        // Adding and removing 2^23 rounds to nearest, ties to even, for 0 ≤ x < 2^23.
+        const M: f32 = 8_388_608.0;
+        let m = F4::splat(max as f32);
+        let x = F4::load(&v).mul(m).max0().min_c(m);
+        x.add(F4::splat(M)).sub(F4::splat(M)).to_i32().map(|q| q as u32)
+    }
+}
+
+/// `interleave` for `S` planes and `B`-byte samples, four pixels at a time.
+#[inline(always)]
+fn interleave_n<T: Quantize, const S: usize, const B: usize>(out: &mut [u8], planes: [&[T]; S], max: u32) {
+    let n = planes[0].len();
+    for (i, px) in out.chunks_mut(4 * S * B).enumerate() {
+        let x = 4 * i;
+        let q: [[u32; 4]; S] = core::array::from_fn(|c| {
+            let v: [T; 4] = match planes[c].get(x..x + 4) {
+                Some(v) => v.try_into().unwrap_or_default(),
+                None => {
+                    // The last, partial group of pixels.
+                    let mut v = [T::default(); 4];
+                    let k = n.saturating_sub(x).min(4);
+                    v[..k].copy_from_slice(&planes[c][x..x + k]);
+                    v
+                }
+            };
+            T::quantize4(v, max)
+        });
+        for (j, p) in px.chunks_exact_mut(S * B).enumerate() {
+            for c in 0..S {
+                p[c * B..c * B + B].copy_from_slice(&q[c][j].to_le_bytes()[..B]);
+            }
+        }
+    }
+}
+
 /// Rebuilds the original JPEG file from a JPEG XL file made by lossless JPEG recompression
 /// (one with a `jbrd` box). The result is byte-identical to the JPEG that was recompressed.
 pub fn reconstruct_jpeg(data: &[u8], opts: &Options) -> Result<Vec<u8>> {

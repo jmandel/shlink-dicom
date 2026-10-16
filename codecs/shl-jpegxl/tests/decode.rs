@@ -167,3 +167,40 @@ fn xyb_output_in_the_image_colour_space() {
         assert!(peak <= lim && rmse <= 5e-5, "{name}: peak {peak:.2e}, rmse {rmse:.2e}");
     }
 }
+
+#[test]
+fn interleave_matches_per_sample_conversion() {
+    // The scalar reference: v × max rounded to nearest, ties to even, clamped, NaN → 0.
+    fn quantize(v: f32, max: u32) -> u32 {
+        let m = max as f32;
+        let x = (v * m).max(0.0).min(m);
+        x.round_ties_even() as u32
+    }
+    let specials = [f32::NAN, f32::INFINITY, -f32::INFINITY, -0.0, 0.5 / 255.0, 1.5 / 255.0, 2.5 / 4095.0, 1.0, 1.0001, -0.2];
+    for n in [1usize, 3, 4, 7, 33] {
+        let fl: Vec<Vec<f32>> = (0..3).map(|c| (0..n).map(|i| if i < specials.len() { specials[(i + c) % specials.len()] } else { (i * 37 + c * 11) as f32 / 97.0 - 0.1 }).collect()).collect();
+        let it: Vec<Vec<i32>> = (0..3).map(|c| (0..n).map(|i| (i as i32 * 977 + c * 31) % 70000 - 300).collect()).collect();
+        for (spp, bps, max) in [(1usize, 1usize, 255u32), (1, 2, 4095), (3, 1, 255), (3, 2, 65535)] {
+            let mut want = vec![0u8; n * spp * bps];
+            let mut got = vec![0u8; n * spp * bps];
+            for i in 0..n {
+                for c in 0..spp {
+                    let q = quantize(fl[c][i], max);
+                    want[(i * spp + c) * bps..][..bps].copy_from_slice(&q.to_le_bytes()[..bps]);
+                }
+            }
+            let planes: Vec<Plane> = fl[..spp].iter().map(|p| Plane::Float(p.clone())).collect();
+            shl_jpegxl::interleave(&planes, n, max, bps, &mut got).unwrap();
+            assert_eq!(got, want, "float n={n} spp={spp} bps={bps}");
+            for i in 0..n {
+                for c in 0..spp {
+                    let q = it[c][i].clamp(0, max as i32) as u32;
+                    want[(i * spp + c) * bps..][..bps].copy_from_slice(&q.to_le_bytes()[..bps]);
+                }
+            }
+            let planes: Vec<Plane> = it[..spp].iter().map(|p| Plane::Int(p.clone())).collect();
+            shl_jpegxl::interleave(&planes, n, max, bps, &mut got).unwrap();
+            assert_eq!(got, want, "int n={n} spp={spp} bps={bps}");
+        }
+    }
+}

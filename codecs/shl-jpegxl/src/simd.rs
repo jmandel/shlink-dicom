@@ -54,6 +54,17 @@ mod imp {
         pub fn abs(self) -> F4 {
             F4(f32x4_abs(self.0))
         }
+        /// `self.min(m)` as f32::min does it, for `self` that is not NaN.
+        #[inline(always)]
+        pub fn min_c(self, m: F4) -> F4 {
+            F4(f32x4_pmin(self.0, m.0))
+        }
+        /// Lanes truncated to integers (exact for integer-valued lanes below 2^31).
+        #[inline(always)]
+        pub fn to_i32(self) -> [i32; 4] {
+            let v = i32x4_trunc_sat_f32x4(self.0);
+            [i32x4_extract_lane::<0>(v), i32x4_extract_lane::<1>(v), i32x4_extract_lane::<2>(v), i32x4_extract_lane::<3>(v)]
+        }
         /// `self.max(0.0)` as f32::max does it (NaN gives 0).
         #[inline(always)]
         pub fn max0(self) -> F4 {
@@ -140,6 +151,14 @@ mod imp {
             F4(self.0.map(|v| v.max(0.0)))
         }
         #[inline(always)]
+        pub fn min_c(self, m: F4) -> F4 {
+            lanes!(self, m, f32::min)
+        }
+        #[inline(always)]
+        pub fn to_i32(self) -> [i32; 4] {
+            self.0.map(|v| v as i32)
+        }
+        #[inline(always)]
         pub fn gt_select(self, o: F4, a: F4, b: F4) -> F4 {
             let mut r = b.0;
             for i in 0..4 {
@@ -191,9 +210,13 @@ mod tests {
                 check(lanes(va.abs()), &|x, _| x.abs());
                 check(lanes(va.max0()), &|x, _| x.max(0.0));
                 check(lanes(va.copysign(vb)), &|x, y| x.copysign(y));
+                if b.iter().all(|v| !v.is_nan()) && a.iter().all(|v| !v.is_nan()) {
+                    check(lanes(va.min_c(vb)), &|x, y| x.min(y));
+                }
                 check(lanes(va.gt_select(vb, F4::splat(1.0), F4::splat(2.0))), &|x, y| if x > y { 1.0 } else { 2.0 });
             }
         }
+        assert_eq!(F4::load(&[0.0, 1.0, 4095.0, 65535.0]).to_i32(), [0, 1, 4095, 65535]);
         let q = [0i32, -3, 1 << 30, i32::MIN];
         assert_eq!(lanes(F4::from_i32(&q)), q.map(|v| v as f32));
         let rows: [F4; 4] = core::array::from_fn(|r| F4::load(&[r as f32 * 4.0, r as f32 * 4.0 + 1.0, r as f32 * 4.0 + 2.0, r as f32 * 4.0 + 3.0]));
