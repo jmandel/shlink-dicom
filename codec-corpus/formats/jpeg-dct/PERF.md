@@ -136,6 +136,20 @@ Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv
 - **Rejected:** an 11-bit lookahead for lossless scans only (DCT tables kept at 10). It saved 4–5% cycles on one slice and cost 2% on another; over the 30 slices it was 0.7% slower (130.8M against 129.9M cycles), because building the larger tables for every slice costs about what the extra fast lookups save.
 - **Stopped:** the remaining time is that serial chain, and libjpeg-turbo is already 1.6× slower here. The next idea, decoding two fast-path differences per buffer check, would save about one compare and branch per sample, off the chain.
 
+## SV1 encoder
+
+`encode.rs` writes the SV1 streams that every share is packed with ([performance plan, T1](../../../docs/PERF-PLAN.md#t1-sv1-decode-and-encode)). Measured on the live sample's uncompressed series with `shl-dicom-transcode`'s `perf` example (`encode` mode: encoder only, from decoded pixels; native, one core) and, in wasm, by transcoding the same files to SV1 in Node with the `shl-dicom-transcode-wasm` build (whole transcode, both self-checks included, user cycles per pass), at load 1–2.
+
+| Series | Native encoder, MB/s: before → after | wasm transcode, cycles per pass: before → after |
+|---|---|---|
+| abdomen CT, 93 slices | 201 → 240 | 1,635M → 1,448M (−11%) |
+| brain MR | 186 → 222 | 134M → 125M (−7%) (one series) |
+| wrist X-ray | 189 → 227 | 471M → 399M (−15%) (one study) |
+
+- **What changed:** each pass over the rows called its per-row work through `&mut dyn FnMut`, and the coding pass called `emit` and `BitWriter::put` per sample without inlining them, so the bit buffer went through memory for every sample. The row loop is now generic, `emit`, `put` and `category` are inlined, `put` no longer masks bits its callers already keep within `n`, and the check for a 0xFF byte in each flushed word is one word-wide test instead of four compares.
+- **Rejected:** keeping all differences from the counting pass (16 bits each) instead of computing them again in the coding pass. It cost about 4% more cycles than recomputing them, and memory for the whole frame instead of three rows.
+- **Exactness:** SV1 outputs of every live file (735 encoded, 4 declined, as before) and every corpus file are byte-identical to the previous build natively, and the wasm build's outputs equal the native ones.
+
 ## Exactness
 
 Every step had to keep every jpeg-dct and jpeg-lossless corpus result unchanged:

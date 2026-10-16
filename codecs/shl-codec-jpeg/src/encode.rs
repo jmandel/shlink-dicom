@@ -93,18 +93,21 @@ fn encode(fill: impl Fn(usize, &mut [u16]), columns: u32, rows: u32, components:
     let mut prev = vec![0u16; row_len];
     let mut cur = vec![0u16; row_len];
     let mut diffs = vec![0i32; row_len];
-    let mut rows_of_diffs = |each: &mut dyn FnMut(&[i32])| {
+    // Generic over `each` (not `dyn`), so each pass's per-sample work is inlined into its loop.
+    #[inline(always)]
+    fn for_rows(h: usize, n: usize, precision: u8, fill: &impl Fn(usize, &mut [u16]), bufs: (&mut Vec<u16>, &mut Vec<u16>, &mut [i32]), mut each: impl FnMut(&[i32])) {
+        let (prev, cur, diffs) = bufs;
         for y in 0..h {
-            fill(y, &mut cur);
-            differences(&cur, (y > 0).then_some(&prev[..]), n, precision, &mut diffs);
-            each(&diffs);
-            std::mem::swap(&mut prev, &mut cur);
+            fill(y, cur);
+            differences(cur, (y > 0).then_some(&prev[..]), n, precision, diffs);
+            each(diffs);
+            std::mem::swap(prev, cur);
         }
-    };
+    }
 
     // Pass 1: difference category counts per component.
     let mut freq = vec![[0u32; 17]; n];
-    rows_of_diffs(&mut |row: &[i32]| {
+    for_rows(h, n, precision, &fill, (&mut prev, &mut cur, &mut diffs), |row: &[i32]| {
         if n == 1 {
             let f = &mut freq[0];
             for &d in row {
@@ -167,13 +170,14 @@ fn encode(fill: impl Fn(usize, &mut [u16]), columns: u32, rows: u32, components:
             (t.code[s] << extra, u32::from(t.size[s]) + extra)
         }))
         .collect();
-    let emit = |bw: &mut BitWriter, l: &[(u32, u32); 17], d: i32| {
+    #[inline(always)]
+    fn emit(bw: &mut BitWriter, l: &[(u32, u32); 17], d: i32) {
         let s = category(d);
         let (code, len) = l[s as usize];
         let v = if d < 0 { d - 1 } else { d } as u32 & ((1u32 << s) - 1) & 0x7FFF;
         bw.put(code | if s < 16 { v } else { 0 }, len);
-    };
-    rows_of_diffs(&mut |row: &[i32]| {
+    }
+    for_rows(h, n, precision, &fill, (&mut prev, &mut cur, &mut diffs), |row: &[i32]| {
         if n == 1 {
             for &d in row {
                 emit(&mut bw, &lut[0], d);
@@ -214,6 +218,7 @@ fn differences(row: &[u16], prev: Option<&[u16]>, n: usize, precision: u8, out: 
 }
 
 /// SSSS: the number of bits in |d| (0 for 0, 16 for 32768).
+#[inline(always)]
 fn category(d: i32) -> u32 {
     32 - d.unsigned_abs().leading_zeros()
 }
@@ -344,19 +349,19 @@ struct BitWriter {
 
 impl BitWriter {
     /// Append the low `n` bits of `bits` (n at most 32).
-    #[inline]
+    #[inline(always)]
     fn put(&mut self, bits: u32, n: u32) {
-        if n == 0 {
-            return;
-        }
-        let bits = u64::from(bits) & ((1u64 << n) - 1);
-        self.acc = (self.acc << n) | bits;
+        // `bits` < 2^n (callers build codes and values that fit), n <= 31.
+        debug_assert!(n < 32 && u64::from(bits) >> n == 0);
+        self.acc = (self.acc << n) | u64::from(bits);
         self.nbits += n;
         if self.nbits >= 32 {
             self.nbits -= 32;
             let word = (self.acc >> self.nbits) as u32;
             let bytes = word.to_be_bytes();
-            if bytes.contains(&0xFF) {
+            // Some byte is 0xFF exactly when `!word` has a zero byte.
+            let inv = !word;
+            if inv.wrapping_sub(0x0101_0101) & !inv & 0x8080_8080 != 0 {
                 for b in bytes {
                     self.out.push(b);
                     if b == 0xFF {
