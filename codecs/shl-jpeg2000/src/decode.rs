@@ -270,9 +270,10 @@ impl<'c, 'a> Decoder<'c, 'a> {
             match (&mut a[0], &mut b[0], &mut c[0]) {
                 (Plane::Int(y0), Plane::Int(y1), Plane::Int(y2)) if y0.len() == y1.len() && y1.len() == y2.len() => {
                     for ((a, b), c) in y0.iter_mut().zip(y1.iter_mut()).zip(y2.iter_mut()) {
-                        let g = *a - ((*b + *c) >> 2);
-                        let r = *c + g;
-                        let bl = *b + g;
+                        // Wrapping: damaged data can hold any 32-bit values; valid data never wraps.
+                        let g = a.wrapping_sub(b.wrapping_add(*c) >> 2);
+                        let r = c.wrapping_add(g);
+                        let bl = b.wrapping_add(g);
                         *a = r;
                         *b = g;
                         *c = bl;

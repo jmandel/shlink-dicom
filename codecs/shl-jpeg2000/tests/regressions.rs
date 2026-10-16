@@ -62,4 +62,6 @@ fn fuzz_findings_are_errors_not_panics() {
     assert!(decode(&data("fuzz-cod-block-size-255.j2c"), &Options::default()).is_err());
     // An HT packet header that failed after the first cleanup pass was found.
     let _ = decode(&data("fuzz-ht-p0-past-passes.j2c"), &Options::default());
+    // Damaged code-blocks with 31-bit coefficients, whose 5/3 synthesis overflows i32.
+    let _ = decode(&data("fuzz-53-overflow.j2c"), &Options::default());
 }

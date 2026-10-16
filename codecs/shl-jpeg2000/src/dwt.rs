@@ -129,8 +129,8 @@ impl Filter<i32> for Rev53 {
     fn lift(low: &mut [i32], high: &mut [i32], odd: bool) {
         let (a, b) = if odd { (0, -1) } else { (-1, 0) };
         // F-5 then F-6.
-        step(low, high, a, |s, l, r| s - ((l + r + 2) >> 2));
-        step(high, low, b, |s, l, r| s + ((l + r) >> 1));
+        step(low, high, a, |s, l, r| s.wrapping_sub(l.wrapping_add(r).wrapping_add(2) >> 2));
+        step(high, low, b, |s, l, r| s.wrapping_add(l.wrapping_add(r) >> 1));
     }
     fn halve(v: i32) -> i32 {
         v >> 1
@@ -139,8 +139,8 @@ impl Filter<i32> for Rev53 {
         // Low-pass rows are those at even coordinates.
         let low = usize::from(odd);
         let step = |k: usize, row: &mut [i32], a: &[i32], b: &[i32]| match k {
-            0 => lift_row(row, a, b, |s, l, r| s - ((l + r + 2) >> 2)),
-            _ => lift_row(row, a, b, |s, l, r| s + ((l + r) >> 1)),
+            0 => lift_row(row, a, b, |s, l, r| s.wrapping_sub(l.wrapping_add(r).wrapping_add(2) >> 2)),
+            _ => lift_row(row, a, b, |s, l, r| s.wrapping_add(l.wrapping_add(r) >> 1)),
         };
         vlift(buf, w, h, [low, 1 - low], step, None::<fn(&mut [i32], usize)>);
     }

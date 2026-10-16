@@ -321,7 +321,7 @@ impl T1 {
             let row = &mut out[y * stride..y * stride + self.w];
             for ((o, &word), &m) in row.iter_mut().zip(words).zip(mags) {
                 let up = kind == 1 && word >> (VIS0 + r) & 1 == 0;
-                let v = if m == 0 { 0 } else { m as i32 + if up { h1 } else { h0 } };
+                let v = if m == 0 { 0 } else { (m as i32).wrapping_add(if up { h1 } else { h0 }) };
                 *o = if word >> (CHI0 + r + 1) & 1 != 0 { -v } else { v };
             }
         }
