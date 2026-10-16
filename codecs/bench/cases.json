@@ -3,6 +3,7 @@
  "about": "Benchmark cases for codecs/bench. Each entry names a codec-corpus case (<format>/<case id>). Pixel metadata, max_abs and the oracle come from the corpus at run time; sample_sha256 pins the file so results stay comparable. Bump version when the set changes. sample_sha256 and oracle_sha256 pin the file and the expected pixels; the runner warns when either differs (regenerated synthetic files get new UIDs, so their sample hash changes while the pixels do not).",
  "defaults": {
   "warmup": 2,
+  "warmup_ms": 250,
   "min_runs": 5,
   "max_runs": 30,
   "budget_ms": 300

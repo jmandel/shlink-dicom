@@ -43,7 +43,7 @@ export async function instantiate(module) {
 
 /**
  * Warm up, verify, measure. Returns a record without case metadata.
- * opts: {warmup, min_runs, max_runs, budget_ms, maxAbs, mark?: (name, start, end) => void}
+ * opts: {warmup, warmup_ms, min_runs, max_runs, budget_ms, maxAbs, mark?: (name, start, end) => void}
  */
 export function measure(dec, fileBytes, npyBytes, opts) {
   dec.setInput(fileBytes);
@@ -52,7 +52,11 @@ export function measure(dec, fileBytes, npyBytes, opts) {
   const cold_ms = first.t[0];
   const verify = npyBytes ? verifyOutput(dec.output(), npyBytes, opts.maxAbs) : { ok: false, reason: "no oracle" };
   let est = cold_ms, consistent = true;
-  for (let i = 1; i < Math.max(opts.warmup, 1); i++) {
+  // At least `warmup` decodes and `warmup_ms` of decoding: V8 moves hot functions from Liftoff
+  // to TurboFan code only after they have run for a while (about 25 decodes of a 2 ms frame),
+  // and runs measured before that mix the two tiers.
+  const t0 = performance.now();
+  for (let i = 1; i < Math.max(opts.warmup, 1) || performance.now() - t0 < (opts.warmup_ms ?? 0); i++) {
     const r = dec.decode();
     est = r.t[0];
     consistent &&= r.hash === first.hash;

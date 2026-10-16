@@ -89,7 +89,8 @@ export async function runCwasm(c, frames, npy, opts) {
         rec.verify = verifyOutput(all, npy, c.max_abs);
       }
       let est = performance.now() - t0;
-      for (let i = 1; i < Math.max(opts.warmup, 1); i++) {
+      const w0 = performance.now();
+      for (let i = 1; i < Math.max(opts.warmup, 1) || performance.now() - w0 < (opts.warmup_ms ?? 0); i++) {
         const t = performance.now();
         frames.forEach((cs) => decodeFrame(mod, p.cls, cs, false));
         est = performance.now() - t;

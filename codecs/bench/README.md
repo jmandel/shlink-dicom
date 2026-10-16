@@ -70,7 +70,7 @@ The wasm module comes from `codecs/shl-dicom-wasm-bench`, which exposes a few ra
 1. Copies the file into memory.
 2. Decodes it once. This is the "first decode" time, which includes wasm memory growth and V8 tier-up.
 3. Checks that output against the oracle `.npy`: exact match, or within the case's `max_abs` for lossy syntaxes.
-4. Runs the remaining warm-up decodes.
+4. Runs the remaining warm-up decodes. In wasm (Node and Chromium, ours and the C codecs alike) warm-up also continues until it has taken 250 ms (`warmup_ms` in `cases.json`). V8 runs a function in its baseline compiler (Liftoff) until it has done enough work, then switches to optimised TurboFan code, which for a 2 ms frame takes about 25 decodes. Measuring before that point mixes the two, and small cases then move by 10% or more between builds whose code is the same.
 5. Runs the measured decodes: enough to fill 300 ms, at least 5 and at most 30, or only 3 when one decode takes more than 2 s.
 
 Every measured decode must return the same output hash as the verified one. Reported numbers are the median, p10 and p90.
