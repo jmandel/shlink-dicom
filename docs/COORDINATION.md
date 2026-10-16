@@ -115,7 +115,7 @@ Related docs:
   - SMART Imaging Access: servers SHOULD be able to transcode to a lossless compressed transfer syntax. Document a proper negotiation: apps list preferred syntaxes in `Accept`, with `transfer-syntax=*` as the fallback everyone can handle. Clients then decide whether to re-encode what they get, or keep it large. Push this upstream (draft for Josh before anything is posted).
   - shlink-dicom's protocol doesn't change. Only the share page's packing defaults may: what it asks the SMART source for, and whether it re-encodes uncompressed images before encrypting.
   - Candidate encodings: those IHE PDI's DVD/USB options require readers to handle (JPEG Lossless SV1, JPEG 2000 lossless).
-  - Upstream PR opened (Josh approved): argonautproject/smart-imaging#4 (transfer syntax negotiation; addresses #3). Fork jmandel/smart-imaging-1, branch transfer-syntax-negotiation, clone at /media/barracuda/upstream/smart-imaging. Add the measured ratios as a PR comment when they arrive.
+  - Upstream PR opened (Josh approved): argonautproject/smart-imaging#5 (transfer syntax negotiation; addresses #3; #4 was the same change from a fork, closed). Branch transfer-syntax-negotiation in the upstream repo (Josh has write access: use branches there, not forks), clone at /media/barracuda/upstream/smart-imaging. Add the measured ratios as a PR comment when they arrive.
   - The measurement agent (a18873dede250f0de) is gathering ratios and speed on the Josh Example studies. Then: the issue draft, the packing defaults, PROPOSAL §11.1 (it still says HTJ2K/JPEG-LS), and whether the sandbox should serve precomputed compressed copies so the negotiation is exercised.
 
 ## Decisions pending (ask Josh)
