@@ -16,7 +16,7 @@ import {
 import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import {
-  COMPRESS_DEFAULT, ENCODING_NAME, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, workers,
+  COMPRESS_DEFAULT, ENCODING_NAME, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, workers,
   type CompressMode, type CompressSummary, type Encoding, type SeriesEstimate,
 } from "./lib/compress";
 import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadJob } from "./lib/upload";
@@ -416,15 +416,21 @@ function setCompressMode(m: CompressMode) {
 /** Each series' estimated compression, once measured (one image encoded per series). */
 let estimates = new Map<SeriesModel, SeriesEstimate | null>();
 
+/** What this build's encoder offers: "Smaller files, slower" appears when it makes JPEG 2000. */
+let encodings: Encoding[] = ["sv1"];
+
 /** Estimates the saving series by series, after the thumbnails, updating the line as it goes. */
 async function estimateAll(studies: StudyModel[], gen: number) {
   if (gen === thumbGen) estimates = new Map();
+  try {
+    encodings = await compressPool().encodings();
+  } catch {}
   for (const st of studies) {
     for (const se of st.series) {
       if (gen !== thumbGen) return;
       if (!se.instances.some(isUncompressedImage)) continue;
       try {
-        estimates.set(se, await estimateSeries(se));
+        estimates.set(se, await estimateSeries(se, encodings));
       } catch {
         estimates.set(se, null);
       }
@@ -583,12 +589,16 @@ function updateTotal() {
       return { after, seconds: rate > 0 ? before / (rate * workers()) : 0 };
     };
     const sv1 = est("sv1"), j2k = est("j2k");
-    // "Smaller files" is offered once this build's encoder has shown it can make JPEG 2000 here.
-    const j2kOffered = known.some((e) => e.ok.j2k);
+    // "Smaller files" is offered when this build's encoder makes JPEG 2000.
+    const j2kOffered = encodings.includes("j2k");
     $("rv-c-j2k").closest(".pick")!.classList.toggle("hidden", !j2kOffered);
     if (!j2kOffered && compressMode() === "j2k") setCompressMode("sv1");
     $("rv-c-sv1").textContent = sv1 ? `${ENCODING_NAME.sv1} · about ${formatBytes(sv1.after)}` : `${ENCODING_NAME.sv1} · estimating the size…`;
-    $("rv-c-j2k").textContent = j2k ? `${ENCODING_NAME.j2k} · about ${formatBytes(j2k.after)}${j2k.seconds ? ` · ${aboutTime(j2k.seconds)} to compress on this device` : ""}` : "";
+    // Against the default: how much smaller, and how much longer, measured on this data and device.
+    const smaller = sv1 && j2k ? sv1.after - j2k.after : 0, longer = sv1 && j2k ? j2k.seconds - sv1.seconds : 0;
+    $("rv-c-j2k").textContent = j2k
+      ? [`${ENCODING_NAME.j2k} · about ${formatBytes(j2k.after)}`, smaller > 0 ? `${formatBytes(smaller)} smaller` : null, longer > 5 ? `${aboutTime(longer).replace(/^about /, "about ")} more to compress on this device` : null].filter(Boolean).join(" · ")
+      : `${ENCODING_NAME.j2k} · estimating the size and time…`;
     if (sv1?.seconds && sv1.seconds > 20) $("rv-c-sv1").textContent += ` · ${aboutTime(sv1.seconds)} to compress on this device`;
     $("rv-c-exact").textContent = `${formatBytes(before)} · the recipient gets the original files, byte for byte`;
     const m = compressMode();

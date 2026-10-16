@@ -84,6 +84,9 @@ cd "$DIR"
 echo "== wasm modules"
 cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-wasm
 wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
+# The Share page's lossless encoder (JPEG Lossless SV1), in the codecs workspace.
+(cd codecs && cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm)
+wasm-bindgen --target web --out-dir codecs/shl-dicom-transcode-wasm/pkg codecs/target/wasm32-unknown-unknown/release/shl_dicom_transcode_wasm.wasm
 HOME=/opt/rust/home bun viewer-kit/scripts/build.mjs
 
 echo "== web app"

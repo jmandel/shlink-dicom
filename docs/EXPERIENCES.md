@@ -55,12 +55,19 @@ Each experience imports only what it needs, so it can ship as its own bundle.
    - for flair, a small grey line: "14 series · 263 images · 41 MB · uncompressed".
 
    Every study can be included or left out.
+
+   When some images are uncompressed (a CD, or a server that sent them as stored), a choice under the cards:
+   - **Compress without loss (recommended)**, the default: JPEG Lossless, with the estimated size;
+   - **Smaller files, slower**: JPEG 2000 Lossless, with the estimated size and time on this device (offered when the encoder supports it);
+   - **Keep files exactly as they are**: the original files, byte for byte.
+
+   The line above it says what compressing does: every pixel stays identical, the file bytes change.
 3. **Who and for how long.**
    - Recipient label: "Dr. Patel, Neurology".
    - Expiry presets: 1 day, 1 week, 1 month, or "until I revoke it".
    - "Allow updates" toggle.
    - Optional passcode.
-4. **Encrypt and upload.** A short animation of the real work: "Encrypting 17 series on your device · uploading ciphertext". It shows bytes and records as they go, with the line "The server stores only scrambled data."
+4. **Encrypt and upload.** Compressing comes first, with its own measured progress ("Compressing 120 of 458 images without loss · 60 MB → 24 MB so far · about 2 minutes left"). Then a short animation of the real work: "Encrypting 17 series on your device · uploading ciphertext". It shows bytes and records as they go, with the line "The server stores only scrambled data."
 5. **Hand it over.**
    - A large QR code, Copy link, Share (Web Share API) and Email.
    - The owner link, given prominently: "Save this to manage or revoke later". Saved in this browser too.
@@ -69,12 +76,14 @@ Each experience imports only what it needs, so it can ship as its own bundle.
      - recipient and studies;
      - status ("Opened 2 times, last yesterday 3:12 pm");
      - the actions Revoke, Extend, Take offline and New link for someone else.
+   - **The files:** byte for byte as added, or which images were compressed without loss (pixel-identical, not the same bytes).
    - **Activity.** A simple timeline, with a "Show technical log" disclosure for the raw range-request log.
 
 **SMART on FHIR imaging source** (step 1, second option):
 - The visitor picks an imaging-enabled FHIR server: for the demo, a sample or sandbox server.
 - A SMART App Launch (standalone, patient scope) follows.
 - The app lists `ImagingStudy` resources and fetches each series over DICOMweb WADO-RS, using the server's associated endpoint (the SMART Imaging Access pattern).
+- It asks for JPEG Lossless first, then JPEG 2000 Lossless, then anything as stored (the SMART Imaging Access negotiation), and compresses what still arrives uncompressed.
 - It then packs locally as with files.
 
 Open question 1 below asks which server to use for the demo.

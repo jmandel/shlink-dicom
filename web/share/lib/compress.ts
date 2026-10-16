@@ -77,6 +77,8 @@ export class CompressPool {
   private waiting: (() => void)[] = [];
   private seq = 0;
   private pending = new Map<number, (r: TranscodeResult) => void>();
+  private capsWaiting: ((ts: string[]) => void)[] = [];
+  private caps: Promise<Encoding[]> | null = null;
   readonly size: number;
 
   constructor(n = poolSize()) {
@@ -85,6 +87,12 @@ export class CompressPool {
       const w = new Worker(assetUrl("compress-worker.js"), { type: "module" });
       w.onmessage = (ev) => {
         const m = ev.data;
+        if (m.caps) {
+          this.capsWaiting.shift()?.(m.caps);
+          this.idle.push(w);
+          this.waiting.shift()?.();
+          return;
+        }
         this.pending.get(m.id)?.(m.bytes ? { bytes: new Uint8Array(m.bytes), transferSyntax: m.transferSyntax } : { declined: m.declined ?? "no result" });
         this.pending.delete(m.id);
         this.idle.push(w);
@@ -92,6 +100,20 @@ export class CompressPool {
       };
       this.idle.push(w);
     }
+  }
+
+  /** The encodings this build's encoder offers (JPEG Lossless always, when it loads at all). */
+  encodings(): Promise<Encoding[]> {
+    this.caps ??= (async () => {
+      while (!this.idle.length) await new Promise<void>((r) => this.waiting.push(r));
+      const w = this.idle.pop()!;
+      const ts = await new Promise<string[]>((resolve) => {
+        this.capsWaiting.push(resolve);
+        w.postMessage({ id: 0, caps: true });
+      });
+      return (Object.keys(ENCODING_TS) as Encoding[]).filter((e) => ts.includes(ENCODING_TS[e]));
+    })();
+    return this.caps;
   }
 
   async transcode(bytes: Uint8Array, mode: Encoding): Promise<TranscodeResult> {
@@ -287,14 +309,14 @@ export interface SeriesEstimate {
  * Estimates a series by encoding one of its uncompressed images (the middle one) both ways and
  * applying the ratios to the rest. Null when the series has none.
  */
-export async function estimateSeries(se: SeriesModel, transcode: Transcode = poolTranscode): Promise<SeriesEstimate | null> {
+export async function estimateSeries(se: SeriesModel, encodings: Encoding[], transcode: Transcode = poolTranscode): Promise<SeriesEstimate | null> {
   const mine = se.instances.filter(isUncompressedImage);
   if (!mine.length) return null;
   const before = mine.reduce((a, i) => a + i.src.size, 0);
   const pick = mine[Math.floor(mine.length / 2)];
   const bytes = await pick.src.read(0, pick.src.size);
   const est: SeriesEstimate = { images: mine.length, before, after: { sv1: before, j2k: before }, rate: { sv1: 0, j2k: 0 }, ok: { sv1: false, j2k: false } };
-  for (const mode of ["sv1", "j2k"] as const) {
+  for (const mode of encodings) {
     const t0 = performance.now();
     const r = await transcode(bytes.slice(), mode);
     const s = (performance.now() - t0) / 1000;

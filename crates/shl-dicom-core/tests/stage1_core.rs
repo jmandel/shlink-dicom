@@ -603,3 +603,19 @@ fn test_subset_reports_follow_studies() {
     let ids: Vec<&str> = sub["entry"].as_array().unwrap().iter().filter_map(|e| e["resource"]["id"].as_str()).collect();
     assert_eq!(ids, vec!["p1", "study-1", "r1", "r3"]);
 }
+
+/// The owner Bundle's Provenance (the Share page's note of lossless re-encoding) never goes into a
+/// link's Bundle, for a subset or for everything.
+#[test]
+fn test_subset_leaves_out_provenance() {
+    let mut bundle = build_fhir_bundle(&build_input(None));
+    let study_url = bundle["entry"][1]["fullUrl"].clone();
+    bundle["entry"].as_array_mut().unwrap().push(serde_json::json!({
+        "fullUrl": "urn:uuid:00000000-0000-4000-8000-000000000001",
+        "resource": { "resourceType": "Provenance", "target": [{ "reference": study_url }], "recorded": "2026-10-15T00:00:00Z", "agent": [{ "who": { "display": "test" } }] }
+    }));
+    for files in [vec![], vec!["AAAAAAAAAAAAAAAAAAAAAA".to_string()]] {
+        let sub = subset_fhir_bundle(&bundle, &files, "2026-10-15T01:00:00Z").unwrap();
+        assert!(sub["entry"].as_array().unwrap().iter().all(|e| e["resource"]["resourceType"] != "Provenance"), "Provenance in a link Bundle ({} files)", files.len());
+    }
+}

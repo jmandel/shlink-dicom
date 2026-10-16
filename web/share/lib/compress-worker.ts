@@ -4,7 +4,11 @@
 import { assetUrl } from "../../core/config";
 
 type Result = { bytes?: Uint8Array; declined?: string; tsUid?: string; free?(): void };
-type Transcoder = { transcode_part10?(input: Uint8Array, tsUid: string): Result; transcode_part10_sv1(input: Uint8Array): Result };
+type Transcoder = {
+  transcode_part10(input: Uint8Array, tsUid: string): Result;
+  /** The transfer syntaxes this build encodes; absent in builds that encode only JPEG Lossless SV1. */
+  supported_transfer_syntaxes?(): string[];
+};
 
 const TS = { sv1: "1.2.840.10008.1.2.4.70", j2k: "1.2.840.10008.1.2.4.90" } as const;
 
@@ -23,12 +27,13 @@ function load(): Promise<Transcoder | null> {
 }
 
 self.onmessage = async (ev: MessageEvent) => {
-  const { id, bytes, mode } = ev.data as { id: number; bytes: ArrayBuffer; mode: keyof typeof TS };
+  const { id, bytes, mode, caps } = ev.data as { id: number; bytes: ArrayBuffer; mode: keyof typeof TS; caps?: boolean };
   const t = await load();
+  if (caps) return postMessage({ id, caps: t ? (t.supported_transfer_syntaxes?.() ?? [TS.sv1]) : [] });
   if (!t) return postMessage({ id, declined: "the encoder is not in this build" });
   try {
     const input = new Uint8Array(bytes);
-    const r = t.transcode_part10 ? t.transcode_part10(input, TS[mode]) : mode === "sv1" ? t.transcode_part10_sv1(input) : { declined: "JPEG 2000 is not in this build" };
+    const r = t.transcode_part10(input, TS[mode]);
     const out = r.bytes;
     const reply = out ? { id, bytes: out.buffer, transferSyntax: r.tsUid ?? TS[mode] } : { id, declined: r.declined ?? "declined" };
     r.free?.();

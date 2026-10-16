@@ -705,12 +705,16 @@ async function stallProxy(port, upstream, stallAtPatch) {
   };
 }
 
-/** Starts the upload of NET_DIR's files and waits until `pct` percent is sent. */
+/**
+ * Starts the upload of NET_DIR's files and waits until `pct` percent is sent. `o.exact`: keep the
+ * files exactly as they are (the network flows, so the upload stays long enough to disturb).
+ */
 async function startNetUpload(page, dev, files, pct, o = {}) {
   await page.goto(`${o.pageBase ?? BASE}/share${o.query ?? ""}`);
   await page.click("[data-src=files]");
   await page.setInputFiles("#in-files", files);
   await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+  if (o.exact) await page.locator("label.pick:has(input[value=exact])").click();
   await page.click("#rv-next");
   await page.click("#who-form button[type=submit]");
   // The upload's own bar (compressing comes first, on the same bar).
@@ -746,7 +750,7 @@ async function flowNetwork(dev) {
     const cdp = await context.newCDPSession(page);
     await cdp.send("Network.enable");
     await cdp.send("Network.emulateNetworkConditions", slow);
-    await startNetUpload(page, dev, files, 20);
+    await startNetUpload(page, dev, files, 20, { exact: true });
     await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });
     const shown = await seesTrouble(page);
     check(`${P}: the page says the connection is lost`, /Connection lost/.test(shown), shown);
@@ -764,16 +768,17 @@ async function flowNetwork(dev) {
   {
     const P = `flaky/${dev}`;
     const { context, page, errors } = await newPage(dev, { allowErrors: noise });
-    let failed = 0;
+    // Every third append fails (alternately reset and 503), so every run rides out some.
+    let failed = 0, patches = 0;
     await page.route(/\/api\/shares\/[^/]+\/files\//, async (route) => {
       const r = route.request();
-      if (r.method() === "PATCH" && Math.random() < 0.33) {
+      if (r.method() === "PATCH" && ++patches % 3 === 2) {
         failed++;
         return failed % 2 ? route.abort("connectionreset") : route.fulfill({ status: 503, body: "Service Unavailable" });
       }
       return route.continue();
     });
-    await startNetUpload(page, dev, files, 0);
+    await startNetUpload(page, dev, files, 0, { exact: true });
     await finishNetUpload(page, P, files);
     check(`${P}: rode out ${failed} failed requests`, failed > 0, `${failed} failed`);
     await noErrors(P, errors);
@@ -790,7 +795,7 @@ async function flowNetwork(dev) {
     const proxy = await stallProxy(3399, remote ? { host: u.hostname, port: Number(u.port || 443), tls: u.protocol === "https:" } : { port: Number(u.port || 80) }, 3);
     // 409 while the server is still holding the stalled request (until its 30 s idle limit).
     const { context, page, errors } = await newPage(dev, { allowErrors: [...noise, /409/] });
-    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399", pageBase: remote ? "http://localhost:3333" : BASE });
+    await startNetUpload(page, dev, files, 0, { query: "?api=http://127.0.0.1:3399", pageBase: remote ? "http://localhost:3333" : BASE, exact: true });
     const shown = await seesTrouble(page, 120000);
     check(`${P}: a stalled request is noticed`, proxy.stalled && /Connection lost/.test(shown), shown);
     await finishNetUpload(page, P, files);

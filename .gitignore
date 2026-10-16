@@ -4,6 +4,7 @@
 /node_modules/
 /dist/
 /crates/shl-dicom-wasm/pkg/
+/codecs/shl-dicom-transcode-wasm/pkg/
 viewer-kit/dist/
 viewer-kit/node_modules/
 perf-spikes/**/node_modules/

@@ -75,9 +75,10 @@ for (const f of ["pdf.min.mjs", "pdf.worker.min.mjs"]) cpSync(`node_modules/pdfj
 cpSync(offsetWasm, `${assets}/shl_dicom_wasm_bg.wasm`);
 // The Share page's lossless encoder (codecs/shl-dicom-transcode-wasm), loaded by its compress worker.
 const transcodePkg = "codecs/shl-dicom-transcode-wasm/pkg";
-if (existsSync(`${transcodePkg}/shl_dicom_transcode_wasm_bg.wasm`)) {
-  for (const f of ["shl_dicom_transcode_wasm.js", "shl_dicom_transcode_wasm_bg.wasm"]) cpSync(`${transcodePkg}/${f}`, `${assets}/${f}`);
+if (!existsSync(`${transcodePkg}/shl_dicom_transcode_wasm_bg.wasm`)) {
+  throw new Error(`${transcodePkg} missing: cargo build --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm in codecs/, then wasm-bindgen --target web (see deploy/bootstrap-shlink-dicom.sh)`);
 }
+for (const f of ["shl_dicom_transcode_wasm.js", "shl_dicom_transcode_wasm_bg.wasm"]) cpSync(`${transcodePkg}/${f}`, `${assets}/${f}`);
 // MPEG-2 video decoder (FFmpeg, LGPL-2.1+; codecs/mpeg2-wasm), loaded only for MPEG-2 video, and
 // the exact FFmpeg source it was built from, which the LGPL requires us to offer alongside it.
 for (const f of ["mpeg2dec.js", "mpeg2dec.wasm"]) cpSync(`codecs/mpeg2-wasm/dist/${f}`, `${assets}/${f}`);
