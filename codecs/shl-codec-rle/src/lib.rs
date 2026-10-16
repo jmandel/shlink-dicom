@@ -181,15 +181,39 @@ pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame>
             decode_segment(&codestream[start..end], out, cols)?;
         }
     } else {
-        let mut tmp = vec![0u8; plane];
-        for (seg, &(start, end)) in ranges.iter().enumerate() {
-            decode_segment(&codestream[start..end], &mut tmp, cols)?;
-            let s = seg / bps;
-            let k = seg % bps; // 0 = most significant byte
-            let byte = bps - 1 - k; // position within the little-endian sample
-            let dst = &mut data[s * plane * bps..(s + 1) * plane * bps];
-            for (chunk, &v) in dst.chunks_exact_mut(bps).zip(tmp.iter()) {
-                chunk[byte] = v;
+        // A sample's segments come most significant byte first. The first goes into the start of
+        // the sample's region of `data`, the others into `tmp`; then the region is filled with
+        // little-endian samples from its end backwards, a block at a time. Block [a, i) of the
+        // first segment is copied out before samples a..i are written over bytes bps·a..bps·i,
+        // and those bytes lie at or beyond a, past the blocks still to be read.
+        let mut tmp = vec![0u8; plane * (bps - 1)];
+        for (s, segs) in ranges.chunks_exact(bps).enumerate() {
+            let region = &mut data[s * plane * bps..(s + 1) * plane * bps];
+            decode_segment(&codestream[segs[0].0..segs[0].1], &mut region[..plane], cols)?;
+            for (&(start, end), out) in segs[1..].iter().zip(tmp.chunks_exact_mut(plane)) {
+                decode_segment(&codestream[start..end], out, cols)?;
+            }
+            const B: usize = 512;
+            let mut first = [0u8; B];
+            let mut i = plane;
+            while i > 0 {
+                let a = i.saturating_sub(B);
+                let first = &mut first[..i - a];
+                first.copy_from_slice(&region[a..i]);
+                let dst = &mut region[bps * a..bps * i];
+                if bps == 2 {
+                    for ((o, &h), &l) in dst.chunks_exact_mut(2).zip(&*first).zip(&tmp[a..i]) {
+                        o.copy_from_slice(&[l, h]);
+                    }
+                } else {
+                    let (b1, rest) = tmp.split_at(plane);
+                    let (b2, b3) = rest.split_at(plane);
+                    let it = first.iter().zip(&b1[a..i]).zip(&b2[a..i]).zip(&b3[a..i]);
+                    for (o, (((&x0, &x1), &x2), &x3)) in dst.chunks_exact_mut(4).zip(it) {
+                        o.copy_from_slice(&[x3, x2, x1, x0]);
+                    }
+                }
+                i = a;
             }
         }
     }
