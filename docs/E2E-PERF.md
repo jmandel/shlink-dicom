@@ -157,7 +157,7 @@ The rest of the 1 s is the first read of every header: about 0.45 MB, needed to 
 
 ## Proposals (protocol or product: Josh's decision)
 
-1. **Series thumbnails in the Bundle.**
+1. **Series thumbnails in the Bundle.** *Declined (Josh, 16 Oct): the Bundle carries only ImagingStudy indexing information.*
    - Problem: a radiograph's overview thumbnail costs its whole file (2.8–6.5 MB here). SV1 can't be decoded at reduced size, and none of the sample's files carries an icon.
    - Proposal: about 5–10 kB of JPEG per series, in `ImagingStudy.series`.
    - Gain: on Fast 4G each X-ray thumbnail drops from about 3–6 s to near zero, and on Slow 4G from about 16–36 s.
