@@ -76,6 +76,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .thumb-over { position: absolute; inset: auto 0 0 0; display: flex; flex-direction: column; gap: 3px; padding: 4px 5px 5px; font-size: 0.6875rem; line-height: 1.2; color: var(--text-2); text-align: center; }
 .thumb-tile.has-image .thumb-over { background: rgba(0, 0, 0, 0.6); color: #fff; }
 .thumb-over.thumb-error { inset: 0; justify-content: center; color: var(--text-2); }
+.thumb-label { overflow-wrap: anywhere; }
 .thumb-bar { display: block; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
 .thumb-fill { display: block; height: 100%; width: 0; background: var(--accent); }
 .study-title { font-weight: 650; font-size: 1.0625rem; margin: 0 0 2px; overflow-wrap: anywhere; }
@@ -400,3 +401,22 @@ body.slide-mode .measure-tool, body.slide-mode #btn-measure { display: none; }
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; cursor: pointer; overflow-wrap: anywhere;
 }
 .choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+
+/* Window/level on touch screens is a mode: the hint says so and has Done. */
+.adjust-hint {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 4;
+  display: flex; align-items: center; gap: 10px; max-width: calc(100% - 24px);
+  padding: 6px 6px 6px 14px; border-radius: 999px; background: rgba(0, 0, 0, 0.72); color: #fff; font-size: 0.875rem;
+}
+.adjust-hint .btn { min-height: 36px; padding: 4px 14px; flex: none; }
+@media (pointer: coarse) { .adjust-hint .btn { min-height: 44px; } }
+.first-hint {
+  position: absolute; left: 50%; top: 56px; transform: translateX(-50%); z-index: 4; pointer-events: none;
+  max-width: calc(100% - 24px); padding: 6px 14px; border-radius: 999px; background: rgba(0, 0, 0, 0.72); color: #fff; font-size: 0.875rem; text-align: center;
+}
+#btn-adjust[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+body.slide-mode #btn-adjust, body.slide-mode .adjust-hint { display: none !important; }
+.gestures { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 8px 16px; margin: 12px 0; }
+.gestures dt { font-weight: 600; overflow-wrap: anywhere; }
+.gestures dd { margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
+@media (max-width: 600px), (max-height: 500px) { .wide-only { display: none !important; } }

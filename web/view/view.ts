@@ -27,7 +27,7 @@ import {
   type StudyEntry,
 } from "../core/index";
 import { getDecoderPool, ImageStore, imageHeader, imageHeaderNow, PoolDecryptor, Priority, type DecodedImage } from "../core/images";
-import { displayPlan, formatValue, imageRealWorld, linearWindow, realValue, realWorldOf, unitText, type DisplayModel, type RealWorld, type VoiChoice } from "../core/display";
+import { displayPlan, formatValue, imageRealWorld, linearWindow, realValue, realWorldOf, rescaleOf, unitText, type DisplayModel, type RealWorld, type VoiChoice } from "../core/display";
 import { defaultView, frameOf, renderCpu, type Frame } from "../../viewer-kit/src/index";
 import { iccToSrgb, type IccTransform } from "../core/icc";
 import { drawThumbnail, Viewport } from "../core/render";
@@ -49,7 +49,8 @@ import { Layers, mapColours, mapScale, type Layer } from "./layers";
 import { Measure, type Tool } from "./measure";
 import { GpuReformatter } from "../core/volume-gl";
 import { buildVolume, isAcquired, makeVolume, planeGrid, reformat, VolumeError, type Orientation, type Plane, type PlaneGrid, type PlaneSpec, type Slab, type SlabMode, type Volume } from "../core/volume";
-import { geometryOf } from "../core/geometry";
+import { dot, geometryOf, normal } from "../core/geometry";
+import { refersTo } from "../core/derived";
 import { renderReports, reportHeading } from "./report-view";
 
 const sopKind = (c: string) => sopInfo(c).kind;
@@ -484,20 +485,47 @@ function openLayersSheet() {
 }
 
 /** Applies a presentation state (or removes one): window, invert, zoom to its displayed area, then draws its graphics. */
+/** The window in use before a presentation state took over, restored on images it does not name. */
+let beforePs: { wc: number; ww: number; presetId: string } | null = null;
+/** The image (sop/frame) the presentation state was last applied to, or "" when it is not applied. */
+let psOn = "";
+
 function applyPresentationState(l: Layer | null) {
   if (!layers) return;
+  if (l?.ps && !layers.applied) beforePs = { wc, ww, presetId };
   layers.applied = l;
-  const ps = l?.ps;
-  const sop = shown?.sop ?? "";
-  if (!ps) {
+  psOn = "";
+  if (!l?.ps) {
+    beforePs = null;
     viewport?.setView({ invert: false });
+    $("stage").style.setProperty("--ps-transform", "none");
     resetView();
-  } else {
-    const voi = ps.voi.find((v) => !v.images.length || v.images.some((r) => r.sopInstance === sop)) ?? ps.voi[0];
-    if (voi) setWindow(voi.center, voi.width);
-    viewport?.setView({ invert: ps.presentationShape === "INVERSE" });
-    const area = ps.displayedArea[0];
-    if (area && shown) {
+  } else syncPresentationState();
+  layers.redraw();
+  updateLayersButton();
+}
+
+/**
+ * A presentation state's window, inversion, displayed area and rotation apply to the images it
+ * names, and only to them: on others the viewer's own window comes back. Run on every draw.
+ */
+function syncPresentationState() {
+  const ps = layers?.applied?.ps;
+  if (!ps || !shown) return;
+  const key = `${shown.sop}/${shown.frame}`;
+  const named = refersTo(ps.images, shown.sop, shown.frame + 1);
+  if (named) {
+    if (psOn === key) return;
+    psOn = key;
+    const voi = ps.voi.find((v) => refersTo(v.images, shown!.sop, shown!.frame + 1)) ?? ps.voi[0];
+    if (voi) {
+      wc = voi.center;
+      ww = Math.max(1, voi.width);
+      presetId = "custom";
+    }
+    viewport?.setView({ ...displayView(shown.img, shown.frame), invert: ps.presentationShape === "INVERSE" });
+    const area = ps.displayedArea.find((d) => refersTo(d.images, shown!.sop, shown!.frame + 1));
+    if (area) {
       const cols = shown.img.columns, rows = shown.img.rows;
       const w = area.br[0] - area.tl[0] + 1, h = area.br[1] - area.tl[1] + 1;
       const z = Math.min(cols / w, rows / h);
@@ -505,10 +533,14 @@ function applyPresentationState(l: Layer | null) {
       const s = Math.min(viewport!.canvas.width / cols, viewport!.canvas.height / rows) * z;
       setZoomPan(z, -cx * s, -cy * s);
     }
+    $("stage").style.setProperty("--ps-transform", `rotate(${ps.rotation}deg)${ps.flip ? " scaleX(-1)" : ""}`);
+  } else if (psOn) {
+    psOn = "";
+    if (beforePs) ({ wc, ww, presetId } = beforePs);
+    viewport?.setView({ ...displayView(shown.img, shown.frame), invert: false });
+    $("stage").style.setProperty("--ps-transform", "none");
   }
-  $("stage").style.setProperty("--ps-transform", ps ? `rotate(${ps.rotation}deg)${ps.flip ? " scaleX(-1)" : ""}` : "none");
-  layers.redraw();
-  updateLayersButton();
+  updateHud();
 }
 
 /** A series holding video says so in the list, with its length when the file records frame timing. */
@@ -567,8 +599,16 @@ async function showDerived(se: SeriesEntry) {
   const { study: ts, series: tse } = at as { study: number; series: number };
   if (ts !== studyIdx) openStudy(ts);
   selectSeries(tse);
-  if (l.kind === "pr") applyPresentationState(l);
-  else await layers!.toggle(l, true);
+  if (l.kind === "pr") {
+    // Open at the first image the state names (its frame, for a multi-frame image), then apply it.
+    const target = share!.index.studies[ts].series[tse];
+    const ref = l.ps!.images.find((r) => target.instances.some((x) => x.uid === r.sopInstance));
+    if (ref) {
+      const i = target.instances.findIndex((x) => x.uid === ref.sopInstance);
+      showSlice(target.instances.length === 1 && ref.frames.length ? sliceOfFrame(ref.frames[0] - 1) : i);
+    }
+    applyPresentationState(l);
+  } else await layers!.toggle(l, true);
   updateLayersButton();
 }
 
@@ -619,14 +659,17 @@ async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: D
   if (se.instances.length === 1) {
     const img = await images!.get(se, 0, { priority: Priority.Visible, onProgress: (r, t) => stageBusy(`Loading the series · ${formatBytes(r)} of ${formatBytes(t)}`, r, t) });
     const h = await imageHeader(img);
-    for (let f = 0; f < img.frames; f++) input.push({ img, frame: f, geom: geometryOf(h!.ds, f) });
+    for (let f = 0; f < img.frames; f++) input.push({ img, frame: f, geom: geometryOf(h!.ds, f), rescale: rescaleOf(h!.ds, f) });
   } else {
     const n = se.instances.length;
     let done = 0;
     const step = () => stageBusy(`Loading slices · ${done} of ${n}`, done, n);
     step();
     const imgs = await Promise.all(se.instances.map((_, i) => images!.get(se, i, { priority: Priority.Visible }).then((im) => (done++, step(), im))));
-    for (const img of imgs) input.push({ img, frame: 0, geom: geometryOf((await imageHeader(img))!.ds, null) });
+    for (const img of imgs) {
+      const ds = (await imageHeader(img))!.ds;
+      input.push({ img, frame: 0, geom: geometryOf(ds, null), rescale: rescaleOf(ds, 0) });
+    }
   }
   const volume = buildVolume(input);
   lastVolume?.gpu?.destroy();
@@ -1185,6 +1228,7 @@ function openStudy(si: number, push = true) {
   studyAbort.abort();
   studyAbort = new AbortController();
   show("viewer");
+  firstHint();
   $("top-kicker").textContent = sharedLine;
   $("top-title").textContent = studyTitle(study());
   document.title = studyTitle(study());
@@ -1269,6 +1313,7 @@ function selectSeries(k: number) {
   seriesIdx = k;
   const se = series();
   updateDownloadButton();
+  setAdjust(false);
   // Reformats are for image series (set again below when this is one).
   $("view-plane").classList.add("hidden");
   $("btn-plane-opts").classList.add("hidden");
@@ -1329,6 +1374,7 @@ function selectSeries(k: number) {
   mpr = null;
   updatePlaneSelect(se);
   sliceCount = se.instances.length;
+  frameOrder = null;
   presetId = "auto";
   wc = 0;
   ww = 0;
@@ -1418,9 +1464,33 @@ async function openLabelSheet() {
 }
 
 /** Slice i → (instance, frame). Many instances: one slice each. One multi-frame instance: its frames. */
+/**
+ * A single multi-frame instance steps through its frames in space, not in stored order: frames
+ * sorted by position along the normal (as reformats are), stored order where frames carry no
+ * position or share one (cine, b-values, phases keep their order).
+ */
+let frameOrder: number[] | null = null;
+
+function spatialFrameOrder(img: DecodedImage): number[] | null {
+  const ds = headerNow(img);
+  if (!ds || img.frames < 2) return null;
+  const geoms = Array.from({ length: img.frames }, (_, f) => geometryOf(ds, f));
+  const n = normal(geoms[0]);
+  if (!n || geoms.some((g) => !g.position)) return null;
+  const d = geoms.map((g) => dot(g.position!, n));
+  if (Math.max(...d) - Math.min(...d) < 1e-3) return null;
+  return d.map((v, f) => ({ v, f })).sort((a, b) => a.v - b.v || a.f - b.f).map((x) => x.f);
+}
+
 function sliceTarget(i: number): { inst: number; frame: number } {
   const se = series();
-  return se.instances.length === 1 ? { inst: 0, frame: i } : { inst: i, frame: 0 };
+  return se.instances.length === 1 ? { inst: 0, frame: frameOrder?.[i] ?? i } : { inst: i, frame: 0 };
+}
+
+/** The slice that shows stored frame f of a single multi-frame instance. */
+function sliceOfFrame(f: number): number {
+  const i = frameOrder?.indexOf(f) ?? -1;
+  return i >= 0 ? i : f;
 }
 
 function showSlice(i: number, startPrefetch = false) {
@@ -1497,9 +1567,16 @@ function sliceError(e: unknown) {
 function draw(img: DecodedImage, frame: number) {
   const se = series();
   $("stage-busy").classList.add("hidden");
-  // Single multi-frame instance: its frames become the slices.
+  // The display transform needs the header (its LUTs, windows, shape): draw once it is read.
+  const hp = img.header && !imageHeaderNow(img) ? imageHeader(img) : null;
+  if (hp) {
+    void hp.then(() => draw(img, frame), () => draw(img, frame));
+    return;
+  }
+  // Single multi-frame instance: its frames become the slices, in spatial order.
   if (se.instances.length === 1 && img.frames > 1 && sliceCount !== img.frames) {
     sliceCount = img.frames;
+    frameOrder = spatialFrameOrder(img);
     const slider = $<HTMLInputElement>("slice");
     slider.max = String(sliceCount - 1);
     slider.disabled = false;
@@ -1508,16 +1585,11 @@ function draw(img: DecodedImage, frame: number) {
       return;
     }
   }
-  // The display transform needs the header (its LUTs, windows, shape): draw once it is read.
-  const hp = img.header && !imageHeaderNow(img) ? imageHeader(img) : null;
-  if (hp) {
-    void hp.then(() => draw(img, frame), () => draw(img, frame));
-    return;
-  }
   const k = Math.min(frame, img.frames - 1);
   if (autoWw === 0) initialDisplay(img, k);
   viewport!.show(img, k, { ...displayView(img, k), zoom, panX, panY }, displayFrame(img, k));
   shown = { img, frame: Math.min(frame, img.frames - 1), sop: se.instances[sliceTarget(sliceIdx).inst].uid };
+  syncPresentationState();
   const t = iccs.get(img);
   iccInUse = t ? t.description || "embedded profile" : "";
   refreshLayers();
@@ -1544,7 +1616,9 @@ function valueAt(x: number, y: number): { value: number; units: string; text: st
   if (!shown || mpr || shown.img.samplesPerPixel !== 1) return null;
   const img = shown.img, k = shown.frame;
   if (x < 0 || y < 0 || x >= img.columns || y >= img.rows) return null;
-  const f = frameOf(img, k);
+  const h = imageHeaderNow(img);
+  const rs = h ? rescaleOf(h.ds, (h.ds.num(T.NumberOfFrames) ?? 1) > 1 ? k : 0) : null;
+  const f = rs ? { ...frameOf(img, k), rescaleSlope: rs.slope, rescaleIntercept: rs.intercept } : frameOf(img, k);
   const rw = realWorldFor(img, k);
   const value = realValue(f.data[y * img.columns + x], rw, f);
   const units = rw ? unitText(rw.units) : seriesDisplay?.rescaleType && seriesDisplay.rescaleType !== "US" ? seriesDisplay.rescaleType : "";
@@ -1823,17 +1897,46 @@ function stepSlice(d: number) {
 
 // ------------------------------------------------------------------------------------- gestures
 
+/**
+ * Window/level as an explicit mode on touch screens ("Adjust"): while on, one finger changes
+ * brightness and contrast. Desktop needs no mode: left-drag is window/level.
+ */
+let adjusting = false;
+
+function setAdjust(on: boolean) {
+  adjusting = on;
+  $("btn-adjust").setAttribute("aria-pressed", String(on));
+  $("adjust-hint").classList.toggle("hidden", !on);
+}
+
+/**
+ * Window/level from a drag, the same everywhere: across changes the width (contrast, right =
+ * wider), up and down the level (drag up = brighter, a lower centre). Gain follows the window.
+ */
+function dragWindow(dx: number, dy: number) {
+  const g = isFloat() ? ww / 220 : Math.max(0.5, ww / 220);
+  setWindow(wc + dy * g, ww + dx * g);
+  presetId = "custom";
+}
+
+/**
+ * The stage's input. Desktop (as OHIF and Cornerstone): left-drag window/level (or measures,
+ * when a tool is on), middle-drag pan, right-drag zoom, wheel steps slices, Ctrl/Cmd+wheel and
+ * trackpad pinch zoom at the cursor, double-click resets. Touch (as a phone's photo viewer):
+ * pinch zooms at the fingers' midpoint and two fingers pan together; one finger pans when the
+ * image is zoomed in, or steps slices with a vertical drag at fit; double-tap resets; window/level
+ * only in Adjust mode.
+ */
 function wireGestures() {
   const stage = $("stage");
   type P = { x: number; y: number; x0: number; y0: number; type: string; button: number };
   const pts = new Map<number, P>();
-  let mode: "none" | "slice" | "wl" | "pan" | "pinch" | "two" = "none";
+  let mode: "none" | "slice" | "wl" | "pan" | "zoom" | "two" = "none";
   let carry = 0;
-  let holdTimer: ReturnType<typeof setTimeout> | null = null;
   let lastTap = 0;
-  let pinchD0 = 0, pinchZ0 = 1, mid0x = 0, mid0y = 0, pan0x = 0, pan0y = 0;
+  let zoomAnchor: readonly [number, number] = [0, 0];
+  let d0 = 0, z0 = 1, mid0x = 0, mid0y = 0, pan0x = 0, pan0y = 0;
   const STEP_PX = 9;
-  const wlGain = () => (isFloat() ? ww / 220 : Math.max(0.5, ww / 220));
 
   const canvasPoint = (x: number, y: number) => {
     const r = viewport!.canvas.getBoundingClientRect();
@@ -1846,7 +1949,9 @@ function wireGestures() {
   let lastMeasureTap = 0;
   stage.addEventListener("pointerdown", (e) => {
     if (!viewport || slideView?.active || inObject(e)) return;
-    if (measure?.active) {
+    // Controls drawn over the image (the Adjust hint's Done) take their own clicks.
+    if ((e.target as Element | null)?.closest?.("button")) return;
+    if (measure?.active && (e.pointerType !== "mouse" || e.button === 0)) {
       stage.setPointerCapture(e.pointerId);
       const now = performance.now();
       measure.pointer("down", e.clientX, e.clientY, now - lastMeasureTap < 350);
@@ -1857,7 +1962,9 @@ function wireGestures() {
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, type: e.pointerType, button: e.button });
     carry = 0;
     if (e.pointerType === "mouse") {
-      mode = e.button === 1 || e.button === 2 || e.shiftKey ? "pan" : "wl";
+      mode = e.button === 1 ? "pan" : e.button === 2 ? "zoom" : "wl";
+      if (mode === "zoom") zoomAnchor = canvasPoint(e.clientX, e.clientY);
+      if (e.button === 1) e.preventDefault(); // no autoscroll
       return;
     }
     if (pts.size === 1) {
@@ -1869,21 +1976,13 @@ function wireGestures() {
         return;
       }
       lastTap = now;
-      // One finger pans a zoomed image, or an image with nothing to step through; else steps slices.
-      mode = zoom > 1.01 || sliceCount <= 1 ? "pan" : "slice";
-      if (holdTimer) clearTimeout(holdTimer);
-      holdTimer = setTimeout(() => {
-        const p = pts.get(e.pointerId);
-        if (pts.size === 1 && p && Math.hypot(p.x - p.x0, p.y - p.y0) < 8) {
-          mode = "wl";
-          navigator.vibrate?.(10);
-        }
-      }, 420);
+      // One finger: window/level in Adjust mode; else pans a zoomed image (or one with nothing to
+      // step through); else steps slices.
+      mode = adjusting ? "wl" : zoom > 1.01 || sliceCount <= 1 ? "pan" : "slice";
     } else if (pts.size === 2) {
-      if (holdTimer) clearTimeout(holdTimer);
       const [a, b] = [...pts.values()];
-      pinchD0 = Math.hypot(b.x - a.x, b.y - a.y);
-      pinchZ0 = zoom;
+      d0 = Math.hypot(b.x - a.x, b.y - a.y);
+      z0 = zoom;
       mid0x = (a.x + b.x) / 2;
       mid0y = (a.y + b.y) / 2;
       pan0x = panX;
@@ -1895,7 +1994,7 @@ function wireGestures() {
 
   stage.addEventListener("pointermove", (e) => {
     if (slideView?.active) return;
-    if (measure?.active) {
+    if (measure?.active && (e.pointerType !== "mouse" || !pts.size)) {
       measure.pointer("move", e.clientX, e.clientY);
       return;
     }
@@ -1908,21 +2007,19 @@ function wireGestures() {
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
     p.x = e.clientX;
     p.y = e.clientY;
-    if (holdTimer && Math.hypot(p.x - p.x0, p.y - p.y0) > 8) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
-    if (mode === "wl") {
-      setWindow(wc - dy * wlGain(), ww + dx * wlGain());
-      presetId = "custom";
-      return;
-    }
-    if (mode === "pan" && (pts.size === 1 || p.type === "mouse")) {
+    if (mode === "wl" && pts.size === 1) return dragWindow(dx, dy);
+    if (mode === "pan" && pts.size === 1) {
       const s = viewport.scale;
       setZoomPan(zoom, panX + dx * s, panY + dy * s);
       return;
     }
+    if (mode === "zoom") {
+      // Right-drag: up zooms in, down zooms out, about where the drag started.
+      zoomAt(Math.exp(-dy * 0.01), zoomAnchor[0], zoomAnchor[1]);
+      return;
+    }
     if (mode === "slice" && pts.size === 1) {
+      // A vertical drag steps slices; across does nothing.
       carry += dy;
       const steps = Math.trunc(carry / STEP_PX);
       if (steps) {
@@ -1931,39 +2028,26 @@ function wireGestures() {
       }
       return;
     }
-    if ((mode === "two" || mode === "pinch") && pts.size === 2) {
+    if (mode === "two" && pts.size === 2) {
+      // Pinch and pan together: the image point under the fingers' first midpoint follows the
+      // midpoint, scaled by how far the fingers have spread.
       const [a, b] = [...pts.values()];
       const d = Math.hypot(b.x - a.x, b.y - a.y);
+      const s = viewport.scale;
+      const [px, py] = canvasPoint(mid0x, mid0y);
+      const cx = viewport.canvas.width / 2, cy = viewport.canvas.height / 2;
+      const z1 = Math.max(0.5, Math.min(12, d0 > 10 ? z0 * (d / d0) : z0));
+      const kk = z1 / z0;
       const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-      if (mode === "two") {
-        // Decide once per gesture: fingers spreading/closing → pinch; moving together → window/level.
-        if (Math.abs(d - pinchD0) > 24) mode = "pinch";
-        else if (Math.hypot(mx - mid0x, my - mid0y) > 16) {
-          mode = "wl";
-          return;
-        } else return;
-      }
-      if (mode === "pinch" && pinchD0 > 10) {
-        const s = viewport.scale;
-        const k = d / pinchD0;
-        const [px, py] = canvasPoint(mid0x, mid0y);
-        const cx = viewport.canvas.width / 2, cy = viewport.canvas.height / 2;
-        const z1 = Math.max(0.5, Math.min(12, pinchZ0 * k));
-        const kk = z1 / pinchZ0;
-        setZoomPan(z1, px - cx - (px - cx - pan0x) * kk + (mx - mid0x) * s, py - cy - (py - cy - pan0y) * kk + (my - mid0y) * s);
-      }
+      setZoomPan(z1, px - cx - (px - cx - pan0x) * kk + (mx - mid0x) * s, py - cy - (py - cy - pan0y) * kk + (my - mid0y) * s);
     }
   });
 
   const end = (e: PointerEvent) => {
-    if (measure?.active && e.type === "pointerup") measure.pointer("up", e.clientX, e.clientY);
+    if (measure?.active && e.type === "pointerup" && !(e.pointerType === "mouse" && e.button !== 0)) measure.pointer("up", e.clientX, e.clientY);
     pts.delete(e.pointerId);
-    if (holdTimer) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
     if (pts.size === 0) mode = "none";
-    else if (pts.size === 1 && (mode === "pinch" || mode === "two" || mode === "wl")) mode = "none";
+    else if (pts.size === 1 && mode === "two") mode = "none";
   };
   stage.addEventListener("pointerup", end);
   stage.addEventListener("pointercancel", end);
@@ -2222,7 +2306,52 @@ function openMoreSheet() {
     }
     item("Encrypted · verified", "How this link protects the images, and what has been checked", () => openTrustSheet());
   }
+  if (inViewer) item("Gestures", "Zoom, pan, slices and brightness on this screen", () => openGestures());
   openSheet("sheet-more");
+}
+
+/** The gestures for this kind of input (touch, or mouse and keyboard), as wired in wireGestures. */
+function openGestures() {
+  const touch = matchMedia("(pointer: coarse)").matches;
+  const rows: [string, string][] = touch
+    ? [
+        ["Pinch", "Zoom in and out"],
+        ["Two fingers", "Move the image"],
+        ["One finger, zoomed in", "Move the image"],
+        ["One finger up or down", "Step through the slices"],
+        ["Adjust, then one finger", "Brightness and contrast: up is brighter; right widens the window (less contrast)"],
+        ["Double-tap", "Back to the first view"],
+      ]
+    : [
+        ["Drag", "Brightness and contrast: up is brighter; right widens the window (less contrast)"],
+        ["Middle-button drag", "Move the image"],
+        ["Right-button drag", "Zoom: up zooms in"],
+        ["Wheel", "Step through the slices"],
+        ["Ctrl or ⌘ + wheel, or pinch on a trackpad", "Zoom at the pointer"],
+        ["Double-click", "Back to the first view"],
+        ["Arrow keys, Page Up and Down", "Step through the slices"],
+        ["R", "Back to the first view"],
+        ["?", "This list"],
+      ];
+  const dl = $("gestures-list");
+  dl.textContent = "";
+  for (const [k, v] of rows) dl.append(el("dt", undefined, k), el("dd", undefined, v));
+  $("gestures-title").textContent = touch ? "Gestures" : "Mouse and keyboard";
+  openSheet("sheet-gestures");
+}
+
+/** The first time a phone opens the viewer: one line about zoom and Adjust, gone after a few seconds. */
+function firstHint() {
+  if (!matchMedia("(pointer: coarse)").matches) return;
+  try {
+    if (localStorage.getItem("view.hint")) return;
+    localStorage.setItem("view.hint", "1");
+  } catch {
+    return;
+  }
+  const h = $("first-hint");
+  h.classList.remove("hidden");
+  setTimeout(() => h.classList.add("hidden"), 5000);
 }
 
 /** A choice list in a sheet, built from a select's options: picking one sets the select (its change handler does the rest). */
@@ -2247,6 +2376,15 @@ function openDisplaySheet() {
   box.textContent = "";
   if (!$("preset").classList.contains("hidden")) choiceSection(box, "Window", $<HTMLSelectElement>("preset"), closeSheet);
   if (!$("view-plane").classList.contains("hidden")) choiceSection(box, "Plane", $<HTMLSelectElement>("view-plane"), closeSheet);
+  if (!document.body.classList.contains("slide-mode")) {
+    const b = el("button", "choice", adjusting ? "Stop adjusting brightness and contrast" : "Adjust brightness and contrast (drag on the image)");
+    b.type = "button";
+    b.addEventListener("click", () => {
+      closeSheet();
+      setAdjust(!adjusting);
+    });
+    box.append(b);
+  }
   if (!$("btn-plane-opts").classList.contains("hidden")) {
     const b = el("button", "choice", "Angle and slab…");
     b.type = "button";
@@ -2379,6 +2517,9 @@ function wireStatic() {
   $<HTMLSelectElement>("view-plane").addEventListener("change", (e) => void enterMpr((e.target as HTMLSelectElement).value as Plane | ""));
   $("btn-plane-opts").addEventListener("click", openPlaneSheet);
   $("btn-more").addEventListener("click", openMoreSheet);
+  $("btn-adjust").addEventListener("click", () => setAdjust(!adjusting));
+  $("btn-adjust-done").addEventListener("click", () => setAdjust(false));
+  $("btn-gestures").addEventListener("click", openGestures);
   $("btn-display").addEventListener("click", openDisplaySheet);
   $("btn-measure").addEventListener("click", openMeasureSheet);
   // The Display button follows the controls it gathers.
@@ -2407,6 +2548,7 @@ function wireStatic() {
   $("btn-dl-cancel").addEventListener("click", () => exportAbort?.abort());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeSheet();
+    else if (e.key === "?" && !(e.target as Element | null)?.closest?.("input, select, textarea") && !$("screen-viewer").classList.contains("hidden")) openGestures();
   });
   wireGestures();
 }
@@ -2568,7 +2710,7 @@ function closeSheetForce() {
     return {
       study: studyIdx >= 0 ? study()?.studyInstanceUid ?? null : null,
       series: studyIdx >= 0 && seriesIdx >= 0 ? study()?.series[seriesIdx]?.uid ?? null : null,
-      onScreen: on && "reason" in on ? { reason: on.reason } : on ? { uid: on.se.instances[on.i].uid } : null,
+      onScreen: on && "reason" in on ? { reason: on.reason } : on ? { uid: on.se.instances[on.i].uid, frame: objectView?.active ? 0 : sliceTarget(sliceIdx).frame } : null,
       mpr: mpr?.orient.plane ?? null,
     };
   },

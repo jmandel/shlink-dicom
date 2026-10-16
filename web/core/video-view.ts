@@ -34,7 +34,7 @@ export { mayHoldMedia };
 // ------------------------------------------------------------------------------------- styles
 
 const CSS = `
-.media-stage { position: absolute; inset: 0; z-index: 4; background: #000; display: flex; align-items: center; justify-content: center; cursor: default; }
+.media-stage { position: absolute; inset: 0; z-index: 4; background: #000; display: flex; align-items: center; justify-content: center; cursor: default; overflow: hidden; touch-action: none; }
 .media-stage.hidden, .play-bar.hidden, .play-bar .hidden { display: none; }
 .media-frame { position: relative; overflow: hidden; max-width: 100%; max-height: 100%; }
 .media-frame video, .media-frame canvas { display: block; width: 100%; height: 100%; }
@@ -437,6 +437,7 @@ export class MediaController {
     o.toolbar.insertBefore(this.bar.root, o.toolbar.firstChild);
     // The stage's slice and window gestures must not see the player's input.
     for (const ev of ["pointerdown", "pointermove", "pointerup", "wheel", "dblclick", "contextmenu"]) this.box.addEventListener(ev, (e) => e.stopPropagation(), { passive: true });
+    this.wireZoom();
     this.box.addEventListener("keydown", (e) => {
       e.stopPropagation();
       this.key(e);
@@ -445,6 +446,97 @@ export class MediaController {
     // Using the slice slider pauses cine.
     o.toolbar.querySelector("#slice")?.addEventListener("input", () => this.cine?.pause());
     (globalThis as any).__video = this.hooks();
+  }
+
+  /** Zoom and pan of the picture (CSS transform of the frame): 1, 0, 0 is the fitted picture. */
+  private view = { z: 1, x: 0, y: 0 };
+
+  private applyView() {
+    const v = this.view;
+    this.frame.style.transform = v.z === 1 && !v.x && !v.y ? "" : `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
+    this.frame.dataset.zoom = String(v.z);
+  }
+
+  /** Zoom by k about client point (px, py), keeping that point under the pointer. */
+  private zoomAt(k: number, px: number, py: number) {
+    const r = this.box.getBoundingClientRect();
+    const cx = px - r.left - r.width / 2, cy = py - r.top - r.height / 2;
+    const z1 = Math.max(1, Math.min(8, this.view.z * k));
+    const kk = z1 / this.view.z;
+    this.view = { z: z1, x: cx - (cx - this.view.x) * kk, y: cy - (cy - this.view.y) * kk };
+    if (z1 === 1) this.view = { z: 1, x: 0, y: 0 };
+    this.applyView();
+  }
+
+  /**
+   * The viewer's geometry gestures on the picture (there is no window/level for video): drag or
+   * middle-drag pans, right-drag and Ctrl/Cmd+wheel (or a trackpad pinch) zoom, pinch zooms and
+   * two fingers pan, one finger pans when zoomed in, double-click or double-tap goes back to fit.
+   */
+  private wireZoom() {
+    const box = this.box;
+    const pts = new Map<number, { x: number; y: number; x0: number; y0: number; button: number }>();
+    let two: { d0: number; z0: number; mx: number; my: number; vx: number; vy: number } | null = null;
+    let lastTap = 0;
+    this.frame.style.transformOrigin = "50% 50%";
+    box.addEventListener("pointerdown", (e) => {
+      if ((e.target as Element).closest?.("a, button")) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, button: e.pointerType === "mouse" ? e.button : 0 });
+      box.setPointerCapture?.(e.pointerId);
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()];
+        two = { d0: Math.hypot(b.x - a.x, b.y - a.y), z0: this.view.z, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, vx: this.view.x, vy: this.view.y };
+      }
+      if (e.pointerType !== "mouse" && pts.size === 1) {
+        const now = performance.now();
+        if (now - lastTap < 300) {
+          this.view = { z: 1, x: 0, y: 0 };
+          this.applyView();
+          lastTap = 0;
+        } else lastTap = now;
+      }
+    });
+    box.addEventListener("pointermove", (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      if (pts.size === 2 && two) {
+        const [a, b] = [...pts.values()];
+        const r = box.getBoundingClientRect();
+        const z1 = Math.max(1, Math.min(8, two.d0 > 10 ? two.z0 * (Math.hypot(b.x - a.x, b.y - a.y) / two.d0) : two.z0));
+        const cx = two.mx - r.left - r.width / 2, cy = two.my - r.top - r.height / 2;
+        const kk = z1 / two.z0;
+        this.view = { z: z1, x: cx - (cx - two.vx) * kk + ((a.x + b.x) / 2 - two.mx), y: cy - (cy - two.vy) * kk + ((a.y + b.y) / 2 - two.my) };
+        this.applyView();
+      } else if (pts.size === 1 && p.button === 2) this.zoomAt(Math.exp(-dy * 0.01), p.x0, p.y0);
+      else if (pts.size === 1 && this.view.z > 1) {
+        this.view.x += dx;
+        this.view.y += dy;
+        this.applyView();
+      }
+    });
+    const end = (e: PointerEvent) => {
+      pts.delete(e.pointerId);
+      if (pts.size < 2) two = null;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    box.addEventListener("contextmenu", (e) => e.preventDefault());
+    box.addEventListener("dblclick", () => {
+      this.view = { z: 1, x: 0, y: 0 };
+      this.applyView();
+    });
+    box.addEventListener(
+      "wheel",
+      (e) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        e.preventDefault();
+        this.zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+      },
+      { passive: false },
+    );
   }
 
   /** Whether a video stage is up. */
@@ -594,6 +686,8 @@ export class MediaController {
 
   /** Stops and removes the clip on screen. */
   private closeClip() {
+    this.view = { z: 1, x: 0, y: 0 };
+    this.applyView();
     if (this.clip) {
       this.clip.abort.abort();
       if (this.clip.url) URL.revokeObjectURL(this.clip.url);

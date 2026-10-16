@@ -231,16 +231,9 @@ for (const name of BRIGHTFIELD) {
     const box = await page.locator(".wsi-canvas").boundingBox();
     const mx = box.x + box.width / 2, my = box.y + box.height / 2;
     const touch = (type, pts) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: pts.map(([x, y], id) => ({ x, y, id })) });
-    // Double tap zooms in 2×.
-    let v0 = await view(page);
-    await page.touchscreen.tap(mx, my);
-    await page.waitForTimeout(80);
-    await page.touchscreen.tap(mx, my);
-    await page.waitForTimeout(150);
-    let v1 = await view(page);
-    check(`${name} phone: double tap zooms in`, Math.abs(v1.scale / v0.scale - 2) < 0.01, `${v0.scale.toFixed(5)} → ${v1.scale.toFixed(5)}`);
     // Pinch out (fingers apart) zooms in about the midpoint.
-    v0 = v1;
+    const fit = await view(page);
+    let v0 = fit, v1;
     await touch("touchStart", [[mx - 30, my], [mx + 30, my]]);
     for (let i = 1; i <= 10; i++) await touch("touchMove", [[mx - 30 - i * 9, my], [mx + 30 + i * 9, my]]);
     await touch("touchEnd", []);
@@ -256,6 +249,13 @@ for (const name of BRIGHTFIELD) {
     v1 = await view(page);
     const dxCss = (v1.cx - v0.cx) * v1.scale / v1.dpr;
     check(`${name} phone: drag pans with the finger`, Math.abs(dxCss - 120) < 3, `moved ${dxCss.toFixed(1)} CSS px for a 120 px drag`);
+    // Double tap goes back to the whole slide (as Reset), as in the slice viewer.
+    await page.touchscreen.tap(mx, my);
+    await page.waitForTimeout(80);
+    await page.touchscreen.tap(mx, my);
+    await page.waitForTimeout(150);
+    v1 = await view(page);
+    check(`${name} phone: double tap shows the whole slide`, Math.abs(v1.scale / fit.scale - 1) < 0.01, `${fit.scale.toFixed(5)} → ${v1.scale.toFixed(5)}`);
     // Minimap tap moves there.
     const mb = await page.locator(".wsi-mini").boundingBox();
     await page.touchscreen.tap(mb.x + mb.width * 0.25, mb.y + mb.height * 0.5);

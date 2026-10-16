@@ -166,11 +166,11 @@ async function flowPublic(dev) {
     await page.waitForTimeout(150);
     const s2 = await state(page);
     check(`${label}: one-finger vertical drag changes slice`, s2.sliceIdx > s.sliceIdx, `${s.sliceIdx} → ${s2.sliceIdx}`);
-    // Two-finger parallel drag: window/level.
+    // Two fingers moving together: pan (window/level is the Adjust mode's, not a gesture).
     await touch(page, cdp, lerp(0, 1, 10).map((t) => [[cx - 40 + t * 50, cy - 20 * t], [cx + 40 + t * 50, cy - 20 * t]]));
     await page.waitForTimeout(100);
     const s3 = await state(page);
-    check(`${label}: two-finger drag changes window/level`, s3.ww !== s2.ww, `W ${Math.round(s2.ww)}→${Math.round(s3.ww)}`);
+    check(`${label}: two-finger drag pans, window unchanged`, s3.ww === s2.ww && (s3.panX !== s2.panX || s3.panY !== s2.panY), `W ${Math.round(s2.ww)}→${Math.round(s3.ww)}, pan ${Math.round(s2.panX)}→${Math.round(s3.panX)}`);
     // Pinch out: zoom.
     await touch(page, cdp, lerp(0, 1, 10).map((t) => [[cx - 30 - 50 * t, cy], [cx + 30 + 50 * t, cy]]));
     await page.waitForTimeout(100);
@@ -1175,6 +1175,222 @@ print(json.dumps({s: sorted(v)[len(v) // 2][1] for s, v in by.items()}))
   await context.close();
 }
 
+// Every input mapping, one test each, on the slice view, a reformat and a slide (video: in
+// object-checks). Desktop: left-drag window/level, middle-drag pan, right-drag zoom, wheel slices,
+// Ctrl+wheel zoom, double-click reset. Touch: pinch, two-finger pan, one finger pans when zoomed or
+// steps slices at fit, Adjust mode, double-tap reset; no hidden window/level gestures; the page
+// itself never zooms or scrolls.
+async function flowGestures(dev) {
+  const label = `gestures/${dev}`;
+  const phone = dev !== "desktop";
+  const { context, page, errors } = await newPage(dev);
+  const cdp = phone ? await context.newCDPSession(page) : null;
+  await page.goto(viewUrl(F.publicLink));
+  await waitOverview(page);
+  const st = () => page.evaluate(() => window.__viewHooks.state());
+  const centre = async () => {
+    const b = await page.locator("#stage").boundingBox();
+    return [b.x + b.width / 2, b.y + b.height / 2];
+  };
+  const pageZoom = () => page.evaluate(() => ({ scale: window.visualViewport?.scale ?? 1, x: scrollX, y: scrollY }));
+  const mouseDrag = async (button, dx, dy) => {
+    const [x, y] = await centre();
+    await page.mouse.move(x, y);
+    await page.mouse.down({ button });
+    await page.mouse.move(x + dx, y + dy, { steps: 8 });
+    await page.mouse.up({ button });
+    await page.waitForTimeout(120);
+  };
+  const finger = async (dx, dy, holdMs = 0) => {
+    const [x, y] = await centre();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 0 }] });
+    if (holdMs) await page.waitForTimeout(holdMs);
+    for (let k = 1; k <= 10; k++) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + (dx * k) / 10, y: y + (dy * k) / 10, id: 0 }] });
+      await page.waitForTimeout(16);
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await page.waitForTimeout(150);
+  };
+  const pinch = async (spread, move = 0) => {
+    const [x, y] = await centre();
+    await touch(page, cdp, lerp(0, 1, 10).map((t) => [[x - 30 - spread * t + move * t, y], [x + 30 + spread * t + move * t, y]]));
+    await page.waitForTimeout(150);
+  };
+  const doubleTap = async () => {
+    const [x, y] = await centre();
+    for (let k = 0; k < 2; k++) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 0 }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await page.waitForTimeout(80);
+    }
+    await page.waitForTimeout(300);
+  };
+  const open = async (re, series) => {
+    if (await page.isVisible("#btn-back")) {
+      await page.click("#btn-back");
+      await page.waitForSelector("#screen-overview:not(.hidden)");
+    }
+    const n = await page.locator(".study-open").count();
+    for (let i = 0; i < n; i++) if (re.test(await page.locator(".study-card .study-title").nth(i).textContent())) {
+      await page.locator(".study-open").nth(i).click();
+      break;
+    }
+    await page.waitForSelector(".series-btn");
+    if (series) await page.locator(".series-btn", { hasText: series }).first().click();
+    await page.waitForFunction(() => !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+    await page.waitForTimeout(400);
+  };
+  // The first phone visit shows the one-line hint, once.
+  if (phone) {
+    await open(/CT/, "ABD/PEL");
+    const hint = await page.isVisible("#first-hint");
+    check(`${label}: first visit shows "${await page.textContent("#first-hint")}"`, hint && (await page.evaluate(() => localStorage.getItem("view.hint"))) === "1");
+  } else await open(/CT/, "ABD/PEL");
+  for (const where of ["slice", "reformat"]) {
+    if (where === "reformat") {
+      await page.evaluate(() => window.__viewHooks.enterMpr("sagittal"));
+      await page.waitForFunction(() => window.__viewHooks.current().mpr && !document.querySelector("#stage-busy:not(.hidden)"), null, { timeout: 120000 });
+      await page.waitForTimeout(300);
+    }
+    const L = `${label} ${where}`;
+    if (!phone) {
+      let a = await st();
+      await mouseDrag("left", 80, 0);
+      let b = await st();
+      check(`${L}: left-drag right widens the window`, b.ww > a.ww && b.wc === a.wc && b.zoom === a.zoom, `W ${Math.round(a.ww)} → ${Math.round(b.ww)}`);
+      a = b;
+      await mouseDrag("left", 0, -60);
+      b = await st();
+      check(`${L}: left-drag up brightens (lower level)`, b.wc < a.wc && b.ww === a.ww, `L ${Math.round(a.wc)} → ${Math.round(b.wc)}`);
+      a = b;
+      await mouseDrag("middle", 50, 30);
+      b = await st();
+      check(`${L}: middle-drag pans`, (b.panX !== a.panX || b.panY !== a.panY) && b.ww === a.ww && b.wc === a.wc && b.sliceIdx === a.sliceIdx, `pan ${Math.round(a.panX)},${Math.round(a.panY)} → ${Math.round(b.panX)},${Math.round(b.panY)}`);
+      a = b;
+      await mouseDrag("right", 0, -60);
+      b = await st();
+      check(`${L}: right-drag up zooms in`, b.zoom > a.zoom * 1.3 && b.ww === a.ww, `zoom ${a.zoom.toFixed(2)} → ${b.zoom.toFixed(2)}`);
+      check(`${L}: no context menu on the stage`, await page.evaluate(() => { const e = new MouseEvent("contextmenu", { bubbles: true, cancelable: true }); document.querySelector("#stage canvas").dispatchEvent(e); return e.defaultPrevented; }));
+      a = b;
+      const [x, y] = await centre();
+      await page.mouse.move(x, y);
+      await page.mouse.wheel(0, 120);
+      await page.waitForTimeout(150);
+      b = await st();
+      check(`${L}: wheel steps slices`, b.sliceIdx === a.sliceIdx + 1 && b.zoom === a.zoom, `${a.sliceIdx} → ${b.sliceIdx}`);
+      a = b;
+      await page.keyboard.down("Control");
+      await page.mouse.wheel(0, -200);
+      await page.keyboard.up("Control");
+      await page.waitForTimeout(150);
+      b = await st();
+      const pz = await pageZoom();
+      check(`${L}: Ctrl+wheel zooms the image at the pointer, not the page`, b.zoom > a.zoom && b.sliceIdx === a.sliceIdx && pz.scale === 1 && pz.x === 0 && pz.y === 0, `zoom ${a.zoom.toFixed(2)} → ${b.zoom.toFixed(2)}, page ${pz.scale}`);
+      await page.mouse.dblclick(x, y);
+      await page.waitForTimeout(300);
+      b = await st();
+      check(`${L}: double-click resets`, b.zoom === 1 && b.panX === 0 && b.panY === 0, `zoom ${b.zoom}, pan ${b.panX},${b.panY}`);
+    } else {
+      await doubleTap();
+      let a = await st();
+      await finger(0, 70);
+      let b = await st();
+      check(`${L}: at fit, one finger up or down steps slices`, b.sliceIdx !== a.sliceIdx && b.panX === a.panX && b.ww === a.ww, `${a.sliceIdx} → ${b.sliceIdx}`);
+      a = b;
+      await finger(90, 0);
+      b = await st();
+      check(`${L}: at fit, one finger across does nothing`, b.sliceIdx === a.sliceIdx && b.panX === a.panX && b.ww === a.ww && b.wc === a.wc);
+      a = b;
+      await finger(90, 0, 700);
+      b = await st();
+      check(`${L}: no long-press window/level`, b.ww === a.ww && b.wc === a.wc, `W ${Math.round(a.ww)} → ${Math.round(b.ww)}`);
+      a = b;
+      await pinch(60);
+      b = await st();
+      const pz = await pageZoom();
+      check(`${L}: pinch zooms the image, not the page`, b.zoom > a.zoom * 1.5 && pz.scale === 1 && pz.x === 0 && pz.y === 0, `zoom ${a.zoom.toFixed(2)} → ${b.zoom.toFixed(2)}, page ${pz.scale}`);
+      a = b;
+      const [x, y] = await centre();
+      await touch(page, cdp, lerp(0, 1, 10).map((t) => [[x - 40 + 60 * t, y - 30 * t], [x + 40 + 60 * t, y - 30 * t]]));
+      await page.waitForTimeout(150);
+      b = await st();
+      check(`${L}: two fingers together pan, no window/level`, (b.panX !== a.panX || b.panY !== a.panY) && b.ww === a.ww && b.wc === a.wc, `pan ${Math.round(a.panX)} → ${Math.round(b.panX)}`);
+      a = b;
+      await finger(-60, 40);
+      b = await st();
+      check(`${L}: zoomed in, one finger pans`, (b.panX !== a.panX || b.panY !== a.panY) && b.sliceIdx === a.sliceIdx && b.ww === a.ww, `pan ${Math.round(a.panX)} → ${Math.round(b.panX)}`);
+      // Adjust mode.
+      await page.click("#btn-adjust");
+      check(`${L}: Adjust shows its hint with Done`, (await page.isVisible("#adjust-hint")) && /Drag to adjust brightness and contrast/.test(await page.textContent("#adjust-hint")));
+      a = await st();
+      await finger(80, 0);
+      b = await st();
+      check(`${L}: Adjust, one finger right widens the window`, b.ww > a.ww && b.wc === a.wc && b.panX === a.panX, `W ${Math.round(a.ww)} → ${Math.round(b.ww)}`);
+      a = b;
+      await finger(0, -60);
+      b = await st();
+      check(`${L}: Adjust, one finger up brightens (lower level)`, b.wc < a.wc && b.ww === a.ww, `L ${Math.round(a.wc)} → ${Math.round(b.wc)}`);
+      a = b;
+      await pinch(40);
+      b = await st();
+      check(`${L}: Adjust, pinch still zooms`, b.zoom > a.zoom && b.ww === a.ww, `zoom ${a.zoom.toFixed(2)} → ${b.zoom.toFixed(2)}`);
+      await page.click("#btn-adjust-done");
+      a = await st();
+      await finger(-50, 30);
+      b = await st();
+      check(`${L}: Done ends Adjust: one finger pans again`, !(await page.isVisible("#adjust-hint")) && b.ww === a.ww && (b.panX !== a.panX || b.panY !== a.panY));
+      await doubleTap();
+      b = await st();
+      check(`${L}: double-tap resets`, b.zoom === 1 && b.panX === 0 && b.panY === 0, `zoom ${b.zoom}`);
+    }
+    if (where === "reformat") await page.evaluate(() => window.__viewHooks.enterMpr(""));
+  }
+  // A slide: the same geometry (pan, zoom, reset); no window/level.
+  await open(/Histo/);
+  await page.waitForTimeout(1500);
+  const v = () => page.evaluate(() => window.__wsi.view());
+  const fit = await v();
+  if (!phone) {
+    await mouseDrag("right", 0, -60);
+    const z = await v();
+    check(`${label} slide: right-drag up zooms in`, z.scale > fit.scale * 1.3, `${fit.scale.toFixed(5)} → ${z.scale.toFixed(5)}`);
+    await mouseDrag("left", 60, 0);
+    const p = await v();
+    check(`${label} slide: left-drag pans (no window/level on slides)`, p.cx !== z.cx && p.scale === z.scale);
+    await mouseDrag("middle", -60, 0);
+    const m = await v();
+    check(`${label} slide: middle-drag pans`, m.cx !== p.cx);
+    const [x, y] = await centre();
+    await page.mouse.dblclick(x, y);
+    await page.waitForTimeout(300);
+    const r = await v();
+    check(`${label} slide: double-click shows the whole slide`, Math.abs(r.scale / fit.scale - 1) < 0.01, `${r.scale.toFixed(5)} vs ${fit.scale.toFixed(5)}`);
+  } else {
+    check(`${label} slide: no Adjust button (no window/level on slides)`, !(await page.isVisible("#btn-adjust")));
+    await pinch(60);
+    const z = await v();
+    const pz = await pageZoom();
+    check(`${label} slide: pinch zooms the slide, not the page`, z.scale > fit.scale * 1.5 && pz.scale === 1);
+    await doubleTap();
+    const r = await v();
+    check(`${label} slide: double-tap shows the whole slide`, Math.abs(r.scale / fit.scale - 1) < 0.01, `${r.scale.toFixed(5)} vs ${fit.scale.toFixed(5)}`);
+  }
+  // The help card lists the gestures for this input.
+  await open(/CT/, "ABD/PEL");
+  if (phone) {
+    await page.click("#btn-more");
+    await page.locator("#sheet-more .more-item", { hasText: "Gestures" }).click();
+  } else await page.keyboard.press("?");
+  await page.waitForSelector("#sheet-gestures:not(.hidden)");
+  const help = await page.textContent("#gestures-list");
+  check(`${label}: the help card lists this input's gestures`, phone ? /Pinch/.test(help) && /Adjust/.test(help) && /Double-tap/.test(help) : /Middle-button drag/.test(help) && /Right-button drag/.test(help) && /Wheel/.test(help) && /up is brighter/.test(help), help.slice(0, 80));
+  await page.screenshot({ path: `${SHOTS}${dev}-gestures.png` });
+  await page.click("#sheet-gestures [data-close]");
+  check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------------------- run
 
 const flows = {
@@ -1190,6 +1406,9 @@ const flows = {
   dark: () => Promise.all(["desktop", "phone390"].map(flowDark)),
   "mpr-ui": () => Promise.all(["desktop", "phone390"].map(flowMprUi)),
   overflow: flowOverflow,
+  gestures: async () => {
+    for (const dev of ["desktop", "phone390"]) await flowGestures(dev);
+  },
   "thumb-middle": flowThumbMiddle,
   "touch-reset": async () => {
     for (const dev of ["phone390", "desktop"]) await flowTouchReset(dev);

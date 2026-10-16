@@ -85,6 +85,18 @@ export function readLut(it: DataSet, explanationTag: number, signedInput = false
   return { first, bits: lutOutputBits(bits, max), declaredBits: bits, data, explanation: it.str(explanationTag) ?? "" };
 }
 
+/**
+ * The header's Rescale Slope and Intercept for frame `frame` (per-frame functional groups, then
+ * shared, then top level), or null when it gives none. It wins over the decoder's copy, which may
+ * stop reading the header before a multi-frame file's later frames.
+ */
+export function rescaleOf(ds: DataSet, frame = 0): { slope: number; intercept: number } | null {
+  const per = ds.seq(T.PerFrameFunctionalGroupsSequence)[frame]?.seq(T.PixelValueTransformationSequence)[0];
+  const pvt = per ?? ds.seq(T.SharedFunctionalGroupsSequence)[0]?.seq(T.PixelValueTransformationSequence)[0] ?? ds;
+  const slope = pvt.num(T.RescaleSlope), intercept = pvt.num(T.RescaleIntercept);
+  return slope != null || intercept != null ? { slope: slope ?? 1, intercept: intercept ?? 0 } : null;
+}
+
 /** What the header asks for, for frame `frame` (per-frame functional groups first). */
 export function displayModel(ds: DataSet, frame = 0): DisplayModel {
   const per = ds.seq(T.PerFrameFunctionalGroupsSequence)[frame];
@@ -226,6 +238,19 @@ function valueWindow(f: Frame, lo = 0.01, hi = 0.99): { center: number; width: n
   return { center: (low + high) / 2, width: Math.max(1, high - low) };
 }
 
+/** Whether at least 1% of the frame's values (sampled, after rescale) fall inside the window. */
+function windowCovers(f: Frame, center: number, width: number): boolean {
+  const d = f.data, m = f.rescaleSlope, b = f.rescaleIntercept;
+  const lo = center - width / 2, hi = center + width / 2;
+  const step = Math.max(1, Math.floor(d.length / 65536));
+  let n = 0, inside = 0;
+  for (let i = 0; i < d.length; i += step, n++) {
+    const v = d[i] * m + b;
+    if (v >= lo && v <= hi) inside++;
+  }
+  return inside >= 0.01 * n;
+}
+
 /**
  * The display transform of PS3.4 N.2 for one frame, in one place: Modality LUT (or rescale), VOI
  * (window with its function, or VOI LUT), Presentation LUT Shape; MONOCHROME1 is inverted by the
@@ -274,7 +299,9 @@ export function displayPlan(img: DecodedImage, k: number, header: DataSet | null
     const pf = img.perFrame?.[k];
     const c = model?.windows[0]?.center ?? pf?.windowCenter ?? img.windowCenter;
     const wd = model?.windows[0]?.width ?? pf?.windowWidth ?? img.windowWidth;
-    if (c != null && wd != null && wd >= 1) w = { center: c, width: wd };
+    // A stored window that misses the frame's values (under 1% inside it) would draw one flat
+    // grey; the frame's own value range shows the image instead.
+    if (c != null && wd != null && wd >= 1) w = windowCovers(base, c, wd) ? { center: c, width: wd } : valueWindow(base);
     else if (model?.voiLuts.length) lutIndex = 0;
     else w = valueWindow(base);
   } else w = valueWindow(base);

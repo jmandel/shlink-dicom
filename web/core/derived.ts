@@ -53,6 +53,8 @@ export interface SegFrame {
   source: ImageRef | null;
   /** Plane position of the frame (patient coordinates), for matching by position. */
   position: Vec3 | null;
+  /** The frame's own plane: position, orientation and spacing (to place it on an image). */
+  geometry: Geometry;
 }
 
 export interface Segmentation {
@@ -88,6 +90,7 @@ export function readSegmentation(ds: DataSet): Segmentation {
       segment: segId?.num(T.ReferencedSegmentNumber) ?? 1,
       source: deriv ? refsIn([deriv])[0] : null,
       position: geometryOf(ds, f).position,
+      geometry: geometryOf(ds, f),
     });
   }
   return {
