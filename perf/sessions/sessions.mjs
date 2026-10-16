@@ -36,7 +36,7 @@ export const SESSIONS = {
   slide: { share: "sample", study: /Histopath/i, steps: slideSteps() },
   // The second share (perf/sessions/README.md, Data).
   us: { share: "extras", study: /3D Rendering/i, steps: [{ op: "open" }, { op: "play", seconds: 4 }, ...scrubSeries({ slow: 16, fast: 16 })] },
-  enhct: { share: "extras", study: /^CT$/, steps: [{ op: "open" }, ...scrubSeries({ slow: 30, fast: 30 }), { op: "mpr", plane: "sagittal", slabs: [10] }] },
+  enhct: { share: "extras", study: /^CT$/, steps: [{ op: "open" }, ...scrubSeries({ slow: 30, fast: 30 })] },
   mg: { share: "extras", study: /MG_Chest/, steps: [{ op: "open" }, { op: "scrub", label: "views", from: "here", count: 6, pace: 1 }] },
   tomo: { share: "extras", study: /TOMOSYNTHESIS/, steps: [{ op: "open" }, ...scrubSeries({ slow: 20, fast: 20 })] },
   dx: { share: "extras", study: /FLAT PLATE/, steps: [{ op: "open" }] },

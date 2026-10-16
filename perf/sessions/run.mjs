@@ -139,7 +139,9 @@ async function opMpr(page, plane, slab) {
       const h = window.__viewHooks, v = window.__view;
       const n0 = v.drawLog.length;
       const t = performance.now();
-      void h.enterMpr(plane, slab ? { slab: { thickness: slab, mode: "mip" } } : undefined);
+      await h.enterMpr(plane, slab ? { slab: { thickness: slab, mode: "mip" } } : undefined);
+      // The acquired plane itself is not a reformat: the viewer stays on the slices.
+      if (!h.current().mpr) return { ms: null, acquired: true };
       for (;;) {
         const d = v.drawLog.slice(n0).find((e) => e[0] === "mpr");
         if (d) return { ms: Math.round(d[2] - t) };
@@ -217,6 +219,7 @@ async function session(browser, kind, run) {
     bytes += e.encodedDataLength;
     requests++;
   });
+  await page.addInitScript(() => performance.setResourceTimingBufferSize(100000));
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const ops = [];
@@ -271,9 +274,13 @@ async function session(browser, kind, run) {
         const k = (((cur + step.to) % n) + n) % n;
         ops.push({ op: "switch", ...(await opSwitch(page, k)) });
       } else if (step.op === "mpr") {
-        const r = await opMpr(page, step.plane);
-        ops.push({ op: "mpr", label: "first", ...r });
-        if (r.ms !== null) for (const slab of step.slabs ?? []) ops.push({ op: "mpr", label: `slab${slab}`, ...(await opMpr(page, step.plane, slab)) });
+        let r, plane;
+        for (plane of [step.plane, "coronal", "sagittal", "axial"]) {
+          r = await opMpr(page, plane);
+          if (!r.acquired) break;
+        }
+        ops.push({ op: "mpr", label: "first", plane, ...r });
+        if (r.ms !== null) for (const slab of step.slabs ?? []) ops.push({ op: "mpr", label: `slab${slab}`, ...(await opMpr(page, plane, slab)) });
       } else if (step.op === "play") {
         ops.push({ op: "play", ...(await opPlay(page, step.seconds)) });
       } else if (step.op === "fit") {
@@ -294,13 +301,23 @@ async function session(browser, kind, run) {
   } catch (e) {
     errors.push(String(e.message ?? e).slice(0, 300));
   }
+  // Bytes and requests from Resource Timing (CDP's counts miss requests the viewer abandons).
+  try {
+    const rt = await page.evaluate(() => {
+      const es = performance.getEntriesByType("resource");
+      return { bytes: es.reduce((a, e) => a + (e.transferSize || e.encodedBodySize || 0), 0), requests: es.length, bin: es.filter((e) => /\.bin/.test(e.name)).length };
+    });
+    bytes = rt.bytes;
+    requests = rt.requests;
+    var binRequests = rt.bin;
+  } catch {}
   const steps = ops.filter((o) => o.op === "step");
   const stalled = steps.filter((o) => o.ms === null || o.ms > STALL_MS);
   const res = {
     build, net, device, cpu, kind, run,
     load: Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]),
     totalMs: Date.now() - t0,
-    bytes, requests,
+    bytes, requests, binRequests,
     stalls: stalled.length,
     stallMs: stalled.reduce((a, o) => a + (o.ms ?? CAP), 0),
     ops,
