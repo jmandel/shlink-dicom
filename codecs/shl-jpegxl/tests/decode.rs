@@ -75,3 +75,62 @@ fn truncated_files_are_errors() {
         }
     }
 }
+
+/// Float samples of a colour PFM (rows stored bottom to top), interleaved, top row first.
+fn pfm(name: &str) -> (usize, usize, Vec<f32>) {
+    let d = data(name);
+    let mut lines = d.splitn(4, |&b| b == b'\n');
+    assert_eq!(lines.next().unwrap(), b"PF");
+    let dims = String::from_utf8(lines.next().unwrap().to_vec()).unwrap();
+    let mut it = dims.split_whitespace().map(|v| v.parse::<usize>().unwrap());
+    let (w, h) = (it.next().unwrap(), it.next().unwrap());
+    let big = !String::from_utf8(lines.next().unwrap().to_vec()).unwrap().trim().starts_with('-');
+    let body = lines.next().unwrap();
+    let vals: Vec<f32> = body
+        .chunks(4)
+        .map(|c| {
+            let b = [c[0], c[1], c[2], c[3]];
+            if big { f32::from_be_bytes(b) } else { f32::from_le_bytes(b) }
+        })
+        .collect();
+    let mut out = Vec::with_capacity(vals.len());
+    for y in (0..h).rev() {
+        out.extend_from_slice(&vals[y * w * 3..(y + 1) * w * 3]);
+    }
+    (w, h, out)
+}
+
+// The next two files come from tests/data/make-test-files.c (libjxl 0.12.0's encoder API):
+// `enc noise-ll.jxl 64 48 0 6400 0 0` and `enc ec3.jxl 64 48 3 0 0 0`.
+
+#[test]
+fn lossless_frame_with_noise_gets_the_noise() {
+    // A lossless RGB frame with photon noise (ISO 6400): libjxl adds the noise, so it must not
+    // take the exact-integer path.
+    let img = decode(&data("noise-ll.jxl"), &Options::default()).unwrap();
+    let (w, h, want) = pfm("noise-ll.djxl.pfm");
+    assert_eq!((img.width as usize, img.height as usize), (w, h));
+    let mut worst = 0f32;
+    for (c, p) in img.planes.iter().take(3).enumerate() {
+        let Plane::Float(p) = p else { panic!("a frame with noise should be rendered as floats") };
+        for (i, &v) in p.iter().enumerate() {
+            worst = worst.max((v - want[i * 3 + c]).abs());
+        }
+    }
+    assert!(worst < 1e-4, "worst difference {worst}");
+}
+
+#[test]
+fn three_extra_channels_fit_the_image_size_limit() {
+    // RGB with alpha, depth and an optional channel, decoded with the limit set to the image
+    // size, as the DICOM wrapper does.
+    let d = data("ec3.jxl");
+    let img = decode(&d, &Options { max_pixels: 64 * 48 }).unwrap();
+    assert_eq!(img.planes.len(), 6);
+    let (_, _, want) = pnm("ec3.djxl.ppm");
+    for (c, p) in img.planes.iter().take(3).enumerate() {
+        let Plane::Int(p) = p else { panic!("lossless output should be integers") };
+        assert!(p.iter().enumerate().all(|(i, &v)| v as u32 == want[i * 3 + c]));
+    }
+    assert!(decode(&data("ec2.jxl"), &Options { max_pixels: 64 * 48 }).is_ok());
+}

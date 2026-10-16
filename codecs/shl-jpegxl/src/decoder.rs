@@ -113,6 +113,8 @@ impl<'a> Decoder<'a> {
             && !fh.loop_filter.gab
             && fh.loop_filter.epf_iters == 0
             && df.patches.is_empty()
+            && df.splines.is_none()
+            && df.noise.is_none()
             && df.nb_color > 0
     }
 

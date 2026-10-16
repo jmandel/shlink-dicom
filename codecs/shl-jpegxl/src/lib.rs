@@ -78,6 +78,7 @@ pub struct Info {
     pub xyb_encoded: bool,
     pub colour: ColourEncoding,
     pub num_extra_channels: usize,
+    pub extra_channels: Vec<ExtraChannelType>,
 }
 
 pub fn info(data: &[u8]) -> Result<Info> {
@@ -93,6 +94,7 @@ pub fn info(data: &[u8]) -> Result<Info> {
         xyb_encoded: hd.metadata.xyb_encoded,
         colour: hd.metadata.colour.clone(),
         num_extra_channels: hd.metadata.extra_channels.len(),
+        extra_channels: hd.metadata.extra_channels.iter().map(|e| e.kind).collect(),
     })
 }
 
@@ -114,7 +116,10 @@ pub fn decode_frames(data: &[u8], opts: &Options, max: usize) -> Result<Vec<Imag
         return Err(Error::Limit("image too large"));
     }
     dec.allow_int = max == 1;
-    dec.max_samples = opts.max_pixels.saturating_mul(4);
+    // A frame may be up to 4× the image area (frames can extend past the canvas), in every
+    // channel; images with more than 13 extra channels get the limit of 13.
+    let nch = (3 + hd.metadata.extra_channels.len() as u64).min(16);
+    dec.max_samples = opts.max_pixels.saturating_mul(4).saturating_mul(nch);
     let mut out = Vec::new();
     while out.len() < max {
         let Some((_, r)) = dec.next_displayed()? else { break };

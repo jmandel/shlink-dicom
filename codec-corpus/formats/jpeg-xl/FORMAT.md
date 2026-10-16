@@ -31,7 +31,7 @@ Crates: `codecs/shl-jpegxl` (the decoder) and `codecs/shl-codec-jpegxl` (the DIC
 - colour: XYB to the image's own colour space for the sRGB, linear, gamma, DCI, BT.709, PQ and HLG transfer functions, with the transfer curves ported from libjxl; YCbCr; orientation;
 - JPEG reconstruction from the `jbrd` box (`reconstruct_jpeg`), byte-identical to the JPEG that was recompressed.
 
-**Refused as unsupported (exit 3):** XYB output to RGB primaries or a white point other than sRGB's; a frame saved for reference after the colour transform but not displayed. XYB images that carry an ICC profile come back as linear sRGB, as libjxl gives them without a colour management system. In the wrapper: floating-point samples, more bits than Bits Allocated, and Bits Allocated 24 (the canonical form has no 24-bit sample type).
+**Refused as unsupported (exit 3):** XYB output to RGB primaries or a white point other than sRGB's; a frame saved for reference after the colour transform but not displayed. XYB images that carry an ICC profile come back as linear sRGB, as libjxl gives them without a colour management system. In the wrapper: CMYK (a black extra channel), floating-point samples, more bits than Bits Allocated, and Bits Allocated 24 (the canonical form has no 24-bit sample type).
 
 **Output.** Lossless (modular, non-XYB) images come back as their exact integers. Everything else comes back as f32 in the image's colour space, nominal range 0.0–1.0.
 

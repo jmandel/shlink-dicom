@@ -60,6 +60,9 @@ pub fn decode_frame(codestream: &[u8], info: &FrameInfo) -> Result<DecodedFrame>
     if hdr.num_color != spp {
         return Err(invalid(format!("JPEG XL has {} colour channel(s) but Samples per Pixel is {spp}", hdr.num_color)));
     }
+    if hdr.extra_channels.contains(&shl_jpegxl::ExtraChannelType::Black) {
+        return Err(unsupported("CMYK JPEG XL (a black extra channel)"));
+    }
     if hdr.bit_depth.float {
         return Err(unsupported("JPEG XL with floating-point samples"));
     }
@@ -130,5 +133,27 @@ mod tests {
         assert!(matches!(decode_frame(b"not a jpeg xl", &info(4, 4)), Err(DecodeError::Invalid(_))));
         assert!(matches!(decode_frame(&[], &info(4, 4)), Err(DecodeError::Invalid(_))));
         assert!(matches!(decode_frame(&[0xFF, 0x0A], &info(4, 4)), Err(DecodeError::Invalid(_))));
+    }
+
+    #[test]
+    fn cmyk_is_unsupported() {
+        // CMY colour channels, a black extra channel and a CMYK ICC profile made by
+        // make-cmyk-profile.c (both in shl-jpegxl/tests/data).
+        let cs = include_bytes!("../../shl-jpegxl/tests/data/cmyk.jxl");
+        let fi = FrameInfo { samples_per_pixel: 3, photometric: Photometric::Rgb, ..info(16, 16) };
+        assert!(matches!(decode_frame(cs, &fi), Err(DecodeError::Unsupported(_))));
+    }
+
+    #[test]
+    fn extra_channels_are_dropped() {
+        // RGB plus alpha, depth and an optional channel (shl-jpegxl's tests/data/ec3.jxl).
+        let cs = include_bytes!("../../shl-jpegxl/tests/data/ec3.jxl");
+        let fi = FrameInfo { samples_per_pixel: 3, photometric: Photometric::Rgb, ..info(48, 64) };
+        let f = decode_frame(cs, &fi).unwrap();
+        assert_eq!(f.data.len(), 64 * 48 * 3);
+        // The colour pattern of make-test-files.c at (x, y) = (10, 5).
+        let (x, y) = (10usize, 5usize);
+        let p = &f.data[(y * 64 + x) * 3..][..3];
+        assert_eq!(p, [(x * 255 / 64) as u8, (y * 255 / 48) as u8, ((x * 7 + y * 13) & 255) as u8]);
     }
 }
