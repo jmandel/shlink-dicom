@@ -187,7 +187,8 @@ fn encode(fill: impl Fn(usize, &mut [u16]), columns: u32, rows: u32, components:
     fn emit(bw: &mut BitWriter, l: &[(u32, u32); 17], d: i32) {
         let s = category(d);
         let (code, len) = l[s as usize];
-        let v = if d < 0 { d - 1 } else { d } as u32 & ((1u32 << s) - 1) & 0x7FFF;
+        // d − 1 for negative d (T.81 F.1.2.1.1), without a branch.
+        let v = d.wrapping_add(d >> 31) as u32 & ((1u32 << s) - 1) & 0x7FFF;
         bw.put(code | if s < 16 { v } else { 0 }, len);
     }
     for_rows(h, n, precision, &fill, (&mut prev, &mut cur, &mut diffs), |row: &[i32]| {
@@ -233,7 +234,9 @@ fn differences(row: &[u16], prev: Option<&[u16]>, n: usize, precision: u8, out: 
 /// SSSS: the number of bits in |d| (0 for 0, 16 for 32768).
 #[inline(always)]
 fn category(d: i32) -> u32 {
-    32 - d.unsigned_abs().leading_zeros()
+    // |d| without a branch: on noisy images the sign is random and a branch mispredicts.
+    let m = d >> 31;
+    32 - ((d ^ m) - m).leading_zeros()
 }
 
 struct Table {

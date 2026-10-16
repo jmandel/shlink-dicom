@@ -138,17 +138,27 @@ Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv
 
 ## SV1 encoder
 
-`encode.rs` writes the SV1 streams that every share is packed with ([performance plan, T1](../../../docs/PERF-PLAN.md#t1-sv1-decode-and-encode)). Measured on the live sample's uncompressed series with `shl-dicom-transcode`'s `perf` example (`encode` mode: encoder only, from decoded pixels; native, one core) and, in wasm, by transcoding the same files to SV1 in Node with the `shl-dicom-transcode-wasm` build (whole transcode, both self-checks included, user cycles per pass), at load 1–2.
+`encode.rs` writes the SV1 streams that every share is packed with ([performance plan, T1](../../../docs/PERF-PLAN.md#t1-sv1-decode-and-encode)). Measured on the live sample's uncompressed series, one core (`taskset`), from memory, at load 2–3:
 
-| Series | Native encoder, MB/s: before → after | wasm transcode, cycles per pass: before → after |
-|---|---|---|
-| abdomen CT, 93 slices | 201 → 240 | 1,635M → 1,448M (−11%) |
-| brain MR | 186 → 222 | 134M → 125M (−7%) (one series) |
-| wrist X-ray | 189 → 227 | 471M → 399M (−15%) (one study) |
+- **Ours, native:** `shl-dicom-transcode`'s `perf` example in `encode` mode (encoder only, from decoded pixels): native pixel bytes over the fastest of 7 passes over the series.
+- **libjpeg-turbo 3.2:** `tj3Compress16` with `TJPARAM_LOSSLESS` 1, predictor 1, point transform 0, `TJPARAM_PRECISION` = Bits Stored, grayscale, the same frames from memory (in-process through ctypes); the same MB/s definition.
+- **DCMTK 3.7 `dcmcjpeg +e1`:** whole processes, so its time is given net of `dcmconv` on the same files (reading and writing without compression). Per-process start-up still differs between the two tools, which makes the MR series (267 files) the least reliable.
+- **wasm:** the whole SV1 transcode (both self-checks included) in Node with the `shl-dicom-transcode-wasm` build, user cycles per pass over the series. There is no reference SV1 encoder in wasm.
 
-- **What changed:** each pass over the rows called its per-row work through `&mut dyn FnMut`, and the coding pass called `emit` and `BitWriter::put` per sample without inlining them, so the bit buffer went through memory for every sample. The row loop is now generic, `emit`, `put` and `category` are inlined, `put` no longer masks bits its callers already keep within `n`, and the check for a 0xFF byte in each flushed word is one word-wide test instead of four compares.
-- **Four partial histograms** in the counting pass (one-component images), so increments of the same category no longer wait on each other: wasm transcode of the CT series 1,467M → 1,413M cycles per pass (−3.7%); the MR series ran the same instructions (323M against 322M) and cycles within run-to-run spread, the X-ray study 2% fewer cycles.
-- **Rejected:** keeping all differences from the counting pass (16 bits each) instead of computing them again in the coding pass. It cost about 4% more cycles than recomputing them, and memory for the whole frame instead of three rows.
+| Series | Ours native MB/s: main → now | libjpeg-turbo MB/s | dcmcjpeg +e1 MB/s, net of I/O | wasm transcode cycles per pass: main → now |
+|---|---|---|---|---|
+| abdomen CT, 93 slices, 16-bit | 202 → 343 | 74.6 | 66 | 1,627M → 1,227M (−25%) |
+| brain MR, 267 images, 16-bit | 188 → 329 | 58.0 | 12 | 138M → 115M (−17%), one series |
+| wrist X-ray, 3 images, 12-bit | 189 → 355 | 65.8 | 75 | 465M → 328M (−29%), one study |
+
+- **What changed (three commits):**
+  - Each pass over the rows called its per-row work through `&mut dyn FnMut`, and the coding pass called `emit` and `BitWriter::put` per sample without inlining them, so the bit buffer went through memory for every sample. The row loop is now generic, `emit`, `put` and `category` are inlined, `put` no longer masks bits its callers already keep within `n`, and the check for a 0xFF byte in each flushed word is one word-wide test instead of four compares (native 201 → 240 MB/s on the CT series, wasm −11%).
+  - The difference category and its extra bits are computed without branching on the sign. On noisy images the sign is random, so the branch mispredicted often in both passes: the `perf` run over the CT series went from 33M to 9M branch misses (native 243 → 339 MB/s, wasm −13–16%).
+  - **Four partial histograms** in the counting pass (one-component images), so increments of the same category no longer wait on each other: wasm transcode of the CT series 1,467M → 1,413M cycles per pass (−3.7%); the MR series ran the same instructions (323M against 322M) and cycles within run-to-run spread, the X-ray study 2% fewer cycles.
+- **Rejected:**
+  - Keeping all differences from the counting pass (16 bits each) instead of computing them again in the coding pass. It cost about 4% more cycles than recomputing them, and memory for the whole frame instead of three rows.
+  - Inlining the per-row `differences`: 1.5% fewer wasm instructions, no cycle change.
+  - Holding the bit buffer in locals across the coding loop, apart from the output `Vec`: about 2% fewer wasm instructions, native unchanged; not worth a second write path.
 - **Exactness:** SV1 outputs of every live file (735 encoded, 4 declined, as before) and every corpus file are byte-identical to the previous build natively, and the wasm build's outputs equal the native ones.
 
 ## Exactness
