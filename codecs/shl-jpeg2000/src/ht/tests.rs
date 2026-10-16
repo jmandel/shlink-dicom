@@ -451,3 +451,66 @@ fn report(name: &str, cases: &[Case]) {
     let ns = |s: f64| s * 1e9 / (reps * samples) as f64;
     eprintln!("{name}: {} blocks, {samples} samples: ours {:.2} ns/sample, reference {:.2} ns/sample", cases.len(), ns(best[0]), ns(best[1]));
 }
+
+/// Writes `tests/data/ht-golden.bin`: block decoder inputs with the reference decoder's result
+/// (success, and a hash of every output word), kept as the regression baseline once the
+/// reference is gone. Run with `cargo test -p shl-jpeg2000 write_golden -- --ignored`.
+#[test]
+#[ignore]
+fn write_golden() {
+    let mut rng = Rng(0x5EED_0F_601D);
+    let mut cases: Vec<Case> = Vec::new();
+    let small: Vec<(usize, usize)> = SIZES.iter().copied().filter(|&(w, h)| w * h <= 4096 && w <= 128 && h <= 128).collect();
+    for i in 0..150 {
+        let size = small[i % small.len()];
+        let k_max = if i % 10 == 0 { 1 + rng.below(30) } else { 1 + rng.below(16) };
+        if let Some(c) = random_case(&mut rng, size, k_max) {
+            if i % 3 == 0 {
+                cases.push(mutate(&mut rng, &c));
+            }
+            cases.push(c);
+        }
+    }
+    for &(w, h) in &[(1024usize, 4usize), (4, 1024), (1024, 1), (1, 1024)] {
+        if let Some(c) = random_case(&mut rng, (w, h), 6) {
+            cases.push(c);
+        }
+    }
+    for i in 0..30 {
+        let (width, height) = small[i % small.len()];
+        let lcup = 2 + rng.below(200) as usize;
+        let lref = rng.below(40) as usize;
+        let mut coded: Vec<u8> = (0..lcup + lref).map(|_| rng.next() as u8).collect();
+        let scup = 2 + rng.below(lcup.min(4079) as u32 - 1) as usize;
+        coded[lcup - 1] = (scup >> 4) as u8;
+        coded[lcup - 2] = (coded[lcup - 2] & 0xF0) | (scup & 0xF) as u8;
+        cases.push(Case { coded, width, height, stride: width, missing_msbs: 10 + rng.below(20), num_passes: 1 + rng.below(3), len_cleanup: lcup, len_refinement: lref, vertically_causal: rng.below(2) == 0 });
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"HTG1");
+    out.extend_from_slice(&(cases.len() as u32).to_le_bytes());
+    let mut theirs_scratch = reference::Scratch::default();
+    let (mut ok, mut n) = (0, 0);
+    for c in &cases {
+        let len = (c.height - 1) * c.stride + c.width;
+        let mut theirs = vec![0xDEAD_BEEFu32; len + 3];
+        let r = reference::decode_block(&mut theirs_scratch, &c.coded, &mut theirs, c.width, c.height, c.stride, c.missing_msbs, c.num_passes, c.len_cleanup, c.len_refinement, c.vertically_causal);
+        let hash = theirs.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ u64::from(w)).wrapping_mul(0x100_0000_01b3));
+        for v in [c.width, c.height, c.stride] {
+            out.extend_from_slice(&(v as u16).to_le_bytes());
+        }
+        out.push(c.missing_msbs as u8);
+        out.push(c.num_passes as u8);
+        out.extend_from_slice(&(c.len_cleanup as u32).to_le_bytes());
+        out.extend_from_slice(&(c.len_refinement as u32).to_le_bytes());
+        out.push(u8::from(c.vertically_causal));
+        out.push(u8::from(r.is_ok()));
+        out.extend_from_slice(&hash.to_le_bytes());
+        out.extend_from_slice(&(c.coded.len() as u32).to_le_bytes());
+        out.extend_from_slice(&c.coded);
+        ok += usize::from(r.is_ok());
+        n += 1;
+    }
+    std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ht-golden.bin"), &out).unwrap();
+    eprintln!("{n} cases, {ok} decoded, {} bytes", out.len());
+}
