@@ -33,7 +33,7 @@ Times in ms, fastest of 9 (wasm) or 7 (native) decodes. "main" is the code befor
 | Slide, lossless e1 | 25.4 | 16.1 | 16.4 | 16.7 | 0.98 |
 | Hand X-ray, lossless e7 | 691.6 | 698.1 | 702.8 | 686.0 | 1.02 |
 
-**native** (x86-64; libjxl uses AVX2, we use SSE2 through auto-vectorisation):
+**native** (x86-64; libjxl picks AVX2 at run time; these figures are of our code built for the baseline x86-64 target, SSE2 through auto-vectorisation, before native builds moved to x86-64-v3, see [below](#native-builds-for-x86-64-v3)):
 
 | File | main | perf-t6 | now | libjxl 1 thread | now ÷ libjxl | libjxl 4 threads | libjxl 12 threads |
 |---|---|---|---|---|---|---|---|
@@ -50,6 +50,24 @@ Times in ms, fastest of 9 (wasm) or 7 (native) decodes. "main" is the code befor
 | Hand X-ray, lossless e7 | 648.3 | 646.2 | 645.3 | 817.9 | 0.79 | 213.8 | 111.3 |
 
 `shl-jpegxl` decodes one image on one thread; the viewer decodes several frames at once in its worker pool.
+
+### Native builds for x86-64-v3
+
+Native builds now target x86-64-v3 (AVX2, FMA; [codecs/README.md, CPU requirement](../../../codecs/README.md#cpu-requirement)), so LLVM vectorises the same loops with AVX2. User-mode cycles per decode in the bench's codec path (`bench-native` under `perf stat`, one core, minimum of 3 alternating rounds, identical output), with the ratio to libjxl (one thread) from the timing table above where the file is in it. That ratio was timed on the baseline build and has not been re-timed; the cycle change suggests it shrinks by about the same fraction.
+
+| Case | x86-64 | x86-64-v3 | change | now ÷ libjxl, baseline build |
+|---|---|---|---|---|
+| Photo 2048², d1 | 2,675M | 2,397M | −10.4% | 1.91 |
+| Photo 2048², d3 | 2,483M | 2,144M | −13.7% | 2.31 |
+| Photo 2048², lossless e1 | 2,100M | 1,978M | −5.8% | 1.22 |
+| Photo 2048², lossless e7 | 14,900M | 13,504M | −9.4% | – |
+| DX 2048², d1 | 1,916M | 1,743M | −9.0% | 2.07 |
+| DX 2048², lossless e1 | 676M | 636M | −6.0% | 1.18 |
+| DX 2048², lossless e7 | 6,048M | 5,448M | −9.9% | – |
+| IDC DX 3032×2520, d1 | 3,537M | 3,432M | −3.0% | – |
+| IDC DX 3032×2520, lossless e1 | 1,092M | 1,035M | −5.2% | – |
+
+Each figure covers the whole run of `bench-native` on the file (several decodes plus start-up), so only the change column compares across rows.
 
 **Size:** the JPEG XL code in the stripped wasm grows by 4.7 KB (2.7 KB gzip) over main.
 
@@ -134,11 +152,10 @@ Each effect was measured on its own during the work (on the scratch branch, agai
 | EPF in 64-column blocks with the slices cut per block, skipping blocks whose sigma is below the minimum | 3.4% faster in wasm than the per-offset loops, but about 60% slower natively, and a second EPF implementation for one target would break the one-implementation rule |
 | relaxed-simd FMA on the five multiply-add sites | 1.4% faster, not bit-exact, Chromium only |
 | AVX2 + FMA kernels (`#[target_feature]`) for three EPF loops | −4.5% natively, needs an `unsafe` dispatch call per kernel; deferred (native only) |
-| The whole crate built for x86-64-v3 (an upper bound for AVX2 auto-vectorisation) | −1% natively |
 | Resolving the AC entropy tables once per group (ANS without LZ77) | 0.2–2.9% more instructions natively: the per-call dispatch cost more than the lookups it saved |
 | IDCT bundles of 4 lanes instead of 8 (to cut register spills natively) | 5% more instructions natively; in wasm within noise, +4% on DX |
 | One copy fewer in the 2-D IDCT (the second pass works in the scratch block) | −0.5% instructions; in wasm under 1% |
-| XYB → transfer curve → integer interleave in one pass for a frame shown as it is (perf-t6d) | the fused kernel ran on `F4` lanes; natively that fell back to scalar arrays (+41% on the photo), and in wasm it was 8% slower than the separate passes |
+| XYB → transfer curve → integer interleave in one pass for a frame shown as it is (perf-t6d) | the fused kernel ran on `F4` lanes; natively that fell back to scalar arrays (+41% on the photo), and in wasm it was 8% slower than the separate passes. Retried with the x86-64-v3 build: still +48% and +52% cycles on the photo at d1 and d3, +18% and +19% on the grey d1 files, lossless within ±2% |
 | XYB and the sRGB curve in one pass, without lanes | within noise in wasm; natively −8% to +1% |
 | Local bit reader for every modular channel (copied at the channel's entry) | the copy sat outside the loop's function, so it went back to memory; effort 1 got 10% slower |
 | Local bit reader for the first pass in the AC coefficient loop | native cycles −0.2% to −1.5% |
