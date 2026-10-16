@@ -64,7 +64,11 @@ async function mount(section: HTMLElement) {
   const pic = section.querySelector<HTMLElement>("[data-pic]") ?? h("div");
   const exact = section.querySelector<HTMLElement>("[data-exact]") ?? h("div");
   try {
-    await STEPS[id]?.(pic, exact);
+    const t0 = performance.now();
+    const done = STEPS[id]?.(pic, exact);
+    // Main-thread time of the step's synchronous part (the checks read it).
+    section.dataset.syncMs = String(Math.round(performance.now() - t0));
+    await done;
     section.dataset.ready = "1";
   } catch (e) {
     pic.replaceChildren(h("p", { class: "bad", text: (e as Error).message }));
@@ -96,15 +100,30 @@ async function boot() {
   status(`Opened the sample: ${formatPersonName(idx.patient.name) || "a patient"}, ${idx.studies.length} studies. The page follows slice ${S.slice + 1} of ${S.series.instances.length} in the “${S.series.description}” series of the ${S.study.description ?? "MRI"} study.`, "ok");
   (window as any).__how = { S, mounted };
 
-  // Build each step's picture once, when it comes within a screen of view.
+  // Build each step's picture once, when it comes within a screen of view: one step per task, so
+  // building several at once never holds the main thread for long.
+  const queue: HTMLElement[] = [];
+  let draining = false;
+  const drain = () => {
+    if (draining) return;
+    draining = true;
+    const next = () => {
+      const s = queue.shift();
+      if (!s) return void (draining = false);
+      void mount(s);
+      setTimeout(next, 0);
+    };
+    setTimeout(next, 0);
+  };
   const sections = [...document.querySelectorAll<HTMLElement>("section.step")];
   const io = new IntersectionObserver(
     (entries) => {
       for (const e of entries) {
         if (!e.isIntersecting) continue;
         io.unobserve(e.target);
-        void mount(e.target as HTMLElement);
+        queue.push(e.target as HTMLElement);
       }
+      drain();
     },
     { rootMargin: "100% 0px" },
   );

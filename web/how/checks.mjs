@@ -11,6 +11,8 @@ import { darkAudit } from "../checks/dark.mjs";
 import { mkdirSync } from "node:fs";
 
 const BASE = process.env.BASE ?? "http://localhost:3360";
+/** Prefix for screenshot names, to keep runs against differently packed samples apart (e.g. "sv1-"). */
+const SHOT_TAG = process.env.SHOT_TAG ?? "";
 const SHOTS = new URL("../../docs/shots/how/", import.meta.url).pathname;
 const DARK_SHOTS = new URL("../../docs/shots/dark/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
@@ -32,8 +34,8 @@ const PLAIN = {
   study: ["#study .pic pre.code", "#study .pic p.cap"],
   file: ["#file .strip", "#file .thumb.this canvas", "#file .pic pre.code"],
   host: ["#host .host-log .req"],
-  gcm: ["#gcm .band-box canvas", "#gcm .verdict", "#gcm .switch"],
-  dicom: ["#dicom .pic pre.code", "#dicom .stage canvas", "#wl-c", "#wl-w"],
+  gcm: ["#gcm .rec-tiles", "#gcm .slice-img canvas", "#gcm .verdict", "#gcm .switch"],
+  dicom: ["#dicom .pic pre.code", "#dicom-encoding", "#dicom .stage canvas", "#wl-c", "#wl-w"],
   less: ["#less .counter", "#less .stage canvas", "#less-slider"],
   share: ["#share .study-list", "#sh-make"],
   end: ["#open-viewer"],
@@ -79,7 +81,7 @@ async function run(width, dark) {
   const tag = `${width}px ${dark ? "dark" : "light"}`;
   const L = (s) => `${tag}: ${s}`;
   const shot = async (name, full = false) => {
-    const path = dark ? `${DARK_SHOTS}how-${width}-${name}.png` : `${SHOTS}${width}-${name}.png`;
+    const path = dark ? `${DARK_SHOTS}how-${SHOT_TAG}${width}-${name}.png` : `${SHOTS}${SHOT_TAG}${width}-${name}.png`;
     await page.screenshot({ path, fullPage: full });
   };
   const context = await browser.newContext({ ...WIDTHS[width], colorScheme: dark ? "dark" : "light" });
@@ -139,9 +141,32 @@ async function run(width, dark) {
   check(L("5 file: the slice's records light up and the slice is decoded"), (await page.locator("#file .rec.got").count()) === truth.last - truth.first + 1 && (await page.locator("#file .thumb.this canvas").count()) === 1);
   const rows = await page.locator("#host .host-log .req").count();
   check(L("6 server: its requests listed"), rows >= 3 && /\.bin/.test(await text(page, "#host .host-log")), `${rows} lines`);
-  check(L("7 tag: every record passes"), /passed their tag check/.test(await text(page, "#gcm .verdict")));
+  await page.waitForFunction(() => {
+    const c = document.querySelector("#gcm .slice-img canvas");
+    const d = c?.getContext("2d")?.getImageData(0, 0, c.width, c.height).data;
+    if (!d) return false;
+    for (let i = 0; i < d.length; i += 4 * 97) if (d[i] > 20) return true;
+    return false;
+  }, null, { timeout: 15000 }).catch(() => {});
+  const lit = await page.evaluate(() => {
+    const c = document.querySelector("#gcm .slice-img canvas");
+    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let s = 0;
+    for (let i = 0; i < d.length; i += 4 * 97) s += d[i];
+    return s / (d.length / (4 * 97));
+  });
+  check(L("7 tag: every record passes and the slice is decoded from them"), /passed their tag check/.test(await text(page, "#gcm .verdict")) && (await page.locator("#gcm .rec-tile.ok").count()) === truth.last - truth.first + 1 && lit > 5, `brightness ${lit.toFixed(1)}`);
   const dh = await text(page, "#dicom .pic pre.code");
-  check(L("8 DICOM: header tags and the pixels"), /Example\^Josh/.test(dh) && /Pixel Data/.test(dh) && /512/.test(dh) && (await page.locator("#dicom .stage canvas").count()) === 1);
+  const ts = /Transfer Syntax UID\s+(\S+):/.exec(dh)?.[1] ?? "";
+  const native = ["1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2"].includes(ts);
+  check(L(`8 DICOM: header tags, implementation and the pixels (${ts})`), /Example\^Josh/.test(dh) && /Pixel Data/.test(dh) && /512/.test(dh) && /Implementation Version Name/.test(dh) && (await page.locator("#dicom .stage canvas").count()) === 1);
+  const enc = await text(page, "#dicom-encoding");
+  if (native) check(L("8 DICOM: native Pixel Data described as uncompressed"), /uncompressed/.test(enc) && !/Basic Offset Table/.test(dh), enc);
+  else {
+    check(L("8 DICOM: encapsulated Pixel Data shown with its Basic Offset Table and first fragment"), /Basic Offset Table/.test(dh) && /the compressed image|fragment 1/.test(dh) && /end of the items/.test(dh), ts);
+    if (/\.4\.(57|70)$/.test(ts)) check(L("8 DICOM: JPEG markers labelled (SOI, SOF3, SOS)"), /SOI/.test(dh) && /SOF3\s+lossless frame: \d+-bit, 512 rows, 512 columns/.test(dh) && /SOS/.test(dh));
+    check(L("8 DICOM: says the compression is without loss, and names the writer"), /without loss/.test(enc) && /names the program that wrote this file/.test(enc), enc);
+  }
   check(L("9 on demand: counter against the study's file"), /fetched of the .* encrypted file/.test(await text(page, "#less .counter")));
 
   // Opening every expander only adds.
@@ -184,7 +209,7 @@ async function run(width, dark) {
   if (dark) {
     for (const id of STEPS) {
       await page.locator(`#${id}`).scrollIntoViewIfNeeded();
-      await darkAudit(page, L(`step ${id}`), check, `how-${width}-${id}`);
+      await darkAudit(page, L(`step ${id}`), check, `how-${SHOT_TAG}${width}-${id}`);
     }
   } else {
     // Copy and Open.
@@ -218,10 +243,17 @@ async function run(width, dark) {
     await page.locator("#gcm .switch").click();
     await page.waitForSelector("#gcm .verdict.bad", { timeout: 15000 });
     const bad = await text(page, "#gcm .verdict");
-    check(L("7 the tamper switch makes a record fail its tag check"), /failed its tag check/.test(bad) && /flipped/.test(bad), bad);
-    await page.locator("#gcm").screenshot({ path: `${SHOTS}${width}-tampered.png` });
+    check(L("7 the tamper switch makes a record fail its tag check, and the slice is not shown"), /failed its tag check/.test(bad) && /flipped/.test(bad) && (await page.locator("#gcm .rec-tile.bad").count()) === 1 && (await page.locator("#gcm .refused:not(.hidden)").count()) === 1, bad);
+    await page.locator("#gcm").screenshot({ path: `${SHOTS}${SHOT_TAG}${width}-step7-tampered.png` });
     await page.locator("#gcm .switch").click();
     await page.waitForSelector("#gcm .verdict.good", { timeout: 15000 });
+    await page.waitForTimeout(800);
+    await page.locator("#gcm").screenshot({ path: `${SHOTS}${SHOT_TAG}${width}-step7.png` });
+    await page.locator("#dicom").scrollIntoViewIfNeeded();
+    await page.locator("#dicom details.exact").evaluate((e) => (e.open = true));
+    await page.waitForTimeout(400);
+    await page.locator("#dicom").screenshot({ path: `${SHOTS}${SHOT_TAG}${width}-step8.png` });
+    await page.locator("#dicom details.exact").evaluate((e) => (e.open = false));
 
     // Brightness, and scrolling the series.
     await page.locator("#wl-c").fill("95");
@@ -247,7 +279,7 @@ async function run(width, dark) {
     await page.locator("#share details.exact").evaluate((e) => (e.open = true));
     await page.waitForFunction(() => document.querySelectorAll("#share .exact-body .req").length >= 2, null, { timeout: 10000 }).catch(() => {});
     check(L("10 the server's access log for the copy is shown"), (await page.locator("#share .exact-body .req").count()) >= 2);
-    await page.locator("#share").screenshot({ path: `${SHOTS}${width}-revoked.png` });
+    await page.locator("#share").screenshot({ path: `${SHOTS}${SHOT_TAG}${width}-revoked.png` });
 
     // Build your own: receiver, test vector, decoder comparison, all in the worker.
     if (width !== "360") {
