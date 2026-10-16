@@ -385,6 +385,7 @@ version = "0.1.0"
 dependencies = [
  "jxl-oxide",
  "shl-codec-common",
+ "shl-jpegxl",
 ]
 
 [[package]]
@@ -447,6 +448,10 @@ dependencies = [
 
 [[package]]
 name = "shl-jpeg2000"
+version = "0.1.0"
+
+[[package]]
+name = "shl-jpegxl"
 version = "0.1.0"
 
 [[package]]

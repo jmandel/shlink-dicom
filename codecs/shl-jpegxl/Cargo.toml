@@ -1,0 +1,10 @@
+[package]
+name = "shl-jpegxl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "JPEG XL (ISO/IEC 18181-1 and -2) decoder, pure Rust"
+
+[dependencies]
+
+[dev-dependencies]

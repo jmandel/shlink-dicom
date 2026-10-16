@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 shl-codec-common = { path = "../shl-codec-common" }
+shl-jpegxl = { path = "../shl-jpegxl" }
 jxl-oxide = { version = "0.12.6", default-features = false }
