@@ -28,10 +28,10 @@ Crates: `codecs/shl-jpegxl` (the decoder) and `codecs/shl-codec-jpegxl` (the DIC
 - Modular frames: every predictor including the weighted predictor, MA trees, the RCT, palette and squeeze transforms, integer and floating-point samples, extra channels;
 - VarDCT frames: every transform type (DCT sizes from 2×2 to 256×256, IDENTITY, AFV), custom quantisation tables, adaptive quantisation, chroma-from-luma, progressive passes, LF frames;
 - Gaborish, the edge-preserving filter, patches, splines, noise, upsampling, chroma subsampling, blending, reference frames and animation (the first displayed frame is returned);
-- colour: XYB to the image's own colour space for the sRGB, linear, gamma, DCI, BT.709, PQ and HLG transfer functions, with the transfer curves ported from libjxl; YCbCr; orientation;
+- colour: XYB to the image's own colour space, as libjxl does it: any primaries and white point (sRGB, Display P3, BT.2100, custom; D65, DCI, E, custom), through the primaries matrix with Bradford adaptation, and the sRGB, linear, gamma, DCI, BT.709, PQ and HLG transfer functions (HLG with libjxl's inverse OOTF), with the transfer curves ported from libjxl; YCbCr; orientation;
 - JPEG reconstruction from the `jbrd` box (`reconstruct_jpeg`), byte-identical to the JPEG that was recompressed.
 
-**Refused as unsupported (exit 3):** XYB output to RGB primaries or a white point other than sRGB's; a frame saved for reference after the colour transform but not displayed. XYB images that carry an ICC profile come back as linear sRGB, as libjxl gives them without a colour management system. In the wrapper: CMYK (a black extra channel), floating-point samples, more bits than Bits Allocated, and Bits Allocated 24 (the canonical form has no 24-bit sample type).
+**Refused as unsupported (exit 3):** a frame saved for reference after the colour transform but not displayed. XYB images that carry an ICC profile come back as linear sRGB, as libjxl gives them without a colour management system. In the wrapper: CMYK (a black extra channel), floating-point samples, more bits than Bits Allocated, and Bits Allocated 24 (the canonical form has no 24-bit sample type).
 
 **Output.** Lossless (modular, non-XYB) images come back as their exact integers. Everything else comes back as f32 in the image's colour space, nominal range 0.0–1.0.
 
@@ -49,7 +49,7 @@ There is no reduced-resolution decode: the CLI decodes in full and box-downsampl
 - the [libjxl conformance suite](https://github.com/libjxl/conformance): all 40 test cases within their tolerances (for example `bike`, with splines, noise and patches: peak error 2.5e-4 against a limit of 7e-3);
 - byte-identical output to `djxl` (libjxl 0.12.0) for 52 lossless files: the corpus's lossless frames and lossless encodes, at effort 1, 3 and 7, of CT, MR, digital X-ray and photographic test images;
 - JPEG reconstruction byte-identical to `djxl` and to the original JPEG for 44 files: the corpus's .111 frames, three conformance cases, and `cjpeg` baseline, progressive, restart-interval, optimised, greyscale, 4:2:2, 4:2:0 and RGB JPEGs, with ICC, COM, Exif and XMP, compressed and not;
-- `tests/decode.rs` decodes small `cjxl` files (lossless 16-bit, lossy RGB, JPEG recompression) and checks that every truncated prefix is refused; `tests/regressions.rs` holds fuzz findings;
+- `tests/decode.rs` decodes small `cjxl` files (lossless 16-bit, lossy RGB, JPEG recompression) and checks that every truncated prefix is refused. It also decodes lossy files made with libjxl's encoder API in nine colour encodings (Display P3 with sRGB and DCI curves, BT.2100 with PQ and HLG, Adobe RGB, ProPhoto with a D50 white, sRGB primaries with D50 and E whites, sRGB with HLG) and compares them with `djxl`'s float output: within 1e-4 peak (1e-3 for PQ, which is steep near black); `tests/regressions.rs` holds fuzz findings;
 - fuzzing ([STATUS](#status)).
 
 ## References (oracle)

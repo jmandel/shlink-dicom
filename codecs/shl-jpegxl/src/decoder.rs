@@ -427,7 +427,7 @@ fn output_params(hd: &Headers) -> Result<(crate::stages::OpsinParams, crate::sta
     let can_output = !ce.want_icc
         && matches!(ce.tf, TransferFunction::Pq | TransferFunction::Srgb | TransferFunction::Gamma(_) | TransferFunction::Linear | TransferFunction::Hlg | TransferFunction::Dci | TransferFunction::Bt709)
         && !(ce.is_gray() && ce.white_point != WhitePoint::D65);
-    let tf = if !can_output {
+    let mut tf = if !can_output {
         OutputTf::Linear
     } else {
         match ce.tf {
@@ -437,13 +437,29 @@ fn output_params(hd: &Headers) -> Result<(crate::stages::OpsinParams, crate::sta
             TransferFunction::Dci => OutputTf::Gamma(1.0 / 2.6),
             TransferFunction::Bt709 => OutputTf::Bt709,
             TransferFunction::Pq => OutputTf::Pq(m.tone_mapping.intensity_target),
-            TransferFunction::Hlg => OutputTf::Hlg,
+            TransferFunction::Hlg => {
+                // HlgOOTF::ToSceneLight at the image's intensity target.
+                let l = m.tone_mapping.intensity_target;
+                let gamma = (1.0 / 1.2f32) * 1.111f32.powf(-(l / 1000.0).log2());
+                OutputTf::Hlg(gamma - 1.0, [0.2126, 0.7152, 0.0722])
+            }
             TransferFunction::Unknown => OutputTf::Linear,
         }
     };
     let gray = ce.is_gray();
     if can_output && !gray && ce.colour_space == ColourSpace::Rgb && (ce.primaries != Primaries::Srgb || ce.white_point != WhitePoint::D65) {
-        return Err(Error::Unsupported("XYB output to non-sRGB primaries"));
+        // Linear sRGB to the image's primaries and white point, folded into the opsin
+        // inverse matrix (libjxl's OutputEncodingInfo::SetColorEncoding).
+        let srgb_to_xyzd50 = crate::colour::primaries_to_xyz_d50(crate::colour::SRGB_PRIMARIES, crate::colour::D65)?;
+        let wp = crate::colour::white_point_xy(ce.white_point);
+        let original_to_xyz = crate::colour::primaries_to_xyz(crate::colour::primaries_xy(ce.primaries), wp)?;
+        if let OutputTf::Hlg(e, _) = tf {
+            tf = OutputTf::Hlg(e, original_to_xyz[1]);
+        }
+        let adapt = crate::colour::adapt_to_xyz_d50(wp)?;
+        let xyzd50_to_original = crate::colour::inv3(&crate::colour::mul3(&adapt, &original_to_xyz))?;
+        let srgb_to_original = crate::colour::mul3(&xyzd50_to_original, &srgb_to_xyzd50);
+        inv = crate::colour::mul3(&srgb_to_original, &inv);
     }
     if gray {
         let lum = [0.2126f32, 0.7152, 0.0722];

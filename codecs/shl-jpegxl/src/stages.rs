@@ -486,7 +486,8 @@ pub enum OutputTf {
     Gamma(f32),
     Bt709,
     Pq(f32),
-    Hlg,
+    /// HLG: libjxl's inverse OOTF (exponent, luminances of the primaries), then the OETF.
+    Hlg(f32, [f32; 3]),
 }
 
 #[allow(clippy::excessive_precision)]
@@ -528,14 +529,46 @@ fn pq_from_linear(x: f32, intensity: f32) -> f32 {
     m.copysign(x)
 }
 
+/// libjxl's TF_HLG::EncodedFromDisplay (vector form, with FastLog2f).
 fn hlg_from_linear(x: f32) -> f32 {
-    let a = f64::from(x.abs());
-    let (ka, kb, kc) = (0.17883277, 0.28466892, 0.55991073);
-    let v = if a <= 1.0 / 12.0 { (3.0 * a).sqrt() } else { ka * (12.0 * a - kb).ln() + kc };
-    (v as f32).copysign(x)
+    const KA: f32 = 0.17883277;
+    const KB: f32 = 0.28466892;
+    const KC: f32 = 0.55991073;
+    const INV_LOG2E: f32 = std::f32::consts::LN_2; // 1 / log2(e)
+    let a = x.abs();
+    let lo = (3.0 * a).sqrt();
+    let hi = (KA * INV_LOG2E) * crate::vardct::quant::fast_log2f_pub(12.0 * a - KB) + KC;
+    let v = if a <= 1.0 / 12.0 { lo } else { hi };
+    v.copysign(x)
+}
+
+/// libjxl's HlgOOTF::Apply: scales each pixel by its luminance to the power `exponent`.
+fn hlg_ootf(planes: &mut [Plane], exponent: f32, lum: [f32; 3]) {
+    if (-0.01..=0.01).contains(&exponent) {
+        return;
+    }
+    let ratio = |l: f32| crate::vardct::quant::fast_powf_pub(l, exponent).min(1e9);
+    if planes.len() == 1 {
+        let s = lum[0] + lum[1] + lum[2];
+        for v in planes[0].data.iter_mut() {
+            *v *= ratio(*v * s);
+        }
+        return;
+    }
+    let (p0, rest) = planes.split_at_mut(1);
+    let (p1, p2) = rest.split_at_mut(1);
+    for ((r, g), b) in p0[0].data.iter_mut().zip(p1[0].data.iter_mut()).zip(p2[0].data.iter_mut()) {
+        let k = ratio(lum[0] * *r + (lum[1] * *g + lum[2] * *b));
+        *r *= k;
+        *g *= k;
+        *b *= k;
+    }
 }
 
 pub fn from_linear(planes: &mut [Plane], tf: OutputTf) {
+    if let OutputTf::Hlg(e, lum) = tf {
+        hlg_ootf(planes, e, lum);
+    }
     for p in planes.iter_mut() {
         match tf {
             OutputTf::Linear => {}
@@ -543,7 +576,7 @@ pub fn from_linear(planes: &mut [Plane], tf: OutputTf) {
             OutputTf::Gamma(g) => p.data.iter_mut().for_each(|v| *v = if *v <= 1e-5 { 0.0 } else { crate::vardct::quant::fast_powf_pub(*v, g) }),
             OutputTf::Bt709 => p.data.iter_mut().for_each(|v| *v = bt709_from_linear(*v)),
             OutputTf::Pq(i) => p.data.iter_mut().for_each(|v| *v = pq_from_linear(*v, i)),
-            OutputTf::Hlg => p.data.iter_mut().for_each(|v| *v = hlg_from_linear(*v)),
+            OutputTf::Hlg(..) => p.data.iter_mut().for_each(|v| *v = hlg_from_linear(*v)),
         }
     }
 }

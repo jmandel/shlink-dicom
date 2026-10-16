@@ -479,6 +479,10 @@ fn unreachable_library() -> Result<()> {
 }
 
 /// libjxl's FastPowf (used by the gamma transfer function).
+pub fn fast_log2f_pub(x: f32) -> f32 {
+    fast_log2f(x)
+}
+
 pub fn fast_powf_pub(b: f32, e: f32) -> f32 {
     fast_powf(b, e)
 }

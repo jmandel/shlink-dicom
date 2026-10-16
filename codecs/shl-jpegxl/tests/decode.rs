@@ -134,3 +134,36 @@ fn three_extra_channels_fit_the_image_size_limit() {
     }
     assert!(decode(&data("ec2.jxl"), &Options { max_pixels: 64 * 48 }).is_ok());
 }
+
+// Lossy (XYB) files tagged with other primaries, white points and transfer curves, from
+// tests/data/make-colour-files.c (libjxl 0.12.0's encoder API): `enc2 prim-P-W-T-B.jxl P W T B 1`.
+// Each must come back in its own colour space, as djxl gives it (`djxl F prim-….djxl.pfm`).
+#[test]
+fn xyb_output_in_the_image_colour_space() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("prim-") && n.ends_with(".jxl"))
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 9);
+    for name in names {
+        let img = decode(&data(&name), &Options::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (w, h, want) = pfm(&name.replace(".jxl", ".djxl.pfm"));
+        assert_eq!((img.width as usize, img.height as usize), (w, h));
+        let (mut peak, mut sq) = (0f64, 0f64);
+        for (c, p) in img.planes.iter().take(3).enumerate() {
+            let Plane::Float(p) = p else { panic!("{name}: lossy output should be floats") };
+            for (i, &v) in p.iter().enumerate() {
+                let d = f64::from(v.clamp(0.0, 1.0) - want[i * 3 + c].clamp(0.0, 1.0)).abs();
+                peak = peak.max(d);
+                sq += d * d;
+            }
+        }
+        let rmse = (sq / (w * h * 3) as f64).sqrt();
+        // PQ is steep near black, so it gets the most room; the others are within 1e-4.
+        let lim = if name.contains("-pq-") { 1e-3 } else { 1e-4 };
+        assert!(peak <= lim && rmse <= 5e-5, "{name}: peak {peak:.2e}, rmse {rmse:.2e}");
+    }
+}
