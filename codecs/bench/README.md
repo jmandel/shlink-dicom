@@ -45,7 +45,7 @@ Each run writes `results/<date>-<label>.json` (and a copy in `results/latest.jso
 
 | Build | Target and flags |
 |---|---|
-| `native` | x86_64, default target CPU |
+| `native` | x86_64, x86-64-v3 from the repository's `.cargo/config.toml` ([CPU requirement](../README.md#cpu-requirement)); the build sets no `RUSTFLAGS`, which would replace it |
 | `wasm-base` | wasm32-unknown-unknown |
 | `wasm-simd` | wasm32 with `-C target-feature=+simd128` |
 | `wasm-relaxed` | wasm32 with `+simd128,+relaxed-simd` |

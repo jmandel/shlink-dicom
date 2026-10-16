@@ -42,6 +42,8 @@ cargo run --release -p shl-dicom-server -- serve --port 3333
 
 The server seeds a sample share from every `.tgz` in `data/samples/`.
 
+Native x86_64 builds target x86-64-v3 (AVX2); for an older CPU see [codecs/README.md](codecs/README.md#cpu-requirement).
+
 ## Tests
 
 ```bash

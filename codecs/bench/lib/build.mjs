@@ -21,7 +21,8 @@ export const PROFILE = { "opt-level": 3, lto: "fat", "codegen-units": 1, debug: 
 const PROFILE_ENV = { CARGO_PROFILE_RELEASE_LTO: "fat", CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1" };
 
 export const BUILDS = {
-  native: { rustflags: "", target: null, about: "x86_64 release binary, default target CPU (x86-64, SSE2)" },
+  // null: no RUSTFLAGS, so the target-cpu from the repository's .cargo/config.toml applies.
+  native: { rustflags: null, target: null, about: "x86_64 release binary, x86-64-v3 (AVX2) from .cargo/config.toml" },
   "wasm-base": { rustflags: "", target: "wasm32-unknown-unknown", about: "wasm32, Rust's default wasm features, no SIMD" },
   "wasm-simd": { rustflags: "-C target-feature=+simd128", target: "wasm32-unknown-unknown", about: "wasm32 + simd128" },
   "wasm-relaxed": { rustflags: "-C target-feature=+simd128,+relaxed-simd", target: "wasm32-unknown-unknown", about: "wasm32 + simd128 + relaxed-simd" },
@@ -200,13 +201,19 @@ export function build(names, log = console.error) {
     const args = ["build", "--release", "-p", "shl-dicom-wasm-bench"];
     if (b.target) args.push("--target", b.target, "--lib");
     else args.push("--bin", "bench-native");
-    log(`build ${name}: cargo ${args.join(" ")}  RUSTFLAGS="${b.rustflags}"`);
+    log(`build ${name}: cargo ${args.join(" ")}  ${b.rustflags === null ? "(.cargo/config.toml)" : `RUSTFLAGS="${b.rustflags}"`}`);
+    // A RUSTFLAGS variable, even an empty one, replaces the config file's flags, so it is removed
+    // for builds that take theirs from the config.
+    const env = { ...process.env, ...PROFILE_ENV, CARGO_TARGET_DIR: targetDir };
+    delete env.CARGO_ENCODED_RUSTFLAGS;
+    if (b.rustflags === null) delete env.RUSTFLAGS;
+    else env.RUSTFLAGS = b.rustflags;
     const t0 = Date.now();
     execFileSync(CARGO[0], [CARGO[1], ...args], {
       cwd: CODECS, stdio: ["ignore", "ignore", "inherit"],
-      env: { ...process.env, ...PROFILE_ENV, CARGO_TARGET_DIR: targetDir, RUSTFLAGS: b.rustflags },
+      env,
     });
-    const rec = { about: b.about, rustflags: b.rustflags, target: b.target ?? "x86_64-unknown-linux-gnu", profile: PROFILE, build_s: (Date.now() - t0) / 1000 };
+    const rec = { about: b.about, rustflags: b.rustflags ?? "-C target-cpu=x86-64-v3 (.cargo/config.toml)", target: b.target ?? "x86_64-unknown-linux-gnu", profile: PROFILE, build_s: (Date.now() - t0) / 1000 };
     if (b.target) {
       const src = join(targetDir, b.target, "release", "shl_dicom_wasm_bench.wasm");
       const dst = join(OUT, `${name}.wasm`);

@@ -1,0 +1,5 @@
+# Native x86_64 builds target x86-64-v3 (AVX2, BMI1/2, FMA, MOVBE: Intel Haswell, AMD Excavator
+# or newer), which the codecs' vector kernels are compiled for. wasm32 builds are unaffected.
+# For an older CPU, see codecs/README.md.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v3"]
