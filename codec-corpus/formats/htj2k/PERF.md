@@ -81,7 +81,19 @@ Track T3 of the [performance plan](../../../docs/PERF-PLAN.md#t3-jpeg-2000-decod
   - an MQ decode that branches on the sub-interval as T.800 Figures C.16–C.18 do, instead of selecting without branches: 8–9% fewer instructions, but 7% more cycles on MR2 and 13% more on lossless CT 512, where symbols are near 50/50 and the branch mispredicts.
   - **Next idea, not taken:** restructuring tier-1 the way OpenJPEG does (each column's flags in a register for the whole pass with the MQ registers as locals, and the coefficient's sign and magnitude written in place instead of in separate `mag` and sign bits). It is a rewrite of `t1.rs`, and the measured gap on the cases that dominate viewer use is 0.88–0.99× OpenJPEG for lossless and 1.05–1.09× for the slide tiles.
 
+## Changes in track T5
+
+Track T5 of the [performance plan](../../../docs/PERF-PLAN.md#t5-htj2k-block-decoder), a spike: decode MagSgn with wasm simd128 and keep it only if it saves at least 10% on the 2048² frames in wasm. It did not, and the track stopped. Times are medians from `codecs/bench/run.mjs` on 16 October 2026 at load average 4–5, in ms per frame; wasm is the codec stage in a Chromium worker, base and change built and run alternately.
+
+The wasm profile (`codecs/bench/profile.mjs`) shows where the 2048² decodes go: MagSgn (`magsgn_row`) 36% of lossless DX, 16% of lossy DX and 27% of the RGB frame; the CxtVLC, MEL and U-VLC decoding (`vlc_row`) 21%, 16% and 21%. The VLC codes are read one after another, each depending on the last, so only MagSgn has lanes to fill.
+
+- **The four samples of a quad from one buffer.** Each sample's bit offset is the sum of the `m_n` before it, so the four can be read from the same 64-bit buffer at once, with one shift of the buffer per quad instead of four. wasm 38.0 → 38.0 ms (DX lossless), 32.1 → 31.5 (DX lossy), 144 → 157 (RGB, noisy); natively 31.6 → 31.3, 24.2 → 24.0 and 121 → 122. Rejected.
+- **A simd128 quad, as OpenJPH's wasm decoder does it.** Lane `n` gathers three bytes of the buffer at its offset with `i8x16_swizzle`, shifts them by the rest of the offset with a multiply from a table of powers of two, and builds the sample with lane-wise masks from a second table; one shift of the buffer per quad. All of it is safe Rust. A differential test checked it against the scalar samples on a million random quads. wasm over two alternating rounds: DX lossless 38.3 and 38.7 → 42.5 and 39.4 ms, DX lossy 31.4 and 31.5 → 33.0 and 31.1, RGB 149 and 151 → 149 and 151. Rejected.
+- **The VLC decoding** was not tried: it is serial by construction, and the two MagSgn results above suggest that the arithmetic of a sample is not what limits the loop; the per-quad control (skipping empty quads, the exponent predictor, refilling the buffer) is the likelier cost, though it was not measured apart.
+
+Beside these, in the same session: `@cornerstonejs/codec-openjph` in the same Chromium worker 33.2 ms (DX lossless), 28.2 (DX lossy) and 191 (RGB), against our 38.9, 32.9 and 148, so 1.17×, 1.17× and 0.78×; OpenJPH 0.32 natively (one thread, through imagecodecs) 14.2, 9.42 and 59.6 ms, against our native 32.8, 26.7 and 184 (2.31×, 2.83×, 3.09×; the RGB figure is high from load, 121–129 ms in quieter runs).
+
 ## What is left
 
-- **Tier-1** is most of every decode: the MQ coder for JPEG 2000 (about 90% of a lossless decode) and the HT block decoder for HTJ2K (about 55%). Both are scalar. OpenJPH decodes MagSgn with SIMD; that approach needs per-lane variable shifts, and `#![forbid(unsafe_code)]` rules out raw intrinsics.
+- **Tier-1** is most of every decode: the MQ coder for JPEG 2000 (about 90% of a lossless decode) and the HT block decoder for HTJ2K (about 55%). Both are scalar. OpenJPH's SIMD MagSgn decoding, rebuilt in safe Rust for wasm simd128, did not help ([track T5](#changes-in-track-t5)).
 - **Native vector width:** the wavelet and colour stages are vectorised by the compiler for the default x86-64 target (SSE2). Choosing AVX2 at run time needs `unsafe` to call a `#[target_feature]` function. In wasm32 with `+simd128` the same loops use 128-bit vectors.
