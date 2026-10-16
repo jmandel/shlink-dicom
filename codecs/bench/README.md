@@ -55,7 +55,7 @@ The wasm module comes from `codecs/shl-dicom-wasm-bench`, which exposes a few ra
 
 | Runner | What it runs |
 |---|---|
-| `native` | `bench-native`, one process per case |
+| `native` | `bench-native`, one process per case. On Linux it is pinned to one CPU, so multi-frame files, which the decoder otherwise splits across threads, are timed single-core too. |
 | `node` | the wasm builds in V8, in-process |
 | `chromium-worker` | headless Chromium; each build runs in a fresh dedicated Web Worker, so main-thread work cannot interfere. The page is cross-origin isolated, which gives `performance.now()` 5 µs resolution. |
 | `chromium-cwasm` | C/C++ codecs compiled to wasm, in the same worker, right after our builds on each case. These are the Cornerstone packages that a browser viewer would otherwise use (versions pinned in `package.json`): `@cornerstonejs/codec-libjpeg-turbo-8bit`, `codec-charls`, `codec-openjpeg`, `codec-openjph`. They decode the frame codestreams produced by our own frame splitter (`bench_extract_frames`), and only their `decode()` call is timed. |

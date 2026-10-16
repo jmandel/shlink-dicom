@@ -13,7 +13,7 @@
 //! On wasm32 the clock is imported from JavaScript as `env.bench_now` (performance.now()), and
 //! the module exports a small C ABI (`bench_*`) used by codecs/bench/lib/wasm.ts. No wasm-bindgen.
 
-use std::cell::Cell;
+use std::sync::Mutex;
 
 use shl_codec_common::{DecodeFn, DecodedFrame, FrameInfo};
 pub use shl_dicom_decode::{Canonical, Error};
@@ -55,43 +55,53 @@ mod clock {
 
 pub use clock::now;
 
-thread_local! {
-    static REAL: Cell<Option<DecodeFn>> = const { Cell::new(None) };
-    static FIRST: Cell<f64> = const { Cell::new(f64::NAN) };
-    static CODEC: Cell<f64> = const { Cell::new(0.0) };
-    static CALLS: Cell<u32> = const { Cell::new(0) };
+/// The shim's state. Process-wide, not per thread: native multi-frame decodes run frames on
+/// worker threads. Codec time is then summed over threads, so it can exceed the wall time;
+/// pin the process to one CPU for single-core numbers.
+struct Shim {
+    real: Option<DecodeFn>,
+    first: f64,
+    codec: f64,
+    calls: u32,
+}
+
+static SHIM: Mutex<Shim> = Mutex::new(Shim { real: None, first: f64::NAN, codec: 0.0, calls: 0 });
+
+fn shim() -> std::sync::MutexGuard<'static, Shim> {
+    SHIM.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn timed_codec(cs: &[u8], info: &FrameInfo) -> shl_codec_common::Result<DecodedFrame> {
-    let real = REAL
-        .with(Cell::get)
-        .ok_or_else(|| shl_codec_common::DecodeError::Invalid("bench: no codec".into()))?;
+    let real = shim().real.ok_or_else(|| shl_codec_common::DecodeError::Invalid("bench: no codec".into()))?;
     let t = now();
-    if FIRST.with(Cell::get).is_nan() {
-        FIRST.with(|c| c.set(t));
-    }
     let r = real(cs, info);
     let dt = now() - t;
-    CODEC.with(|c| c.set(c.get() + dt));
-    CALLS.with(|c| c.set(c.get() + 1));
+    let mut s = shim();
+    if s.first.is_nan() || t < s.first {
+        s.first = t;
+    }
+    s.codec += dt;
+    s.calls += 1;
     r
 }
 
 /// `decode_file` with stage timings. Produces exactly the same pixels as `decode_file`.
 pub fn decode_timed(bytes: &[u8]) -> (Result<Canonical, Error>, Timings) {
-    FIRST.with(|c| c.set(f64::NAN));
-    CODEC.with(|c| c.set(0.0));
-    CALLS.with(|c| c.set(0));
+    {
+        let mut s = shim();
+        (s.first, s.codec, s.calls) = (f64::NAN, 0.0, 0);
+    }
     let t0 = now();
     let r = shl_dicom_decode::decode_file_with(bytes, |ts| {
         let real = shl_dicom_decode::codec_for(ts);
-        REAL.with(|c| c.set(real));
+        shim().real = real;
         real.map(|_| timed_codec as DecodeFn)
     });
     let t1 = now();
-    let first = FIRST.with(Cell::get);
-    let codec = CODEC.with(Cell::get);
-    let calls = CALLS.with(Cell::get);
+    let (first, codec, calls) = {
+        let s = shim();
+        (s.first, s.codec, s.calls)
+    };
     let total = t1 - t0;
     let parse = if first.is_nan() { total } else { first - t0 };
     let t = Timings {
@@ -155,7 +165,7 @@ pub fn quick_hash(data: &[u8]) -> u64 {
 mod exports {
     //! C ABI for JavaScript. Single-threaded; one result is held at a time.
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };

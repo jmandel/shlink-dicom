@@ -1,7 +1,7 @@
 // Native runner: one bench-native process decodes every case; outputs are verified here.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import { binDir } from "../lib/build.mjs";
 import { verifyOutput } from "../lib/verify.mjs";
@@ -11,13 +11,21 @@ import { verifyOutput } from "../lib/verify.mjs";
 // codec comparison native keeps freed memory too.
 export const NATIVE_MALLOC = "glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=4294967295";
 
+// The decoder runs the frames of a multi-frame file on several threads. On Linux the process is
+// pinned to one CPU (the last), which leaves it one thread, so every case is a single-core time.
+function command(bin, args) {
+  if (process.platform !== "linux") return [bin, args];
+  return ["taskset", ["-c", String(cpus().length - 1), bin, ...args]];
+}
+
 export async function runNative(cases, opts, log = console.error) {
   const dir = mkdtempSync(join(tmpdir(), "bench-native-"));
   const records = [];
   try {
     for (const c of cases) {
       const args = ["--warmup", opts.warmup, "--min-runs", opts.min_runs, "--max-runs", opts.max_runs, "--budget-ms", opts.budget_ms, "--dump", dir, c.sample].map(String);
-      const line = execFileSync(join(binDir(), "bench-native"), args, { maxBuffer: 1 << 26, env: { ...process.env, GLIBC_TUNABLES: NATIVE_MALLOC } }).toString().trim();
+      const [cmd, argv] = command(join(binDir(), "bench-native"), args);
+      const line = execFileSync(cmd, argv, { maxBuffer: 1 << 26, env: { ...process.env, GLIBC_TUNABLES: NATIVE_MALLOC } }).toString().trim();
       const r = JSON.parse(line);
       const rec = { case: c.id, runner: "native", build: "native", status: r.status };
       if (r.status !== 0) { rec.msg = r.msg; records.push(rec); log(`  native ${c.id}: exit ${r.status} ${r.msg}`); continue; }
