@@ -7,6 +7,21 @@ The earlier long-tail sweep ([LONGTAIL.md](LONGTAIL.md)) chose IDC files by pixe
 
 The counts it draws on are in [SOPCLASS_CENSUS.md](SOPCLASS_CENSUS.md).
 
+
+## Status of the defects (16 Oct 2026)
+
+| # | Defect | Status |
+|---|---|---|
+| 1 | PET reformats with per-slice rescale | Fixed in ec827af (volumes on one real-value scale) |
+| 2 | Per-frame items numbered 0 in the decoder | Fixed in eacfeb3 |
+| 3 | Out-of-order frames step in stored order | Fixed in ec827af |
+| 4 | SEG drawn through the image's grid, upside down for NLST | Fixed in ec827af (placed through its own geometry) |
+| 5 | GSPS opens the wrong image | Fixed in ec827af |
+| 6 | Deflated label-map SEGs dropped at Share ingest | Open (Share) |
+| 7 | Breast Projection For Processing draws black | Fixed in ec827af (percentile window when the stored one covers under 1% of values) |
+
+The sweep's regression fixtures pass for 1–5 and 7.
+
 ## Summary
 
 - **156 cases covering 43 SOP classes:** all 38 in IDC v25, plus five IDC lacks. Enhanced CT and MR came from public test corpora; Legacy Converted Enhanced CT, MR and PET were derived from IDC series. The data took 8.1 GB of scratch space. Only UIDs and metadata are committed.

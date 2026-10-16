@@ -16,7 +16,7 @@ import {
   type Segmentation,
   type StructureSet,
 } from "../core/derived";
-import { dot, geometryOf, normal, patientToPixel, sub, type Geometry } from "../core/geometry";
+import { dot, geometryOf, normal, patientToPixel, pixelToPatient, sub, type Geometry } from "../core/geometry";
 import type { InstanceLoader } from "../core/loader";
 import { seriesKind, sopInfo } from "../core/objects";
 import { overlayBitsFromPixels, readOverlays, type OverlayPlane } from "../core/overlays";
@@ -289,19 +289,23 @@ export class Layers {
       const im = new ImageData(px.columns, px.rows);
       const [r, gr, b] = segment.color;
       const max = seg.kind === "FRACTIONAL" ? seg.fractionalMax || 255 : 1;
+      let any = false;
       for (let i = 0; i < data.length; i++) {
         const v = data[i];
         if (!v) continue;
+        any = true;
         const o = i * 4;
         im.data[o] = r;
         im.data[o + 1] = gr;
         im.data[o + 2] = b;
         im.data[o + 3] = Math.round(110 * Math.min(1, v / max));
       }
+      // An empty frame (a segment absent from this slice) draws nothing.
+      if (!any) return;
       const off2 = new OffscreenCanvas(px.columns, px.rows);
       off2.getContext("2d")!.putImageData(im, 0, 0);
       g.imageSmoothingEnabled = false;
-      g.drawImage(off2, m.x(0), m.y(0), m.cols * m.s, m.rows * m.s);
+      placeOnImage(g, off2, f.geometry, geom, m);
       count++;
     });
     return count;
@@ -338,12 +342,7 @@ export class Layers {
       const oc = new OffscreenCanvas(px.columns, px.rows);
       oc.getContext("2d")!.putImageData(im, 0, 0);
       g.imageSmoothingEnabled = false;
-      // Placed by geometry when both planes have it (the map may be coarser than the image), else stretched over the image.
-      const p0 = geom && fg.position && fg.spacing && geom.spacing ? patientToPixel(geom, fg.position) : null;
-      if (p0 && fg.spacing && geom?.spacing) {
-        const sx = fg.spacing[1] / geom.spacing[1], sy = fg.spacing[0] / geom.spacing[0];
-        g.drawImage(oc, m.x(p0.x + 0.5 - sx / 2), m.y(p0.y + 0.5 - sy / 2), px.columns * sx * m.s, px.rows * sy * m.s);
-      } else g.drawImage(oc, m.x(0), m.y(0), m.cols * m.s, m.rows * m.s);
+      placeOnImage(g, oc, fg, geom, m);
       count++;
     });
     return count;
@@ -511,4 +510,28 @@ export function mapScale(l: Layer): { lo: number; hi: number; units: string; tex
   if (lo > hi) [lo, hi] = [hi, lo];
   const units = rw ? unitText(rw.units) : "";
   return { lo, hi, units, text: `${formatValue(lo)} – ${formatValue(hi)}${units ? ` ${units}` : ""}` };
+}
+
+/**
+ * Draws a frame (SEG, parametric map) on the image through both planes' geometry: each of its
+ * pixels lands where its patient position falls on the image, whatever the frame's own
+ * orientation, spacing or origin (a mask stored bottom-up, cropped or resampled). Without
+ * geometry on either side, the frame is stretched over the image.
+ */
+function placeOnImage(g: CanvasRenderingContext2D, src: OffscreenCanvas, fg: Geometry, geom: Geometry | null, m: { s: number; x: (gx: number) => number; y: (gy: number) => number; cols: number; rows: number }) {
+  const o = geom && fg.position && fg.row && fg.col && fg.spacing ? patientToPixel(geom, fg.position) : null;
+  if (!o || !geom || !fg.row || !fg.col || !fg.spacing) {
+    g.drawImage(src, m.x(0), m.y(0), m.cols * m.s, m.rows * m.s);
+    return;
+  }
+  // Image pixel (x, y) of frame pixel (i, j): affine, from the frame's origin and its two steps.
+  const at = (i: number, j: number) => patientToPixel(geom, pixelToPatient(fg, i, j)!)!;
+  const pi = at(1, 0), pj = at(0, 1);
+  const ax = pi.x - o.x, ay = pi.y - o.y, bx = pj.x - o.x, by = pj.y - o.y;
+  // Source pixel corner (u, v) is frame index (u − ½, v − ½); image pixel centre x is coordinate x + ½.
+  const ex = o.x - 0.5 * ax - 0.5 * bx + 0.5, ey = o.y - 0.5 * ay - 0.5 * by + 0.5;
+  g.save();
+  g.setTransform(ax * m.s, ay * m.s, bx * m.s, by * m.s, m.x(ex), m.y(ey));
+  g.drawImage(src, 0, 0);
+  g.restore();
 }

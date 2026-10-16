@@ -158,9 +158,14 @@ async function seriesChecks(page, c, r, e, deep, check, out) {
       check(`${cat}: not blank`, !!es?.constant, `every pixel drawn at grey ${g.grey[0]}${es?.constant ? " (the frame is constant)" : ""}`, uid);
     } else check(`${cat}: not blank`, true, "", uid);
     if (!deep) return;
-    // Initial window: the stored window of the slice first shown, when it has one.
+    // Initial window: the stored window of the slice first shown, when it has one, unless under
+    // 1% of the slice's values fall inside it (then the viewer opens on the values' own range).
     const firstSlice = await sliceAt(page, e, st.sliceIdx);
-    if (firstSlice?.window && e.spp === 1) {
+    if (firstSlice?.window && e.spp === 1 && firstSlice.windowCover != null && firstSlice.windowCover < 0.01) {
+      const [wc, ww] = firstSlice.window;
+      const other = Math.abs(st.wc - wc) > 0.51 || Math.abs(st.ww - ww) > 0.51;
+      check(`${cat}: a stored window that misses the values gives way to their range`, other, `W ${st.ww} L ${st.wc}; slice ${st.sliceIdx + 1} stores W ${ww} L ${wc} with ${(100 * firstSlice.windowCover).toFixed(2)}% of values inside`, uid);
+    } else if (firstSlice?.window && e.spp === 1) {
       const [wc, ww] = firstSlice.window;
       const ok = Math.abs(st.wc - wc) < 0.51 && Math.abs(st.ww - ww) < 0.51;
       check(`${cat}: initial window is the stored window of the slice shown`, ok, `W ${st.ww} L ${st.wc}; slice ${st.sliceIdx + 1} stores W ${ww} L ${wc}`, uid);
@@ -358,12 +363,13 @@ async function seriesChecks(page, c, r, e, deep, check, out) {
   check(`${cat}: no check for this category`, null, "", uid);
 }
 
-/** The expected slice for viewer slice i (by the instance on screen; a single multi-frame instance: frame i). */
+/** The expected slice for viewer slice i (by the instance on screen; a single multi-frame instance: the frame on screen). */
 async function sliceAt(page, e, i) {
   const cur = await page.evaluate(() => window.__viewHooks.current());
   const uid = cur.onScreen?.uid;
   const single = e.frames.length === 1;
-  return e.slices.find((s) => s.uid === uid && s.frame === (single ? i : 0)) ?? null;
+  // The frame on screen: a multi-frame instance steps its frames in spatial order, not stored order.
+  return e.slices.find((s) => s.uid === uid && s.frame === (single ? cur.onScreen.frame ?? i : 0)) ?? null;
 }
 
 /** Thin reformats in the planes not acquired (and one oblique) against the SimpleITK oracle. */

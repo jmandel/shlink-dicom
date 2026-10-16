@@ -496,6 +496,68 @@ async function overflowObjects() {
       }
 }
 
+/** Video: the viewer's geometry gestures on the picture (zoom, pan, reset); the page never zooms. */
+async function videoGestures() {
+  const vf = process.env.VIDEO_FIXTURES_JSON ?? "/tmp/video-fixtures.json";
+  if (!existsSync(vf)) return check("video gestures: fixture", false, "run web/checks/video-fixtures.ts");
+  const V = JSON.parse(readFileSync(vf, "utf8"));
+  const base = new URL(JSON.parse(Buffer.from(V.link.slice(V.link.indexOf("/") + 1), "base64url").toString()).url).origin;
+  for (const dev of ["desktop", "phone"]) {
+    const context = await browser.newContext(DEV[dev]);
+    const page = await context.newPage();
+    await page.goto(`${base}/view#${V.link}`);
+    await page.waitForSelector(".study-open");
+    await page.locator(".study-open").first().click();
+    await page.waitForSelector(".media-stage:not(.hidden) .media-frame", { timeout: 60000 });
+    await page.waitForTimeout(1500);
+    const b = await page.locator(".media-stage").boundingBox();
+    const x = b.x + b.width / 2, y = b.y + b.height / 2;
+    const z = () => page.evaluate(() => ({ z: Number(document.querySelector(".media-frame").dataset.zoom ?? 1), t: document.querySelector(".media-frame").style.transform, page: window.visualViewport?.scale ?? 1 }));
+    if (dev === "desktop") {
+      await page.mouse.move(x, y);
+      await page.keyboard.down("Control");
+      await page.mouse.wheel(0, -200);
+      await page.keyboard.up("Control");
+      await page.waitForTimeout(150);
+      const a = await z();
+      check(`video gestures/desktop: Ctrl+wheel zooms the picture, not the page`, a.z > 1.5 && a.page === 1, JSON.stringify(a));
+      await page.mouse.down();
+      await page.mouse.move(x + 60, y + 30, { steps: 6 });
+      await page.mouse.up();
+      const p = await z();
+      check(`video gestures/desktop: drag pans the zoomed picture`, p.t !== a.t && p.z === a.z, p.t);
+      await page.mouse.dblclick(x, y);
+      await page.waitForTimeout(150);
+      const r = await z();
+      check(`video gestures/desktop: double-click goes back to fit`, r.z === 1 && !r.t);
+      await page.mouse.move(x, y);
+      await page.mouse.down({ button: "right" });
+      await page.mouse.move(x, y - 60, { steps: 6 });
+      await page.mouse.up({ button: "right" });
+      const rz = await z();
+      check(`video gestures/desktop: right-drag up zooms in`, rz.z > 1.3, JSON.stringify(rz));
+    } else {
+      const cdp = await context.newCDPSession(page);
+      const t = (type, pts) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: pts.map(([px, py], id) => ({ x: px, y: py, id })) });
+      await t("touchStart", [[x - 30, y], [x + 30, y]]);
+      for (let i = 1; i <= 10; i++) await t("touchMove", [[x - 30 - i * 6, y], [x + 30 + i * 6, y]]);
+      await t("touchEnd", []);
+      await page.waitForTimeout(150);
+      const a = await z();
+      check(`video gestures/phone: pinch zooms the picture, not the page`, a.z > 2 && a.page === 1, JSON.stringify(a));
+      for (let k = 0; k < 2; k++) {
+        await t("touchStart", [[x, y]]);
+        await t("touchEnd", []);
+        await page.waitForTimeout(80);
+      }
+      await page.waitForTimeout(150);
+      const r = await z();
+      check(`video gestures/phone: double-tap goes back to fit`, r.z === 1 && !r.t, JSON.stringify(r));
+    }
+    await context.close();
+  }
+}
+
 /** Originals of a share's files (sample-originals.py), cached per name. */
 function originals(name, files) {
   const out = `/tmp/originals-${name}.json`;
@@ -547,6 +609,7 @@ async function objectDownloads() {
 const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap"];
 try {
   for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
+  if (!only || only === "video-gestures") await videoGestures().catch((e) => check("video gestures: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "overflow") await overflowObjects().catch((e) => check("overflow: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "reset") await resetOthers().catch((e) => check("reset: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "dark") await darkObjects().catch((e) => check("dark: flow threw", false, String(e?.stack ?? e).slice(0, 400)));

@@ -19,6 +19,8 @@ export interface VolumeInput {
   img: DecodedImage;
   frame: number;
   geom: Geometry;
+  /** The header's rescale for this slice, when it gives one (it wins over the decoder's). */
+  rescale?: { slope: number; intercept: number } | null;
 }
 
 export type Plane = "axial" | "sagittal" | "coronal";
@@ -84,6 +86,20 @@ function sharedRange(input: VolumeInput[]): { lo: number; hi: number } | null {
   return lo <= hi ? { lo, hi } : null;
 }
 
+/** The lowest and highest real value (stored × the frame's own rescale) over the frames. */
+function realRange(frames: Frame[]): { lo: number; hi: number } {
+  let lo = Infinity, hi = -Infinity;
+  for (const f of frames) {
+    const d = f.data, m = f.rescaleSlope, b = f.rescaleIntercept;
+    for (let i = 0; i < d.length; i++) {
+      const v = d[i] * m + b;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  }
+  return lo <= hi ? { lo, hi } : { lo: 0, hi: 1 };
+}
+
 /** Largest gantry tilt accepted (degrees): beyond it the slices barely overlap. */
 const MAX_TILT = 45;
 
@@ -116,9 +132,20 @@ export function buildVolume(input: VolumeInput[]): Volume {
     const off = sub(sorted[k].geom.position!, add(p0, scale(step, k)));
     if (norm(off) > Math.max(0.05, 0.05 * Math.min(g0.spacing[0], g0.spacing[1], dz))) throw new VolumeError("slice positions do not follow one direction");
   }
-  const frames = sorted.map((s) => frameOf(s.img, s.frame));
-  const range = input[0].img.float ? sharedRange(input) : null;
-  const slices = range ? frames.map((f, i) => floatFrame(f, imageRealWorld(sorted[i].img), range)) : frames;
+  const frames = sorted.map((s) => {
+    const f = frameOf(s.img, s.frame);
+    return s.rescale ? { ...f, rescaleSlope: s.rescale.slope, rescaleIntercept: s.rescale.intercept } : f;
+  });
+  let slices = frames;
+  if (input[0].img.float) {
+    const range = sharedRange(input);
+    slices = frames.map((f, i) => floatFrame(f, imageRealWorld(sorted[i].img), range));
+  } else if (frames.some((f) => f.rescaleSlope !== frames[0].rescaleSlope || f.rescaleIntercept !== frames[0].rescaleIntercept)) {
+    // Each slice has its own rescale (PET): one shared scale of real values, so a reformat
+    // crossing the slices shows the same quantity everywhere.
+    const range = realRange(frames);
+    slices = frames.map((f) => floatFrame(f, null, range));
+  }
   return makeVolume(slices, p0, g0.row, g0.col, [g0.spacing[1], g0.spacing[0]], step);
 }
 

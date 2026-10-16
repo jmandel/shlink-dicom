@@ -103,6 +103,8 @@
         <div id="hud-br" class="hud hud-br" aria-live="polite"></div>
         <div id="stage-busy" class="stage-busy hidden" role="status"><span id="stage-busy-text"></span><span id="stage-track" class="stage-track hidden" role="progressbar" aria-valuemin="0" aria-label="Loading"><span id="stage-fill" class="stage-fill"></span></span></div>
         <div id="stage-msg" class="stage-msg hidden" role="alert"></div>
+        <div id="adjust-hint" class="adjust-hint hidden" role="status"><span>Drag to adjust brightness and contrast</span><button id="btn-adjust-done" class="btn" type="button">Done</button></div>
+        <div id="first-hint" class="first-hint hidden" role="status">Pinch to zoom · Adjust for brightness</div>
       </div>
       <div id="toolbar" class="toolbar">
         <div class="slice-ctl">
@@ -127,9 +129,11 @@
             <option value="clear">Clear</option>
           </select>
           <!-- Narrow screens: display choices and measure tools open in sheets. -->
+          <button id="btn-adjust" class="btn compact-only" type="button" aria-pressed="false" title="Drag on the image to change brightness and contrast">Adjust</button>
           <button id="btn-display" class="btn compact-only hidden" type="button" aria-haspopup="dialog">Display</button>
           <button id="btn-measure" class="btn compact-only" type="button" aria-haspopup="dialog">Measure</button>
           <button id="btn-reset" class="btn" type="button" title="Reset window, zoom and pan">Reset</button>
+          <button id="btn-gestures" class="btn wide-only" type="button" aria-haspopup="dialog" aria-label="Mouse and keyboard" title="Mouse and keyboard (?)">?</button>
         </div>
       </div>
       <nav id="strip" class="strip" aria-label="Series"></nav>
@@ -169,6 +173,13 @@
     <div class="sheet-grip" aria-hidden="true"></div>
     <h2 id="more-title" class="more-title"></h2>
     <div id="more-items" class="more-items"></div>
+    <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
+  </section>
+
+  <section id="sheet-gestures" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="gestures-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="gestures-title">Gestures</h2>
+    <dl id="gestures-list" class="gestures"></dl>
     <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>
   </section>
 

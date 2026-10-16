@@ -149,6 +149,12 @@ def image_series(files):
                 pts = [(R // 4, C // 4), (R // 2, C // 2), (3 * R // 4, 3 * C // 4), (R // 2, C // 4), (R // 3, 2 * C // 3)]
                 s["values"] = [{"x": x, "y": y, "stored": float(fr[y, x]), "real": float(fr[y, x]) * slope + icpt} for y, x in pts]
                 s["constant"] = bool(fr.min() == fr.max())
+                if s["window"]:
+                    # Share of the frame's real values inside its stored window (the viewer does not
+                    # open on a window with under 1% of them inside).
+                    wc, ww = s["window"][0], s["window"][1]
+                    real = fr.astype(np.float64) * slope + icpt
+                    s["windowCover"] = float(np.mean((real >= wc - ww / 2) & (real <= wc + ww / 2)))
             elif arr is None:
                 s["decodeError"] = err
             slices.append(s)

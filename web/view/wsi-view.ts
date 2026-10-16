@@ -708,7 +708,7 @@ export class SlideView {
 
   private wire() {
     const el = this.root;
-    type P = { x: number; y: number; x0: number; y0: number; t0: number };
+    type P = { x: number; y: number; x0: number; y0: number; t0: number; button: number };
     const pts = new Map<number, P>();
     let lastTap = 0, lastTapX = 0, lastTapY = 0;
     let pinch: { d0: number; s0: number; mx: number; my: number; bx: number; by: number } | null = null;
@@ -729,7 +729,7 @@ export class SlideView {
       e.stopPropagation();
       lastPointerType = e.pointerType;
       el.setPointerCapture(e.pointerId);
-      pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now() });
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), button: e.pointerType === "mouse" ? e.button : 0 });
       if (pts.size === 2) startPinch();
       el.classList.add("dragging");
     });
@@ -740,7 +740,11 @@ export class SlideView {
       const dx = e.clientX - p.x, dy = e.clientY - p.y;
       p.x = e.clientX;
       p.y = e.clientY;
-      if (pts.size === 1) {
+      if (pts.size === 1 && p.button === 2) {
+        // Right-drag zooms (up zooms in) about where the drag started, as in the slice viewer.
+        const [x, y] = cp(p.x0, p.y0);
+        this.zoomAt(Math.exp(-dy * 0.01), x, y);
+      } else if (pts.size === 1) {
         const k = this.canvas.width / Math.max(1, this.canvas.getBoundingClientRect().width);
         this.panBy(dx * k, dy * k);
       } else if (pts.size === 2 && pinch && pinch.d0 > 10) {
@@ -761,12 +765,11 @@ export class SlideView {
       if (pts.size === 2) startPinch();
       else pinch = null;
       if (pts.size === 0) el.classList.remove("dragging");
-      // Double tap (touch) zooms in at the tap.
+      // Double tap (touch) returns to the whole slide, as Reset does.
       if (e.type === "pointerup" && e.pointerType !== "mouse" && Math.hypot(e.clientX - p.x0, e.clientY - p.y0) < 10 && performance.now() - p.t0 < 300) {
         const now = performance.now();
         if (now - lastTap < 320 && Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < 40) {
-          const [x, y] = cp(e.clientX, e.clientY);
-          this.zoomAt(2, x, y);
+          this.fit();
           lastTap = 0;
         } else {
           lastTap = now;
@@ -781,8 +784,7 @@ export class SlideView {
       e.stopPropagation();
       // Touch double taps are handled on pointerup (browsers also send dblclick for them).
       if (lastPointerType !== "mouse") return;
-      const [x, y] = cp(e.clientX, e.clientY);
-      this.zoomAt(e.shiftKey ? 0.5 : 2, x, y);
+      this.fit();
     });
     el.addEventListener(
       "wheel",
