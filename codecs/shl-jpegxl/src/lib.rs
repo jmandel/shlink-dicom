@@ -7,6 +7,7 @@
 
 mod bits;
 mod container;
+mod decoder;
 mod entropy;
 pub mod error;
 mod frame;
@@ -14,12 +15,12 @@ mod frame_header;
 pub mod headers;
 mod icc;
 mod modular;
+mod render;
 
 pub use error::{Error, Result};
 pub use headers::{BitDepth, ColourEncoding, ColourSpace, ExtraChannelType, TransferFunction};
 
 use bits::BitReader;
-use frame_header::{read_toc, BlendMode, Encoding, FrameHeader, FrameType};
 
 /// Limits applied while decoding.
 #[derive(Clone, Copy, Debug)]
@@ -89,81 +90,65 @@ pub fn info(data: &[u8]) -> Result<Info> {
 
 /// Decodes the first displayed frame of a JPEG XL file or bare codestream.
 pub fn decode(data: &[u8], opts: &Options) -> Result<Image> {
+    let mut frames = decode_frames(data, opts, 1)?;
+    frames.pop().ok_or(Error::Invalid("no displayed frame"))
+}
+
+/// Decodes up to `max` displayed frames (animations), as float samples except for a lone
+/// lossless frame.
+pub fn decode_frames(data: &[u8], opts: &Options, max: usize) -> Result<Vec<Image>> {
     let parsed = container::parse(data)?;
     let cs: &[u8] = &parsed.codestream;
-    let mut br = BitReader::new(cs);
-    let hd = headers::read_headers(&mut br)?;
+    let mut dec = decoder::Decoder::new(cs)?;
+    let hd = dec.hd.clone();
     let pixels = u64::from(hd.size.width) * u64::from(hd.size.height);
     if pixels > opts.max_pixels {
         return Err(Error::Limit("image too large"));
     }
-    let mut pos = br.byte_pos();
-    if hd.metadata.preview.is_some() {
-        pos = skip_frame(cs, pos, &hd, true)?;
+    dec.allow_int = max == 1;
+    let mut out = Vec::new();
+    while out.len() < max {
+        let Some((_, r)) = dec.next_displayed()? else { break };
+        out.push(to_image(r, &hd));
     }
-    loop {
-        let mut br = BitReader::new(cs.get(pos..).ok_or(Error::Invalid("frame offset"))?);
-        let fh = FrameHeader::read(&mut br, &hd, false)?;
-        let dims = fh.dims();
-        let toc = read_toc(&mut br, &dims, fh.passes.num_passes as usize)?;
-        let start = pos + br.byte_pos();
-        let data = cs.get(start..).ok_or(Error::Invalid("frame data"))?;
-        let mut sections = frame::Sections::new(data, &toc)?;
-        let simple = fh.frame_type == FrameType::Regular
-            && fh.is_visible()
-            && fh.encoding == Encoding::Modular
-            && !fh.xyb
-            && !fh.ycbcr
-            && fh.upsampling == 1
-            && fh.ec_upsampling.iter().all(|&u| u == 1)
-            && fh.blending.mode == BlendMode::Replace
-            && fh.x0 == 0
-            && fh.y0 == 0
-            && fh.width == hd.size.width
-            && fh.height == hd.size.height
-            && !fh.can_be_referenced();
-        if !simple {
-            return Err(Error::Unsupported("frame type or rendering not yet supported"));
-        }
-        let dm = frame::decode_modular_frame(&mut sections, &hd, &fh)?;
-        return Ok(integer_image(dm, &hd));
+    if out.is_empty() {
+        return Err(Error::Invalid("no displayed frame"));
     }
+    Ok(out)
 }
 
-/// Skips a frame (used for the preview) using its TOC; returns the offset of the next frame.
-fn skip_frame(cs: &[u8], pos: usize, hd: &headers::Headers, preview: bool) -> Result<usize> {
-    let mut br = BitReader::new(cs.get(pos..).ok_or(Error::Invalid("frame offset"))?);
-    let fh = FrameHeader::read(&mut br, hd, preview)?;
-    let toc = read_toc(&mut br, &fh.dims(), fh.passes.num_passes as usize)?;
-    let end = pos + br.byte_pos() + toc.total;
-    if end > cs.len() {
-        return Err(Error::Invalid("frame data truncated"));
-    }
-    Ok(end)
-}
-
-fn integer_image(dm: frame::DecodedModular, hd: &headers::Headers) -> Image {
+fn to_image(r: decoder::Rendered, hd: &headers::Headers) -> Image {
     let w = hd.size.width as usize;
     let h = hd.size.height as usize;
-    let mut planes = Vec::with_capacity(dm.image.channels.len());
-    for (i, ch) in dm.image.channels.into_iter().enumerate() {
-        let bits = if i < dm.nb_color {
-            hd.metadata.bit_depth.bits
-        } else {
-            hd.metadata.extra_channels[i - dm.nb_color].bit_depth.bits
-        };
-        let max = ((1u64 << bits) - 1) as i32;
-        let mut data = ch.data;
-        for v in data.iter_mut() {
-            *v = (*v).clamp(0, max);
-        }
-        planes.push(Plane::Int(orient(data, w, h, hd.metadata.orientation)));
-    }
+    let o = hd.metadata.orientation;
+    let num_color = if hd.metadata.colour.is_gray() { 1 } else { 3 };
+    let planes: Vec<Plane> = match r {
+        decoder::Rendered::Int(chans, nb_color) => chans
+            .into_iter()
+            .enumerate()
+            .map(|(i, ch)| {
+                let bits = if i < nb_color { hd.metadata.bit_depth.bits } else { hd.metadata.extra_channels[i - nb_color].bit_depth.bits };
+                let max = ((1u64 << bits) - 1) as i32;
+                let mut data = ch.data;
+                for v in data.iter_mut() {
+                    *v = (*v).clamp(0, max);
+                }
+                Plane::Int(orient(data, w, h, o))
+            })
+            .collect(),
+        decoder::Rendered::Float(img) => img
+            .planes
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= 3 || *i < num_color)
+            .map(|(_, p)| Plane::Float(orient(p.data, w, h, o)))
+            .collect(),
+    };
     let s = hd.oriented_size();
     Image {
         width: s.width,
         height: s.height,
-        num_color: dm.nb_color,
+        num_color,
         planes,
         bit_depth: hd.metadata.bit_depth,
         extra_channels: hd.metadata.extra_channels.iter().map(|e| e.kind).collect(),

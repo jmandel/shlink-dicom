@@ -252,11 +252,91 @@ fn fill_props(p: &mut [i32], x: usize, n: &Neighbours) {
     p[14] = (n.left - n.leftleft) as i32;
 }
 
+/// The tree flattened two levels at a time (as libjxl's FilterTree): a node tests `prop0`,
+/// and both children's tests are in the same node, so one step resolves two levels. Leaves
+/// that sit at an odd depth appear twice. Leaves have `prop0 == LEAF`.
+#[derive(Clone, Copy)]
+struct FlatNode {
+    prop0: u32,
+    split0: i32,
+    props: [u32; 2],
+    splits: [i32; 2],
+    /// First grandchild (split nodes) or leaf index (leaves).
+    child: u32,
+}
+
+#[derive(Clone, Copy)]
+struct FastLeaf {
+    ctx: u32,
+    predictor: Predictor,
+    offset: i64,
+    multiplier: u32,
+}
+
+const LEAF: u32 = u32::MAX;
+const NO_LEAF: FastLeaf = FastLeaf { ctx: 0, predictor: Predictor::Zero, offset: 0, multiplier: 1 };
+
+fn flat_tree(tree: &ChannelTree) -> (Vec<FlatNode>, Vec<FastLeaf>) {
+    let nodes = &tree.nodes;
+    let mut out = Vec::with_capacity(nodes.len());
+    let mut leaves = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(0usize);
+    while let Some(cur) = queue.pop_front() {
+        match nodes.get(cur) {
+            Some(&Node::Split { property, splitval, left, right }) => {
+                let child = (out.len() + queue.len() + 1) as u32;
+                let mut fnode = FlatNode { prop0: property & 0xFF, split0: splitval, props: [0; 2], splits: [0; 2], child };
+                for (i, c) in [left as usize, right as usize].into_iter().enumerate() {
+                    match nodes.get(c) {
+                        Some(&Node::Split { property, splitval, left, right }) => {
+                            fnode.props[i] = property & 0xFF;
+                            fnode.splits[i] = splitval;
+                            queue.push_back(left as usize);
+                            queue.push_back(right as usize);
+                        }
+                        _ => {
+                            queue.push_back(c);
+                            queue.push_back(c);
+                        }
+                    }
+                }
+                out.push(fnode);
+            }
+            Some(&Node::Leaf { ctx, predictor, offset, multiplier }) => {
+                out.push(FlatNode { prop0: LEAF, split0: 0, props: [0; 2], splits: [0; 2], child: leaves.len() as u32 });
+                leaves.push(FastLeaf { ctx, predictor, offset, multiplier });
+            }
+            None => {
+                out.push(FlatNode { prop0: LEAF, split0: 0, props: [0; 2], splits: [0; 2], child: leaves.len() as u32 });
+                leaves.push(NO_LEAF);
+            }
+        }
+    }
+    (out, leaves)
+}
+
+#[inline(always)]
+fn walk(nodes: &[FlatNode], leaves: &[FastLeaf], props: &[i32; 256]) -> FastLeaf {
+    let mut i = 0usize;
+    loop {
+        let Some(n) = nodes.get(i) else { return NO_LEAF };
+        if n.prop0 == LEAF {
+            return leaves.get(n.child as usize).copied().unwrap_or(NO_LEAF);
+        }
+        let p0 = props[(n.prop0 & 0xFF) as usize] <= n.split0;
+        let off0 = usize::from(props[(n.props[0] & 0xFF) as usize] <= n.splits[0]);
+        let off1 = 2 | usize::from(props[(n.props[1] & 0xFF) as usize] <= n.splits[1]);
+        i = n.child as usize + if p0 { off1 } else { off0 };
+    }
+}
+
 fn decode_general(br: &mut BitReader, r: &mut SymbolReader, cx: &ChannelCtx, prev: &[Channel], ch: &mut Channel) -> Result<()> {
     let tree = cx.tree;
     let code = cx.code;
     let (w, h) = (ch.w, ch.h);
     let num_refs = (tree.num_props - NUM_NONREF_PROPS) / 4;
+    let (nodes, leaves) = flat_tree(tree);
     // Reference channels: earlier channels of identical geometry, nearest first.
     let refs: Vec<&Channel> = prev
         .iter()
@@ -264,13 +344,15 @@ fn decode_general(br: &mut BitReader, r: &mut SymbolReader, cx: &ChannelCtx, pre
         .filter(|c| c.w == w && c.h == h && c.hshift == ch.hshift && c.vshift == ch.vshift && c.data.len() == w * h)
         .take(num_refs)
         .collect();
-    let mut ref_props = vec![0i32; num_refs * 4 * w];
-    let mut props = vec![0i32; tree.num_props];
+    let nref = num_refs * 4;
+    if NUM_NONREF_PROPS + nref > 256 {
+        return invalid("too many reference properties");
+    }
+    let mut ref_props = vec![0i32; nref * w];
+    let mut props = [0i32; 256];
     let mut st = if tree.uses_wp { Some(WpState::new(*cx.wp, w)) } else { None };
-    let static_ch = 0; // channel/group properties were resolved when the tree was specialised
-    let _ = static_ch;
     for y in 0..h {
-        if num_refs > 0 {
+        if nref > 0 {
             ref_props.fill(0);
             for (k, rc) in refs.iter().enumerate() {
                 let row = &rc.data[y * w..(y + 1) * w];
@@ -281,7 +363,7 @@ fn decode_general(br: &mut BitReader, r: &mut SymbolReader, cx: &ChannelCtx, pre
                     let vtop = if y > 0 { i64::from(prow[x]) } else { vleft };
                     let vtopleft = if x > 0 && y > 0 { i64::from(prow[x - 1]) } else { vleft };
                     let pred = clamped_gradient(vleft, vtop, vtopleft);
-                    let o = x * num_refs * 4 + k * 4;
+                    let o = x * nref + k * 4;
                     ref_props[o] = v.abs() as i32;
                     ref_props[o + 1] = v as i32;
                     ref_props[o + 2] = (v - pred).abs() as i32;
@@ -291,8 +373,26 @@ fn decode_general(br: &mut BitReader, r: &mut SymbolReader, cx: &ChannelCtx, pre
         }
         props[2] = y as i32;
         props[9] = 0;
-        for x in 0..w {
-            let n = neighbours(&ch.data, w, x, y);
+        let (above, rest) = ch.data.split_at_mut(y * w);
+        let cur = &mut rest[..w];
+        let prow: &[i32] = if y > 0 { &above[(y - 1) * w..y * w] } else { &[] };
+        let pprow: &[i32] = if y > 1 { &above[(y - 2) * w..(y - 1) * w] } else { &[] };
+        let interior = y >= 2 && w > 4;
+        let mut x = 0;
+        while x < w {
+            let n = if interior && x >= 2 && x + 2 < w {
+                Neighbours {
+                    left: i64::from(cur[x - 1]),
+                    top: i64::from(prow[x]),
+                    topleft: i64::from(prow[x - 1]),
+                    topright: i64::from(prow[x + 1]),
+                    leftleft: i64::from(cur[x - 2]),
+                    toptop: i64::from(pprow[x]),
+                    toprightright: i64::from(prow[x + 2]),
+                }
+            } else {
+                edge_neighbours(cur, prow, pprow, w, x, y)
+            };
             fill_props(&mut props, x, &n);
             let mut wp_pred = 0;
             if let Some(s) = st.as_mut() {
@@ -300,22 +400,42 @@ fn decode_general(br: &mut BitReader, r: &mut SymbolReader, cx: &ChannelCtx, pre
                 wp_pred = p;
                 props[WP_PROP] = maxerr;
             }
-            if num_refs > 0 {
-                let o = x * num_refs * 4;
-                props[NUM_NONREF_PROPS..].copy_from_slice(&ref_props[o..o + num_refs * 4]);
+            if nref > 0 {
+                let o = x * nref;
+                props[NUM_NONREF_PROPS..NUM_NONREF_PROPS + nref].copy_from_slice(&ref_props[o..o + nref]);
             }
-            let (ctx, predictor, offset, multiplier) = tree.lookup(&props);
-            let guess = offset.wrapping_add(predict(predictor, &n, wp_pred));
-            let v = r.read_clustered(code, br, ctx as usize);
-            let px = make_pixel(v, multiplier, guess);
-            ch.data[y * w + x] = px;
+            let leaf = walk(&nodes, &leaves, &props);
+            let guess = leaf.offset.wrapping_add(predict(leaf.predictor, &n, wp_pred));
+            let v = r.read_clustered(code, br, leaf.ctx as usize);
+            let px = make_pixel(v, leaf.multiplier, guess);
+            cur[x] = px;
             if let Some(s) = st.as_mut() {
                 s.update(i64::from(px), x, y);
             }
+            x += 1;
         }
         if br.overrun() {
             return invalid("truncated modular channel");
         }
     }
     Ok(())
+}
+
+/// `neighbours` for a row split into the current row and the two rows above.
+#[inline(always)]
+fn edge_neighbours(cur: &[i32], prow: &[i32], pprow: &[i32], w: usize, x: usize, y: usize) -> Neighbours {
+    let left = if x > 0 {
+        i64::from(cur[x - 1])
+    } else if y > 0 {
+        i64::from(prow[x])
+    } else {
+        0
+    };
+    let top = if y > 0 { i64::from(prow[x]) } else { left };
+    let topleft = if x > 0 && y > 0 { i64::from(prow[x - 1]) } else { left };
+    let topright = if x + 1 < w && y > 0 { i64::from(prow[x + 1]) } else { top };
+    let leftleft = if x > 1 { i64::from(cur[x - 2]) } else { left };
+    let toptop = if y > 1 { i64::from(pprow[x]) } else { top };
+    let toprightright = if x + 2 < w && y > 0 { i64::from(prow[x + 2]) } else { topright };
+    Neighbours { left, top, topleft, topright, leftleft, toptop, toprightright }
 }

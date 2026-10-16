@@ -8,3 +8,5 @@ description = "JPEG XL (ISO/IEC 18181-1 and -2) decoder, pure Rust"
 [dependencies]
 
 [dev-dependencies]
+# Test-only comparison decoder (removed with the wrapper switch).
+jxl-oxide = { version = "0.12.6", default-features = false }

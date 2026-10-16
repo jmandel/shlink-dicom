@@ -182,22 +182,39 @@ pub fn read_lf_dequant(br: &mut BitReader) -> Result<[f32; 3]> {
     Ok(q)
 }
 
-/// Result of decoding a modular frame: the modular image with all transforms undone.
-pub struct DecodedModular {
-    pub image: ModularImage,
+/// Everything decoded from a frame's sections, before rendering.
+pub struct DecodedFrame {
+    /// The modular image with all transforms undone: colour channels (`nb_color` of them,
+    /// modular frames only) then the extra channels.
+    pub modular: ModularImage,
     pub nb_color: usize,
-    pub lf: LfGlobal,
+    pub lf_dequant: [f32; 3],
+    pub patches: Vec<crate::render::Patch>,
 }
 
-pub fn decode_modular_frame(sections: &mut Sections, hd: &Headers, fh: &FrameHeader) -> Result<DecodedModular> {
+pub fn decode_frame_sections(
+    sections: &mut Sections,
+    hd: &Headers,
+    fh: &FrameHeader,
+    refs: &[Option<crate::render::Reference>; 4],
+) -> Result<DecodedFrame> {
     let dims = fh.dims();
-    if fh.flags & (FLAG_PATCHES | FLAG_SPLINES | FLAG_NOISE) != 0 {
-        return Err(Error::Unsupported("patches, splines or noise"));
+    if fh.flags & (FLAG_SPLINES | FLAG_NOISE) != 0 {
+        return Err(Error::Unsupported("splines or noise"));
     }
-    let (lf_dequant, mut mf) = sections.with(0, |br| {
+    if fh.encoding == Encoding::VarDct {
+        return Err(Error::Unsupported("VarDCT frames"));
+    }
+    let num_ec = hd.metadata.extra_channels.len();
+    let (lf_dequant, patches, mut mf) = sections.with(0, |br| {
+        let patches = if fh.flags & FLAG_PATCHES != 0 {
+            read_patches(br, dims.xsize_padded, dims.ysize_padded, num_ec, refs)?
+        } else {
+            Vec::new()
+        };
         let q = read_lf_dequant(br)?;
         let mf = ModularFrame::read_global(br, hd, fh, &dims)?;
-        Ok((q, mf))
+        Ok((q, patches, mf))
     })?;
     for g in 0..dims.num_lf_groups {
         let gx = g % dims.xsize_lf_groups;
@@ -220,9 +237,102 @@ pub fn decode_modular_frame(sections: &mut Sections, hd: &Headers, fh: &FrameHea
     let nb_color = mf.nb_color;
     let mut image = mf.image;
     image.undo_transforms()?;
-    let expect = nb_color + hd.metadata.extra_channels.len();
-    if image.channels.len() != expect {
+    if image.channels.len() != nb_color + num_ec {
         return invalid("modular image has the wrong number of channels");
     }
-    Ok(DecodedModular { image, nb_color, lf: LfGlobal { lf_dequant } })
+    Ok(DecodedFrame { modular: image, nb_color, lf_dequant, patches })
+}
+
+/// Patch dictionary (K.3.1). `xsize`/`ysize` bound the patch positions (the padded frame).
+pub fn read_patches(
+    br: &mut BitReader,
+    xsize: usize,
+    ysize: usize,
+    num_ec: usize,
+    refs: &[Option<crate::render::Reference>; 4],
+) -> Result<Vec<crate::render::Patch>> {
+    use crate::bits::unpack_signed;
+    use crate::render::{Patch, PatchBlending, PatchMode};
+    let code = crate::entropy::EntropyCode::read(br, 10)?;
+    let mut r = code.reader(br, 0)?;
+    let num_ref = r.read(&code, br, 0) as usize;
+    let max_ref = 1024 + xsize * ysize / 4;
+    let max_patches = max_ref * 4;
+    if num_ref > max_ref {
+        return invalid("too many patches");
+    }
+    let mut out: Vec<Patch> = Vec::new();
+    for _ in 0..num_ref {
+        let reference = r.read(&code, br, 1) as usize;
+        let rf = refs.get(reference).and_then(|r| r.as_ref()).ok_or(Error::Invalid("patch reference frame"))?;
+        if rf.image.width() == 0 {
+            return invalid("patch reference frame");
+        }
+        if !rf.before_ct {
+            return invalid("patches cannot use frames saved after the colour transform");
+        }
+        let rx0 = r.read(&code, br, 3) as usize;
+        let ry0 = r.read(&code, br, 3) as usize;
+        let w = r.read(&code, br, 2) as usize + 1;
+        let h = r.read(&code, br, 2) as usize + 1;
+        if rx0 + w > rf.image.width() || ry0 + h > rf.image.height() {
+            return invalid("patch outside its reference frame");
+        }
+        let count = r.read(&code, br, 7) as usize;
+        if count >= max_patches || out.len() + count + 1 > max_patches {
+            return invalid("too many patches");
+        }
+        let (mut px, mut py) = (0usize, 0usize);
+        for i in 0..=count {
+            if i == 0 {
+                px = r.read(&code, br, 4) as usize;
+                py = r.read(&code, br, 4) as usize;
+            } else {
+                let dx = unpack_signed(r.read(&code, br, 6)) as i64;
+                let dy = unpack_signed(r.read(&code, br, 6)) as i64;
+                let nx = px as i64 + dx;
+                let ny = py as i64 + dy;
+                if nx < 0 || ny < 0 {
+                    return invalid("patch position");
+                }
+                px = nx as usize;
+                py = ny as usize;
+            }
+            if px + w > xsize || py + h > ysize {
+                return invalid("patch outside the frame");
+            }
+            let mut blending = Vec::with_capacity(num_ec + 1);
+            for _ in 0..=num_ec {
+                let mode = match r.read(&code, br, 5) {
+                    0 => PatchMode::None,
+                    1 => PatchMode::Replace,
+                    2 => PatchMode::Add,
+                    3 => PatchMode::Mul,
+                    4 => PatchMode::BlendAbove,
+                    5 => PatchMode::BlendBelow,
+                    6 => PatchMode::AwAddAbove,
+                    7 => PatchMode::AwAddBelow,
+                    _ => return invalid("patch blend mode"),
+                };
+                let uses_alpha = matches!(mode, PatchMode::BlendAbove | PatchMode::BlendBelow | PatchMode::AwAddAbove | PatchMode::AwAddBelow);
+                let mut alpha_channel = 0;
+                if uses_alpha && num_ec > 1 {
+                    alpha_channel = r.read(&code, br, 8) as usize;
+                    if alpha_channel >= num_ec {
+                        return invalid("patch alpha channel");
+                    }
+                }
+                let clamp = if uses_alpha || mode == PatchMode::Mul { r.read(&code, br, 9) != 0 } else { false };
+                blending.push(PatchBlending { mode, alpha_channel, clamp });
+            }
+            out.push(Patch { reference, rx0, ry0, w, h, x: px, y: py, blending });
+            if br.overrun() {
+                return invalid("truncated patches");
+            }
+        }
+    }
+    if !r.check_final_state() {
+        return invalid("patches ANS state");
+    }
+    Ok(out)
 }

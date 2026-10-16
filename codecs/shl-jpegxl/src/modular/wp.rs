@@ -57,7 +57,7 @@ pub struct WpState {
     prediction: [i64; 4],
     pred: i64,
     /// Two rows of per-predictor errors, (xsize + 2) each.
-    pred_errors: [Vec<u32>; 4],
+    pred_errors: Vec<[u32; 4]>,
     error: Vec<i32>,
 }
 
@@ -76,7 +76,7 @@ impl WpState {
             xsize,
             prediction: [0; 4],
             pred: 0,
-            pred_errors: [vec![0; n], vec![0; n], vec![0; n], vec![0; n]],
+            pred_errors: vec![[0; 4]; n],
             error: vec![0; n],
         }
     }
@@ -92,10 +92,10 @@ impl WpState {
         let pos_n = prev_row + x;
         let pos_ne = if x + 1 < xs { pos_n + 1 } else { pos_n };
         let pos_nw = if x > 0 { pos_n - 1 } else { pos_n };
+        let (en, ene, enw) = (self.pred_errors[pos_n], self.pred_errors[pos_ne], self.pred_errors[pos_nw]);
         let mut weights = [0u32; 4];
         for (i, wt) in weights.iter_mut().enumerate() {
-            let pe = &self.pred_errors[i];
-            let s = pe[pos_n].wrapping_add(pe[pos_ne]).wrapping_add(pe[pos_nw]);
+            let s = en[i].wrapping_add(ene[i]).wrapping_add(enw[i]);
             *wt = error_weight(s, self.h.w[i]);
         }
         let n = n.wrapping_shl(3);
@@ -162,11 +162,14 @@ impl WpState {
         let prev_row = if y & 1 != 0 { xs + 2 } else { 0 };
         let val = val.wrapping_shl(3);
         self.error[cur_row + x] = self.pred.wrapping_sub(val) as i32;
+        let mut errs = [0u32; 4];
+        for (i, e) in errs.iter_mut().enumerate() {
+            *e = (self.prediction[i].wrapping_sub(val).unsigned_abs().wrapping_add(3) >> 3) as u32;
+        }
+        self.pred_errors[cur_row + x] = errs;
+        let next = &mut self.pred_errors[prev_row + x + 1];
         for i in 0..4 {
-            let err = (self.prediction[i].wrapping_sub(val).unsigned_abs().wrapping_add(3) >> 3) as u32;
-            let pe = &mut self.pred_errors[i];
-            pe[cur_row + x] = err;
-            pe[prev_row + x + 1] = pe[prev_row + x + 1].wrapping_add(err);
+            next[i] = next[i].wrapping_add(errs[i]);
         }
     }
 }
