@@ -4,11 +4,17 @@
 
 use crate::Error;
 
-/// Allocate a zeroed buffer without aborting on allocation failure.
-pub fn alloc(len: usize) -> Result<Vec<u8>, Error> {
+/// An empty buffer with room for `len` bytes, without aborting on allocation failure.
+pub fn reserve(len: usize) -> Result<Vec<u8>, Error> {
     let mut v = Vec::new();
     v.try_reserve_exact(len)
         .map_err(|_| Error::Unsupported(format!("cannot allocate {len} bytes for decoded pixels")))?;
+    Ok(v)
+}
+
+/// Allocate a zeroed buffer without aborting on allocation failure.
+pub fn alloc(len: usize) -> Result<Vec<u8>, Error> {
+    let mut v = reserve(len)?;
     v.resize(len, 0);
     Ok(v)
 }

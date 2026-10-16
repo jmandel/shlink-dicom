@@ -1035,9 +1035,22 @@ fn decode_encapsulated(img: &Image, frames: &[std::borrow::Cow<'_, [u8]>], codec
         let photometric = normalise_frame(img, decoded, cs, &mut out)?;
         return img.canonical(out, photometric);
     }
-    let mut out = pixel::alloc(total)?;
     let threads = decode_threads(frames.len(), total);
-    let out_photometric = if threads <= 1 || expected == 0 {
+    if threads <= 1 && expected > 0 {
+        // One thread: append each frame to the output, which is reserved but not zeroed first.
+        let mut out = pixel::reserve(total)?;
+        let mut photometric = img.photometric_str.clone();
+        for (k, cs) in frames.iter().enumerate() {
+            let decoded = codec(cs, &info)?;
+            if decoded.data.len() != expected {
+                return Err(Error::Invalid(format!("frame {k}: codec returned {} bytes, expected {expected}", decoded.data.len())));
+            }
+            photometric = normalise_into(img, decoded, cs, expected, frames.len(), &mut out)?;
+        }
+        return img.canonical(out, photometric);
+    }
+    let mut out = pixel::alloc(total)?;
+    let out_photometric = if threads <= 1 {
         decode_run(0, frames, &mut out)?
     } else {
         let per = frames.len().div_ceil(threads);
@@ -1116,11 +1129,15 @@ fn normalise_into(
     out: &mut Vec<u8>,
 ) -> Result<String, Error> {
     if out.is_empty() {
-        let total = expected.saturating_mul(frames);
-        out.try_reserve_exact(total)
-            .map_err(|_| Error::Unsupported(format!("cannot allocate {total} bytes for decoded pixels")))?;
+        *out = pixel::reserve(expected.saturating_mul(frames))?;
     }
     let start = out.len();
+    if decoded.data.len() == expected && !(decoded.planar && img.samples_per_pixel > 1) {
+        // Interleaved: copy the frame in, then work on it in place (no zero fill first).
+        out.extend_from_slice(&decoded.data);
+        drop(decoded.data);
+        return finish_frame(img, decoded.color, cs, out.get_mut(start..).unwrap_or(&mut []));
+    }
     out.resize(start + expected, 0);
     normalise_frame(img, decoded, cs, out.get_mut(start..).unwrap_or(&mut []))
 }
