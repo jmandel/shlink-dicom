@@ -168,7 +168,10 @@ enum Ctx {
     Top,
     /// Inside an item of the Shared Functional Groups Sequence.
     Shared,
-    /// Inside item `n` of the Per-Frame Functional Groups Sequence.
+    /// The Per-Frame Functional Groups Sequence itself: its items are numbered, one per frame.
+    PerFrameItems,
+    /// Inside item `n` of the Per-Frame Functional Groups Sequence (and in the functional group
+    /// sequences nested in it, which keep `n`).
     PerFrame(usize),
     /// Inside the first Real World Value Mapping item (`units`: in its Measurement Units Code
     /// Sequence). `rank` orders the places one can be found: 0 top level, 1 shared, 2 per-frame.
@@ -235,7 +238,7 @@ impl<'a> Walker<'a> {
             if len == UNDEFINED || is_sq || known_sq {
                 let child_ctx = match (ctx, tag) {
                     (Ctx::Top, 0x5200_9229) => Ctx::Shared,
-                    (Ctx::Top, 0x5200_9230) => Ctx::PerFrame(0),
+                    (Ctx::Top, 0x5200_9230) => Ctx::PerFrameItems,
                     (Ctx::Top, 0x0040_9096) => Ctx::RealWorld { rank: 0, units: false },
                     (Ctx::Shared, 0x0040_9096) => Ctx::RealWorld { rank: 1, units: false },
                     (Ctx::PerFrame(_), 0x0040_9096) => Ctx::RealWorld { rank: 2, units: false },
@@ -272,7 +275,7 @@ impl<'a> Walker<'a> {
                 0xE0DD => return Some(pos), // sequence delimiter
                 0xE000 => {
                     let item_ctx = match ctx {
-                        Ctx::PerFrame(_) => Ctx::PerFrame(index),
+                        Ctx::PerFrameItems => Ctx::PerFrame(index),
                         // Only the first item of a Real World Value Mapping Sequence is read, and
                         // per-frame only from frame 0.
                         Ctx::RealWorld { .. } if index > 0 => Ctx::Ignore,
@@ -855,5 +858,53 @@ mod tests {
         assert_eq!((rw.slope, rw.intercept), (Some(2.5), Some(-1.0)));
         assert_eq!(rw.label.as_deref(), Some("ADC"));
         assert_eq!(rw.units.as_deref(), Some("mm2/s"));
+    }
+
+    /// A defined-length explicit VR SQ holding one defined-length item per `items` entry.
+    fn sq(out: &mut Vec<u8>, g: u16, e: u16, items: &[Vec<u8>]) {
+        let body: Vec<u8> = items
+            .iter()
+            .flat_map(|it| {
+                let mut v = vec![0xFE, 0xFF, 0x00, 0xE0];
+                v.extend_from_slice(&(it.len() as u32).to_le_bytes());
+                v.extend_from_slice(it);
+                v
+            })
+            .collect();
+        out.extend_from_slice(&g.to_le_bytes());
+        out.extend_from_slice(&e.to_le_bytes());
+        out.extend_from_slice(b"SQ\0\0");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+    }
+
+    #[test]
+    fn per_frame_values_stay_with_their_frame() {
+        // Legacy Converted Enhanced PET shape: each Per-Frame Functional Groups item holds a
+        // Pixel Value Transformation Sequence and a Frame VOI LUT Sequence (nested sequences).
+        let mut per_frame = Vec::new();
+        for (k, (slope, center)) in [("2", "100"), ("3", "200"), ("4.5", "300")].iter().enumerate() {
+            let mut pvt = Vec::new();
+            el(&mut pvt, 0x0028, 0x1052, b"DS", format!("{k} ").as_bytes());
+            el(&mut pvt, 0x0028, 0x1053, b"DS", format!("{slope:<4}").as_bytes());
+            let mut voi = Vec::new();
+            el(&mut voi, 0x0028, 0x1050, b"DS", format!("{center:<4}").as_bytes());
+            el(&mut voi, 0x0028, 0x1051, b"DS", b"50");
+            let mut item = Vec::new();
+            sq(&mut item, 0x0028, 0x9132, &[voi]);
+            sq(&mut item, 0x0028, 0x9145, &[pvt]);
+            per_frame.push(item);
+        }
+        let mut file = vec![0u8; 128];
+        file.extend_from_slice(b"DICM");
+        short(&mut file, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
+        sq(&mut file, 0x5200, 0x9230, &per_frame);
+        let e = read_extra(&file);
+        assert_eq!(e.per_frame.len(), 3);
+        let got: Vec<(Option<f64>, Option<f64>, Option<f64>)> =
+            e.per_frame.iter().map(|f| (f.rescale_slope, f.rescale_intercept, f.window_center)).collect();
+        assert_eq!(got, [(Some(2.0), Some(0.0), Some(100.0)), (Some(3.0), Some(1.0), Some(200.0)), (Some(4.5), Some(2.0), Some(300.0))]);
+        // The image-level values are frame 1's.
+        assert_eq!((e.rescale_slope, e.window_center), (Some(2.0), Some(100.0)));
     }
 }
