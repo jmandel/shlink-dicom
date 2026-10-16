@@ -53,6 +53,40 @@ Times in ms, fastest of 9 (wasm) or 7 (native) decodes. "main" is the code befor
 
 **Size:** the JPEG XL code in the stripped wasm grows by 4.7 KB (2.7 KB gzip) over main.
 
+## The bench path, and the output conversion
+
+The quiet full bench run of 16 Oct (`2026-10-16-18-53-28-quiet-full3`) put our JPEG XL decodes 30–60% slower than the tables above, while its libjxl figures matched mine. The difference was what each harness timed. The tables above time `shl_jpegxl::decode` on the bare codestream, which returns float or integer planes. The bench times the DICOM codec stage, `shl_codec_jpegxl::decode_frame`, which also converts those planes to interleaved 8- or 16-bit samples. That conversion went through a closure that indexed the output for every sample: 28% of a lossless effort-1 decode (DX 2048²) and about 10% of a lossy one. The viewer pays the same cost, so it was fixed (perf-t6c): `shl_jpegxl::interleave` packs the planes, quantising floats four lanes at a time, and a test checks it against the per-sample conversion. Output is identical on all 49 corpus cases.
+
+Native cycles per decode in the bench's codec path (`bench-native`, `perf stat`, minimum of 3), before and after:
+
+| Case | before | after | change |
+|---|---|---|---|
+| Photo 2048², d1 | 843M | 693M | −17.9% |
+| Photo 2048², d3 | 781M | 643M | −17.6% |
+| Photo 2048², lossless e1 | 672M | 581M | −13.6% |
+| Photo 2048², lossless e7 | 3800M | 3675M | −3.3% |
+| DX 2048², d1 | 570M | 508M | −10.9% |
+| DX 2048², lossless e1 | 242M | 178M | −26.8% |
+| DX 2048², lossless e7 | 1521M | 1464M | −3.8% |
+| IDC DX 3032×2520, d1 | 1045M | 971M | −7.1% |
+| IDC DX 3032×2520, lossless e1 | 410M | 297M | −27.6% |
+
+In Chromium (`run.mjs --runners chromium-worker --builds simd`, load average 12, so read as ±10%), against the quiet run's figures for our previous build and for libjxl (C in wasm):
+
+| Case | before (quiet) | after (load 12) | libjxl wasm (quiet) |
+|---|---|---|---|
+| Photo 2048², d1 | 235.6 | 190 | 145.5 |
+| Photo 2048², d3 | 218.4 | 167 | 123.2 |
+| Photo 2048², lossless e1 | 223.0 | 164 | 133.7 |
+| Photo 2048², lossless e7 | 995.4 | 932 | 936.5 |
+| DX 2048², d1 | 151.0 | 144 | 118.0 |
+| DX 2048², lossless e1 | 72.3 | 51.4 | 39.9 |
+| DX 2048², lossless e7 | 393.2 | 370 | 359.8 |
+| IDC DX, d1 | 291.2 | 262 | 223.2 |
+| IDC DX, lossless e1 | 116.9 | 80.0 | 65.7 |
+
+The interleaving is still about 10% of a native lossy decode; libjxl does the same conversion inside its decode.
+
 ## What changed
 
 The crate stays `#![forbid(unsafe_code)]` and has no new dependencies.
