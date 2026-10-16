@@ -474,3 +474,8 @@ pi stores sessions as JSONL (`~/.pi/agent/sessions/--home-jmandel-hobby-shlink-d
 - **Process lessons.**
   - **Commits:** `git add` followed by a bare `git commit` swept another agent's staged rename into a commit and broke a deploy. Now commits take a pathspec, and agents never touch the index.
   - **Rules from Josh:** short-lived branches that land promptly; never characterize the Ditch the Disk working group's scope.
+
+- **16 Oct, mid-morning: landing the morning's branches.**
+  - **Three branches went to main in one pass:** the decoder speed round, JPEG XL wide-gamut colour and the aligned byte views. Each was rebased on the previous one and deployed once at the end.
+  - **A merge script that pushed past its own tests.** The decoder tests ran in debug mode under a 30-minute timeout, and test and push were joined by `;`. The timeout killed the tests and the push went ahead. A release-mode re-run passed, so nothing broke, but merge scripts now push only if the tests' exit status says they passed.
+

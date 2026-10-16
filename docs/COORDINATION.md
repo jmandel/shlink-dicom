@@ -135,6 +135,14 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **16 Oct, about 10:45: three branches landed and deployed (f522017).**
+  - **decoder-perf (a4b3a594727c938f4), 12 commits, byte-identical:** SV1 −25–30%, J2K lossless about −20%, J2K lossy 6–9% faster natively, RLE, Bits Stored masking. Small HTJ2K frames are 3–7% slower in wasm. **Follow-up:** htj2k/PERF.md (broken SCALED table) and the jpeg-dct/PERF.md lossless rows are stale.
+  - **jxl-primaries (a26e1d2aaf1165705):** wide-gamut XYB output in the image's own primaries with Bradford adaptation, and the HLG inverse OOTF fix. Gap 2 (ICC-tagged lossy decoding to linear sRGB) stays documented.
+  - **how-hex-align (a0bd674282e6512f4):** step 8's bytes aligned column by column; phone overflow from an unwrappable UID fixed. how/checks.mjs: 279/279 on the live site.
+  - **Removed:** the dperf, jxlprim and howhex worktrees and branches. /media/barracuda/dperf (45 GB build cache) can be deleted when nothing needs it.
+  - **Lesson:** the merge script joined test and push with `;`, so a test run killed by its timeout still pushed. The release-mode re-run passed afterwards. Merge scripts gate the push with `&&` on a test exit status.
+  - **Still open:** the JPEG XL speed spike (jxl-simd-spike, ../shlink-dicom-jxlspike), e2e-perf (a4397313d3a700665), codec-simd-spike decisions (Josh), the tracked `web/checks/objects/__pycache__/*.pyc`.
+
 - **16 Oct, early: all decoders become ours (Josh).** The JPEG 2000/HTJ2K decoder is ours (c3ed9a2). A new agent (a26e1d2aaf1165705) is writing our own JPEG XL decoder on branch jxl-decoder (../shlink-dicom-jxl), staged Modular, then VarDCT, then JPEG recompression/brotli, then delete jxl-oxide, against the libjxl conformance oracles. The decoder agent (a4b3a594727c938f4) is doing a decoder performance round on branch decoder-perf. The LinkedIn sentence on patched crates must be fixed after the 9 am ET publish (scheduled articles can't be edited).
 
 - **15 Oct, about 21:50: the LinkedIn article is SCHEDULED** for Fri 16 Oct, 8:00 am CDT (9:00 am ET), Post to Anyone, with the post message from $CLAUDE_JOB_DIR/tmp/post-message.txt (Josh's opener; no links; 1.5 MB of 313 MB). The draft was verified identical to the blog md (44 blocks, 40 links, 8 images). Known stale item: shot-viewer.png predates the thumbnail fix (empty DWI/ADC tiles); Josh said not to chase every screenshot. Josh can change or cancel it via LinkedIn's "View scheduled articles".
