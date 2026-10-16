@@ -31,7 +31,7 @@ mod test_common;
 
 use shl_codec_common::{scaled_extent, DecodeError, DecodedFrame, DecodedScaled, FrameInfo, Result};
 
-pub use encode::encode_lossless_sv1;
+pub use encode::{encode_lossless_sv1, encode_lossless_sv1_le};
 
 pub(crate) fn invalid(m: &str) -> DecodeError {
     DecodeError::Invalid(m.to_string())

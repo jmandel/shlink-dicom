@@ -176,6 +176,16 @@ pub fn decode_frames(bytes: &[u8], first: usize, count: usize, scale_log2: u8) -
     decode_inner(bytes, codec_for, Some((scale_log2, &scaled_codec_for)), range)
 }
 
+/// [`decode_frames`] at full size with a different codec table, as [`decode_file_with`].
+pub fn decode_frames_with(
+    bytes: &[u8],
+    first: usize,
+    count: usize,
+    codecs: impl Fn(&str) -> Option<DecodeFn>,
+) -> Result<Canonical, Error> {
+    decode_inner(bytes, codecs, None, Some((first, count)))
+}
+
 /// Decode every frame at 1/2^`scale_log2` of its size in each direction (CONTRACT.md,
 /// "Reduced-resolution decode"): ceil(rows / 2^s) × ceil(columns / 2^s), same canonical form as
 /// [`decode_file`]. Uses the codec's own reduced decode where [`scaled_codec_for`] has one,
@@ -987,7 +997,6 @@ fn decode_encapsulated(img: &Image, frames: &[std::borrow::Cow<'_, [u8]>], codec
     let info = img.frame_info();
     let expected = info.frame_bytes().ok_or_else(|| Error::Unsupported("image too large".into()))?;
     let total = expected.checked_mul(frames.len()).ok_or_else(|| Error::Unsupported("image too large".into()))?;
-    let mut out = pixel::alloc(total)?;
     let decode_run = |first: usize, run: &[std::borrow::Cow<'_, [u8]>], dst: &mut [u8]| -> Result<String, Error> {
         let mut photometric = img.photometric_str.clone();
         for ((k, cs), slot) in run.iter().enumerate().zip(dst.chunks_exact_mut(expected.max(1))) {
@@ -1003,6 +1012,23 @@ fn decode_encapsulated(img: &Image, frames: &[std::borrow::Cow<'_, [u8]>], codec
         }
         Ok(photometric)
     };
+    // One interleaved frame: normalise the codec's buffer in place instead of copying it.
+    if frames.len() == 1 && expected > 0 {
+        let cs = &frames[0];
+        let mut decoded = codec(cs, &info)?;
+        if decoded.data.len() != expected {
+            return Err(Error::Invalid(format!("frame 0: codec returned {} bytes, expected {expected}", decoded.data.len())));
+        }
+        if !(decoded.planar && img.samples_per_pixel > 1) {
+            let mut data = std::mem::take(&mut decoded.data);
+            let photometric = finish_frame(img, decoded.color, cs, &mut data)?;
+            return img.canonical(data, photometric);
+        }
+        let mut out = pixel::alloc(total)?;
+        let photometric = normalise_frame(img, decoded, cs, &mut out)?;
+        return img.canonical(out, photometric);
+    }
+    let mut out = pixel::alloc(total)?;
     let threads = decode_threads(frames.len(), total);
     let out_photometric = if threads <= 1 || expected == 0 {
         decode_run(0, frames, &mut out)?
@@ -1105,7 +1131,12 @@ fn normalise_frame(img: &Image, decoded: DecodedFrame, cs: &[u8], dst: &mut [u8]
         dst.copy_from_slice(&decoded.data);
     }
     drop(decoded.data);
-    let data = dst;
+    finish_frame(img, decoded.color, cs, dst)
+}
+
+/// The in-place part of [`normalise_frame`]: Bits Stored, then colour.
+fn finish_frame(img: &Image, color: ColorOut, cs: &[u8], data: &mut [u8]) -> Result<String, Error> {
+    let bps = img.bps();
     if img.bits_allocated != 1 {
         let signed = img.pixel_representation == 1;
         if is_jpeg2000(&img.transfer_syntax) {
@@ -1121,7 +1152,7 @@ fn normalise_frame(img: &Image, decoded: DecodedFrame, cs: &[u8], dst: &mut [u8]
             pixel::fix_unused_bits(data, bps, img.bits_stored, signed);
         }
     }
-    Ok(match decoded.color {
+    Ok(match color {
         ColorOut::Rgb => "RGB".into(),
         ColorOut::AsDeclared => match img.photometric {
             Photometric::YbrFull | Photometric::YbrFull422 | Photometric::YbrPartial422 => {

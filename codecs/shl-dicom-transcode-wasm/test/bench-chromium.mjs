@@ -1,5 +1,5 @@
 // The wasm transcoder in headless Chromium: speed, sizes, and byte-identical output to the native
-// build (determinism across builds).
+// build (determinism across builds). THROTTLE=4 slows the page's CPU 4× (DevTools emulation).
 //
 //   node codecs/shl-dicom-transcode-wasm/test/bench-chromium.mjs PKG_DIR FILES_DIR NATIVE_HASHES_JSON [TS]
 //
@@ -67,6 +67,10 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? 
 try {
   const p = await browser.newPage();
   p.on("pageerror", (e) => console.error("[page error]", e.message));
+  if (process.env.THROTTLE) {
+    const cdp = await p.context().newCDPSession(p);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.THROTTLE) });
+  }
   await p.goto(`http://127.0.0.1:${server.address().port}/`);
   await p.waitForFunction(() => window.ready);
   const { out, ms, pin, pout } = await p.evaluate(([n, t]) => window.run(n, t), [files, ts]);

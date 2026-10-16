@@ -13,6 +13,14 @@ shl-codec-jpeg2000-encode = { path = "../shl-codec-jpeg2000-encode" }
 # The self-check decodes with our own decoder; JPEG XL is not needed for that.
 shl-dicom-decode = { path = "../shl-dicom-decode", default-features = false }
 
+[features]
+# `bench` module: the transcode stages timed separately (examples/perf.rs, the wasm bench build).
+bench = []
+
 [dev-dependencies]
 # examples/hashes.rs: output hashes for the native-vs-wasm comparison.
 sha2 = "0.10"
+
+[[example]]
+name = "perf"
+required-features = ["bench"]

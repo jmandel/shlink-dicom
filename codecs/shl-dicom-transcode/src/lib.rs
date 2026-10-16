@@ -250,19 +250,30 @@ struct Prepared<'a> {
     ds: &'a [u8],
     elems: Vec<Elem<'a>>,
     pixel_len: usize,
-    before: shl_dicom_decode::Canonical,
+    /// The first frame's canonical pixels and attributes; `first.total_frames` frames in all.
+    first: shl_dicom_decode::Canonical,
 }
 
-/// Our decoder, with only the codecs the self-check needs (native data and the syntaxes written
-/// here), so a build of this crate carries no other codec.
-fn decode(bytes: &[u8]) -> Result<shl_dicom_decode::Canonical, shl_dicom_decode::Error> {
-    shl_dicom_decode::decode_file_with(bytes, |ts| {
-        match ts {
-            JPEG_LOSSLESS_SV1 => Some(shl_codec_jpeg::decode_frame as shl_codec_common::DecodeFn),
-            JPEG_2000_LOSSLESS => Some(shl_codec_jpeg2000::decode_frame as shl_codec_common::DecodeFn),
-            _ => None,
-        }
-    })
+/// The codecs the self-check needs (the syntaxes written here), so a build of this crate
+/// carries no other codec.
+fn codecs(ts: &str) -> Option<shl_codec_common::DecodeFn> {
+    match ts {
+        JPEG_LOSSLESS_SV1 => Some(shl_codec_jpeg::decode_frame as shl_codec_common::DecodeFn),
+        JPEG_2000_LOSSLESS => Some(shl_codec_jpeg2000::decode_frame as shl_codec_common::DecodeFn),
+        _ => None,
+    }
+}
+
+/// Frames `first..first + count` with our decoder: only those frames are decoded (and for
+/// native data only their bytes copied), so memory follows the range, not the file.
+fn decode_range(bytes: &[u8], first: usize, count: usize) -> Result<shl_dicom_decode::Canonical, shl_dicom_decode::Error> {
+    shl_dicom_decode::decode_frames_with(bytes, first, count, codecs)
+}
+
+/// Frames decoded together in the encode and in the self-check: enough to keep per-call work
+/// low, few enough to keep memory near one frame.
+fn frames_per_chunk(frame_bytes: usize) -> usize {
+    (4 << 20) / frame_bytes.max(1)
 }
 
 /// Read the input and apply the rules every encoding shares.
@@ -303,8 +314,9 @@ fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
             return Err(no(format!("overlay group {g:04X} is stored in the pixel data's high bits")));
         }
     }
-    // The canonical pixels: what is encoded, and the reference for the self-check.
-    let before = decode(input).map_err(|e| no(format!("input does not decode: {e}")))?;
+    // The first frame's canonical pixels and attributes. Frames are decoded in ranges later, so
+    // the whole image is never held decoded.
+    let before = decode_range(input, 0, 1).map_err(|e| no(format!("input does not decode: {e}")))?;
     // A missing Planar Configuration the decoder settled from the pixels is fine: the output
     // states it (0, as JPEG requires) and the pixel self-check guards the reading.
     let unsettled: Vec<_> = before.inferred.iter().filter(|i| i.attribute != "PlanarConfiguration").collect();
@@ -327,7 +339,7 @@ fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
     if before.photometric != photometric {
         return Err(no(format!("{photometric} decodes as {}", before.photometric)));
     }
-    Ok(Prepared { meta, explicit, ds, elems, pixel_len, before })
+    Ok(Prepared { meta, explicit, ds, elems, pixel_len, first: before })
 }
 
 /// Transfer syntaxes this crate writes, with the Implementation Version Name each gets.
@@ -342,74 +354,124 @@ fn version_name(ts: &str) -> Option<&'static str> {
 fn transcode(input: &[u8], ts: &str, report: &mut Report) -> Result<Vec<u8>, Declined> {
     let p = prepare(input)?;
     report.pixel_bytes_in = p.pixel_len;
-    report.frames = p.before.frames;
-    let b = &p.before;
-    // The stored bits as unsigned patterns of the JPEG precision: Bits Stored, but at least 2, and
-    // at least 9 in a 16-bit container, since readers size their output by the precision.
-    let precision = b.bits_stored.max(if b.bits_allocated == 16 { 9 } else { 2 }) as u8;
-    let mask = ((1u32 << precision) - 1) as u16;
-    let bps = b.bytes_per_sample();
-    let frame_samples = b.rows as usize * b.columns as usize * usize::from(b.samples_per_pixel);
-    let frame_bytes = frame_samples * bps;
-    let encode = |frame: &[u8]| -> Result<Vec<u8>, Declined> {
-        if ts == JPEG_2000_LOSSLESS {
-            // JPEG 2000 takes the values: unsigned below 2^P, signed sign-extended.
-            let samples: Vec<i32> = match (bps, b.signed) {
-                (1, false) => frame.iter().map(|&v| i32::from(v) & i32::from(mask)).collect(),
-                (1, true) => frame.iter().map(|&v| i32::from(v as i8)).collect(),
-                (_, false) => frame.chunks_exact(2).map(|v| i32::from(u16::from_le_bytes([v[0], v[1]]) & mask)).collect(),
-                (_, true) => frame.chunks_exact(2).map(|v| i32::from(i16::from_le_bytes([v[0], v[1]]))).collect(),
-            };
-            return shl_codec_jpeg2000_encode::encode_lossless(&samples, b.columns, b.rows, b.samples_per_pixel, precision, b.signed)
-                .map_err(|e| no(format!("encoder: {e}")));
-        }
-        let samples: Vec<u16> = if bps == 1 {
-            frame.iter().map(|&v| u16::from(v) & mask).collect()
-        } else {
-            frame.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]]) & mask).collect()
-        };
-        shl_codec_jpeg::encode_lossless_sv1(&samples, b.columns, b.rows, b.samples_per_pixel as u8, precision)
-            .map_err(|e| no(format!("encoder: {e}")))
-    };
-    let chunks: Vec<&[u8]> = b.data.chunks_exact(frame_bytes.max(1)).take(b.frames as usize).collect();
-    if chunks.len() != b.frames as usize {
-        return Err(no("decoded pixel data does not hold every frame"));
-    }
-    let fragments = encode_all(&chunks, encode)?;
-    let refs: Vec<&[u8]> = fragments.iter().map(Vec::as_slice).collect();
-    wrap(p, ts, refs, report)
+    report.frames = p.first.total_frames;
+    let fragments = encode_frames(input, &p.first, ts)?;
+    wrap(input, p, ts, fragments, report)
 }
 
-/// Encode every frame; outside wasm, large multi-frame images on several threads. The result is the
-/// same either way.
-fn encode_all(chunks: &[&[u8]], encode: impl Fn(&[u8]) -> Result<Vec<u8>, Declined> + Sync) -> Result<Vec<Vec<u8>>, Declined> {
+/// The JPEG precision for canonical samples: Bits Stored, but at least 2, and at least 9 in a
+/// 16-bit container, since readers size their output by the precision.
+fn precision(b: &shl_dicom_decode::Canonical) -> u8 {
+    b.bits_stored.max(if b.bits_allocated == 16 { 9 } else { 2 }) as u8
+}
+
+/// One frame's codestream from its canonical bytes (`b` describes the image).
+fn encode_frame(frame: &[u8], b: &shl_dicom_decode::Canonical, ts: &str) -> Result<Vec<u8>, Declined> {
+    let precision = precision(b);
+    let mask = ((1u32 << precision) - 1) as u16;
+    let bps = b.bytes_per_sample();
+    if ts == JPEG_2000_LOSSLESS {
+        // JPEG 2000 takes the values: unsigned below 2^P, signed sign-extended.
+        let samples: Vec<i32> = match (bps, b.signed) {
+            (1, false) => frame.iter().map(|&v| i32::from(v) & i32::from(mask)).collect(),
+            (1, true) => frame.iter().map(|&v| i32::from(v as i8)).collect(),
+            (_, false) => frame.chunks_exact(2).map(|v| i32::from(u16::from_le_bytes([v[0], v[1]]) & mask)).collect(),
+            (_, true) => frame.chunks_exact(2).map(|v| i32::from(i16::from_le_bytes([v[0], v[1]]))).collect(),
+        };
+        return shl_codec_jpeg2000_encode::encode_lossless(&samples, b.columns, b.rows, b.samples_per_pixel, precision, b.signed)
+            .map_err(|e| no(format!("encoder: {e}")));
+    }
+    shl_codec_jpeg::encode_lossless_sv1_le(frame, bps, b.columns, b.rows, b.samples_per_pixel as u8, precision)
+        .map_err(|e| no(format!("encoder: {e}")))
+}
+
+/// One codestream per frame of `input`, decoding frames a chunk at a time. Outside wasm, chunks of
+/// a large multi-frame image go to several threads; the codestreams are the same either way.
+fn encode_frames(input: &[u8], first: &shl_dicom_decode::Canonical, ts: &str) -> Result<Vec<Vec<u8>>, Declined> {
+    let frames = first.total_frames as usize;
+    let frame_bytes = first.data.len();
+    let per = frames_per_chunk(frame_bytes).clamp(1, frames.max(1));
+    let starts: Vec<usize> = (0..frames).step_by(per).collect();
+    let run = |start: usize| -> Result<Vec<Vec<u8>>, Declined> {
+        let n = per.min(frames - start);
+        let c = if start == 0 && n == 1 {
+            None
+        } else {
+            Some(decode_range(input, start, n).map_err(|e| no(format!("input does not decode: {e}")))?)
+        };
+        let data = c.as_ref().map_or(&first.data, |c| &c.data);
+        data.chunks_exact(frame_bytes.max(1)).take(n).map(|f| encode_frame(f, first, ts)).collect()
+    };
+    let parts = map_parallel(&starts, frames * frame_bytes, run);
+    let mut out = Vec::with_capacity(frames);
+    for part in parts {
+        out.extend(part?);
+    }
+    if out.len() != frames {
+        return Err(no("decoded pixel data does not hold every frame"));
+    }
+    Ok(out)
+}
+
+/// `f` over `items`, in order; outside wasm on up to 8 threads when there is enough work.
+fn map_parallel<T: Sync + Copy, R: Send>(items: &[T], bytes: usize, f: impl Fn(T) -> R + Sync) -> Vec<R> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let bytes: usize = chunks.iter().map(|c| c.len()).sum();
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(chunks.len()).min(bytes / (4 << 20)).max(1);
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(items.len()).min(bytes / (4 << 20)).max(1);
         if threads > 1 {
-            let per = chunks.len().div_ceil(threads);
-            let encode = &encode;
-            let parts: Vec<Result<Vec<Vec<u8>>, Declined>> = std::thread::scope(|s| {
-                let hs: Vec<_> = chunks.chunks(per).map(|run| s.spawn(move || run.iter().map(|c| encode(c)).collect())).collect();
-                hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(no("encoder thread panicked")))).collect()
+            let per = items.len().div_ceil(threads);
+            let f = &f;
+            return std::thread::scope(|s| {
+                let hs: Vec<_> = items.chunks(per).map(|run| s.spawn(move || run.iter().map(|&t| f(t)).collect::<Vec<R>>())).collect();
+                hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
             });
-            let mut out = Vec::with_capacity(chunks.len());
-            for p in parts {
-                out.extend(p?);
-            }
-            return Ok(out);
         }
     }
-    chunks.iter().map(|c| encode(c)).collect()
+    let _ = bytes;
+    items.iter().map(|&t| f(t)).collect()
+}
+
+/// Benchmark builds only (`--features bench`): the stages of a transcode, timed separately.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench {
+    use super::*;
+
+    /// An input's canonical pixels, decoded once.
+    pub struct Frames(shl_dicom_decode::Canonical);
+
+    impl Frames {
+        /// None when the transcoder would decline the input.
+        pub fn new(input: &[u8]) -> Option<Self> {
+            prepare(input).ok()?;
+            decode_range(input, 0, 0).ok().map(Self)
+        }
+
+        /// Encode every frame (no self-checks); the total codestream bytes.
+        pub fn encode(&self, ts: &str) -> usize {
+            let fb = self.0.data.len() / (self.0.frames.max(1) as usize);
+            self.0.data.chunks_exact(fb.max(1)).map(|f| encode_frame(f, &self.0, ts).map_or(0, |c| c.len())).sum()
+        }
+
+        /// Native pixel bytes.
+        pub fn bytes(&self) -> usize {
+            self.0.data.len()
+        }
+    }
+
+    /// The decoder alone, on any file (the self-check's cost on an encoded output).
+    pub fn decode_len(input: &[u8]) -> usize {
+        decode_range(input, 0, 0).map_or(0, |c| c.data.len())
+    }
 }
 
 /// Build the output file around `fragments` and run both self-checks.
-fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -> Result<Vec<u8>, Declined> {
+fn wrap(input: &[u8], p: Prepared<'_>, ts: &str, fragments: Vec<Vec<u8>>, report: &mut Report) -> Result<Vec<u8>, Declined> {
     let name = version_name(ts).ok_or_else(|| no(format!("transfer syntax {ts} is not one this writer produces")))?;
-    let Prepared { meta, explicit, ds, mut elems, pixel_len, before, .. } = p;
-    if fragments.len() != before.frames as usize {
-        return Err(no(format!("{} codestreams for {} frames", fragments.len(), before.frames)));
+    let Prepared { meta, explicit, ds, mut elems, pixel_len, first, .. } = p;
+    let frames = first.total_frames as usize;
+    if fragments.len() != frames {
+        return Err(no(format!("{} codestreams for {frames} frames", fragments.len())));
     }
     if fragments.iter().any(|f| f.is_empty()) {
         return Err(no("an empty codestream"));
@@ -441,13 +503,12 @@ fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -
     elems[at] = Elem {
         tag: PIXEL_DATA,
         vr: *b"OB",
-        value: Value::Encapsulated { bot, fragments: fragments.iter().map(|f| f.to_vec()).collect() },
+        value: Value::Encapsulated { bot, fragments },
     };
-    drop(fragments);
     // Planar Configuration 0, which JPEG requires: changed from 1, or added where it was missing
     // and the decoder settled the layout from the pixels.
     let planar_changed = us(&elems, 0x0028_0006) == Some(1);
-    let planar_added = before.samples_per_pixel == 3 && find(&elems, 0x0028_0006).is_none();
+    let planar_added = first.samples_per_pixel == 3 && find(&elems, 0x0028_0006).is_none();
     if planar_changed {
         if let Some(e) = elems.iter_mut().find(|e| e.tag == 0x0028_0006) {
             e.value = Value::Owned(vec![0, 0]);
@@ -459,7 +520,7 @@ fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -
     let mut out = Vec::with_capacity(meta.end + report.pixel_bytes_out + ds.len().saturating_sub(pixel_len));
     write_meta(&mut out, &meta, ts, name);
     let ds_start = out.len();
-    Writer { signed: before.signed }
+    Writer { signed: first.signed }
         .elems(&mut out, &elems)
         .map_err(|e| no(format!("cannot write the data set as Explicit VR: {e}")))?;
     drop(elems);
@@ -480,14 +541,28 @@ fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -
     }
     drop((in_elems, out_elems));
 
-    // Check 2: the output decodes to exactly the input's pixels.
-    let after = decode(&out).map_err(|e| no(format!("self-check: output does not decode: {e}")))?;
-    let same = (after.frames, after.rows, after.columns, after.samples_per_pixel, after.bits_allocated, after.bits_stored, after.signed)
-        == (before.frames, before.rows, before.columns, before.samples_per_pixel, before.bits_allocated, before.bits_stored, before.signed)
-        && after.photometric == before.photometric
-        && after.data == before.data;
-    if !same {
-        return Err(no("self-check mismatch: the encoded pixels do not decode to the input's"));
+    // Check 2: the output decodes to exactly the input's pixels, every frame, compared a chunk of
+    // frames at a time.
+    let per = frames_per_chunk(first.data.len()).clamp(1, frames.max(1));
+    for start in (0..frames).step_by(per) {
+        let n = per.min(frames - start);
+        // A single frame is already decoded (`first`); others are decoded again a chunk at a time.
+        let decoded;
+        let before = if start == 0 && n == 1 {
+            &first
+        } else {
+            decoded = decode_range(input, start, n).map_err(|e| no(format!("input does not decode: {e}")))?;
+            &decoded
+        };
+        let after = decode_range(&out, start, n).map_err(|e| no(format!("self-check: output does not decode: {e}")))?;
+        let same = (after.frames, after.total_frames, after.rows, after.columns, after.samples_per_pixel, after.bits_allocated)
+            == (before.frames, before.total_frames, before.rows, before.columns, before.samples_per_pixel, before.bits_allocated)
+            && (after.bits_stored, after.signed) == (before.bits_stored, before.signed)
+            && after.photometric == before.photometric
+            && after.data == before.data;
+        if !same {
+            return Err(no("self-check mismatch: the encoded pixels do not decode to the input's"));
+        }
     }
     Ok(out)
 }

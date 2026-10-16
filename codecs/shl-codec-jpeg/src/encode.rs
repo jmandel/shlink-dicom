@@ -12,7 +12,73 @@ use shl_codec_common::{DecodeError, Result};
 /// Encode `samples` (rows × columns × `components`, interleaved, each below 2^`precision`) as a
 /// lossless JPEG codestream (SOI … EOI). `precision` 2–16; `components` 1–4.
 pub fn encode_lossless_sv1(samples: &[u16], columns: u32, rows: u32, components: u8, precision: u8) -> Result<Vec<u8>> {
-    let bad = |m: &str| DecodeError::Invalid(m.to_string());
+    let (w, n) = (columns as usize, usize::from(components));
+    let count = w.checked_mul(rows as usize).and_then(|x| x.checked_mul(n)).ok_or_else(|| bad("image too large"))?;
+    if samples.len() != count {
+        return Err(bad("sample count does not match the image size"));
+    }
+    if precision <= 16 && samples.iter().any(|&s| u32::from(s) >> precision != 0) {
+        return Err(bad("a sample does not fit the precision"));
+    }
+    encode(
+        |y, row| {
+            let len = row.len();
+            row.copy_from_slice(&samples[y * len..(y + 1) * len]);
+        },
+        columns,
+        rows,
+        components,
+        precision,
+    )
+}
+
+/// [`encode_lossless_sv1`] from little-endian samples of `bytes_per_sample` (1 or 2) bytes, of
+/// which the low `precision` bits are coded: a frame as DICOM stores it, read a row at a time with
+/// no copy of the image.
+pub fn encode_lossless_sv1_le(frame: &[u8], bytes_per_sample: usize, columns: u32, rows: u32, components: u8, precision: u8) -> Result<Vec<u8>> {
+    let (w, n) = (columns as usize, usize::from(components));
+    let count = w.checked_mul(rows as usize).and_then(|x| x.checked_mul(n)).ok_or_else(|| bad("image too large"))?;
+    if !matches!(bytes_per_sample, 1 | 2) || count.checked_mul(bytes_per_sample) != Some(frame.len()) {
+        return Err(bad("frame length does not match the image size"));
+    }
+    let mask = ((1u32 << precision.min(16)) - 1) as u16;
+    if bytes_per_sample == 1 {
+        encode(
+            |y, row| {
+                let len = row.len();
+                for (d, &s) in row.iter_mut().zip(&frame[y * len..(y + 1) * len]) {
+                    *d = u16::from(s) & mask;
+                }
+            },
+            columns,
+            rows,
+            components,
+            precision,
+        )
+    } else {
+        encode(
+            |y, row| {
+                let len = row.len();
+                let src = &frame[2 * y * len..2 * (y + 1) * len];
+                for (d, s) in row.iter_mut().zip(src.chunks_exact(2)) {
+                    *d = u16::from_le_bytes([s[0], s[1]]) & mask;
+                }
+            },
+            columns,
+            rows,
+            components,
+            precision,
+        )
+    }
+}
+
+fn bad(m: &str) -> DecodeError {
+    DecodeError::Invalid(m.to_string())
+}
+
+/// The encoder, reading the image a row at a time through `fill(y, row)` (twice: once to count
+/// difference categories, once to code them), so it holds three rows, not the image.
+fn encode(fill: impl Fn(usize, &mut [u16]), columns: u32, rows: u32, components: u8, precision: u8) -> Result<Vec<u8>> {
     if !(2..=16).contains(&precision) {
         return Err(bad("lossless JPEG precision must be 2 to 16 bits"));
     }
@@ -23,34 +89,46 @@ pub fn encode_lossless_sv1(samples: &[u16], columns: u32, rows: u32, components:
         return Err(bad("image size must be 1 to 65535 in each direction"));
     }
     let (w, h, n) = (columns as usize, rows as usize, usize::from(components));
-    let count = w.checked_mul(h).and_then(|x| x.checked_mul(n)).ok_or_else(|| bad("image too large"))?;
-    if samples.len() != count {
-        return Err(bad("sample count does not match the image size"));
-    }
-    let limit = 1u32 << precision;
-    if samples.iter().any(|&s| u32::from(s) >= limit) {
-        return Err(bad("a sample does not fit the precision"));
-    }
-
-    // The differences, in scan order, then their category counts per component.
-    let diffs = differences(samples, w, h, n, precision);
-    let mut freq = vec![[0u32; 17]; n];
-    if n == 1 {
-        let f = &mut freq[0];
-        for &d in &diffs {
-            f[category(d) as usize] += 1;
+    let row_len = w * n;
+    let mut prev = vec![0u16; row_len];
+    let mut cur = vec![0u16; row_len];
+    let mut diffs = vec![0i32; row_len];
+    let mut rows_of_diffs = |each: &mut dyn FnMut(&[i32])| {
+        for y in 0..h {
+            fill(y, &mut cur);
+            differences(&cur, (y > 0).then_some(&prev[..]), n, precision, &mut diffs);
+            each(&diffs);
+            std::mem::swap(&mut prev, &mut cur);
         }
-    } else {
-        for px in diffs.chunks_exact(n) {
-            for (f, &d) in freq.iter_mut().zip(px) {
+    };
+
+    // Pass 1: difference category counts per component.
+    let mut freq = vec![[0u32; 17]; n];
+    rows_of_diffs(&mut |row: &[i32]| {
+        if n == 1 {
+            let f = &mut freq[0];
+            for &d in row {
                 f[category(d) as usize] += 1;
             }
+        } else {
+            for px in row.chunks_exact(n) {
+                for (f, &d) in freq.iter_mut().zip(px) {
+                    f[category(d) as usize] += 1;
+                }
+            }
         }
-    }
+    });
     let tables: Vec<Table> = freq.iter().map(Table::build).collect();
+    // The coded size is known exactly from the counts (plus rare stuffed bytes).
+    let bits: u64 = freq
+        .iter()
+        .zip(&tables)
+        .map(|(f, t)| f.iter().enumerate().map(|(s, &c)| u64::from(c) * (u64::from(t.size[s]) + if s < 16 { s as u64 } else { 0 })).sum::<u64>())
+        .sum();
+    let coded = (bits / 8) as usize;
 
     // Headers.
-    let mut out = Vec::with_capacity(count + count / 2 + 1024);
+    let mut out = Vec::with_capacity(coded + coded / 128 + 1024);
     out.extend_from_slice(&[0xFF, 0xD8]); // SOI
     for (id, t) in tables.iter().enumerate() {
         let len = 2 + 1 + 16 + t.values.len();
@@ -79,7 +157,7 @@ pub fn encode_lossless_sv1(samples: &[u16], columns: u32, rows: u32, components:
     }
     out.extend_from_slice(&[1, 0, 0]);
 
-    // Entropy-coded data: each code and its extra bits in one write (at most 16 + 15 bits).
+    // Pass 2: entropy-coded data; each code and its extra bits in one write (at most 16 + 15 bits).
     let mut bw = BitWriter { out, acc: 0, nbits: 0 };
     // Per symbol: the code shifted to make room for its extra bits, and the total length.
     let lut: Vec<[(u32, u32); 17]> = tables
@@ -95,27 +173,28 @@ pub fn encode_lossless_sv1(samples: &[u16], columns: u32, rows: u32, components:
         let v = if d < 0 { d - 1 } else { d } as u32 & ((1u32 << s) - 1) & 0x7FFF;
         bw.put(code | if s < 16 { v } else { 0 }, len);
     };
-    if n == 1 {
-        for &d in &diffs {
-            emit(&mut bw, &lut[0], d);
-        }
-    } else {
-        for px in diffs.chunks_exact(n) {
-            for (l, &d) in lut.iter().zip(px) {
-                emit(&mut bw, l, d);
+    rows_of_diffs(&mut |row: &[i32]| {
+        if n == 1 {
+            for &d in row {
+                emit(&mut bw, &lut[0], d);
+            }
+        } else {
+            for px in row.chunks_exact(n) {
+                for (l, &d) in lut.iter().zip(px) {
+                    emit(&mut bw, l, d);
+                }
             }
         }
-    }
+    });
     let mut out = bw.finish();
     out.extend_from_slice(&[0xFF, 0xD9]); // EOI
     Ok(out)
 }
 
-/// The difference of every sample from its SV1 prediction, in scan order (T.81 H.1.2.1): the first
-/// sample of the image is predicted by 2^(P−1), the rest of the first row by the sample to the
-/// left, the first sample of every other row by the sample above, and all others by the sample to
+/// The SV1 differences of one row (T.81 H.1.2.1): the first samples of the image are predicted by
+/// 2^(P−1), the first samples of other rows by the row above (`prev`), all others by the sample to
 /// the left. Differences are taken modulo 2^16 into −32767..=32768.
-fn differences(samples: &[u16], w: usize, h: usize, n: usize, precision: u8) -> Vec<i32> {
+fn differences(row: &[u16], prev: Option<&[u16]>, n: usize, precision: u8, out: &mut [i32]) {
     let wrap = |d: i32| {
         let d = d & 0xFFFF;
         if d > 32768 {
@@ -125,20 +204,13 @@ fn differences(samples: &[u16], w: usize, h: usize, n: usize, precision: u8) -> 
         }
     };
     let start = 1i32 << (precision - 1);
-    let row_len = w * n;
-    let mut out = vec![0i32; samples.len()];
-    for y in 0..h {
-        let row = &samples[y * row_len..(y + 1) * row_len];
-        let dst = &mut out[y * row_len..(y + 1) * row_len];
-        for c in 0..n {
-            let pred = if y > 0 { i32::from(samples[(y - 1) * row_len + c]) } else { start };
-            dst[c] = wrap(i32::from(row[c]) - pred);
-        }
-        for ((d, &s), &left) in dst[n..].iter_mut().zip(&row[n..]).zip(row) {
-            *d = wrap(i32::from(s) - i32::from(left));
-        }
+    for c in 0..n {
+        let pred = prev.map_or(start, |p| i32::from(p[c]));
+        out[c] = wrap(i32::from(row[c]) - pred);
     }
-    out
+    for ((d, &s), &left) in out[n..].iter_mut().zip(&row[n..]).zip(row) {
+        *d = wrap(i32::from(s) - i32::from(left));
+    }
 }
 
 /// SSSS: the number of bits in |d| (0 for 0, 16 for 32768).

@@ -16,4 +16,4 @@ wasm-bindgen = "=0.2.128"
 
 [features]
 # Exports `encode_only_j2k` for test/bench-chromium.mjs's encoder-only timing. Not in shipped builds.
-bench = []
+bench = ["shl-dicom-transcode/bench"]
