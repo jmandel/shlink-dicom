@@ -21,7 +21,7 @@ Our time ÷ the reference's time, single-threaded, same frames; below 1 means we
 
 **What the browser column measures.** The Cornerstone builds of libjpeg-turbo, OpenJPEG, CharLS and OpenJPH are what web DICOM viewers ship, so they're the fair comparison for users. But libjpeg-turbo's speed comes from hand-written SIMD for each architecture (x86 assembly, Arm NEON), and there is no WebAssembly SIMD port. Its wasm build is the plain C fallback: the Cornerstone libjpeg-turbo and OpenJPEG modules contain essentially no SIMD instructions, against about 27,000 in ours. So the browser JPEG figures read as "faster than libjpeg-turbo as web viewers ship it", not faster than libjpeg-turbo at its best. The native column is the second comparison.
 
-**JPEG XL is being reconciled.** The bench measures our JPEG XL decodes 30–60% slower than the JPEG XL agent's own harness did, while libjxl's times agree between the two. The T6 figures (browser lossy 1.09–1.26×) came from that harness. Until the gap is explained, the bench figures above stand.
+**JPEG XL rows predate a fix.** The bench measured our JPEG XL 30–60% slower than the JPEG XL agent's harness because the DICOM wrapper converted planes to interleaved samples one sample at a time; the viewer pays that too. The fix (44b2cb9) cut native cycles by 11–28% on lossy and effort-1 cases. The JPEG XL rows above are from before it; the next quiet run replaces them.
 
 | Encoder, MB/s (higher is better) | Ours native | Reference native | Ours wasm | Reference wasm |
 |---|---|---|---|---|
