@@ -1,0 +1,24 @@
+# cargo-fuzz targets for shl-jpeg2000: `cargo +nightly fuzz run ht_block` from this directory.
+[package]
+name = "shl-jpeg2000-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+shl-jpeg2000 = { path = ".." }
+# Test scaffolding: the vendored HT decoder as a reference (goes with hayro).
+hayro-jpeg2000 = { path = "../../shl-codec-jpeg2000/vendor/hayro-jpeg2000", features = ["ht-reference"] }
+
+[[bin]]
+name = "ht_block"
+path = "fuzz_targets/ht_block.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -15,7 +15,7 @@
 //! reconstruction.
 
 mod decode;
-#[cfg(test)]
+#[cfg(any(test, feature = "ht-reference"))]
 mod encode;
 // The encoder halves of these modules are used by the round-trip tests only.
 #[allow(dead_code)]
@@ -28,9 +28,11 @@ pub(crate) mod tables;
 mod tables_data;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "ht-reference")]
+pub mod reference;
 
 pub(crate) use decode::{HtScratch, decode_block};
-#[cfg(test)]
+#[cfg(any(test, feature = "ht-reference"))]
 pub(crate) use encode::encode_block;
 
 use alloc::string::String;

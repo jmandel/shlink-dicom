@@ -564,6 +564,8 @@ fn decode_ht_sub_band(
             // buffer filled with junk), so the buffer is only resized, not cleared.
             let samples = &mut tile_ctx.ht_samples;
             samples.resize(w * h, 0);
+            #[cfg(feature = "ht-reference")]
+            super::ht::reference::record(coded, w, h, missing_msbs, passes - cleanup_pass, len_cleanup, vertically_causal);
             decode_block(
                 &mut tile_ctx.ht_scratch,
                 coded,

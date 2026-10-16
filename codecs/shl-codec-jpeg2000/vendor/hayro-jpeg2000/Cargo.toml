@@ -20,6 +20,9 @@ default = ["std", "simd"]
 logging = ["dep:log"]
 simd = ["fearless_simd", "std"]
 std = []
+# Test scaffolding for shl-jpeg2000's HT block decoder (dev-dependency only; removed with this
+# crate): exposes the HT block decoder, its test encoder and a code-block recorder.
+ht-reference = ["std"]
 
 [dependencies]
 fearless_simd = { version = "1.0.0", optional = true }

@@ -4,6 +4,8 @@ mod build;
 mod codestream;
 mod decode;
 mod ht;
+#[cfg(feature = "ht-reference")]
+pub use ht::reference as ht_reference;
 mod idwt;
 mod mct;
 mod mct2;

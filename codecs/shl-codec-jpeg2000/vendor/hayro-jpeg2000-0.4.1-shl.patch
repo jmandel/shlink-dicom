@@ -1,6 +1,6 @@
 diff -ruN a/src/error.rs b/src/error.rs
---- a/src/error.rs	2026-10-15 11:39:09.456225065 -0500
-+++ b/src/error.rs	2026-10-15 11:39:09.460641967 -0500
+--- a/src/error.rs	2026-10-15 22:43:38.748718614 -0500
++++ b/src/error.rs	2026-10-15 22:43:43.636030346 -0500
 @@ -106,6 +106,10 @@
      InvalidProgressionIterator,
      /// Unexpected end of data.
@@ -21,7 +21,7 @@ diff -ruN a/src/error.rs b/src/error.rs
      }
  }
 diff -ruN a/src/integration.rs b/src/integration.rs
---- a/src/integration.rs	2026-10-15 11:39:09.456540031 -0500
+--- a/src/integration.rs	2026-10-15 22:43:38.749915683 -0500
 +++ b/src/integration.rs	1969-12-31 18:00:00.000000000 -0600
 @@ -1,342 +0,0 @@
 -//! Integration with the [image] crate
@@ -367,8 +367,8 @@ diff -ruN a/src/integration.rs b/src/integration.rs
 -    true
 -}
 diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
---- a/src/j2c/build.rs	2026-10-15 11:39:09.457410870 -0500
-+++ b/src/j2c/build.rs	2026-10-15 11:39:09.461034119 -0500
+--- a/src/j2c/build.rs	2026-10-15 22:43:38.751165649 -0500
++++ b/src/j2c/build.rs	2026-10-15 22:43:43.636555500 -0500
 @@ -26,6 +26,16 @@
  ) -> Result<()> {
      let mut component_samples = vec![];
@@ -405,8 +405,8 @@ diff -ruN a/src/j2c/build.rs b/src/j2c/build.rs
  
  pub(crate) struct Segment<'a> {
 diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
---- a/src/j2c/codestream.rs	2026-10-15 11:39:09.457659641 -0500
-+++ b/src/j2c/codestream.rs	2026-10-15 11:39:09.460812700 -0500
+--- a/src/j2c/codestream.rs	2026-10-15 22:43:38.751441131 -0500
++++ b/src/j2c/codestream.rs	2026-10-15 22:43:43.636663985 -0500
 @@ -6,10 +6,13 @@
  use super::DecodeSettings;
  use super::bitplane::BITPLANE_BIT_SIZE;
@@ -762,8 +762,8 @@ diff -ruN a/src/j2c/codestream.rs b/src/j2c/codestream.rs
      pub(crate) fn to_string(marker: u8) -> &'static str {
          match marker {
 diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
---- a/src/j2c/decode.rs	2026-10-15 11:39:09.457865200 -0500
-+++ b/src/j2c/decode.rs	2026-10-15 11:39:09.461089685 -0500
+--- a/src/j2c/decode.rs	2026-10-15 22:43:38.751657921 -0500
++++ b/src/j2c/decode.rs	2026-10-15 22:43:43.636789643 -0500
 @@ -43,6 +43,20 @@
  
      ctx.reset(header, &tiles[0])?;
@@ -873,7 +873,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
      for precinct in sub_band
          .precincts
          .clone()
-@@ -433,6 +484,122 @@
+@@ -433,6 +484,124 @@
      Ok(())
  }
  
@@ -957,6 +957,8 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
 +            // buffer filled with junk), so the buffer is only resized, not cleared.
 +            let samples = &mut tile_ctx.ht_samples;
 +            samples.resize(w * h, 0);
++            #[cfg(feature = "ht-reference")]
++            super::ht::reference::record(coded, w, h, missing_msbs, passes - cleanup_pass, len_cleanup, vertically_causal);
 +            decode_block(
 +                &mut tile_ctx.ht_scratch,
 +                coded,
@@ -996,7 +998,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
  fn apply_sign_shift(channel_data: &mut [ComponentData], component_infos: &[ComponentInfo]) {
      use crate::math::{Level, dispatch, f32x8};
  
-@@ -454,9 +621,42 @@
+@@ -454,9 +623,42 @@
      tile_ctx: &mut TileDecodeContext,
      channel_data: &mut ComponentData,
      component_info: &ComponentInfo,
@@ -1039,7 +1041,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
      let component_tile = ComponentTile::new(tile, component_info);
      let resolution_tile = ResolutionTile::new(
          component_tile,
-@@ -502,7 +702,14 @@
+@@ -502,7 +704,14 @@
                  [resolution_tile.rect.x0.saturating_sub(image_x_offset) as usize..]
                  [..input_row.len()];
  
@@ -1055,7 +1057,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
          }
      } else {
          let image_width = header.size_data.image_width();
-@@ -520,17 +727,27 @@
+@@ -520,17 +729,27 @@
              .image_area_y_offset
              .div_ceil(y_shrink_factor);
  
@@ -1088,7 +1090,7 @@ diff -ruN a/src/j2c/decode.rs b/src/j2c/decode.rs
                      ..u32::min(reference_grid_x + scale_x as u32, image_width + x_offset)
 diff -ruN a/src/j2c/ht/decode.rs b/src/j2c/ht/decode.rs
 --- a/src/j2c/ht/decode.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/decode.rs	2026-10-15 11:39:09.461950314 -0500
++++ b/src/j2c/ht/decode.rs	2026-10-15 22:43:43.637067840 -0500
 @@ -0,0 +1,640 @@
 +//! HT block decoder: cleanup, `SigProp` and `MagRef` passes (T.814 §7).
 +//!
@@ -1732,7 +1734,7 @@ diff -ruN a/src/j2c/ht/decode.rs b/src/j2c/ht/decode.rs
 +}
 diff -ruN a/src/j2c/ht/encode.rs b/src/j2c/ht/encode.rs
 --- a/src/j2c/ht/encode.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/encode.rs	2026-10-15 11:39:09.461595993 -0500
++++ b/src/j2c/ht/encode.rs	2026-10-15 22:43:43.637171255 -0500
 @@ -0,0 +1,345 @@
 +//! HT block encoder: a single self-contained cleanup pass (T.814 §6).
 +//!
@@ -2081,7 +2083,7 @@ diff -ruN a/src/j2c/ht/encode.rs b/src/j2c/ht/encode.rs
 +}
 diff -ruN a/src/j2c/ht/LICENSE b/src/j2c/ht/LICENSE
 --- a/src/j2c/ht/LICENSE	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/LICENSE	2026-10-15 11:39:09.462507849 -0500
++++ b/src/j2c/ht/LICENSE	2026-10-15 22:43:43.636948854 -0500
 @@ -0,0 +1,53 @@
 +The files in this directory come from ndic-htj2k 0.2.5 (src/block/), MIT licence:
 +
@@ -2138,7 +2140,7 @@ diff -ruN a/src/j2c/ht/LICENSE b/src/j2c/ht/LICENSE
 +OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 diff -ruN a/src/j2c/ht/mel.rs b/src/j2c/ht/mel.rs
 --- a/src/j2c/ht/mel.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/mel.rs	2026-10-15 11:39:09.461709458 -0500
++++ b/src/j2c/ht/mel.rs	2026-10-15 22:43:43.637261797 -0500
 @@ -0,0 +1,331 @@
 +//! MEL (adaptive run-length) coder — T.814 §7.1.1 / §7.3.4.
 +//!
@@ -2473,8 +2475,8 @@ diff -ruN a/src/j2c/ht/mel.rs b/src/j2c/ht/mel.rs
 +}
 diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 --- a/src/j2c/ht/mod.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/mod.rs	2026-10-15 11:39:09.461907182 -0500
-@@ -0,0 +1,68 @@
++++ b/src/j2c/ht/mod.rs	2026-10-15 22:43:43.637664369 -0500
+@@ -0,0 +1,70 @@
 +//! The HTJ2K (ITU-T T.814) block decoder: HT cleanup, SigProp and MagRef passes.
 +//!
 +//! shl patch 5. These files come from `ndic-htj2k` 0.2.5 (MIT, Fideus Labs LLC,
@@ -2492,7 +2494,7 @@ diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 +//! reconstruction.
 +
 +mod decode;
-+#[cfg(test)]
++#[cfg(any(test, feature = "ht-reference"))]
 +mod encode;
 +// The encoder halves of these modules are used by the round-trip tests only.
 +#[allow(dead_code)]
@@ -2505,9 +2507,11 @@ diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 +mod tables_data;
 +#[cfg(test)]
 +mod tests;
++#[cfg(feature = "ht-reference")]
++pub mod reference;
 +
 +pub(crate) use decode::{HtScratch, decode_block};
-+#[cfg(test)]
++#[cfg(any(test, feature = "ht-reference"))]
 +pub(crate) use encode::encode_block;
 +
 +use alloc::string::String;
@@ -2543,9 +2547,88 @@ diff -ruN a/src/j2c/ht/mod.rs b/src/j2c/ht/mod.rs
 +        Self { num_passes: 1, len_cleanup: len, len_refinement: 0 }
 +    }
 +}
+diff -ruN a/src/j2c/ht/reference.rs b/src/j2c/ht/reference.rs
+--- a/src/j2c/ht/reference.rs	1969-12-31 18:00:00.000000000 -0600
++++ b/src/j2c/ht/reference.rs	2026-10-15 22:43:43.637341367 -0500
+@@ -0,0 +1,75 @@
++//! Test scaffolding (feature `ht-reference`), for shl-jpeg2000's HT block decoder: the vendored
++//! decoder and test encoder behind a public interface, and a recorder of the HT code-blocks
++//! that frame decodes pass to the decoder. Deleted with this crate.
++
++use alloc::string::String;
++use alloc::vec::Vec;
++use std::sync::Mutex;
++
++use super::{BlockPasses, HtScratch};
++
++/// Scratch buffers of [`decode_block`].
++#[derive(Default)]
++pub struct Scratch(HtScratch);
++
++/// The vendored `decode_block`, with the pass layout spelled out.
++#[allow(clippy::too_many_arguments)]
++pub fn decode_block(
++    scratch: &mut Scratch,
++    coded: &[u8],
++    out: &mut [u32],
++    width: usize,
++    height: usize,
++    stride: usize,
++    missing_msbs: u32,
++    num_passes: u32,
++    len_cleanup: usize,
++    len_refinement: usize,
++    vertically_causal: bool,
++) -> Result<(), String> {
++    let passes = BlockPasses { num_passes, len_cleanup, len_refinement };
++    super::decode_block(&mut scratch.0, coded, out, width, height, stride, missing_msbs, &passes, vertically_causal)
++        .map_err(|e| alloc::format!("{e:?}"))
++}
++
++/// The vendored test encoder: one cleanup pass for sign-magnitude samples.
++pub fn encode_block(samples: &[u32], width: usize, height: usize, stride: usize, missing_msbs: u32) -> Option<Vec<u8>> {
++    super::encode_block(samples, width, height, stride, missing_msbs).ok()
++}
++
++/// One recorded HT code-block: the arguments of a `decode_block` call.
++#[derive(Clone, Debug)]
++pub struct Block {
++    /// Cleanup then refinement bytes.
++    pub coded: Vec<u8>,
++    /// Block width.
++    pub width: usize,
++    /// Block height.
++    pub height: usize,
++    /// Missing MSBs of the cleanup pass.
++    pub missing_msbs: u32,
++    /// HT passes in the set.
++    pub num_passes: u32,
++    /// Bytes of the cleanup segment.
++    pub len_cleanup: usize,
++    /// The vertically causal context flag.
++    pub vertically_causal: bool,
++}
++
++static RECORDED: Mutex<Option<Vec<Block>>> = Mutex::new(None);
++
++/// Starts recording the HT code-blocks of subsequent decodes (all threads).
++pub fn start_recording() {
++    *RECORDED.lock().unwrap() = Some(Vec::new());
++}
++
++/// Stops recording and returns the blocks recorded.
++pub fn take_recorded() -> Vec<Block> {
++    RECORDED.lock().unwrap().take().unwrap_or_default()
++}
++
++pub(crate) fn record(coded: &[u8], width: usize, height: usize, missing_msbs: u32, num_passes: u32, len_cleanup: usize, vertically_causal: bool) {
++    if let Some(v) = RECORDED.lock().unwrap().as_mut() {
++        v.push(Block { coded: coded.to_vec(), width, height, missing_msbs, num_passes, len_cleanup, vertically_causal });
++    }
++}
 diff -ruN a/src/j2c/ht/streams.rs b/src/j2c/ht/streams.rs
 --- a/src/j2c/ht/streams.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/streams.rs	2026-10-15 11:39:09.462007682 -0500
++++ b/src/j2c/ht/streams.rs	2026-10-15 22:43:43.637427851 -0500
 @@ -0,0 +1,654 @@
 +//! Sub-bitstream readers and writers for the HT cleanup / refinement passes.
 +//!
@@ -3203,7 +3286,7 @@ diff -ruN a/src/j2c/ht/streams.rs b/src/j2c/ht/streams.rs
 +}
 diff -ruN a/src/j2c/ht/tables_data.rs b/src/j2c/ht/tables_data.rs
 --- a/src/j2c/ht/tables_data.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tables_data.rs	2026-10-15 11:39:09.461832581 -0500
++++ b/src/j2c/ht/tables_data.rs	2026-10-15 22:43:43.637557797 -0500
 @@ -0,0 +1,938 @@
 +//! CxtVLC / UVLC lookup tables for the HT (FBCOT) block coder.
 +//!
@@ -4145,7 +4228,7 @@ diff -ruN a/src/j2c/ht/tables_data.rs b/src/j2c/ht/tables_data.rs
 +];
 diff -ruN a/src/j2c/ht/tables.rs b/src/j2c/ht/tables.rs
 --- a/src/j2c/ht/tables.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tables.rs	2026-10-15 11:39:09.461753100 -0500
++++ b/src/j2c/ht/tables.rs	2026-10-15 22:43:43.637477064 -0500
 @@ -0,0 +1,151 @@
 +//! Lookup-table access for the HT block coder.
 +//!
@@ -4300,7 +4383,7 @@ diff -ruN a/src/j2c/ht/tables.rs b/src/j2c/ht/tables.rs
 +}
 diff -ruN a/src/j2c/ht/tests.rs b/src/j2c/ht/tests.rs
 --- a/src/j2c/ht/tests.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/ht/tests.rs	2026-10-15 11:39:09.461667318 -0500
++++ b/src/j2c/ht/tests.rs	2026-10-15 22:43:43.637629242 -0500
 @@ -0,0 +1,158 @@
 +//! Round-trip tests for the HT block decoder: blocks coded by the (test-only) encoder must
 +//! decode back exactly. Adapted from ndic-htj2k's `tests/block_roundtrip.rs` (MIT), with a
@@ -4461,8 +4544,8 @@ diff -ruN a/src/j2c/ht/tests.rs b/src/j2c/ht/tests.rs
 +    std::println!("{ns:.2} ns/sample ({} bytes coded)", coded.len());
 +}
 diff -ruN a/src/j2c/idwt.rs b/src/j2c/idwt.rs
---- a/src/j2c/idwt.rs	2026-10-15 11:39:09.457978835 -0500
-+++ b/src/j2c/idwt.rs	2026-10-15 11:39:09.461154738 -0500
+--- a/src/j2c/idwt.rs	2026-10-15 22:43:38.751771195 -0500
++++ b/src/j2c/idwt.rs	2026-10-15 22:43:43.637708172 -0500
 @@ -175,12 +175,21 @@
      transform: WaveletTransform,
      storage: &DecompositionStorage<'_>,
@@ -4987,7 +5070,7 @@ diff -ruN a/src/j2c/idwt.rs b/src/j2c/idwt.rs
          #[inline(always)]
 diff -ruN a/src/j2c/mct2.rs b/src/j2c/mct2.rs
 --- a/src/j2c/mct2.rs	1969-12-31 18:00:00.000000000 -0600
-+++ b/src/j2c/mct2.rs	2026-10-15 11:39:09.461511854 -0500
++++ b/src/j2c/mct2.rs	2026-10-15 22:43:43.637806959 -0500
 @@ -0,0 +1,730 @@
 +//! shl patch 11: the array-based multiple component transformations of ITU-T T.801 |
 +//! ISO/IEC 15444-2 Annex J (JPEG 2000 Part 2), as DICOM uses them for the transfer syntaxes
@@ -5720,20 +5803,22 @@ diff -ruN a/src/j2c/mct2.rs b/src/j2c/mct2.rs
 +    }
 +}
 diff -ruN a/src/j2c/mod.rs b/src/j2c/mod.rs
---- a/src/j2c/mod.rs	2026-10-15 11:39:09.458132105 -0500
-+++ b/src/j2c/mod.rs	2026-10-15 11:39:09.460743169 -0500
-@@ -3,8 +3,10 @@
+--- a/src/j2c/mod.rs	2026-10-15 22:43:38.751918685 -0500
++++ b/src/j2c/mod.rs	2026-10-15 22:43:43.637861472 -0500
+@@ -3,8 +3,12 @@
  mod build;
  mod codestream;
  mod decode;
 +mod ht;
++#[cfg(feature = "ht-reference")]
++pub use ht::reference as ht_reference;
  mod idwt;
  mod mct;
 +mod mct2;
  mod progression;
  mod rect;
  mod segment;
-@@ -52,6 +54,20 @@
+@@ -52,6 +56,20 @@
      let header = &parsed_codestream.header;
      let mut boxes = ImageBoxes::default();
  
@@ -5755,8 +5840,8 @@ diff -ruN a/src/j2c/mod.rs b/src/j2c/mod.rs
      // RGB.
      let cs = if header.component_infos.len() < 3 {
 diff -ruN a/src/j2c/progression.rs b/src/j2c/progression.rs
---- a/src/j2c/progression.rs	2026-10-15 11:39:09.458214591 -0500
-+++ b/src/j2c/progression.rs	2026-10-15 11:39:09.461246000 -0500
+--- a/src/j2c/progression.rs	2026-10-15 22:43:38.751998496 -0500
++++ b/src/j2c/progression.rs	2026-10-15 22:43:43.637895857 -0500
 @@ -120,7 +120,8 @@
      let mut resolution = input.min_resolution();
      let mut component_idx = input.min_comp();
@@ -5793,8 +5878,8 @@ diff -ruN a/src/j2c/progression.rs b/src/j2c/progression.rs
                      ResolutionTile::new(component_tiles[component_idx as usize], resolution);
  
 diff -ruN a/src/j2c/segment.rs b/src/j2c/segment.rs
---- a/src/j2c/segment.rs	2026-10-15 11:39:09.458395604 -0500
-+++ b/src/j2c/segment.rs	2026-10-15 11:39:09.461332795 -0500
+--- a/src/j2c/segment.rs	2026-10-15 22:43:38.752164720 -0500
++++ b/src/j2c/segment.rs	2026-10-15 22:43:43.637974105 -0500
 @@ -8,7 +8,8 @@
  use super::decode::DecompositionStorage;
  use super::progression::ProgressionData;
@@ -5925,8 +6010,8 @@ diff -ruN a/src/j2c/segment.rs b/src/j2c/segment.rs
          let end = storage.segments.len();
          layer.segments = Some(start..end);
 diff -ruN a/src/j2c/tile.rs b/src/j2c/tile.rs
---- a/src/j2c/tile.rs	2026-10-15 11:39:09.458617745 -0500
-+++ b/src/j2c/tile.rs	2026-10-15 11:39:09.461432463 -0500
+--- a/src/j2c/tile.rs	2026-10-15 22:43:38.752375449 -0500
++++ b/src/j2c/tile.rs	2026-10-15 22:43:43.638067281 -0500
 @@ -28,6 +28,8 @@
      pub(crate) progression_order: ProgressionOrder,
      pub(crate) num_layers: u8,
@@ -5980,8 +6065,8 @@ diff -ruN a/src/j2c/tile.rs b/src/j2c/tile.rs
  
          let tile_0_0 = Tile::new(0, &header);
 diff -ruN a/src/jp2/mod.rs b/src/jp2/mod.rs
---- a/src/jp2/mod.rs	2026-10-15 11:39:09.459251715 -0500
-+++ b/src/jp2/mod.rs	2026-10-15 11:39:09.462778101 -0500
+--- a/src/jp2/mod.rs	2026-10-15 22:43:38.753009038 -0500
++++ b/src/jp2/mod.rs	2026-10-15 22:43:43.638322595 -0500
 @@ -117,6 +117,11 @@
  
      let mut image_boxes = image_boxes.ok_or(FormatError::InvalidBox)?;
@@ -5995,8 +6080,8 @@ diff -ruN a/src/jp2/mod.rs b/src/jp2/mod.rs
      if let Some(palette) = image_boxes.palette.as_ref()
          && image_boxes.component_mapping.is_none()
 diff -ruN a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs	2026-10-15 11:39:09.459444500 -0500
-+++ b/src/lib.rs	2026-10-15 11:39:09.462999440 -0500
+--- a/src/lib.rs	2026-10-15 22:43:38.753180493 -0500
++++ b/src/lib.rs	2026-10-15 22:43:43.638408457 -0500
 @@ -64,6 +64,8 @@
  The crate is `no_std` compatible but requires an allocator to be available.
  */
@@ -6006,16 +6091,19 @@ diff -ruN a/src/lib.rs b/src/lib.rs
  #![cfg_attr(not(feature = "std"), no_std)]
  #![forbid(unsafe_code)]
  #![forbid(missing_docs)]
-@@ -94,8 +96,6 @@
+@@ -94,9 +96,9 @@
  pub use j2c::{ComponentData, DecoderContext};
  pub use jp2::DecodedImage;
  
 -#[cfg(feature = "image")]
 -pub mod integration;
  mod j2c;
++#[cfg(feature = "ht-reference")]
++pub use j2c::ht_reference;
  mod jp2;
  pub(crate) mod reader;
-@@ -127,6 +127,21 @@
+ 
+@@ -127,6 +129,21 @@
      pub strict: bool,
      /// A hint for the target resolution that the image should be decoded at.
      pub target_resolution: Option<(u32, u32)>,
@@ -6037,7 +6125,7 @@ diff -ruN a/src/lib.rs b/src/lib.rs
  }
  
  impl Default for DecodeSettings {
-@@ -135,6 +150,9 @@
+@@ -135,6 +152,9 @@
              resolve_palette_indices: true,
              strict: false,
              target_resolution: None,
@@ -6047,7 +6135,7 @@ diff -ruN a/src/lib.rs b/src/lib.rs
          }
      }
  }
-@@ -160,7 +178,9 @@
+@@ -160,7 +180,9 @@
      /// Try to create a new JPEG2000 image from the given data.
      pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
          if data.starts_with(JP2_MAGIC) {
@@ -6058,7 +6146,7 @@ diff -ruN a/src/lib.rs b/src/lib.rs
          } else if data.starts_with(CODESTREAM_MAGIC) {
              j2c::parse(data, settings)
          } else {
-@@ -195,6 +215,14 @@
+@@ -195,6 +217,14 @@
          self.header.component_infos[0].size_info.precision
      }
  
@@ -6074,8 +6162,8 @@ diff -ruN a/src/lib.rs b/src/lib.rs
      pub fn decode<'b>(
          &'a self,
 diff -ruN a/src/math.rs b/src/math.rs
---- a/src/math.rs	2026-10-15 11:39:09.459632015 -0500
-+++ b/src/math.rs	2026-10-15 11:39:09.462898309 -0500
+--- a/src/math.rs	2026-10-15 22:43:38.753352789 -0500
++++ b/src/math.rs	2026-10-15 22:43:43.638501523 -0500
 @@ -454,7 +454,25 @@
  
  #[inline(always)]
@@ -6151,8 +6239,8 @@ diff -ruN a/src/math.rs b/src/math.rs
 +    }
 +}
 diff -ruN a/src/reader.rs b/src/reader.rs
---- a/src/reader.rs	2026-10-15 11:39:09.459719941 -0500
-+++ b/src/reader.rs	2026-10-15 11:39:09.462949055 -0500
+--- a/src/reader.rs	2026-10-15 22:43:38.753435916 -0500
++++ b/src/reader.rs	2026-10-15 22:43:43.638545837 -0500
 @@ -150,11 +150,11 @@
  
      #[inline]

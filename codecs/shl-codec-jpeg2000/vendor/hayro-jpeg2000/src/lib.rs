@@ -97,6 +97,8 @@ pub use j2c::{ComponentData, DecoderContext};
 pub use jp2::DecodedImage;
 
 mod j2c;
+#[cfg(feature = "ht-reference")]
+pub use j2c::ht_reference;
 mod jp2;
 pub(crate) mod reader;
 

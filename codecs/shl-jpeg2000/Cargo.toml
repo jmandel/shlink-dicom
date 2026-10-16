@@ -1,0 +1,13 @@
+[package]
+name = "shl-jpeg2000"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "JPEG 2000 Part 1 and HTJ2K (T.814) decoder, pure Rust"
+
+[dependencies]
+
+[dev-dependencies]
+# Test scaffolding: the vendored decoder this crate replaces (whole-image differential
+# checks in examples/diff.rs) and its HT block decoder as a reference (goes with hayro).
+hayro-jpeg2000 = { path = "../shl-codec-jpeg2000/vendor/hayro-jpeg2000", features = ["ht-reference"] }
