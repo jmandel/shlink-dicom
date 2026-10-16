@@ -66,7 +66,7 @@ export async function exportZip(
             const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
             await zip.add(id.join("/"), files[k]);
             try {
-              dir.push({ fileId: id, header: readDicomHeader(files[k]) });
+              dir.push({ fileId: id, header: await readDicomHeader(files[k]) });
             } catch {
               // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
             }

@@ -8,6 +8,7 @@
 //   SHARE_REDIRECT_URIS=http://localhost:3333/share/smart-callback/ bun src/server.ts
 // Screenshots go to docs/shots/share/. Exits non-zero if any check fails. Deletes the shares it makes.
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
+import { downloadMatrix } from "./download-matrix.mjs";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
@@ -298,6 +299,114 @@ async function flowExact(dev) {
   const note = await m.page.textContent("#share-files");
   check(`${P}: the owner page says the files are byte for byte`, note === "The files are shared exactly as they were added, byte for byte.", note);
   await m.context.close();
+  await noErrors(P, errors);
+  await context.close();
+}
+
+/** Picks "Smaller files, slower" (JPEG 2000 Lossless) on the review step, checking that it is offered and what it says. */
+async function chooseJ2k(page, P) {
+  await page.waitForFunction(() => document.body.dataset.estimate === "done", null, { timeout: 300000 });
+  const r = await page.evaluate(() => ({
+    shown: !document.querySelector("label.pick:has(input[value=j2k])").classList.contains("hidden"),
+    sv1: document.getElementById("rv-c-sv1").textContent,
+    j2k: document.getElementById("rv-c-j2k").textContent,
+  }));
+  check(`${P}: "Smaller files, slower" is offered (the encoder makes JPEG 2000)`, r.shown, JSON.stringify(r));
+  const size = (t) => {
+    const m = /about ([\d.]+) (KB|MB|GB)/.exec(t);
+    return m ? Number(m[1]) * { KB: 1e-3, MB: 1, GB: 1e3 }[m[2]] : NaN;
+  };
+  check(
+    `${P}: the JPEG 2000 estimate gives its size, how much smaller, and how much longer when that matters`,
+    /^JPEG 2000 Lossless · about [\d.]+ [KMG]B( · [\d.]+ [KMG]B smaller)?( · about [\d.]+ (seconds|minutes?|hours?) more to compress on this device)?$/.test(r.j2k) && size(r.j2k) <= size(r.sv1) * 1.05,
+    `${r.sv1} | ${r.j2k}`,
+  );
+  await page.locator("label.pick:has(input[value=j2k])").click();
+  const total = await page.textContent("#rv-total");
+  check(`${P}: the summary uses the JPEG 2000 estimate`, /\(about [\d.]+ [KMG]B after compression\)$/.test(total), total);
+}
+
+/** "Smaller files, slower": JPEG 2000 Lossless, pixel-identical, downloads from /view, and the owner page's note. */
+async function flowJ2k(dev) {
+  const P = `j2k/${dev}`;
+  const { context, page, errors } = await newPage(dev);
+  await page.goto(`${BASE}/share`);
+  await page.click("[data-src=files]");
+  await page.setInputFiles("#in-files", FX.files);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 60000 });
+  await chooseJ2k(page, P);
+  await layout(page, `${P} review`, dev);
+  await shot(page, `${dev}-2-review-j2k`);
+  const r = await finish(page, dev, P, { recipient: "JPEG 2000 test" });
+  const log = (await page.locator("#up-log li").allTextContents()).find((t) => /^Compressed/.test(t)) ?? "";
+  check(`${P}: the upload log names JPEG 2000`, new RegExp(`^Compressed ${FX.images} images without loss as JPEG 2000 Lossless \\(pixels identical\\): `).test(log), log);
+  const dump = `${FXDIR}/j2k-${dev}`;
+  mkdirSync(dump, { recursive: true });
+  const v = verify(r.shlink, FX.files, undefined, ["--pixels", `--dump=${dump}`]);
+  sameContent(P, v, FX.images, "the files", { reencoded: FX.images });
+  check(`${P}: every image is JPEG 2000 Lossless, written by this packer`, v.pixelReport?.transferSyntaxes?.["1.2.840.10008.1.2.4.90"] === FX.images && Object.keys(v.pixelReport?.implementations ?? {}).every((k) => /SHLDICOM/.test(k)), JSON.stringify([v.pixelReport?.transferSyntaxes, v.pixelReport?.implementations]));
+  // /view's downloads: the files the share holds, byte for byte (each one checked above to be pixel-identical to its source).
+  const { readFileSync, statSync } = await import("node:fs");
+  const idx = JSON.parse(readFileSync(`${dump}/index.json`, "utf8"));
+  const O = Object.fromEntries(Object.entries(idx).map(([sop, x]) => [sop, { path: `${dump}/${sop}.dcm`, size: statSync(`${dump}/${sop}.dcm`).size, series: x.series, study: x.study, reencoded: true }]));
+  const vp = await newPage(dev);
+  // Plain downloads (as view-checks does): no save-file picker.
+  await vp.context.addInitScript(() => {
+    delete window.showSaveFilePicker;
+  });
+  await vp.page.goto(r.shlink);
+  await vp.page.waitForSelector("#screen-overview:not(.hidden)", { timeout: 30000 });
+  await vp.page.locator(".study-open").first().click();
+  await vp.page.waitForFunction(() => window.__view?.marks["first-slice"], null, { timeout: 60000 });
+  await downloadMatrix(vp.page, `${P} /view`, O, check, { image: true, series: true, study: true });
+  await noErrors(`${P} /view`, vp.errors);
+  await vp.context.close();
+  // The owner page names the encoding.
+  const m = await newPage(dev);
+  await m.page.goto(r.manage);
+  await m.page.waitForSelector("#share-files", { timeout: 20000 });
+  const notes = await m.page.locator("#share-files li").allTextContents();
+  check(`${P}: the owner page says the images were compressed as JPEG 2000 Lossless`, notes.length === FX.studies.length && notes.every((t) => /images were compressed without loss when shared \(JPEG 2000 Lossless\): pixel-identical to the files they came from, not the same bytes\.$/.test(t)), notes.join(" | "));
+  await m.context.close();
+  await noErrors(P, errors);
+  await context.close();
+}
+
+/** JPEG 2000 with a reload part-way through the upload: it continues with the staged JPEG 2000 files. */
+async function flowJ2kResume(dev) {
+  const P = `j2k-resume/${dev}`;
+  execFileSync("bun", [`${ROOT}web/checks/share-big.ts`, NET_DIR, "200", "512"], { cwd: ROOT, encoding: "utf8" });
+  const { readdirSync } = await import("node:fs");
+  const files = readdirSync(NET_DIR).filter((f) => f.endsWith(".dcm")).sort().map((f) => `${NET_DIR}/${f}`);
+  const { context, page, errors } = await newPage(dev, { allowErrors: [/interrupted|ERR_ABORTED|net::ERR/i] });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Network.enable");
+  // A slow uplink, so the reload lands part-way through the (much smaller) JPEG 2000 upload.
+  await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 1 << 20 });
+  await page.goto(`${BASE}/share`);
+  await page.click("[data-src=files]");
+  await page.setInputFiles("#in-files", files);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
+  await chooseJ2k(page, P);
+  await page.click("#rv-next");
+  await page.click("#who-form button[type=submit]");
+  await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 30, null, { timeout: 600000, polling: 100 });
+  const before = await page.textContent("#up-main");
+  // A reload while requests are in flight can report ERR_ABORTED for the old page; the new one loads all the same.
+  await page.reload().catch(() => page.goto(`${BASE}/share`));
+  await page.waitForSelector("#resume:not(.hidden)", { timeout: 30000 });
+  const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.click("#resume-continue")]);
+  await chooser.setFiles(files);
+  await page.waitForSelector("#s-upload:not(.hidden)");
+  const seen = await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main").textContent) && document.getElementById("up-main").textContent, null, { timeout: 300000 });
+  check(`${P}: after a reload the upload continues from what the server has`, parseFloat((await page.locator("#up-bar").getAttribute("style")).match(/width: ([\d.]+)/)?.[1] ?? "0") > 25, `${before} → ${await seen.jsonValue()}`);
+  await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 900000 });
+  if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
+  const result = await page.evaluate(() => window.__share.result);
+  made.push(result.manage);
+  const v = verify(result.shlink, [NET_DIR], undefined, ["--pixels"]);
+  sameContent(P, v, files.length, "the files", { reencoded: files.length });
+  check(`${P}: the resumed share is all JPEG 2000 Lossless`, v.pixelReport?.transferSyntaxes?.["1.2.840.10008.1.2.4.90"] === files.length, JSON.stringify(v.pixelReport?.transferSyntaxes));
   await noErrors(P, errors);
   await context.close();
 }
@@ -629,6 +738,7 @@ async function flowBigCt(dev) {
   // Reload a third of the way through the upload (after compressing), then continue with the same files.
   const tc = Date.now();
   await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? ""), null, { timeout: 1800000, polling: 250 });
+  const tUpload = Date.now();
   const compressLine = (await page.locator("#up-log li").allTextContents()).find((t) => /^Compressed/.test(t)) ?? "";
   console.log(`COMPRESS ${P}: ${compressLine} (page: ${((Date.now() - tc) / 1000).toFixed(0)} s to the first upload)`);
   check(`${P}: compressed before uploading`, /^Compressed \d+ images without loss/.test(compressLine), compressLine);
@@ -637,7 +747,9 @@ async function flowBigCt(dev) {
     return /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && w > 33;
   }, null, { timeout: 900000, polling: 250 });
   const before = await page.textContent("#up-main");
-  await page.reload();
+  const tReload = Date.now();
+  // A reload while requests are in flight can report ERR_ABORTED for the old page; the new one loads all the same.
+  await page.reload().catch(() => page.goto(`${BASE}/share`));
   await page.waitForSelector("#resume:not(.hidden)", { timeout: 30000 });
   check(`${P}: after a reload the page offers to continue`, true, before);
   await layout(page, `${P} resume`, dev);
@@ -647,10 +759,12 @@ async function flowBigCt(dev) {
   await page.waitForSelector("#s-upload:not(.hidden)");
   const resumedAt = await page.waitForFunction(() => /Uploaded/.test(document.getElementById("up-main").textContent) && document.getElementById("up-main").textContent, null, { timeout: 300000 });
   check(`${P}: the upload continues from what the server has`, parseFloat((await page.locator("#up-bar").getAttribute("style")).match(/width: ([\d.]+)/)?.[1] ?? "0") > 30, await resumedAt.jsonValue());
+  const tResumed = Date.now();
   await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 1800000 });
   if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
   const result = await page.evaluate(() => window.__share.result);
   made.push(result.manage);
+  console.log(`TIMES ${P}: compress ${((tUpload - tc) / 1000).toFixed(0)} s · upload until the reload ${((tReload - tUpload) / 1000).toFixed(0)} s · resume to done ${((Date.now() - tResumed) / 1000).toFixed(0)} s · ${(await page.locator("#up-log li").allTextContents()).filter((t) => /^Compressed/.test(t)).join("")}`);
   const m = await mem.done();
   check(`${P}: renderer memory stays bounded while sharing ${(info.bytes / 1e9).toFixed(2)} GB`, m.peakHwmMB < MEMORY_BOUND_MB, `peak resident ${m.peakHwmMB} MB (bound ${MEMORY_BOUND_MB} MB)`);
   console.log(`MEMORY ${P}: peak renderer resident ${m.peakHwmMB} MB for ${(info.bytes / 1e9).toFixed(2)} GB`);
@@ -1118,6 +1232,10 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "reshare") await flowReshare(dev);
     if (!only || only === "exact") await flowExact(dev);
     if (!only || only === "cd") await flowCd(dev);
+    if (!only || only === "j2k") {
+      await flowJ2k(dev);
+      await flowJ2kResume(dev);
+    }
     if (files && (!only || only === "manage")) await flowManage(dev, files);
     if (!only || only === "slide") await flowSlide(dev);
     if (!only || only === "sample") await flowSample(dev);

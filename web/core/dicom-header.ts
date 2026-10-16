@@ -1,6 +1,7 @@
-// The attributes a DICOMDIR and the Share page's grouping need, read synchronously from a Part 10
-// header (dicom.ts). Pixel data is not read; a truncated file is fine if the header is complete.
-import { parseDicomSync, T, tag } from "./dicom";
+// The attributes a DICOMDIR and the Share page's grouping need, read from a Part 10 header
+// (dicom.ts). Pixel data is not read; a truncated file is fine if the header is complete. A deflated
+// data set (Deflated Explicit VR Little Endian) is inflated first, as far as the bytes given go.
+import { parseDicom, T, tag } from "./dicom";
 
 export interface DicomHeader {
   transferSyntax: string;
@@ -25,11 +26,11 @@ export interface DicomHeader {
   specificCharacterSet: string;
 }
 
-export function readDicomHeader(bytes: Uint8Array): DicomHeader {
+export async function readDicomHeader(bytes: Uint8Array): Promise<DicomHeader> {
   if (bytes.length < 132 || bytes[128] !== 0x44 || bytes[129] !== 0x49 || bytes[130] !== 0x43 || bytes[131] !== 0x4d) {
     throw new Error("not a Part 10 file");
   }
-  const { meta, ds, transferSyntax } = parseDicomSync(bytes, { untilPixelData: true });
+  const { meta, ds, transferSyntax } = await parseDicom(bytes, { untilPixelData: true });
   const s = (t: number) => ds.str(t) ?? "";
   return {
     transferSyntax,

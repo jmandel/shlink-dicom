@@ -58,18 +58,19 @@ export function uncompressedImages(studies: StudyModel[]): { se: SeriesModel; in
 export type TranscodeResult = { bytes: Uint8Array; transferSyntax: string } | { declined: string };
 
 /**
- * How many encodes run at once: one per core but one, and fewer on devices that report little
- * memory (each encode holds about four times its image).
+ * How many encodes run at once: one per core but one, at most four, and fewer on devices that
+ * report little memory (each worker keeps its encoder's memory, about four times the largest image
+ * it has encoded, until the pool is closed): one per 2 GB.
  */
 function poolSize(): number {
   const cores = Math.max(1, (navigator.hardwareConcurrency || 2) - 1);
   const gb = (navigator as any).deviceMemory as number | undefined;
-  const byMemory = gb === undefined ? 4 : Math.max(1, Math.floor(gb / 1.5));
-  return Math.max(1, Math.min(cores, byMemory, 8));
+  const byMemory = gb === undefined ? 4 : Math.max(1, Math.floor(gb / 2));
+  return Math.max(1, Math.min(cores, byMemory, 4));
 }
 
 /** Input bytes being encoded at once, across workers (a larger image still goes, alone). */
-const IN_FLIGHT = 96 << 20;
+const IN_FLIGHT = 48 << 20;
 
 /** Workers running the encoders. */
 export class CompressPool {
@@ -80,6 +81,7 @@ export class CompressPool {
   private capsWaiting: ((ts: string[]) => void)[] = [];
   private caps: Promise<Encoding[]> | null = null;
   readonly size: number;
+  private workers: Worker[] = [];
 
   constructor(n = poolSize()) {
     this.size = n;
@@ -99,7 +101,15 @@ export class CompressPool {
         this.waiting.shift()?.();
       };
       this.idle.push(w);
+      this.workers.push(w);
     }
+  }
+
+  /** Ends the workers, giving back their memory (the encoders' memory only grows while they live). */
+  close() {
+    for (const w of this.workers) w.terminate();
+    this.workers = [];
+    this.idle = [];
   }
 
   /** The encodings this build's encoder offers (JPEG Lossless always, when it loads at all). */
@@ -129,9 +139,15 @@ export class CompressPool {
 }
 
 let shared: CompressPool | null = null;
-/** One pool per page. */
+/** One pool per page, made when first needed. */
 export function compressPool(): CompressPool {
   return (shared ??= new CompressPool());
+}
+
+/** Closes the page's pool once compressing is done, so the upload runs without the encoders' memory. */
+export function closeCompressPool() {
+  shared?.close();
+  shared = null;
 }
 
 export type Transcode = (bytes: Uint8Array, mode: Encoding) => Promise<TranscodeResult>;

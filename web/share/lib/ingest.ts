@@ -129,7 +129,7 @@ export class Collection {
         head = await src.read(0, Math.min(src.size, n));
       }
       try {
-        h = readDicomHeader(head);
+        h = await readDicomHeader(head);
       } catch {
         h = null;
       }

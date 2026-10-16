@@ -18,7 +18,7 @@ mkdirSync(out, { recursive: true });
 interface Part {
   path: string;
   size: number;
-  h: ReturnType<typeof readDicomHeader>;
+  h: Awaited<ReturnType<typeof readDicomHeader>>;
   /** Offset-table rewrite: new head bytes, and where the original resumes. */
   head?: Uint8Array;
   resumeAt?: number;
@@ -26,7 +26,7 @@ interface Part {
 const parts: Part[] = [];
 for (const f of readdirSync(dir).filter((f) => f.endsWith(".dcm"))) {
   const path = `${dir}/${f}`;
-  parts.push({ path, size: statSync(path).size, h: readDicomHeader(new Uint8Array(await Bun.file(path).slice(0, 262144).arrayBuffer())) });
+  parts.push({ path, size: statSync(path).size, h: await readDicomHeader(new Uint8Array(await Bun.file(path).slice(0, 262144).arrayBuffer())) });
 }
 parts.sort((a, b) => (Number(a.h.instanceNumber) || 0) - (Number(b.h.instanceNumber) || 0) || a.h.sopInstanceUid.localeCompare(b.h.sopInstanceUid));
 

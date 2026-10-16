@@ -133,8 +133,11 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
     const studyUrl = "urn:uuid:" + crypto.randomUUID();
     entry.push({ fullUrl: studyUrl, resource: res });
     // For the owner page only (links leave it out): images this device re-encoded without loss.
-    const reencoded = p.instances.filter((i) => i.reencoded).length;
-    if (reencoded) entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: reencodingProvenance(studyUrl, reencoded, p.instances.length, lastUpdated) });
+    const reencoded = p.instances.filter((i) => i.reencoded);
+    if (reencoded.length) {
+      const names = [...new Set(reencoded.map((i) => TS_LOSSLESS[i.h.transferSyntax] ?? "lossless"))].join(" and ");
+      entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: reencodingProvenance(studyUrl, reencoded.length, p.instances.length, names, lastUpdated) });
+    }
     for (const { resource: r } of st.reports.filter((x) => x.include)) {
       const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
       for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
@@ -154,21 +157,24 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
 }
 
 /** Activity text of the owner Bundle's re-encoding note, which the owner page shows as it is. */
-export const REENCODED_TEXT = (n: number, of: number) =>
-  `${n} of ${of} images were compressed without loss when shared (JPEG Lossless): pixel-identical to the files they came from, not the same bytes.`;
+export const REENCODED_TEXT = (n: number, of: number, encoding: string) =>
+  `${n} of ${of} images were compressed without loss when shared (${encoding}): pixel-identical to the files they came from, not the same bytes.`;
+
+/** Names of the lossless transfer syntaxes the Share page writes. */
+const TS_LOSSLESS: Record<string, string> = { "1.2.840.10008.1.2.4.70": "JPEG Lossless", "1.2.840.10008.1.2.4.90": "JPEG 2000 Lossless" };
 
 /**
  * A Provenance saying the Share page re-encoded some of a study's images (PROPOSAL.md §11.1). It
  * is in the owner Bundle only; subsetBundle leaves it out of every link's Bundle.
  */
-function reencodingProvenance(studyUrl: string, n: number, of: number, recorded: string): any {
+function reencodingProvenance(studyUrl: string, n: number, of: number, encoding: string, recorded: string): any {
   return {
     resourceType: "Provenance",
     target: [{ reference: studyUrl }],
     recorded,
     activity: {
       coding: [{ system: "http://terminology.hl7.org/CodeSystem/v3-DataOperation", code: "TRANSFORM" }],
-      text: REENCODED_TEXT(n, of),
+      text: REENCODED_TEXT(n, of, encoding),
     },
     agent: [{ who: { display: "shlink-dicom Share page" } }],
   };

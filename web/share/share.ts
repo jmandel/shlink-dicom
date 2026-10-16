@@ -16,7 +16,7 @@ import {
 import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import {
-  COMPRESS_DEFAULT, ENCODING_NAME, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, workers,
+  COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, workers,
   type CompressMode, type CompressSummary, type Encoding, type SeriesEstimate,
 } from "./lib/compress";
 import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadJob } from "./lib/upload";
@@ -708,7 +708,7 @@ async function upload() {
       const sum = await compress(col, studies, encoding, zst);
       $("up-log").prepend(h("li", null, compressedLine(sum)));
       job.compress = { mode: encoding, stage: zst.onDisk ? zst.session : undefined, records: sum.records };
-    }
+    } else closeCompressPool(); // the review's estimates are done with it
     if (job.addOffsetTables) {
       await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
         $("up-main").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
@@ -741,12 +741,16 @@ async function upload() {
 
 /** Re-encodes the studies' uncompressed images, showing measured progress and the time left. */
 async function compress(c: Collection, studies: StudyModel[], mode: Encoding, zst: Stager): Promise<CompressSummary> {
-  return compressStudies(c, studies, mode, zst, (p) => {
-    // Time left, from this device's measured speed once a few images are done.
-    const left = p.done >= 4 && p.seconds >= 2 && p.before > 0 ? ((p.totalBytes - p.before) * p.seconds) / p.before : 0;
-    $("up-main").textContent = `Compressing ${p.done} of ${plural(p.total, "image")} without loss · ${formatBytes(p.before)} → ${formatBytes(p.after)} so far${left > 5 ? ` · ${aboutTime(left)} left` : ""}`;
-    setBar("up-bar-wrap", p.done, p.total, `${p.done} of ${p.total} images compressed`);
-  });
+  try {
+    return await compressStudies(c, studies, mode, zst, (p) => {
+      // Time left, from this device's measured speed once a few images are done.
+      const left = p.done >= 4 && p.seconds >= 2 && p.before > 0 ? ((p.totalBytes - p.before) * p.seconds) / p.before : 0;
+      $("up-main").textContent = `Compressing ${p.done} of ${plural(p.total, "image")} without loss · ${formatBytes(p.before)} → ${formatBytes(p.after)} so far${left > 5 ? ` · ${aboutTime(left)} left` : ""}`;
+      setBar("up-bar-wrap", p.done, p.total, `${p.done} of ${p.total} images compressed`);
+    });
+  } finally {
+    closeCompressPool();
+  }
 }
 
 function compressedLine(sum: CompressSummary): string {
@@ -907,10 +911,14 @@ async function resumeJob(job: UploadJob, files?: File[]) {
     if (job.compress) {
       const inBundle = new Set(parseStudyIndex(owner).studies.map((s) => s.studyInstanceUid));
       const zst = await openStager(job.compress.stage ?? `${st.session}-z`);
-      await restoreCompressed(c, c.list().filter((s) => inBundle.has(s.uid)), job.compress.mode, job.compress.records, zst, (done, total) => {
-        $("up-main").textContent = `Finding the compressed images: ${done} of ${total}`;
-        setBar("up-bar-wrap", done, total, $("up-main").textContent!);
-      });
+      try {
+        await restoreCompressed(c, c.list().filter((s) => inBundle.has(s.uid)), job.compress.mode, job.compress.records, zst, (done, total) => {
+          $("up-main").textContent = `Finding the compressed images: ${done} of ${total}`;
+          setBar("up-bar-wrap", done, total, $("up-main").textContent!);
+        });
+      } finally {
+        closeCompressPool();
+      }
     }
     if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
     await runUpload({ job, api, owner, packed: planFromOwner(owner, c) });

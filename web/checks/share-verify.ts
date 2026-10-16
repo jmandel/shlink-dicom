@@ -22,6 +22,9 @@ const pass = args.find((a) => a.startsWith("--passcode="))?.slice(11);
 const indexOnly = args.includes("--index-only");
 const archives = args.slice(1).filter((a) => !a.startsWith("--"));
 const pixels = args.includes("--pixels");
+/** --dump=DIR: every instance of the link written to DIR/<SOP Instance UID>.dcm, with DIR/index.json { sop: { series, study } }. */
+const dump = args.find((a) => a.startsWith("--dump="))?.slice(7);
+const dumped: Record<string, { series: string; study: string }> = {};
 /** --pixels: originals (and differing shared instances) written here for pixel-identity.py. */
 const work = pixels ? mkdtempSync(join(tmpdir(), "share-verify-")) : "";
 const originalFiles = new Map<string, string>();
@@ -36,7 +39,7 @@ for (const a of archives.flatMap(walk)) {
   for await (const e of expand(a, new BlobBytes(Bun.file(a)), memoryStager())) {
     try {
       const bytes = await e.src.read(0, e.src.size);
-      const h = readDicomHeader(bytes);
+      const h = await readDicomHeader(bytes);
       if (h.sopInstanceUid) {
         originals.set(h.sopInstanceUid, await hex(bytes));
         if (pixels) {
@@ -88,6 +91,10 @@ for (const st of indexOnly ? [] : share.index.studies) {
       for (let k = 0; k < parts.length; k++) {
         instances++;
         const inst = se.instances[plan.firstInstance + k];
+        if (dump) {
+          writeFileSync(join(dump, `${inst.uid}.dcm`), parts[k]);
+          dumped[inst.uid] = { series: se.uid, study: st.studyInstanceUid };
+        }
         if (!archives.length && !refLink) continue;
         const want = originals.get(inst.uid);
         if (!want) missing++;
@@ -104,6 +111,7 @@ for (const st of indexOnly ? [] : share.index.studies) {
     }
   }
 }
+if (dump) writeFileSync(join(dump, "index.json"), JSON.stringify(dumped));
 let pixelReport: any = null;
 if (pixels && pairs.length) {
   writeFileSync(join(work, "pairs.json"), JSON.stringify(pairs));
