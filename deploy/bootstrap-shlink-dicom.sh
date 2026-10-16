@@ -97,7 +97,7 @@ echo "== server"
 cargo build -q --release -p shl-dicom-server
 
 echo "== public sample (sandbox dataset, Josh Example)"
-(cd imaging-sandbox && bun scripts/build-data.ts --quiet)
+(cd imaging-sandbox && bun scripts/build-data.ts --quiet --no-variants)
 id shlink >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin shlink
 $SUDO mkdir -p "$DATA/samples"
 $SUDO rm -f "$DATA"/samples/*.tgz
