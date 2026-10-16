@@ -8,7 +8,7 @@ Transfer syntaxes:
 | 1.2.840.10008.1.2.4.111 | JPEG XL JPEG Recompression | yes (the JPEG it carries is lossy) |
 | 1.2.840.10008.1.2.4.112 | JPEG XL | yes |
 
-Crate: `codecs/shl-codec-jpegxl`. Cases: `scripts/sources/jpegxl.py`.
+Crates: `codecs/shl-jpegxl` (the decoder) and `codecs/shl-codec-jpegxl` (the DICOM wrapper). Cases: `scripts/sources/jpegxl.py`.
 
 ## Spec
 
@@ -21,26 +21,36 @@ Crate: `codecs/shl-codec-jpegxl`. Cases: `scripts/sources/jpegxl.py`.
 
 ## Decoder
 
-`decode_frame` wraps [jxl-oxide](https://github.com/tirr-c/jxl-oxide) 0.12.6 with default features off (no rayon, no lcms2), single-threaded (`JxlThreadPool::none`):
+`shl-codec-jpegxl` is a thin wrapper around `shl-jpegxl` (`codecs/shl-jpegxl`), a JPEG XL decoder written for this project: pure Rust, `#![forbid(unsafe_code)]`, no dependencies, and it builds for `wasm32-unknown-unknown`. It includes its own Brotli decoder for the `jbrd`, `brob` and compressed metadata boxes.
 
-1. The codestream (bare or in the ISO BMFF container) is read; the image must match Rows × Columns, and its colour channel count (grey or RGB; alpha is dropped) must match Samples per Pixel. CMYK and floating-point samples are Unsupported.
-2. The first keyframe is rendered and each sample `v` (nominal 0.0–1.0) becomes `round(v × (2^bits − 1))`, clamped, where `bits` is the codestream's bit depth. This is libjxl's float-to-integer output. Lossless (modular) data comes back exactly.
-3. **XYB images with an sRGB transfer curve** are rendered as linear light and the exact sRGB curve is applied in f64. jxl-oxide's own sRGB step is a fast approximation (relative error about 1e-4) that left 16-bit lossy frames up to 8 away from libjxl; with the exact curve they are within 1.
-4. Colour comes back as RGB (`ColorOut::Rgb`), whatever the declared photometric (RGB, YBR_RCT, XYB, YBR_FULL_422).
-5. Memory: jxl-oxide's allocation tracker caps image buffers at 48 bytes per output sample plus 64 MiB.
+**What it decodes:**
+- the bare codestream and the ISO BMFF container (`jxlc`, `jxlp`, `jbrd`, `Exif`, `xml `, `brob`);
+- Modular frames: every predictor including the weighted predictor, MA trees, the RCT, palette and squeeze transforms, integer and floating-point samples, extra channels;
+- VarDCT frames: every transform type (DCT sizes from 2×2 to 256×256, IDENTITY, AFV), custom quantisation tables, adaptive quantisation, chroma-from-luma, progressive passes, LF frames;
+- Gaborish, the edge-preserving filter, patches, splines, noise, upsampling, chroma subsampling, blending, reference frames and animation (the first displayed frame is returned);
+- colour: XYB to the image's own colour space for the sRGB, linear, gamma, DCI, BT.709, PQ and HLG transfer functions, with the transfer curves ported from libjxl; YCbCr; orientation;
+- JPEG reconstruction from the `jbrd` box (`reconstruct_jpeg`), byte-identical to the JPEG that was recompressed.
 
-Bits Allocated 24, allowed by Table 8.2.15-1, is Unsupported: the canonical form has no 24-bit sample type. There is no reduced-resolution decode: jxl-oxide has no downsampled render, so the CLI decodes in full and box-downsamples.
+**Refused as unsupported (exit 3):** XYB output to RGB primaries or a white point other than sRGB's; a frame saved for reference after the colour transform but not displayed. XYB images that carry an ICC profile come back as linear sRGB, as libjxl gives them without a colour management system. In the wrapper: floating-point samples, more bits than Bits Allocated, and Bits Allocated 24 (the canonical form has no 24-bit sample type).
+
+**Output.** Lossless (modular, non-XYB) images come back as their exact integers. Everything else comes back as f32 in the image's colour space, nominal range 0.0–1.0.
+
+**The wrapper** (`src/lib.rs`):
+- reads the image header first: the image must match Rows × Columns, its colour channel count (grey or RGB; alpha is dropped) must match Samples per Pixel, and its bit depth must fit Bits Allocated. Nothing is decoded before these checks pass;
+- caps the decode at Rows × Columns pixels;
+- turns each float sample `v` into `v × (2^bits − 1)`, rounded to nearest with ties to even and clamped, where `bits` is the codestream's bit depth. This is libjxl's float-to-integer conversion, except that for 8-bit output libjxl also adds an ordered dither, which the wrapper does not (see [Rulings](#rulings));
+- returns colour as RGB (`ColorOut::Rgb`), whatever the declared photometric (RGB, YBR_RCT, XYB, YBR_FULL_422).
+
+There is no reduced-resolution decode: the CLI decodes in full and box-downsamples.
 
 **Signed data.** JPEG XL samples are unsigned. Writers store a signed frame as its two's-complement bit pattern at the codestream's bit depth (cornerstone's `CTImage` .110 file: Pixel Representation 1, 16-bit codestream). The codec returns the pattern; the CLI sign-extends from Bits Stored.
 
-**Adopt decision.** Adopted (AGENTS.md criteria):
-- pure Rust; MIT OR Apache-2.0; no C (the `lcms2` feature, the only C, is off);
-- builds for `wasm32-unknown-unknown`, including in the viewer-kit simd128 build;
-- passes the corpus (below);
-- 10-minute fuzz run with no crashes (STATUS);
-- readable, actively maintained.
-
-Cost: it adds about 1.5 MB to the stripped `shl-dicom-decode-wasm` module (1.14 → 2.66 MB; gzip 350 → 869 KiB). By function size the largest parts are `jxl_render` 346 KB, `jxl_modular` 291 KB, `jxl_frame` 112 KB and `brotli_decompressor` 106 KB.
+**How it is checked**, besides the corpus ([STATUS](#status)):
+- the [libjxl conformance suite](https://github.com/libjxl/conformance): all 40 test cases within their tolerances (for example `bike`, with splines, noise and patches: peak error 2.5e-4 against a limit of 7e-3);
+- byte-identical output to `djxl` (libjxl 0.12.0) for 52 lossless files: the corpus's lossless frames and lossless encodes, at effort 1, 3 and 7, of CT, MR, digital X-ray and photographic test images;
+- JPEG reconstruction byte-identical to `djxl` and to the original JPEG for 44 files: the corpus's .111 frames, three conformance cases, and `cjpeg` baseline, progressive, restart-interval, optimised, greyscale, 4:2:2, 4:2:0 and RGB JPEGs, with ICC, COM, Exif and XMP, compressed and not;
+- `tests/decode.rs` decodes small `cjxl` files (lossless 16-bit, lossy RGB, JPEG recompression) and checks that every truncated prefix is refused; `tests/regressions.rs` holds fuzz findings;
+- fuzzing ([STATUS](#status)).
 
 ## References (oracle)
 
@@ -58,10 +68,19 @@ Cost: it adds about 1.5 MB to the stripped `shl-dicom-decode-wasm` module (1.14 
 
 ## Rulings
 
-None needed. Lossy cases differ from libjxl by at most 1: the .111 and VarDCT frames go through different floating-point IDCT and colour code.
+None needed. Lossy frames (.112, and .111 decoded to pixels) are within 1 of libjxl. For 8-bit output libjxl adds an ordered dither before rounding; this decoder rounds plainly. Compared with `djxl` on 28 lossy files (the corpus's 21 and 7 lossy encodes of the CT, MR, X-ray, slide and photographic test images), 33,153,349 of 39,727,425 samples are identical and the rest differ by 1. With the dither emulated, 39,722,410 are identical.
 
 ## STATUS
 
+2026-10-16, with `shl-jpegxl`.
+
 - **Corpus:** 40/40 pass: 21 lossless (.110; 19 from seeds, 2 real) exact, 15 .112 and 4 .111 within 1 of libjxl.
-- **Fuzz:** `cargo-fuzz` target `decode` in `codecs/shl-codec-jpegxl/fuzz` (FrameInfo from the input's own header). 10 minutes, 4 processes, no sanitizer (`RUSTC_BOOTSTRAP=1 cargo-fuzz run -O -s none decode`, seeded with the corpus frames): 1.26 million inputs, no crashes, timeouts or out-of-memory.
-- **Tests:** `cargo test`, `cargo clippy --all-targets -D warnings`, and a `wasm32-unknown-unknown` build succeed.
+- **Fuzz:** `cargo-fuzz`, no sanitizer, overflow checks on (`RUSTC_BOOTSTRAP=1 cargo-fuzz run -O -a -s none`), on the final code. No crashes, timeouts or out-of-memory in any run.
+  - `codecs/shl-jpegxl/fuzz`, target `decode` (images capped at 2^20 pixels), seeded with the corpus frames, the conformance files and earlier fuzz corpora: 30 minutes, 4 processes, 2,425,609 inputs.
+  - same crate, target `reconstruct` (JPEG reconstruction), seeded with the 44 recompressed JPEGs above: 30 minutes, 2 processes, 2,801,726 inputs.
+  - `codecs/shl-codec-jpegxl/fuzz`, target `decode` (FrameInfo from the input's own header; the first byte picks Bits Allocated and Pixel Representation): 15 minutes, 4 processes, 9,010,834 inputs.
+  - Earlier runs found a frame-size overflow and ICC profiles that took seconds to expand; both are fixed and in `tests/regressions.rs`.
+- **Speed**, single-threaded, fastest of 7 (native) or median of 5 (Chromium 154, wasm32 with simd128), against jxl-oxide 0.12.6 (default features off, no thread pool), a test-only comparison. Load average 2–5 on a shared 12-core machine. Corpus frames: 2.6× jxl-oxide's speed natively, 4.2× in wasm. 34 encodes of local test images (CT 512², MR, a 2048² digital X-ray, hand and wrist X-rays, a slide tile and a 2048² photograph; lossless at effort 1, 3 and 7, and lossy): 1.27× natively and 1.37× in wasm overall, between 1.09× and 2.4× per file natively and between 1.18× and 3.3× in wasm. No file is slower.
+- **Memory:** peak resident memory of a native decode is at or below jxl-oxide's on all 34 images. jxl-oxide uses up to 1.55× as much on the lossless files and 1.1–2.8× as much on the lossy ones.
+- **Size:** `shl_dicom_decode_jxl.wasm` is 1427 KiB, 442 KiB gzip; JPEG XL adds 543 KiB (168 KiB gzip) to the decoder.
+- **Tests:** `cargo test`, `cargo clippy --all-targets -D warnings`, and a `wasm32-unknown-unknown` build succeed. `viewer-kit/test/verify-oracle.ts` and `scaled.ts` pass on the JPEG XL cases with the wasm module, `viewer-kit/test/pool.mjs` decodes JPEG XL through the lazily loaded module, and the whole-slide JPEG XL checks in `web/checks/wsi-checks.mjs` (lossless, lossy and recompressed slides) match libjxl.

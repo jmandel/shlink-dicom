@@ -525,7 +525,7 @@ footer b {{ font-weight:700; }}
   {treemap_svg(2210, TM_H)}
   <p class="small" style="margin:10px 0 4px;">{groups_line()}</p>
   <p class="small muted" style="margin-top:0;">{c(CM['total_own'])} non-blank lines of the project's own code on main ({CM['commit']}){(', plus ' + c(OWN_TREE-CM['total_own']) + ' lines in review') if OWN_TREE > CM['total_own'] else ''}. The generated DICOM dictionary is not counted.</p>
-  <p class="small" style="margin:6px 0 0;">JPEG XL uses the jxl-oxide library. Everything else, including every JPEG 2000 and HTJ2K decoder and both encoders, is this project's code.</p>
+  <p class="small" style="margin:6px 0 0;">The JPEG 2000, HTJ2K and JPEG XL decoders and both encoders are this project's code.</p>
 </div>
 
 <!-- bottom: how it was built -->

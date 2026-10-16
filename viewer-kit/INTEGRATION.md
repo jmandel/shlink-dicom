@@ -11,8 +11,8 @@ Build it with `node viewer-kit/scripts/build.mjs`. That builds both wasm modules
 
 | File | What it is |
 |---|---|
-| `shl_dicom_decode.wasm` | 1209 KiB, 387 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm`, without JPEG XL |
-| `shl_dicom_decode_jxl.wasm` | 2714 KiB, 912 KiB gzip. The same decoder with JPEG XL (jxl-oxide, `--features jpegxl`). Fetched only when a JPEG XL instance arrives; see [JPEG XL](#jpeg-xl) |
+| `shl_dicom_decode.wasm` | 884 KiB, 274 KiB gzip. `shl_dicom_decode::decode_file` built with simd128 and fat LTO, from `codecs/shl-dicom-decode-wasm`, without JPEG XL |
+| `shl_dicom_decode_jxl.wasm` | 1427 KiB, 442 KiB gzip. The same decoder with JPEG XL (`codecs/shl-jpegxl`, `--features jpegxl`). Fetched only when a JPEG XL instance arrives; see [JPEG XL](#jpeg-xl) |
 | `decoder-worker.js` | the worker script; must be a separate file |
 | the API | `viewer-kit/src/index.ts`; `web/core` imports it and bun bundles it |
 
@@ -84,7 +84,7 @@ const bytes = await pool.decrypt(ciphertext, encrypted);                        
 
 ## JPEG XL
 
-JPEG XL (.110–.112) more than doubles the decoder, so it lives in a second module, `shl_dicom_decode_jxl.wasm`, and callers don't change:
+JPEG XL (.110–.112) adds about 540 KiB (170 KiB gzip) to the decoder, so it lives in a second module, `shl_dicom_decode_jxl.wasm`, and callers don't change:
 
 - **Lazy.** A worker reads the transfer syntax from the file meta before decoding. For JPEG XL it asks the pool for the second module; the pool fetches and compiles it once, the first time any worker asks, and sends the compiled module to each worker that needs it. Other instances never load it.
 - **Where it comes from.** `PoolOptions.jxlWasm`: a URL or a compiled module. When it is left out and `wasm` is a URL, the pool uses `shl_dicom_decode_jxl.wasm` next to it; when `wasm` is a module, there is none. `jxlWasm: null` turns JPEG XL off.

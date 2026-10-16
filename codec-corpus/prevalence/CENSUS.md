@@ -187,7 +187,7 @@ IDC is a research archive. Much of it was decompressed during TCIA de-identifica
 - **JPEG-LS (.80, .81).** Mammography (Hologic) and dcm4chee archives. It has a small spec and CharLS-level complexity. Put it first in tier 2.
 - **HTJ2K (.201–.203).** Cloud archives, AWS HealthImaging and Google, are starting to hand it out over DICOMweb. A portal built on them can produce it. It shares most of the J2K Part 1 code.
 - **Encapsulated Uncompressed (.1.98) and Deflated Image Frame (.8.1).** These are cheap.
-- **JPEG XL (.110–.112) with XYB.** A first vendor (Philips WSI) and AWS have adopted it. It is a large codec; a pure-Rust decoder (jxl-oxide) exists.
+- **JPEG XL (.110–.112) with XYB.** A first vendor (Philips WSI) and AWS have adopted it. It is a large codec; this project decodes it with its own `shl-jpegxl`.
 - **Float and Double Float Pixel Data.**
 - **GE private big-endian syntax (1.2.840.113619.5.2), and files without a Part 10 header** (implicit-LE guess).
 - **Retired progressive and spectral-selection JPEG (.53, .55).** Add only if the chosen JPEG decoder already does progressive Huffman.

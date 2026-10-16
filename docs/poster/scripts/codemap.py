@@ -35,6 +35,7 @@ RULES = [
     ("codecs/shl-codec-jpeg2000-encode/", "Rust codecs", "JPEG 2000 encoder"),
     ("codecs/shl-codec-jpeg2000/", "Rust codecs", "JPEG 2000 glue"),
     ("codecs/shl-codec-htj2k/", "Rust codecs", "HTJ2K glue"),
+    ("codecs/shl-jpegxl/", "Rust codecs", "JPEG XL decoder"),
     ("codecs/shl-codec-jpegxl/", "Rust codecs", "JPEG XL glue"),
     ("codecs/shl-codec-rle/", "Rust codecs", "RLE"),
     ("codecs/shl-codec-common/", "Rust codecs", "codec common"),

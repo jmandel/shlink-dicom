@@ -15,7 +15,7 @@ Status: approved direction (Josh, 15 Oct 2026). It replaces the tier 2 and tier 
 | JPEG progressive and spectral selection (.53, .55) | Extend the JPEG decoder: progressive Huffman, coefficient buffer | libjpeg (Richter, via pylibjpeg-libjpeg), libjpeg-turbo |
 | JPEG arithmetic coding (.52, .54, .56, .58) | Arithmetic entropy decoder (ISO 10918-1 Annex D) for DCT and lossless | libjpeg (Richter), libjpeg-turbo for DCT |
 | JPEG hierarchical (.59–.66) | Frame and differential-frame decoding on top of the above | libjpeg (Richter) |
-| JPEG XL (.110–.112) | jxl-oxide (pure Rust) behind the codec interface; reduced decode if it offers one | libjxl (imagecodecs) |
+| JPEG XL (.110–.112) | `shl-jpegxl`, the project's own decoder, behind the codec interface | libjxl (imagecodecs) |
 | JPEG 2000 Part 2 multi-component (.92, .93) | Part 2 multi-component transforms in `shl-jpeg2000` | OpenJPEG or Kakadu, wherever one decodes the file |
 | Retired photometrics (ARGB, CMYK, HSV, YBR_PARTIAL_422/420) | Colour conversions to RGB | pydicom, GDCM |
 
