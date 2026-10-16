@@ -634,7 +634,7 @@ pub(crate) mod wasm {
         }
         let ws = idct4_1d(rows).map(|y| descale(y, CONST_BITS - pass1 + 1));
         let z = W(i32x4_splat(0), i32x4_splat(0));
-        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z].map(|r| v(r))).map(|c| y(c));
+        let cols = transpose([ws[0], ws[1], ws[2], ws[3], z, z, z, z]);
         let l = Limits::new(max);
         let (k, mask, two_n) = (i32x4_splat(l.k), i32x4_splat(l.mask), i32x4_splat(l.two_n));
         let (zero, vmax) = (i32x4_splat(0), i32x4_splat(l.max));
