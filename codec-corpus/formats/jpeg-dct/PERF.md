@@ -147,14 +147,15 @@ Measured for track T1 of the [performance plan](../../../docs/PERF-PLAN.md#t1-sv
 
 | Series | Ours native MB/s: main → now | libjpeg-turbo MB/s | dcmcjpeg +e1 MB/s, net of I/O | wasm transcode cycles per pass: main → now |
 |---|---|---|---|---|
-| abdomen CT, 93 slices, 16-bit | 202 → 343 | 74.6 | 66 | 1,627M → 1,227M (−25%) |
-| brain MR, 267 images, 16-bit | 188 → 329 | 58.0 | 12 | 138M → 115M (−17%), one series |
-| wrist X-ray, 3 images, 12-bit | 189 → 355 | 65.8 | 75 | 465M → 328M (−29%), one study |
+| abdomen CT, 93 slices, 16-bit | 202 → 343 | 74.6 | 66 | 1,627M → 1,163M (−29%) |
+| brain MR, 267 images, 16-bit | 188 → 329 | 58.0 | 12 | 138M → 107–110M (−21%), one series |
+| wrist X-ray, 3 images, 12-bit | 189 → 355 | 65.8 | 75 | 465M → 314–321M (−32%), one study |
 
-- **What changed (three commits):**
+- **What changed in the encoder (three commits):**
   - Each pass over the rows called its per-row work through `&mut dyn FnMut`, and the coding pass called `emit` and `BitWriter::put` per sample without inlining them, so the bit buffer went through memory for every sample. The row loop is now generic, `emit`, `put` and `category` are inlined, `put` no longer masks bits its callers already keep within `n`, and the check for a 0xFF byte in each flushed word is one word-wide test instead of four compares (native 201 → 240 MB/s on the CT series, wasm −11%).
   - The difference category and its extra bits are computed without branching on the sign. On noisy images the sign is random, so the branch mispredicted often in both passes: the `perf` run over the CT series went from 33M to 9M branch misses (native 243 → 339 MB/s, wasm −13–16%).
   - **Four partial histograms** in the counting pass (one-component images), so increments of the same category no longer wait on each other: wasm transcode of the CT series 1,467M → 1,413M cycles per pass (−3.7%); the MR series ran the same instructions (323M against 322M) and cycles within run-to-run spread, the X-ray study 2% fewer cycles.
+- **The transcoder's pixel self-check** compares the decoded output with the input. `[u8]` equality became a `memcmp` call, which in wasm compares a byte at a time (5% of the CT transcode); `shl-dicom-transcode` now compares eight bytes at a time: CT 1,227M → 1,163M cycles per pass, MR and X-ray 2–5% fewer, native within 1%.
 - **Rejected:**
   - Keeping all differences from the counting pass (16 bits each) instead of computing them again in the coding pass. It cost about 4% more cycles than recomputing them, and memory for the whole frame instead of three rows.
   - Inlining the per-row `differences`: 1.5% fewer wasm instructions, no cycle change.

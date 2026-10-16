@@ -559,7 +559,7 @@ fn wrap(input: &[u8], p: Prepared<'_>, ts: &str, fragments: Vec<Vec<u8>>, report
             == (before.frames, before.total_frames, before.rows, before.columns, before.samples_per_pixel, before.bits_allocated)
             && (after.bits_stored, after.signed) == (before.bits_stored, before.signed)
             && after.photometric == before.photometric
-            && after.data == before.data;
+            && same_bytes(&after.data, &before.data);
         if !same {
             return Err(no("self-check mismatch: the encoded pixels do not decode to the input's"));
         }
@@ -567,9 +567,37 @@ fn wrap(input: &[u8], p: Prepared<'_>, ts: &str, fragments: Vec<Vec<u8>>, report
     Ok(out)
 }
 
+/// `a == b`, eight bytes at a time: in wasm, `[u8]` equality calls a `memcmp` that compares one
+/// byte at a time.
+fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (wa, wb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let tail = wa.remainder() == wb.remainder();
+    // Fold the differences instead of returning at the first, so the loop has no branch.
+    let diff = wa.zip(wb).fold(0u64, |acc, (x, y)| {
+        acc | (u64::from_ne_bytes(x.try_into().unwrap_or_default()) ^ u64::from_ne_bytes(y.try_into().unwrap_or_default()))
+    });
+    tail && diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_bytes_finds_any_difference() {
+        let a: Vec<u8> = (0..37u8).collect();
+        assert!(same_bytes(&a, &a.clone()));
+        assert!(!same_bytes(&a, &a[..36]));
+        for i in 0..a.len() {
+            let mut b = a.clone();
+            b[i] ^= 0x10;
+            assert!(!same_bytes(&a, &b), "byte {i}");
+        }
+        assert!(same_bytes(&[], &[]));
+    }
 
     #[test]
     fn dictionary_lookups() {
