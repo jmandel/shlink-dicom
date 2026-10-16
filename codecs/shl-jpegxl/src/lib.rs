@@ -194,7 +194,7 @@ fn orient<T: Copy>(data: Vec<T>, w: usize, h: usize, orientation: u32) -> Vec<T>
 
 /// Rebuilds the original JPEG file from a JPEG XL file made by lossless JPEG recompression
 /// (one with a `jbrd` box). The result is byte-identical to the JPEG that was recompressed.
-pub fn reconstruct_jpeg(data: &[u8]) -> Result<Vec<u8>> {
+pub fn reconstruct_jpeg(data: &[u8], opts: &Options) -> Result<Vec<u8>> {
     use frame_header::{read_toc, Encoding, FrameHeader};
     let parsed = container::parse(data)?;
     let jbrd = parsed.jbrd.ok_or(Error::Invalid("no JPEG reconstruction data (jbrd box)"))?;
@@ -203,6 +203,9 @@ pub fn reconstruct_jpeg(data: &[u8]) -> Result<Vec<u8>> {
     let hd = headers::read_headers(&mut br)?;
     if hd.metadata.xyb_encoded {
         return Err(Error::Invalid("cannot rebuild a JPEG from an XYB image"));
+    }
+    if u64::from(hd.size.width) * u64::from(hd.size.height) > opts.max_pixels {
+        return Err(Error::Limit("image larger than max_pixels"));
     }
     let mut jd = jpeg::parse_jbrd(jbrd, brotli_decompress)?;
     let mut pos = br.byte_pos();

@@ -1,4 +1,4 @@
-# cargo-fuzz targets for shl-jpegxl: `cargo +nightly fuzz run decode` from this directory.
+# cargo-fuzz targets for shl-jpegxl: `cargo +nightly fuzz run decode` (or `reconstruct`) from this directory.
 [package]
 name = "shl-jpegxl-fuzz"
 version = "0.0.0"
@@ -15,6 +15,13 @@ shl-jpegxl = { path = ".." }
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reconstruct"
+path = "fuzz_targets/reconstruct.rs"
 test = false
 doc = false
 bench = false
