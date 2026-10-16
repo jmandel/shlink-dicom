@@ -1,7 +1,7 @@
 // Native runner: one bench-native process decodes every case; outputs are verified here.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { cpus, tmpdir } from "node:os";
+import { cpus } from "node:os";
 import { join } from "node:path";
 import { binDir } from "../lib/build.mjs";
 import { verifyOutput } from "../lib/verify.mjs";
@@ -19,7 +19,9 @@ function command(bin, args) {
 }
 
 export async function runNative(cases, opts, log = console.error) {
-  const dir = mkdtempSync(join(tmpdir(), "bench-native-"));
+  // Decoded outputs go next to the run's binaries (or under BENCH_TMP), not to the system temp
+  // directory, which may be a small tmpfs.
+  const dir = mkdtempSync(join(process.env.BENCH_TMP || binDir(), "dump-"));
   const records = [];
   try {
     for (const c of cases) {

@@ -90,7 +90,12 @@ fn main() {
                         first_hash = Some(quick_hash(&img.data));
                         if let Some(d) = &dump {
                             let p = d.join(format!("{i}.raw"));
-                            let _ = std::fs::write(&p, &img.data);
+                            // A short or failed write would show up later as a wrong output,
+                            // so stop here instead.
+                            if let Err(e) = std::fs::write(&p, &img.data) {
+                                eprintln!("bench-native: writing {}: {e}", p.display());
+                                std::process::exit(2);
+                            }
                             dump_path = p.display().to_string();
                         }
                     }

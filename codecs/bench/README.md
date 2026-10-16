@@ -33,7 +33,7 @@ node codecs/bench/run.mjs --help
 Several runs can safely happen at once, for example from different agents:
 
 - Each run builds while holding an exclusive `flock` on `codecs/bench/.build.lock`.
-- While still holding the lock, it copies the native binary and the wasm files to its own directory, `codecs/target/bench/runs/<pid>-<time>/`, and runs only from there. That directory is removed at exit.
+- While still holding the lock, it copies the native binary and the wasm files to its own directory, `codecs/target/bench/runs/<pid>-<time>/`, and runs only from there. The native runner writes its decoded outputs there too (or under `BENCH_TMP` if set), not to the system temp directory. That directory is removed at exit.
 - A concurrent rebuild therefore can't replace a binary under a running benchmark, which previously failed with ETXTBSY.
 - The runs still compete for CPU, though. The report header and the terminal summary say **Noisy run** when the 1-minute load average is above 1.5, or when another `run.mjs` or `profile.mjs` is running.
 
