@@ -284,6 +284,12 @@ async fn main() {
                 .await
                 .expect("failed to bind TCP listener");
             println!("shl-dicom-server listening on http://localhost:{port}");
+            // TCP_NODELAY: a response whose body comes after its headers (an S3 range streamed through
+            // the server) otherwise waits for the reader's delayed ACK, about 40 ms, before its body.
+            use axum::serve::ListenerExt;
+            let listener = listener.tap_io(|tcp| {
+                let _ = tcp.set_nodelay(true);
+            });
             axum::serve(listener, app).await.expect("server error");
         }
     }
