@@ -91,7 +91,22 @@ The largest native gap (1.7–3.3× OpenJPH), and 1.2–1.25× in wasm. OpenJPH'
 
 ### T6. JPEG XL lossy
 
-**Stopped.** Kept: a safe four-lane type for the edge-preserving filter (EPF), dequantisation and transposes; tabulated scales; a fast path for effort-1 lossless; skipping the EPF on 8×8 blocks below the minimum sigma. Browser lossy went from 1.4–2.1× libjxl to 1.09–1.26× at distance 1. Three changes in a row then missed (per-group AC tables, 4-lane IDCT bundles, one copy fewer in the IDCT). Native lossy stays at 1.8–2.3× libjxl single-threaded; closing that needs AVX2 or threads within an image, both deferred. `run.mjs` now has nine JPEG XL cases with libjxl as the reference. See jpeg-xl PERF.md.
+**Stopped.** Kept, in two rounds:
+- **Round 1:** a safe four-lane type for the EPF, dequantisation and transposes; tabulated scales; a fast path for effort-1 lossless; skipping the EPF on 8×8 blocks below the minimum sigma.
+- **Round 2,** after the bench showed a gap with the agent's harness:
+  - the DICOM wrapper's per-sample interleave became one vectorised pass (44b2cb9), which the viewer also benefits from;
+  - a local bit reader in the effort-1 loop;
+  - an in-place bundled IDCT;
+  - no grey plane copies;
+  - dequantisation that skips all-zero groups.
+
+Bench at load 5–8 (b65cd88), ours ÷ libjxl:
+- browser lossy: 1.08–1.28;
+- browser lossless: 0.99–1.03;
+- native lossy: 1.8–2.4;
+- native lossless effort 1: 1.17–1.26.
+
+The ideas left (an EPF row ring, Gaborish fused into the EPF) are small. Native lossy needs AVX2-width code: a fused XYB pass was 41% slower natively because the four-lane type falls back to scalar arrays there, which compile-time AVX2 (perf-t8b) may change. See jpeg-xl PERF.md.
 
 ### T7. JPEG-LS colour (ILV 2)
 
