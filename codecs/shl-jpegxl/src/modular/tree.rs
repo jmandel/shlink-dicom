@@ -257,11 +257,25 @@ impl ChannelTree {
                 }
             }
         }
-        let mut props = vec![0i32; prop as usize + 1];
-        let mut lut = Vec::with_capacity(2 * range as usize);
-        for v in -range..range {
-            props[prop as usize] = v;
-            lut.push(self.lookup(&props).0 as u8);
+        // Fill by walking the tree with the value range each node leaves (values v in
+        // [lo, hi], index v + range).
+        let mut lut = vec![0u8; 2 * range as usize];
+        let mut stack = vec![(0usize, -range, range - 1)];
+        while let Some((i, lo, hi)) = stack.pop() {
+            if lo > hi {
+                continue;
+            }
+            match self.nodes.get(i) {
+                Some(&Node::Split { splitval, left, right, .. }) => {
+                    // v > splitval goes left.
+                    stack.push((left as usize, lo.max(splitval + 1), hi));
+                    stack.push((right as usize, lo, hi.min(splitval)));
+                }
+                Some(&Node::Leaf { ctx, .. }) => {
+                    lut[(lo + range) as usize..=(hi + range) as usize].fill(ctx as u8);
+                }
+                None => {}
+            }
         }
         Some(lut)
     }

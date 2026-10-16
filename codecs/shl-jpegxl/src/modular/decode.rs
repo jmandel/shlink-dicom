@@ -140,7 +140,8 @@ pub fn decode_channel(
             _ => {}
         }
     }
-    if !tree.uses_wp {
+    let big = w * h >= 4096;
+    if big && !tree.uses_wp {
         if let Some(lut) = tree.single_property_lut(GRADIENT_PROP as u32, Predictor::Gradient, PROP_RANGE_FAST) {
             decode_gradient(br, r, code, &mut ch.data, w, h, |g| {
                 let i = (g.clamp(-i64::from(PROP_RANGE_FAST), i64::from(PROP_RANGE_FAST) - 1) + i64::from(PROP_RANGE_FAST)) as usize;
@@ -148,6 +149,7 @@ pub fn decode_channel(
             });
             return check(br);
         }
+    } else if !big {
     } else if let Some(lut) = tree.single_property_lut(WP_PROP as u32, Predictor::Weighted, PROP_RANGE_FAST) {
         decode_wp_lut(br, r, code, cx.wp, &mut ch.data, w, h, &lut);
         return check(br);

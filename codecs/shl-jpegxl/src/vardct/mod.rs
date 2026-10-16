@@ -206,6 +206,8 @@ pub struct VarDct {
     hs: [usize; 3],
     vs: [usize; 3],
     pub use_lf_frame: bool,
+    /// Per-group work buffers, sized for the largest transform in use.
+    bufs: Option<(Vec<i32>, Vec<f32>, Vec<f32>)>,
 }
 
 pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf_dequant: &[f32; 3], quant_bias: [f32; 4]) -> Result<VarDct> {
@@ -256,6 +258,7 @@ pub fn read_lf_global(br: &mut BitReader, fh: &FrameHeader, dims: &FrameDims, lf
         hs,
         vs,
         use_lf_frame: use_lf,
+        bufs: None,
     })
 }
 
@@ -412,6 +415,7 @@ impl VarDct {
                         self.acs[p] = (acs.0 << 1) | u8::from(jx == 0 && jy == 0);
                     }
                 }
+                if std::env::var("JXL_ACS_STATS").is_ok() { eprintln!("ACS {}", raw); }
                 self.qf[bi] = 1 + strat[count + num].clamp(0, QUANT_MAX - 1);
                 num += 1;
             }
@@ -577,10 +581,19 @@ impl VarDct {
         }
         // Non-zero counts per pass and channel, group-local (subsampled) block coordinates.
         let mut nzeros = vec![vec![0i32; gdb * gdb * 3]; num_passes];
-        let mut coeffs = vec![0i32; 3 * 256 * 256];
-        let mut block = vec![0f32; 3 * 256 * 256];
-        let mut scratch = vec![0f32; 4 * 256 * 256 + 1024];
-        let mut pixels = vec![0f32; 256 * 256];
+        let (mut coeffs, mut block, mut scratch) = match self.bufs.take() {
+            Some(b) => b,
+            None => {
+                let mut max_size = 64usize;
+                for s in 0..NUM_STRATEGIES {
+                    if self.used_acs & (1 << s) != 0 {
+                        max_size = max_size.max(64 << AcStrategy(s).log2_covered());
+                    }
+                }
+                (vec![0i32; 3 * max_size], vec![0f32; 3 * max_size], vec![0f32; 4 * max_size + 1024])
+            }
+        };
+        let mut pixels = Vec::new();
         for by in 0..bh {
             let mut bx = 0;
             while bx < bw {
@@ -672,6 +685,7 @@ impl VarDct {
                 bx += cxb;
             }
         }
+        self.bufs = Some((coeffs, block, scratch));
         for r in &syms {
             if !r.check_final_state() {
                 return invalid("HF ANS final state");

@@ -123,22 +123,178 @@ fn transpose(src: &[f32], rows: usize, cols: usize, dst: &mut [f32]) {
     }
 }
 
+type V8 = [f32; 8];
+
+#[inline(always)]
+fn v_add(a: V8, b: V8) -> V8 {
+    core::array::from_fn(|i| a[i] + b[i])
+}
+
+/// Fixed-size IDCTs on bundles of 8 lanes: `d[i]` holds point i of 8 independent transforms.
+macro_rules! idct_bundle {
+    ($name:ident, $n:expr, $h:expr, $half:ident) => {
+        #[inline(always)]
+        fn $name(d: &mut [V8; $n], m: &[f32]) {
+            let mut lo = [[0f32; 8]; $h];
+            let mut hi = [[0f32; 8]; $h];
+            for i in 0..$h {
+                lo[i] = d[2 * i];
+                hi[i] = d[2 * i + 1];
+            }
+            $half(&mut lo, wc_multipliers($h));
+            for i in (1..$h).rev() {
+                hi[i] = v_add(hi[i], hi[i - 1]);
+            }
+            hi[0] = core::array::from_fn(|k| hi[0][k] * SQRT2);
+            $half(&mut hi, wc_multipliers($h));
+            for i in 0..$h {
+                let mul = m[i];
+                let (a, b) = (lo[i], hi[i]);
+                d[i] = core::array::from_fn(|k| mul * b[k] + a[k]);
+                d[$n - 1 - i] = core::array::from_fn(|k| a[k] - mul * b[k]);
+            }
+        }
+    };
+}
+
+#[inline(always)]
+fn idct_b2(d: &mut [V8; 2], _m: &[f32]) {
+    let (a, b) = (d[0], d[1]);
+    d[0] = core::array::from_fn(|k| a[k] + b[k]);
+    d[1] = core::array::from_fn(|k| a[k] - b[k]);
+}
+
+#[inline(always)]
+fn idct_b4(d: &mut [V8; 4], m: &[f32]) {
+    let mut lo = [d[0], d[2]];
+    let mut hi = [d[1], d[3]];
+    idct_b2(&mut lo, m);
+    hi[1] = v_add(hi[1], hi[0]);
+    hi[0] = core::array::from_fn(|k| hi[0][k] * SQRT2);
+    idct_b2(&mut hi, m);
+    for i in 0..2 {
+        let mul = m[i];
+        let (a, b) = (lo[i], hi[i]);
+        d[i] = core::array::from_fn(|k| mul * b[k] + a[k]);
+        d[3 - i] = core::array::from_fn(|k| a[k] - mul * b[k]);
+    }
+}
+
+idct_bundle!(idct_b8, 8, 4, idct_b4);
+idct_bundle!(idct_b16, 16, 8, idct_b8);
+idct_bundle!(idct_b32, 32, 16, idct_b16);
+idct_bundle!(idct_b64, 64, 32, idct_b32);
+idct_bundle!(idct_b128, 128, 64, idct_b64);
+idct_bundle!(idct_b256, 256, 128, idct_b128);
+
+/// `idct_rows` for n ≥ 8 points and a lane count that is a multiple of 8.
+fn idct_rows_bundled(d: &mut [f32], n: usize, l: usize) {
+    macro_rules! run {
+        ($f:ident, $n:expr) => {{
+            let m = wc_multipliers($n);
+            let mut b = [[0f32; 8]; $n];
+            for l0 in (0..l).step_by(8) {
+                for i in 0..$n {
+                    b[i].copy_from_slice(&d[i * l + l0..i * l + l0 + 8]);
+                }
+                $f(&mut b, m);
+                for i in 0..$n {
+                    d[i * l + l0..i * l + l0 + 8].copy_from_slice(&b[i]);
+                }
+            }
+        }};
+    }
+    match n {
+        8 => run!(idct_b8, 8),
+        16 => run!(idct_b16, 16),
+        32 => run!(idct_b32, 32),
+        64 => run!(idct_b64, 64),
+        128 => run!(idct_b128, 128),
+        _ => run!(idct_b256, 256),
+    }
+}
+
+/// 8-point IDCT of the 8 columns of an 8×8 block (`d[i * 8 + lane]`), libjxl's factorisation.
+#[inline(always)]
+fn idct8_cols(d: &mut [f32; 64]) {
+    let m4 = wc_multipliers(4);
+    let m8 = wc_multipliers(8);
+    let (m40, m41) = (m4[0], m4[1]);
+    let (m80, m81, m82, m83) = (m8[0], m8[1], m8[2], m8[3]);
+    for j in 0..8 {
+        let x = [d[j], d[8 + j], d[16 + j], d[24 + j], d[32 + j], d[40 + j], d[48 + j], d[56 + j]];
+        // Even half: IDCT4 of x0, x2, x4, x6.
+        let (a0, a1, a2, a3) = (x[0], x[2], x[4], x[6]);
+        let (e0, e1) = (a0 + a2, a0 - a2);
+        let b1 = a1 * SQRT2;
+        let b3 = a3 + a1;
+        let (o0, o1) = (b1 + b3, b1 - b3);
+        let ev = [m40 * o0 + e0, m41 * o1 + e1, e1 - m41 * o1, e0 - m40 * o0];
+        // Odd half: B-transpose, then IDCT4.
+        let q0 = x[1] * SQRT2;
+        let q1 = x[3] + x[1];
+        let q2 = x[5] + x[3];
+        let q3 = x[7] + x[5];
+        let (f0, f1) = (q0 + q2, q0 - q2);
+        let g1 = q1 * SQRT2;
+        let g3 = q3 + q1;
+        let (h0, h1) = (g1 + g3, g1 - g3);
+        let od = [m40 * h0 + f0, m41 * h1 + f1, f1 - m41 * h1, f0 - m40 * h0];
+        let m = [m80, m81, m82, m83];
+        for i in 0..4 {
+            d[i * 8 + j] = m[i] * od[i] + ev[i];
+            d[(7 - i) * 8 + j] = ev[i] - m[i] * od[i];
+        }
+    }
+}
+
+#[inline(always)]
+fn transpose8(d: &mut [f32; 64]) {
+    for y in 0..8 {
+        for x in y + 1..8 {
+            d.swap(y * 8 + x, x * 8 + y);
+        }
+    }
+}
+
+/// The 8×8 case of `idct2d`.
+pub fn idct8x8(coef: &mut [f32], out: &mut [f32], stride: usize) {
+    let mut b = [0f32; 64];
+    b.copy_from_slice(&coef[..64]);
+    idct8_cols(&mut b);
+    transpose8(&mut b);
+    idct8_cols(&mut b);
+    for r in 0..8 {
+        out[r * stride..r * stride + 8].copy_from_slice(&b[r * 8..r * 8 + 8]);
+    }
+}
+
 /// Scaled 2-D IDCT of a `rows × cols` pixel block from coefficients in libjxl's layout
 /// (`min × max`, first index along the smaller dimension; x first for square blocks).
 /// `coef` is destroyed. Writes `rows` rows of `cols` pixels to `out` with `stride`.
 pub fn idct2d(coef: &mut [f32], rows: usize, cols: usize, out: &mut [f32], stride: usize, scratch: &mut [f32]) {
+    if rows == 8 && cols == 8 {
+        return idct8x8(coef, out, stride);
+    }
     let n = rows * cols;
     let (block, rest) = scratch.split_at_mut(n);
+    let pass = |d: &mut [f32], pts: usize, lanes: usize, rest: &mut [f32]| {
+        if pts >= 8 && lanes % 8 == 0 {
+            idct_rows_bundled(d, pts, lanes);
+        } else {
+            idct_rows(d, pts, lanes, rest);
+        }
+    };
     if rows < cols {
         transpose(&coef[..n], rows, cols, block);
-        idct_rows(block, cols, rows, rest);
+        pass(block, cols, rows, rest);
         transpose(block, cols, rows, &mut coef[..n]);
-        idct_rows(&mut coef[..n], rows, cols, rest);
+        pass(&mut coef[..n], rows, cols, rest);
     } else {
-        idct_rows(&mut coef[..n], cols, rows, rest);
+        pass(&mut coef[..n], cols, rows, rest);
         transpose(&coef[..n], cols, rows, block);
         coef[..n].copy_from_slice(block);
-        idct_rows(&mut coef[..n], rows, cols, rest);
+        pass(&mut coef[..n], rows, cols, rest);
     }
     for r in 0..rows {
         out[r * stride..r * stride + cols].copy_from_slice(&coef[r * cols..(r + 1) * cols]);
@@ -440,6 +596,37 @@ mod tests {
             for (a, b) in d.iter().zip(want.iter()) {
                 assert!((a - b).abs() < 1e-3, "n={n} {a} {b}");
             }
+        }
+    }
+
+    #[test]
+    fn idct8x8_matches_generic() {
+        let coef: Vec<f32> = (0..64).map(|i| ((i * 29 % 17) as f32 - 8.0) / (1 + i % 9) as f32).collect();
+        let mut a = coef.clone();
+        let mut out_fast = vec![0f32; 64];
+        idct8x8(&mut a, &mut out_fast, 8);
+        // Generic path: columns, transpose, columns.
+        let mut g = coef.clone();
+        let mut s = vec![0f32; 256];
+        idct_rows(&mut g, 8, 8, &mut s);
+        let mut t = vec![0f32; 64];
+        transpose(&g, 8, 8, &mut t);
+        idct_rows(&mut t, 8, 8, &mut s);
+        for (x, y) in out_fast.iter().zip(t.iter()) {
+            assert_eq!(x, y);
+        }
+    }
+
+    #[test]
+    fn bundled_matches_generic() {
+        for &(n, l) in &[(8usize, 8usize), (16, 8), (32, 16), (64, 32), (128, 8), (256, 16)] {
+            let data: Vec<f32> = (0..n * l).map(|i| ((i * 31 % 23) as f32 - 11.0) / (1 + i % 7) as f32).collect();
+            let mut a = data.clone();
+            let mut b = data.clone();
+            let mut s = vec![0f32; 4 * n * l];
+            idct_rows(&mut a, n, l, &mut s);
+            idct_rows_bundled(&mut b, n, l);
+            assert_eq!(a, b, "n={n} l={l}");
         }
     }
 

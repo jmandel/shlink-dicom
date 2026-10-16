@@ -35,6 +35,50 @@ fn padded(p: &Plane, b: usize) -> (Vec<f32>, usize) {
     (out, pw)
 }
 
+/// Mirrored, column-padded copies of the rows around the one being filtered: the window
+/// `y - b ..= y + b` of `src`, each row `w + 2b` long (index x + b is column x).
+struct RowRing {
+    b: usize,
+    rows: Vec<Vec<f32>>,
+    tags: Vec<i64>,
+}
+
+impl RowRing {
+    fn new(w: usize, b: usize) -> Self {
+        RowRing { b, rows: vec![vec![0f32; w + 2 * b]; 2 * b + 1], tags: vec![i64::MIN; 2 * b + 1] }
+    }
+
+    /// Makes the window for output row `y` available.
+    fn load(&mut self, src: &Plane, y: usize) {
+        let n = 2 * self.b + 1;
+        for dy in 0..n {
+            let r = y as i64 + dy as i64 - self.b as i64;
+            let slot = r.rem_euclid(n as i64) as usize;
+            if self.tags[slot] == r {
+                continue;
+            }
+            let sy = mirror(r, src.h as i64);
+            let s = src.row(sy);
+            let dst = &mut self.rows[slot];
+            let b = self.b;
+            dst[b..b + src.w].copy_from_slice(s);
+            for x in 0..b {
+                dst[x] = s[mirror(x as i64 - b as i64, src.w as i64)];
+                dst[b + src.w + x] = s[mirror((src.w + x) as i64, src.w as i64)];
+            }
+            self.tags[slot] = r;
+        }
+    }
+
+    /// Row `y + dy` (|dy| ≤ b) of the window loaded for `y`.
+    #[inline(always)]
+    fn get(&self, y: usize, dy: isize) -> &[f32] {
+        let n = (2 * self.b + 1) as i64;
+        let slot = (y as i64 + dy as i64).rem_euclid(n) as usize;
+        &self.rows[slot]
+    }
+}
+
 /// Horizontal 2× chroma upsampling to width `w` (0.75 / 0.25 weights).
 pub fn chroma_upsample_h(p: &Plane, w: usize) -> Result<Plane> {
     let (src, pw) = padded(p, 1);
@@ -88,19 +132,23 @@ pub fn gaborish(planes: &mut [Plane], lf: &LoopFilter) {
         w0 *= mul;
         w1 *= mul;
         w2 *= mul;
-        let (src, pw) = padded(p, 1);
+        let mut ring = RowRing::new(p.w, 1);
+        let mut out = vec![0f32; p.w * p.h];
+        let w = p.w;
         for y in 0..p.h {
-            let t = &src[y * pw..(y + 1) * pw];
-            let m = &src[(y + 1) * pw..(y + 2) * pw];
-            let b = &src[(y + 2) * pw..(y + 3) * pw];
-            let o = p.row_mut(y);
-            for x in 0..o.len() {
+            ring.load(p, y);
+            let t = &ring.get(y, -1)[..w + 2];
+            let m = &ring.get(y, 0)[..w + 2];
+            let b = &ring.get(y, 1)[..w + 2];
+            let o = &mut out[y * w..(y + 1) * w];
+            for x in 0..w {
                 let sum0 = m[x + 1];
                 let sum1 = (m[x] + m[x + 2]) + (t[x + 1] + b[x + 1]);
                 let sum2 = (t[x] + t[x + 2]) + (b[x] + b[x + 2]);
                 o[x] = sum2 * w2 + (sum1 * w1 + sum0 * w0);
             }
         }
+        p.data = out;
     }
 }
 
@@ -108,73 +156,150 @@ pub fn gaborish(planes: &mut [Plane], lf: &LoopFilter) {
 const MIN_SIGMA: f32 = -3.90524291751269967465540850526868;
 
 /// One edge-preserving filter step (0, 1 or 2); `inv_sigma` per 8×8 block (`bw` wide).
+///
+/// Steps 0 and 1 compare plus-shaped neighbourhoods. The sum of absolute differences between
+/// the neighbourhoods of p and p + d is a plus-shaped sum of E_d(r) = Σ_c scale_c·|P_c(r) −
+/// P_c(r + d)|, and the one for p − d is the same sum shifted by −d, so each direction's E_d
+/// is computed once per row and shared (libjxl sums per channel first; the rounding differs).
 pub fn epf(planes: &mut [Plane], lf: &LoopFilter, inv_sigma: &[f32], bw: usize, step: u32) {
     let (w, h) = (planes[0].w, planes[0].h);
-    let border = match step {
-        0 => 3,
+    let b = match step {
+        0 => 3usize,
         1 => 2,
         _ => 1,
     };
-    let pads: Vec<(Vec<f32>, usize)> = planes.iter().take(3).map(|p| padded(p, border)).collect();
-    let pw = pads[0].1;
+    // P rows are padded by b + 2 columns so that E can be formed beyond the image edges.
+    let pb = b + 2;
+    let mut rings = [RowRing::new(w, pb), RowRing::new(w, pb), RowRing::new(w, pb)];
     let sm = match step {
         0 => (f64::from(lf.epf_pass0_sigma_scale) * 1.65) as f32,
         1 => 1.65f32,
         _ => (f64::from(lf.epf_pass2_sigma_scale) * 1.65) as f32,
     };
     let bsm = sm * lf.epf_border_sad_mul;
-    const SADS0: [(i64, i64); 12] = [(-2, 0), (-1, -1), (-1, 0), (-1, 1), (0, -2), (0, -1), (0, 1), (0, 2), (1, -1), (1, 0), (1, 1), (2, 0)];
-    const SADS4: [(i64, i64); 4] = [(-1, 0), (0, -1), (0, 1), (1, 0)];
-    const PLUS: [(i64, i64); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
-    let at = |c: usize, y: usize, x: usize, dy: i64, dx: i64| -> f32 {
-        let yy = (y as i64 + border as i64 + dy) as usize;
-        let xx = (x as i64 + border as i64 + dx) as usize;
-        pads[c].0[yy * pw + xx]
+    // Neighbour offsets (dy, dx) in libjxl's order.
+    const SADS0: [(isize, isize); 12] = [(-2, 0), (-1, -1), (-1, 0), (-1, 1), (0, -2), (0, -1), (0, 1), (0, 2), (1, -1), (1, 0), (1, 1), (2, 0)];
+    const SADS4: [(isize, isize); 4] = [(-1, 0), (0, -1), (0, 1), (1, 0)];
+    let offs: &[(isize, isize)] = if step == 0 { &SADS0 } else { &SADS4 };
+    // Canonical directions (dy > 0, or dy == 0 and dx > 0); each neighbour maps to one.
+    let dirs: Vec<(isize, isize)> = {
+        let mut v: Vec<(isize, isize)> = Vec::new();
+        for &(dy, dx) in offs {
+            let d = if dy > 0 || (dy == 0 && dx > 0) { (dy, dx) } else { (-dy, -dx) };
+            if !v.contains(&d) {
+                v.push(d);
+            }
+        }
+        v
     };
+    let scale = lf.epf_channel_scale;
+    let ew = w + 2 * pb; // E rows cover columns -pb .. w + pb (minus the shift), index x + pb.
+    // E ring per direction: rows y - 1 - dy .. y + 1 (at most 5 rows).
+    const ER: usize = 5;
+    let mut erows: Vec<Vec<Vec<f32>>> = dirs.iter().map(|_| vec![vec![0f32; ew]; ER]).collect();
+    let mut etags: Vec<Vec<i64>> = dirs.iter().map(|_| vec![i64::MIN; ER]).collect();
     let mut out: Vec<Vec<f32>> = (0..3).map(|_| vec![0f32; w * h]).collect();
-    let mut sads = [0f32; 12];
+    let mut inv_s = vec![0f32; w];
+    let mut skip = vec![false; w];
+    let mut sad = vec![0f32; w];
+    let mut wsum = vec![0f32; w];
+    let mut acc = [vec![0f32; w], vec![0f32; w], vec![0f32; w]];
     for y in 0..h {
-        let border_row = y % 8 == 0 || y % 8 == 7;
-        for x in 0..w {
-            let s = inv_sigma.get((y / 8) * bw + x / 8).copied().unwrap_or(0.0);
-            if s < MIN_SIGMA {
-                for c in 0..3 {
-                    out[c][y * w + x] = at(c, y, x, 0, 0);
-                }
-                continue;
-            }
-            let vsm = if border_row || x % 8 == 0 || x % 8 == 7 { bsm } else { sm };
-            let inv_s = s * vsm;
-            let mut wsum = 1f32;
-            let mut acc = [at(0, y, x, 0, 0), at(1, y, x, 0, 0), at(2, y, x, 0, 0)];
-            let offs: &[(i64, i64)] = if step == 0 { &SADS0 } else { &SADS4 };
-            for (i, &(dy, dx)) in offs.iter().enumerate() {
-                let mut total = 0f32;
-                for c in 0..3 {
-                    let scale = lf.epf_channel_scale[c];
-                    let sad = if step == 2 {
-                        (at(c, y, x, dy, dx) - at(c, y, x, 0, 0)).abs()
-                    } else {
-                        let mut sad = 0f32;
-                        for &(py, px) in PLUS.iter() {
-                            sad += (at(c, y, x, py, px) - at(c, y, x, dy + py, dx + px)).abs();
+        for (c, r) in rings.iter_mut().enumerate() {
+            r.load(&planes[c], y);
+        }
+        let prow = |c: usize, dy: isize| -> &[f32] { rings[c].get(y, dy) };
+        if step != 2 {
+            // Make E rows y - 1 - dy ..= y + 1 available for each direction.
+            for (k, &(ddy, ddx)) in dirs.iter().enumerate() {
+                for r in (y as i64 - 1 - ddy as i64)..=(y as i64 + 1) {
+                    let slot = r.rem_euclid(ER as i64) as usize;
+                    if etags[k][slot] == r {
+                        continue;
+                    }
+                    let e = &mut erows[k][slot];
+                    e.fill(0.0);
+                    for c in 0..3 {
+                        let sc = scale[c];
+                        let r0 = prow(c, (r - y as i64) as isize);
+                        let r1 = prow(c, (r - y as i64) as isize + ddy);
+                        // e[i] covers column i - pb; needs P(col) and P(col + ddx).
+                        let lo = (ddx.unsigned_abs()).min(pb);
+                        let n = ew - 2 * lo;
+                        let a = &r0[lo..lo + n];
+                        let bb = &r1[(lo as isize + ddx) as usize..(lo as isize + ddx) as usize + n];
+                        let ee = &mut e[lo..lo + n];
+                        for i in 0..n {
+                            ee[i] = (a[i] - bb[i]).abs() * sc + ee[i];
                         }
-                        sad
-                    };
-                    total = sad * scale + total;
+                    }
+                    etags[k][slot] = r;
                 }
-                sads[i] = total;
             }
-            for (i, &(dy, dx)) in offs.iter().enumerate() {
-                let weight = (sads[i] * inv_s + 1.0).max(0.0);
-                wsum += weight;
+        }
+        let border_row = y % 8 == 0 || y % 8 == 7;
+        let srow = &inv_sigma[((y / 8) * bw).min(inv_sigma.len())..];
+        for x in 0..w {
+            let s = srow.get(x / 8).copied().unwrap_or(0.0);
+            skip[x] = s < MIN_SIGMA;
+            let vsm = if border_row || x % 8 == 0 || x % 8 == 7 { bsm } else { sm };
+            inv_s[x] = s * vsm;
+        }
+        wsum.fill(1.0);
+        for c in 0..3 {
+            acc[c].copy_from_slice(&prow(c, 0)[pb..pb + w]);
+        }
+        for &(dy, dx) in offs.iter() {
+            if step == 2 {
+                sad.fill(0.0);
                 for c in 0..3 {
-                    acc[c] = weight * at(c, y, x, dy, dx) + acc[c];
+                    let sc = scale[c];
+                    let r0 = &prow(c, 0)[pb..pb + w];
+                    let o = (pb as isize + dx) as usize;
+                    let r1 = &prow(c, dy)[o..o + w];
+                    for x in 0..w {
+                        sad[x] = (r1[x] - r0[x]).abs() * sc + sad[x];
+                    }
+                }
+            } else {
+                let canonical = dy > 0 || (dy == 0 && dx > 0);
+                let (k, sy, sx) = if canonical {
+                    (dirs.iter().position(|&d| d == (dy, dx)).unwrap_or(0), 0isize, 0isize)
+                } else {
+                    (dirs.iter().position(|&d| d == (-dy, -dx)).unwrap_or(0), dy, dx)
+                };
+                // SAD(p) = Σ over plus q of E(p + shift + q).
+                let er = |ry: isize| -> &[f32] {
+                    let r = y as i64 + ry as i64;
+                    &erows[k][r.rem_euclid(ER as i64) as usize]
+                };
+                let base = (pb as isize + sx) as usize;
+                let c0 = &er(sy)[base..base + w];
+                let up = &er(sy - 1)[base..base + w];
+                let left = &er(sy)[base - 1..base - 1 + w];
+                let down = &er(sy + 1)[base..base + w];
+                let right = &er(sy)[base + 1..base + 1 + w];
+                for x in 0..w {
+                    sad[x] = (((c0[x] + up[x]) + left[x]) + down[x]) + right[x];
                 }
             }
-            let inv_w = 1.0 / wsum;
-            for c in 0..3 {
-                out[c][y * w + x] = acc[c] * inv_w;
+            let o = (pb as isize + dx) as usize;
+            let n0 = &prow(0, dy)[o..o + w];
+            let n1 = &prow(1, dy)[o..o + w];
+            let n2 = &prow(2, dy)[o..o + w];
+            for x in 0..w {
+                let weight = (sad[x] * inv_s[x] + 1.0).max(0.0);
+                wsum[x] += weight;
+                acc[0][x] = weight * n0[x] + acc[0][x];
+                acc[1][x] = weight * n1[x] + acc[1][x];
+                acc[2][x] = weight * n2[x] + acc[2][x];
+            }
+        }
+        for c in 0..3 {
+            let center = &prow(c, 0)[pb..pb + w];
+            let o = &mut out[c][y * w..(y + 1) * w];
+            for x in 0..w {
+                o[x] = if skip[x] { center[x] } else { acc[c][x] * (1.0 / wsum[x]) };
             }
         }
     }
@@ -290,8 +415,30 @@ pub struct OpsinParams {
     pub bias_cbrt: [f32; 3],
 }
 
-pub fn xyb_to_linear(planes: &mut [Plane], op: &OpsinParams) {
+/// XYB to linear RGB; with `gray` (all matrix rows equal) only the first plane is computed
+/// and copied to the other two.
+pub fn xyb_to_linear(planes: &mut [Plane], op: &OpsinParams, gray: bool) {
     let n = planes[0].data.len();
+    if gray {
+        let m = &op.inverse[0];
+        {
+            let (p0, rest) = planes.split_at_mut(1);
+            let (p1, p2) = rest.split_at_mut(1);
+            for i in 0..n {
+                let x = p0[0].data[i];
+                let y = p1[0].data[i];
+                let b = p2[0].data[i];
+                let gr = (y + x) - op.bias_cbrt[0];
+                let gg = (y - x) - op.bias_cbrt[1];
+                let gb = b - op.bias_cbrt[2];
+                let mr = gr * gr * gr + op.bias[0];
+                let mg = gg * gg * gg + op.bias[1];
+                let mb = gb * gb * gb + op.bias[2];
+                p0[0].data[i] = m[2] * mb + (m[1] * mg + m[0] * mr);
+            }
+        }
+        return;
+    }
     let (p0, rest) = planes.split_at_mut(1);
     let (p1, p2) = rest.split_at_mut(1);
     let m = &op.inverse;
@@ -385,7 +532,7 @@ fn hlg_from_linear(x: f32) -> f32 {
 }
 
 pub fn from_linear(planes: &mut [Plane], tf: OutputTf) {
-    for p in planes.iter_mut().take(3) {
+    for p in planes.iter_mut() {
         match tf {
             OutputTf::Linear => {}
             OutputTf::Srgb => p.data.iter_mut().for_each(|v| *v = srgb_from_linear(*v)),

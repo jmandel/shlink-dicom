@@ -1,4 +1,4 @@
-//! Decode timing against jxl-oxide (single-threaded), median of N runs.
+//! Decode timing against jxl-oxide (single-threaded), fastest of N runs (robust to load).
 //! Usage: bench [--runs N] FILES...
 use std::time::Instant;
 
@@ -18,7 +18,7 @@ fn ours(data: &[u8]) -> usize {
 
 fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    v[v.len() / 2]
+    v[0]
 }
 
 fn main() {

@@ -211,8 +211,16 @@ impl<'a> Decoder<'a> {
         if needs_ct {
             if fh.xyb {
                 let (op, tf) = output_params(&self.hd)?;
-                stages::xyb_to_linear(&mut img.planes[..3], &op);
-                stages::from_linear(&mut img.planes[..3], tf);
+                let gray = self.hd.metadata.colour.is_gray();
+                stages::xyb_to_linear(&mut img.planes[..3], &op, gray);
+                if gray {
+                    stages::from_linear(&mut img.planes[..1], tf);
+                    let p0 = img.planes[0].clone();
+                    img.planes[1] = p0.clone();
+                    img.planes[2] = p0;
+                } else {
+                    stages::from_linear(&mut img.planes[..3], tf);
+                }
             } else if fh.ycbcr {
                 stages::ycbcr_to_rgb(&mut img.planes[..3]);
             }
