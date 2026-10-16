@@ -187,6 +187,12 @@ fn decode_multi(codestream: &[u8], full: &FrameInfo, reduce: u8, frames: bool) -
             };
             &one
         };
+        // Subsampled components are packed only in the sYCC layouts `prepare` accepts; a
+        // frame of the components of a volume must have them all full size.
+        let frame_comps = &image.components[base..base + prep.header.components.len()];
+        if prep.sycc().is_none() && frame_comps.iter().any(|c| c.width != info.columns || c.height != info.rows) {
+            return Err(DecodeError::Unsupported("JPEG 2000 frame with subsampled components outside the sYCC layouts".into()));
+        }
         if !subsampled {
             if let Some(r) = prep::pack_rows(info, prep, |c, y, row| {
                 let c = base + c;

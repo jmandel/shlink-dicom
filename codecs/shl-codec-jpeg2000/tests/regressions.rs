@@ -144,3 +144,14 @@ fn reduced_decode_fuzz_findings_do_not_panic() {
         }
     }
 }
+
+/// Fuzz finding: a Part 1 codestream with 4:2:2 chroma decoded by `decode_frames` as a volume
+/// of one-component frames. The chroma frames are subsampled outside the sYCC layout and must
+/// be refused, not packed as if full size.
+#[test]
+fn subsampled_components_as_frames_are_refused() {
+    let cs = include_bytes!("data/frames-subsampled-fuzz.j2c");
+    let info = info(50, 240, 1, 8, Photometric::Monochrome2);
+    let info = FrameInfo { pixel_representation: 1, ..info };
+    assert!(shl_codec_jpeg2000::decode_frames(cs, &info).is_err());
+}
