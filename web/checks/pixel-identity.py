@@ -2,7 +2,9 @@
   uv run --project codec-corpus python web/checks/pixel-identity.py pairs.json
 pairs.json: [{"source": path, "shared": path}, …]. Decodes both with pydicom (pylibjpeg / GDCM for the
 compressed side) and compares every frame exactly, then compares every data element outside group 2 except
-Pixel Data and Planar Configuration. Prints JSON: { checked, identical, transferSyntaxes, implementations, differ: [...] }."""
+Pixel Data and Planar Configuration. A Derivation Description (0008,2111) added by the re-encoder (dcmcjpeg
+adds one) is allowed and counted. Prints JSON: { checked, identical, derivationAdded, transferSyntaxes,
+implementations, differ: [...] }."""
 import json, sys
 import struct
 import numpy as np
@@ -25,7 +27,8 @@ def norm(e):
 
 
 pairs = json.load(open(sys.argv[1]))
-out = {"checked": 0, "identical": 0, "transferSyntaxes": {}, "implementations": {}, "differ": []}
+out = {"checked": 0, "identical": 0, "derivationAdded": 0, "transferSyntaxes": {}, "implementations": {}, "differ": []}
+DERIVATION = 0x00082111
 SKIP = {0x7FE00010, 0x00280006}
 for p in pairs:
     out["checked"] += 1
@@ -45,6 +48,9 @@ for p in pairs:
     if not why:
         ta = {int(e.tag): e for e in a if int(e.tag) not in SKIP}
         tb = {int(e.tag): e for e in b if int(e.tag) not in SKIP}
+        if DERIVATION in tb and DERIVATION not in ta:
+            del tb[DERIVATION]
+            out["derivationAdded"] += 1
         if ta.keys() != tb.keys():
             why = f"elements differ: {sorted(set(ta) ^ set(tb))[:5]}"
         else:

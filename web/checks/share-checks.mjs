@@ -391,6 +391,8 @@ async function flowPortal(dev) {
   const r = await finish(page, dev, P, { recipient: "Dr. Okafor", passcode: pass, expiry: "1m", updates: true });
   const received = await page.evaluate(() => [...window.__share.collection.received]).catch(() => []);
   console.log(`PORTAL ${P}: images received by transfer syntax: ${JSON.stringify(received)}`);
+  const sv1 = received.find(([t]) => t === "1.2.840.10008.1.2.4.70")?.[1] ?? 0;
+  check(`${P}: the portal sent JPEG Lossless for the images it stores uncompressed (Accept lists it first)`, sv1 > 0, JSON.stringify(received));
   const v = verify(r.shlink, S.sameAsLocal ? [DATASET] : [], pass, ["--pixels"]);
   const ts = v.pixelReport?.transferSyntaxes ?? {};
   check(`${P}: images arrive compressed or are compressed on the device`, Object.keys(ts).every((t) => ["1.2.840.10008.1.2.4.70", "1.2.840.10008.1.2.4.90"].includes(t)), JSON.stringify({ received, inLink: ts }));
