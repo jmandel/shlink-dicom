@@ -767,9 +767,16 @@ impl VarDct {
             let x_mul = F4::load(&tx[k..]).mul(vsdx);
             let y_mul = F4::load(&ty[k..]).mul(vsdy);
             let b_mul = F4::load(&tb[k..]).mul(vsdb);
-            let dx_cc = adjust(0, &cx[k..]).mul(x_mul);
-            let dy = adjust(1, &cy[k..]).mul(y_mul);
-            let db_cc = adjust(2, &cb[k..]).mul(b_mul);
+            // Most coefficients are zero, and `adjust` maps 0 to +0: skip its division then.
+            let zero4 = |q: &[i32]| q[..4] == [0; 4];
+            let (ax, ay, ab) = if zero4(&cx[k..]) && zero4(&cy[k..]) && zero4(&cb[k..]) {
+                (F4::splat(0.0), F4::splat(0.0), F4::splat(0.0))
+            } else {
+                (adjust(0, &cx[k..]), adjust(1, &cy[k..]), adjust(2, &cb[k..]))
+            };
+            let dx_cc = ax.mul(x_mul);
+            let dy = ay.mul(y_mul);
+            let db_cc = ab.mul(b_mul);
             vx_cc.mul(dy).add(dx_cc).store(&mut bx_[k..]);
             dy.store(&mut by_[k..]);
             vb_cc.mul(dy).add(db_cc).store(&mut bb_[k..]);
