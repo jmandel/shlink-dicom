@@ -14,6 +14,7 @@ mod arith;
 mod bits;
 mod coef;
 mod dct;
+mod encode;
 mod hier;
 mod huffman;
 mod idct;
@@ -29,6 +30,8 @@ mod simd;
 mod test_common;
 
 use shl_codec_common::{scaled_extent, DecodeError, DecodedFrame, DecodedScaled, FrameInfo, Result};
+
+pub use encode::encode_lossless_sv1;
 
 pub(crate) fn invalid(m: &str) -> DecodeError {
     DecodeError::Invalid(m.to_string())

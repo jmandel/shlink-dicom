@@ -1,0 +1,14 @@
+[package]
+name = "shl-dicom-transcode-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "shl_dicom_transcode::transcode_part10 for the browser (wasm-bindgen, --target web)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+shl-dicom-transcode = { path = "../shl-dicom-transcode" }
+wasm-bindgen = "=0.2.128"

@@ -10,6 +10,8 @@ members = [
     "shl-codec-htj2k",
     "shl-codec-jpegxl",
     "shl-dicom-decode",
+    "shl-dicom-transcode",
+    "shl-dicom-transcode-wasm",
     "shl-dicom-wasm-bench",
     "shl-dicom-decode-wasm",
 ]

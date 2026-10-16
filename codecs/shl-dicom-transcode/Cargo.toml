@@ -1,0 +1,16 @@
+[package]
+name = "shl-dicom-transcode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Lossless re-encoding of uncompressed DICOM files as JPEG Lossless SV1 (1.2.840.10008.1.2.4.70), with bit-exact self-checks"
+
+[dependencies]
+shl-codec-common = { path = "../shl-codec-common" }
+shl-codec-jpeg = { path = "../shl-codec-jpeg" }
+# The self-check decodes with our own decoder; JPEG XL is not needed for that.
+shl-dicom-decode = { path = "../shl-dicom-decode", default-features = false }
+
+[dev-dependencies]
+# examples/hashes.rs: output hashes for the native-vs-wasm comparison.
+sha2 = "0.10"

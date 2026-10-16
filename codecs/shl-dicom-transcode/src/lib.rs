@@ -1,0 +1,456 @@
+//! Lossless re-encoding of uncompressed DICOM files as JPEG Lossless, Non-Hierarchical,
+//! First-Order Prediction (Process 14, Selection Value 1; 1.2.840.10008.1.2.4.70), the lossless
+//! syntax every reader of the PS3.11 compressed-media profiles must decode.
+//!
+//! [`transcode_part10`] takes a Part 10 file and a target transfer syntax and returns the re-encoded file, or [`Declined`]
+//! with the reason; a caller that gets `Declined` keeps the input as it is. What changes:
+//! - the file meta: Transfer Syntax UID, Implementation Class UID and Implementation Version
+//!   Name ([`IMPLEMENTATION_CLASS_UID`], [`IMPLEMENTATION_VERSION_NAME`]), and its group length;
+//! - Pixel Data, now encapsulated: one fragment per frame and a filled Basic Offset Table (an
+//!   Extended Offset Table instead if an offset would pass 4 GiB);
+//! - Planar Configuration 1 becomes 0, which PS3.5 8.2.1 requires for JPEG;
+//! - an Implicit VR Little Endian data set is written as Explicit VR Little Endian, with VRs from
+//!   the PS3.6 dictionary (UN for unknown private elements), and any group length elements are
+//!   recomputed.
+//!
+//! Every other value keeps its bytes, and the SOP Instance UID stays (PS3.4 allows that for a
+//! lossless transfer syntax change). Two checks run on every result before it is returned, and a
+//! failure of either declines: the output decodes with this repository's decoder to exactly the
+//! input's canonical pixels, and re-reading the output gives every non-pixel value byte for byte.
+//!
+//! The output depends only on the input: Huffman tables come from the image's own statistics with
+//! fixed tie-breaking, and nothing reads a clock or a random source.
+#![forbid(unsafe_code)]
+
+mod dict;
+mod ds;
+
+use std::fmt;
+
+use ds::{Elem, Reader, Value, Writer, PIXEL_DATA};
+
+/// Transfer syntax of the output.
+pub const JPEG_LOSSLESS_SV1: &str = "1.2.840.10008.1.2.4.70";
+/// (0002,0012) of a file this crate wrote: shlink-dicom's, so a recipient can tell the file was
+/// re-encoded by its packer.
+pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.222098624467184222580709298353105703221";
+/// (0002,0013) of a file this crate re-encoded as JPEG Lossless SV1.
+pub const IMPLEMENTATION_VERSION_NAME: &str = "SHLDICOM_SV1_1";
+
+const TS_IMPLICIT_LE: &str = "1.2.840.10008.1.2";
+const TS_EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
+
+/// Why a file was left as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declined(pub String);
+
+impl fmt::Display for Declined {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Declined {}
+
+/// Sizes of one call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    pub input_bytes: usize,
+    /// The output file, or the input's size when declined.
+    pub output_bytes: usize,
+    /// The native Pixel Data value.
+    pub pixel_bytes_in: usize,
+    /// The encapsulated Pixel Data value (items included); 0 when declined before encoding.
+    pub pixel_bytes_out: usize,
+    pub frames: u32,
+}
+
+fn no(m: impl Into<String>) -> Declined {
+    Declined(m.into())
+}
+
+/// Re-encode a Part 10 file under `ts_uid`, losslessly. Supported: JPEG Lossless SV1
+/// ([`JPEG_LOSSLESS_SV1`]). See the crate documentation.
+pub fn transcode_part10(input: &[u8], ts_uid: &str) -> Result<Vec<u8>, Declined> {
+    transcode_part10_report(input, ts_uid).0
+}
+
+/// [`transcode_part10`] with the sizes involved.
+pub fn transcode_part10_report(input: &[u8], ts_uid: &str) -> (Result<Vec<u8>, Declined>, Report) {
+    let mut report = Report { input_bytes: input.len(), output_bytes: input.len(), ..Report::default() };
+    let r = match ts_uid {
+        JPEG_LOSSLESS_SV1 => transcode(input, &mut report),
+        other => Err(no(format!("transfer syntax {other} is not one this encoder writes"))),
+    };
+    if let Ok(out) = &r {
+        report.output_bytes = out.len();
+    }
+    (r, report)
+}
+
+/// [`transcode_part10`] to JPEG Lossless SV1.
+pub fn transcode_part10_sv1(input: &[u8]) -> Result<Vec<u8>, Declined> {
+    transcode_part10(input, JPEG_LOSSLESS_SV1)
+}
+
+/// [`transcode_part10_report`] to JPEG Lossless SV1.
+pub fn transcode_part10_sv1_report(input: &[u8]) -> (Result<Vec<u8>, Declined>, Report) {
+    transcode_part10_report(input, JPEG_LOSSLESS_SV1)
+}
+
+/// Tag -> VRs from the PS3.6 dictionary (`dict.rs`); None for a tag it does not list.
+pub(crate) fn vrs_of(tag: u32) -> Option<&'static [[u8; 2]]> {
+    if let Ok(k) = dict::EXACT.binary_search_by_key(&tag, |e| e.0) {
+        return Some(dict::EXACT[k].1);
+    }
+    dict::MASKED.iter().find(|(mask, value, _)| tag & mask == *value).map(|e| e.2)
+}
+
+struct Meta<'a> {
+    /// Bytes before the first meta element (a preamble and `DICM`, or only `DICM`).
+    lead: &'a [u8],
+    elems: Vec<(u16, [u8; 2], &'a [u8])>,
+    ts: String,
+    /// Where the data set starts.
+    end: usize,
+}
+
+fn text(v: &[u8]) -> String {
+    String::from_utf8_lossy(v).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string()
+}
+
+/// The group 0002 file meta, Explicit VR Little Endian as PS3.10 requires.
+fn read_meta(b: &[u8]) -> Result<Meta<'_>, Declined> {
+    let start = if b.get(128..132) == Some(b"DICM") {
+        132
+    } else if b.get(..4) == Some(b"DICM") {
+        4
+    } else {
+        return Err(no("not a Part 10 file (no DICM prefix)"));
+    };
+    let mut pos = start;
+    let mut elems = Vec::new();
+    let mut ts = None;
+    while b.get(pos..pos + 2) == Some(&[0x02, 0x00]) {
+        let element = b.get(pos + 2..pos + 4).map(|s| u16::from_le_bytes([s[0], s[1]])).ok_or_else(|| no("truncated meta"))?;
+        let vr: [u8; 2] = b.get(pos + 4..pos + 6).and_then(|s| s.try_into().ok()).ok_or_else(|| no("truncated meta"))?;
+        if !vr.iter().all(u8::is_ascii_uppercase) {
+            return Err(no("the file meta is not Explicit VR"));
+        }
+        let long = matches!(&vr, b"OB" | b"UN" | b"UT" | b"SQ" | b"OW" | b"UR" | b"UC");
+        let (len, vstart) = if long {
+            (b.get(pos + 8..pos + 12).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize), pos + 12)
+        } else {
+            (b.get(pos + 6..pos + 8).map(|s| usize::from(u16::from_le_bytes([s[0], s[1]]))), pos + 8)
+        };
+        let len = len.ok_or_else(|| no("truncated meta"))?;
+        let v = b.get(vstart..vstart + len).ok_or_else(|| no("truncated meta"))?;
+        if element == 0x0010 {
+            ts = Some(text(v));
+        }
+        if elems.last().is_some_and(|e: &(u16, [u8; 2], &[u8])| e.0 >= element) {
+            // Readers end the meta at such an element and disagree on what follows.
+            return Err(no(format!("file meta element (0002,{element:04X}) is repeated or out of order")));
+        }
+        elems.push((element, vr, v));
+        pos = vstart + len;
+    }
+    let ts = ts.ok_or_else(|| no("the file meta has no Transfer Syntax UID"))?;
+    Ok(Meta { lead: &b[..start], elems, ts, end: pos })
+}
+
+/// The new file meta: the input's elements with the transfer syntax and implementation set to
+/// this writer's, and the group length recomputed.
+fn write_meta(out: &mut Vec<u8>, meta: &Meta<'_>, ts: &str, version_name: &str) {
+    let ui = |s: &str| {
+        let mut v = s.as_bytes().to_vec();
+        if v.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    };
+    let name = {
+        let mut v = version_name.as_bytes().to_vec();
+        if v.len() % 2 == 1 {
+            v.push(b' ');
+        }
+        v
+    };
+    let mut elems: Vec<(u16, [u8; 2], Vec<u8>)> =
+        meta.elems.iter().filter(|e| !matches!(e.0, 0x0000 | 0x0010 | 0x0012 | 0x0013)).map(|e| (e.0, e.1, e.2.to_vec())).collect();
+    elems.push((0x0010, *b"UI", ui(ts)));
+    elems.push((0x0012, *b"UI", ui(IMPLEMENTATION_CLASS_UID)));
+    elems.push((0x0013, *b"SH", name));
+    elems.sort_by_key(|e| e.0);
+    let mut body = Vec::new();
+    for (element, vr, v) in &elems {
+        body.extend_from_slice(&[0x02, 0x00]);
+        body.extend_from_slice(&element.to_le_bytes());
+        body.extend_from_slice(vr);
+        if matches!(vr, b"OB" | b"UN" | b"UT" | b"SQ" | b"OW" | b"UR" | b"UC") {
+            body.extend_from_slice(&[0, 0]);
+            body.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        } else {
+            body.extend_from_slice(&(v.len() as u16).to_le_bytes());
+        }
+        body.extend_from_slice(v);
+    }
+    if meta.lead.len() == 132 {
+        out.extend_from_slice(meta.lead);
+    } else {
+        out.extend_from_slice(&[0u8; 128]);
+        out.extend_from_slice(b"DICM");
+    }
+    out.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, b'U', b'L', 4, 0]);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+}
+
+fn find<'e, 'a>(elems: &'e [Elem<'a>], tag: u32) -> Option<&'e Elem<'a>> {
+    elems.iter().find(|e| e.tag == tag)
+}
+
+fn bytes_of<'a>(elems: &[Elem<'a>], tag: u32) -> Option<&'a [u8]> {
+    match find(elems, tag).map(|e| &e.value) {
+        Some(Value::Bytes(v)) => Some(v),
+        _ => None,
+    }
+}
+
+fn us(elems: &[Elem<'_>], tag: u32) -> Option<u16> {
+    bytes_of(elems, tag).and_then(|v| v.get(..2)).map(|s| u16::from_le_bytes([s[0], s[1]]))
+}
+
+/// An input that passed every rule: its file meta, data set and canonical pixels.
+struct Prepared<'a> {
+    meta: Meta<'a>,
+    explicit: bool,
+    /// The data set bytes after the file meta.
+    ds: &'a [u8],
+    elems: Vec<Elem<'a>>,
+    pixel_len: usize,
+    before: shl_dicom_decode::Canonical,
+}
+
+/// Our decoder, with only the codecs the self-check needs (native data and the syntaxes written
+/// here), so a build of this crate carries no other codec.
+fn decode(bytes: &[u8]) -> Result<shl_dicom_decode::Canonical, shl_dicom_decode::Error> {
+    shl_dicom_decode::decode_file_with(bytes, |ts| {
+        (ts == JPEG_LOSSLESS_SV1).then_some(shl_codec_jpeg::decode_frame as shl_codec_common::DecodeFn)
+    })
+}
+
+/// Read the input and apply the rules every encoding shares.
+fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
+    let meta = read_meta(input)?;
+    let explicit = match meta.ts.as_str() {
+        TS_EXPLICIT_LE => true,
+        TS_IMPLICIT_LE => false,
+        "1.2.840.10008.1.2.2" => return Err(no("Explicit VR Big Endian data set")),
+        "1.2.840.10008.1.2.1.99" => return Err(no("deflated data set")),
+        ts => return Err(no(format!("not uncompressed: transfer syntax {ts}"))),
+    };
+    let ds = &input[meta.end..];
+    let (elems, _) = Reader { buf: ds, explicit }
+        .elems(0, ds.len(), false, 0)
+        .map_err(|e| no(format!("data set not readable: {e}")))?;
+    if elems.iter().any(|e| matches!(e.tag, 0x7FE0_0008 | 0x7FE0_0009)) {
+        return Err(no("Float or Double Float Pixel Data"));
+    }
+    let Some(pixel) = find(&elems, PIXEL_DATA) else {
+        return Err(no("no Pixel Data"));
+    };
+    let pixel_len = match &pixel.value {
+        Value::Bytes(v) => v.len(),
+        _ => return Err(no("Pixel Data is not native")),
+    };
+    let photometric = bytes_of(&elems, 0x0028_0004).map(text).unwrap_or_default();
+    if !matches!(photometric.as_str(), "MONOCHROME1" | "MONOCHROME2" | "PALETTE COLOR" | "RGB") {
+        return Err(no(format!("photometric interpretation {photometric:?} is not encoded (MONOCHROME1/2, PALETTE COLOR and RGB are)")));
+    }
+    // Overlays kept in the pixel data's unused high bits (60xx,0010 without 60xx,3000).
+    for e in &elems {
+        let (g, el) = ((e.tag >> 16) as u16, e.tag as u16);
+        if (0x6000..=0x601E).contains(&g) && g % 2 == 0 && el == 0x0010 && find(&elems, (u32::from(g) << 16) | 0x3000).is_none() {
+            return Err(no(format!("overlay group {g:04X} is stored in the pixel data's high bits")));
+        }
+    }
+    // The canonical pixels: what is encoded, and the reference for the self-check.
+    let before = decode(input).map_err(|e| no(format!("input does not decode: {e}")))?;
+    if !before.inferred.is_empty() {
+        let what: Vec<String> = before.inferred.iter().map(|i| format!("{} ({})", i.attribute, i.reason)).collect();
+        return Err(no(format!("the decoder had to infer {}", what.join("; "))));
+    }
+    if before.float {
+        return Err(no("Float or Double Float Pixel Data"));
+    }
+    if !matches!(before.bits_allocated, 8 | 16) {
+        return Err(no(format!("Bits Allocated {} (8 and 16 are encoded)", before.bits_allocated)));
+    }
+    if before.bits_stored > 16 || before.bits_stored == 0 {
+        return Err(no(format!("Bits Stored {}", before.bits_stored)));
+    }
+    if !matches!(before.samples_per_pixel, 1 | 3) {
+        return Err(no(format!("Samples per Pixel {}", before.samples_per_pixel)));
+    }
+    if before.photometric != photometric {
+        return Err(no(format!("{photometric} decodes as {}", before.photometric)));
+    }
+    Ok(Prepared { meta, explicit, ds, elems, pixel_len, before })
+}
+
+/// Transfer syntaxes this crate writes, with the Implementation Version Name each gets.
+fn version_name(ts: &str) -> Option<&'static str> {
+    match ts {
+        JPEG_LOSSLESS_SV1 => Some(IMPLEMENTATION_VERSION_NAME),
+        _ => None,
+    }
+}
+
+fn transcode(input: &[u8], report: &mut Report) -> Result<Vec<u8>, Declined> {
+    let p = prepare(input)?;
+    report.pixel_bytes_in = p.pixel_len;
+    report.frames = p.before.frames;
+    let b = &p.before;
+    // The stored bits as unsigned patterns of the JPEG precision: Bits Stored, but at least 2, and
+    // at least 9 in a 16-bit container, since readers size their output by the precision.
+    let precision = b.bits_stored.max(if b.bits_allocated == 16 { 9 } else { 2 }) as u8;
+    let mask = ((1u32 << precision) - 1) as u16;
+    let bps = b.bytes_per_sample();
+    let frame_samples = b.rows as usize * b.columns as usize * usize::from(b.samples_per_pixel);
+    let frame_bytes = frame_samples * bps;
+    let encode = |frame: &[u8]| -> Result<Vec<u8>, Declined> {
+        let samples: Vec<u16> = if bps == 1 {
+            frame.iter().map(|&v| u16::from(v) & mask).collect()
+        } else {
+            frame.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]]) & mask).collect()
+        };
+        shl_codec_jpeg::encode_lossless_sv1(&samples, b.columns, b.rows, b.samples_per_pixel as u8, precision)
+            .map_err(|e| no(format!("encoder: {e}")))
+    };
+    let chunks: Vec<&[u8]> = b.data.chunks_exact(frame_bytes.max(1)).take(b.frames as usize).collect();
+    if chunks.len() != b.frames as usize {
+        return Err(no("decoded pixel data does not hold every frame"));
+    }
+    let fragments = encode_all(&chunks, encode)?;
+    let refs: Vec<&[u8]> = fragments.iter().map(Vec::as_slice).collect();
+    wrap(p, JPEG_LOSSLESS_SV1, refs, report)
+}
+
+/// Encode every frame; outside wasm, large multi-frame images on several threads. The result is the
+/// same either way.
+fn encode_all(chunks: &[&[u8]], encode: impl Fn(&[u8]) -> Result<Vec<u8>, Declined> + Sync) -> Result<Vec<Vec<u8>>, Declined> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bytes: usize = chunks.iter().map(|c| c.len()).sum();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(chunks.len()).min(bytes / (4 << 20)).max(1);
+        if threads > 1 {
+            let per = chunks.len().div_ceil(threads);
+            let encode = &encode;
+            let parts: Vec<Result<Vec<Vec<u8>>, Declined>> = std::thread::scope(|s| {
+                let hs: Vec<_> = chunks.chunks(per).map(|run| s.spawn(move || run.iter().map(|c| encode(c)).collect())).collect();
+                hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(no("encoder thread panicked")))).collect()
+            });
+            let mut out = Vec::with_capacity(chunks.len());
+            for p in parts {
+                out.extend(p?);
+            }
+            return Ok(out);
+        }
+    }
+    chunks.iter().map(|c| encode(c)).collect()
+}
+
+/// Build the output file around `fragments` and run both self-checks.
+fn wrap(p: Prepared<'_>, ts: &str, fragments: Vec<&[u8]>, report: &mut Report) -> Result<Vec<u8>, Declined> {
+    let name = version_name(ts).ok_or_else(|| no(format!("transfer syntax {ts} is not one this writer produces")))?;
+    let Prepared { meta, explicit, ds, mut elems, pixel_len, before, .. } = p;
+    if fragments.len() != before.frames as usize {
+        return Err(no(format!("{} codestreams for {} frames", fragments.len(), before.frames)));
+    }
+    if fragments.iter().any(|f| f.is_empty()) {
+        return Err(no("an empty codestream"));
+    }
+
+    // Offsets of each fragment item from the first one; past 4 GiB an Extended Offset Table.
+    let mut offsets = Vec::with_capacity(fragments.len());
+    let mut at = 0u64;
+    for f in &fragments {
+        offsets.push(at);
+        at += 8 + (f.len() as u64 + f.len() as u64 % 2);
+    }
+    let large = at > u64::from(u32::MAX);
+    let bot: Vec<u8> = if large { Vec::new() } else { offsets.iter().flat_map(|&o| (o as u32).to_le_bytes()).collect() };
+    // BOT item, fragment items, sequence delimiter.
+    report.pixel_bytes_out = 8 + bot.len() + at as usize + 8;
+    if report.pixel_bytes_out >= pixel_len {
+        return Err(no(format!("not smaller: {} bytes encoded against {pixel_len} native", report.pixel_bytes_out)));
+    }
+    if large {
+        let eot: Vec<u8> = offsets.iter().flat_map(|o| o.to_le_bytes()).collect();
+        let eotl: Vec<u8> = fragments.iter().flat_map(|f| (f.len() as u64).to_le_bytes()).collect();
+        elems.retain(|e| !matches!(e.tag, 0x7FE0_0001 | 0x7FE0_0002));
+        let at = elems.iter().position(|e| e.tag == PIXEL_DATA).unwrap_or(elems.len());
+        elems.insert(at, Elem { tag: 0x7FE0_0002, vr: *b"OV", value: Value::Owned(eotl) });
+        elems.insert(at, Elem { tag: 0x7FE0_0001, vr: *b"OV", value: Value::Owned(eot) });
+    }
+    let at = elems.iter().position(|e| e.tag == PIXEL_DATA).unwrap_or(0);
+    elems[at] = Elem {
+        tag: PIXEL_DATA,
+        vr: *b"OB",
+        value: Value::Encapsulated { bot, fragments: fragments.iter().map(|f| f.to_vec()).collect() },
+    };
+    drop(fragments);
+    let planar_changed = us(&elems, 0x0028_0006) == Some(1);
+    if planar_changed {
+        if let Some(e) = elems.iter_mut().find(|e| e.tag == 0x0028_0006) {
+            e.value = Value::Owned(vec![0, 0]);
+        }
+    }
+    let mut out = Vec::with_capacity(meta.end + report.pixel_bytes_out + ds.len().saturating_sub(pixel_len));
+    write_meta(&mut out, &meta, ts, name);
+    let ds_start = out.len();
+    Writer { signed: before.signed }
+        .elems(&mut out, &elems)
+        .map_err(|e| no(format!("cannot write the data set as Explicit VR: {e}")))?;
+    drop(elems);
+
+    // Check 1: every non-pixel value is unchanged.
+    let in_elems = Reader { buf: ds, explicit }.elems(0, ds.len(), false, 0).map_err(no)?.0;
+    let written = &out[ds_start..];
+    let out_elems = Reader { buf: written, explicit: true }
+        .elems(0, written.len(), false, 0)
+        .map_err(|e| no(format!("self-check: output data set not readable: {e}")))?
+        .0;
+    let skip = [PIXEL_DATA, 0x7FE0_0001, 0x7FE0_0002, 0x0028_0006];
+    if ds::flatten(&in_elems, &skip) != ds::flatten(&out_elems, &skip) {
+        return Err(no("self-check mismatch: a non-pixel value changed"));
+    }
+    if !planar_changed && bytes_of(&in_elems, 0x0028_0006) != bytes_of(&out_elems, 0x0028_0006) {
+        return Err(no("self-check mismatch: Planar Configuration changed"));
+    }
+    drop((in_elems, out_elems));
+
+    // Check 2: the output decodes to exactly the input's pixels.
+    let after = decode(&out).map_err(|e| no(format!("self-check: output does not decode: {e}")))?;
+    let same = (after.frames, after.rows, after.columns, after.samples_per_pixel, after.bits_allocated, after.bits_stored, after.signed)
+        == (before.frames, before.rows, before.columns, before.samples_per_pixel, before.bits_allocated, before.bits_stored, before.signed)
+        && after.photometric == before.photometric
+        && after.data == before.data;
+    if !same {
+        return Err(no("self-check mismatch: the encoded pixels do not decode to the input's"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dictionary_lookups() {
+        assert_eq!(vrs_of(0x0010_0010), Some(&[*b"PN"][..]));
+        assert_eq!(vrs_of(0x6002_3000), Some(&[*b"OB", *b"OW"][..]));
+        assert!(vrs_of(0x0009_1001).is_none());
+    }
+}
