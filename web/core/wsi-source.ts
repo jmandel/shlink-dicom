@@ -66,6 +66,8 @@ interface Job {
   purpose: ReadPurpose;
   waiters: number;
   running: boolean;
+  /** The records this job fetched, kept for its waiters whatever the cache evicts meanwhile. */
+  out?: Map<number, Uint8Array>;
   promise: Promise<void>;
   resolve(): void;
   reject(e: unknown): void;
@@ -115,7 +117,12 @@ export class SeriesReader implements ByteSource {
   /** Plaintext bytes [a, b) of the series' file. */
   async read(a: number, b: number, o: ReadOptions = {}): Promise<Uint8Array> {
     if (o.signal?.aborted) throw abortError();
+    if (!(Number.isSafeInteger(a) && Number.isSafeInteger(b) && a >= 0 && a < b && b <= this.series.file.plaintextLength)) {
+      throw new RangeError(`bad plaintext range [${a}, ${b}) of ${this.series.file.plaintextLength}`);
+    }
     const r0 = Math.floor(a / RECORD_PLAINTEXT), r1 = Math.floor((b - 1) / RECORD_PLAINTEXT);
+    // Records already here are held for this read, so an eviction while it waits can't lose them.
+    const held = new Map<number, Uint8Array>();
     const priority = o.priority ?? 0;
     const jobs = new Set<Job>();
     let runStart = -1;
@@ -126,11 +133,13 @@ export class SeriesReader implements ByteSource {
       runStart = -1;
     };
     for (let r = r0; r <= r1; r++) {
-      const job = this.cache.has(r) ? null : this.pending.get(r);
-      if (this.cache.has(r)) {
+      const cached = this.cache.get(r);
+      if (cached) {
+        held.set(r, cached);
         flush(r - 1);
         continue;
       }
+      const job = this.pending.get(r);
       if (job) {
         flush(r - 1);
         if (!job.running && priority < job.priority) {
@@ -164,14 +173,11 @@ export class SeriesReader implements ByteSource {
     }
     const out = new Uint8Array(b - a);
     for (let r = r0; r <= r1; r++) {
-      let rec = this.cache.get(r);
-      if (!rec) {
-        // Evicted between the fetch and now (tiny budget): fetch again.
-        return this.read(a, b, o);
-      }
-      // LRU touch.
-      this.cache.delete(r);
-      this.cache.set(r, rec);
+      let rec = held.get(r);
+      if (!rec) for (const j of jobs) if ((rec = j.out?.get(r))) break;
+      if (!rec) throw new Error(`record ${r} was not fetched`);
+      // LRU touch, when it is still cached.
+      if (this.cache.delete(r)) this.cache.set(r, rec);
       const rs = r * RECORD_PLAINTEXT;
       const from = Math.max(a, rs), to = Math.min(b, rs + rec.byteLength);
       out.set(rec.subarray(from - rs, to - rs), from - a);
@@ -240,10 +246,10 @@ export class SeriesReader implements ByteSource {
 
   private async run(job: Job) {
     const s = this.series;
-    const a = job.first * RECORD_PLAINTEXT, b = Math.min(s.file.plaintextLength, (job.last + 1) * RECORD_PLAINTEXT);
-    const plan = planBytes(s, a, b);
-    this.o.onRecords?.(s.file.fileId, plan.firstRecord, plan.lastRecord, "fetching");
     try {
+      const a = job.first * RECORD_PLAINTEXT, b = Math.min(s.file.plaintextLength, (job.last + 1) * RECORD_PLAINTEXT);
+      const plan = planBytes(s, a, b);
+      this.o.onRecords?.(s.file.fileId, plan.firstRecord, plan.lastRecord, "fetching");
       const t0 = performance.now();
       const ct = await this.resolver.fetchRange(plan);
       this.recent.push({ bytes: ct.byteLength, ms: performance.now() - t0 });
@@ -261,9 +267,12 @@ export class SeriesReader implements ByteSource {
         throw e;
       }
       this.o.onRecords?.(s.file.fileId, plan.firstRecord, plan.lastRecord, "verified");
+      job.out = new Map();
       for (let r = job.first; r <= job.last; r++) {
         const off = (r - job.first) * RECORD_PLAINTEXT;
-        this.remember(r, pt.slice(off, Math.min(pt.byteLength, off + RECORD_PLAINTEXT)));
+        const rec = pt.slice(off, Math.min(pt.byteLength, off + RECORD_PLAINTEXT));
+        job.out.set(r, rec);
+        this.remember(r, rec);
       }
       job.resolve();
     } catch (e) {

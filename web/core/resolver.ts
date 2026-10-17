@@ -264,6 +264,15 @@ export class LinkResolver {
     const isFhir = (t: unknown) => typeof t === "string" && t.split(";")[0].trim().toLowerCase() === "application/fhir+json";
     const loc = manifest?.files?.find((f: any) => isFhir(f?.contentType) && typeof f?.location === "string")?.location;
     if (!loc) throw new LinkError("invalid", "The host's answer did not say where the file is.");
+    // Files resolve next to the location ({fileId}.bin under its prefix, spec/README.md): its last segment must be a file
+    // name (with a ".") or empty (a "/"), or `{fileId}.bin` would land somewhere else.
+    let last: string;
+    try {
+      last = new URL(loc).pathname.split("/").pop() ?? "";
+    } catch {
+      throw new LinkError("invalid", "The host's answer gave an address that can't be read.");
+    }
+    if (last !== "" && !last.includes(".")) throw new LinkError("invalid", "The host's answer gave a file address the encrypted files can't be found next to.");
     this.baseUrl = loc;
     this.locatedAt = askedAt;
     return manifest;

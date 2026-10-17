@@ -170,6 +170,11 @@ const TAG = {
   PixelData: t(0x7fe0, 0x0010),
 } as const;
 
+/** Most frames an instance may declare (16.7 M; a 300,000² slide in 256² tiles is 1.4 M). */
+export const MAX_FRAMES = 1 << 24;
+/** Most optical paths or focal planes. */
+export const MAX_PATHS_OR_PLANES = 1024;
+
 /** Little-endian 64-bit values (Extended Offset Table). */
 function u64s(raw: Uint8Array | null): number[] | null {
   if (!raw) return null;
@@ -235,7 +240,9 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
   h.samplesPerPixel = num(TAG.Spp, 1);
   h.photometric = str(TAG.Photometric);
   h.planarConfiguration = num(TAG.Planar, 0);
-  h.numberOfFrames = num(TAG.Frames, 1) || 1;
+  // Counts the header states are bounded, so a damaged one can't size huge arrays.
+  const clamp = (v: number, max: number) => (Number.isFinite(v) && v >= 1 ? Math.min(Math.floor(v), max) : 1);
+  h.numberOfFrames = clamp(num(TAG.Frames, 1), MAX_FRAMES);
   h.rows = num(TAG.Rows, 0);
   h.columns = num(TAG.Columns, 0);
   h.bitsAllocated = num(TAG.BitsAllocated, 8);
@@ -244,8 +251,8 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
   h.pixelRepresentation = num(TAG.PixelRep, 0);
   h.totalColumns = num(TAG.TotalCols, 0);
   h.totalRows = num(TAG.TotalRows, 0);
-  h.opticalPaths = num(TAG.OpticalPaths, 1) || 1;
-  h.focalPlanes = num(TAG.FocalPlanes, 1) || 1;
+  h.opticalPaths = clamp(num(TAG.OpticalPaths, 1), MAX_PATHS_OR_PLANES);
+  h.focalPlanes = clamp(num(TAG.FocalPlanes, 1), MAX_PATHS_OR_PLANES);
   h.extendedOffsets = u64s(ds.raw(TAG.EOT));
   h.extendedLengths = u64s(ds.raw(TAG.EOTLengths));
   h.seriesInstanceUid = str(TAG.SeriesInstance);
@@ -648,25 +655,30 @@ export interface FrameTable {
 /** A frame table from the header alone (EOT, BOT, or native pixel data), or null if walking is needed. */
 export function frameTableFromHeader(h: SlideHeader, instanceLength: number): FrameTable | null {
   if (!h.complete) return null;
+  /** A frame's range, or null when it would run past the instance. */
+  const inside = (r: [number, number] | null): [number, number] | null => (r && r[1] <= instanceLength ? r : null);
   if (!h.encapsulated) {
     if (h.bitsAllocated === 1) {
       const bits = h.rows * h.columns * h.samplesPerPixel;
       const base = h.pixelDataValueOffset;
       return {
         source: "native",
-        range: (k) => (k < h.numberOfFrames ? [base + Math.floor((k * bits) / 8), base + Math.ceil(((k + 1) * bits) / 8)] : null),
+        range: (k) => inside(k < h.numberOfFrames ? [base + Math.floor((k * bits) / 8), base + Math.ceil(((k + 1) * bits) / 8)] : null),
         bitShift: (k) => (k * bits) % 8,
       };
     }
     const fb = (h.rows * h.columns * h.samplesPerPixel * h.bitsAllocated) / 8;
     if (!Number.isInteger(fb) || fb <= 0) return null;
     const base = h.pixelDataValueOffset;
-    return { source: "native", range: (k) => (k < h.numberOfFrames ? [base + k * fb, base + (k + 1) * fb] : null) };
+    return { source: "native", range: (k) => inside(k < h.numberOfFrames ? [base + k * fb, base + (k + 1) * fb] : null) };
   }
   const first = h.firstFragmentOffset;
   // Pixel Data ends with an 8-byte sequence delimiter; anything after it is ignored when parsing items.
   const last = instanceLength - 8;
-  if (h.extendedOffsets && h.extendedOffsets.length === h.numberOfFrames) {
+  // A table is used only when its offsets go strictly up and every frame lies inside the instance;
+  // otherwise the frames are found by walking the fragment items.
+  const usable = (off: number[]) => off.every((o, k) => Number.isSafeInteger(o) && o >= 0 && (k === 0 ? o === 0 : o > off[k - 1]) && first + o < last);
+  if (h.extendedOffsets && h.extendedOffsets.length === h.numberOfFrames && usable(h.extendedOffsets)) {
     const off = h.extendedOffsets;
     return {
       source: "extended-offset-table",
@@ -678,7 +690,7 @@ export function frameTableFromHeader(h: SlideHeader, instanceLength: number): Fr
       },
     };
   }
-  if (h.basicOffsets && h.basicOffsets.length === h.numberOfFrames) {
+  if (h.basicOffsets && h.basicOffsets.length === h.numberOfFrames && usable(h.basicOffsets)) {
     const off = h.basicOffsets;
     return {
       source: "basic-offset-table",

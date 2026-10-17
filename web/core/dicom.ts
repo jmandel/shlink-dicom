@@ -10,6 +10,7 @@
 // an unknown element whose value starts with an item tag is read as a sequence.
 
 import { TS } from "./transfer-syntax";
+import { inflateRawCapped, InflateLimitError, MAX_INFLATED_BYTES } from "./inflate";
 
 export const tag = (g: number, e: number) => ((g << 16) | e) >>> 0;
 export const tagHex = (t: number) => `(${(t >>> 16).toString(16).padStart(4, "0").toUpperCase()},${(t & 0xffff).toString(16).padStart(4, "0").toUpperCase()})`;
@@ -547,34 +548,11 @@ function readItems(b: Uint8Array, start: number, end: number, le: boolean, expli
 async function inflate(data: Uint8Array): Promise<Uint8Array> {
   for (let trim = 0; ; trim++) {
     try {
-      return await inflateAll(data.subarray(0, data.length - trim));
+      return await inflateRawCapped(data.subarray(0, data.length - trim), MAX_INFLATED_BYTES, true);
     } catch (e) {
-      if (trim >= 8 || data.length - trim <= 1) throw e;
+      if (e instanceof InflateLimitError || trim >= 8 || data.length - trim <= 1) throw e;
     }
   }
-}
-
-async function inflateAll(data: Uint8Array): Promise<Uint8Array> {
-  const reader = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
-  const chunks: Uint8Array[] = [];
-  let n = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      n += value.length;
-    }
-  } catch (e) {
-    if (!n) throw e;
-  }
-  const out = new Uint8Array(n);
-  let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.length;
-  }
-  return out;
 }
 
 /**

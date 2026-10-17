@@ -8,6 +8,9 @@ const SD = "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinit
 export const PROFILE_URL = SD + "dicom-imaging-study";
 export const EXT_LINKED_FILE = SD + "linked-file";
 export const EXT_INSTANCE_LENGTH = SD + "instance-length";
+/** The longest instance a Bundle may list (1 TiB) and the longest file (4 TiB): bounds, so a damaged or hostile Bundle can't make readers plan absurd ranges. */
+export const MAX_INSTANCE_BYTES = 2 ** 40;
+export const MAX_FILE_BYTES = 2 ** 42;
 
 /** One encrypted file, `{fileId}.bin` (spec/README.md §8.1, §9). One object per fileId. */
 export interface FileEntry {
@@ -219,7 +222,7 @@ function parseStudySeries(r: any): { files: FileEntry[]; series: SeriesEntry[] }
     for (const inst of se.instance ?? []) {
       const lenExt = (inst.extension ?? []).find((e: any) => e?.url === EXT_INSTANCE_LENGTH);
       const length = Number(lenExt?.valueDecimal);
-      if (!Number.isSafeInteger(length) || length <= 0) throw new InvalidBundleError("instance without a valid length");
+      if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_INSTANCE_BYTES) throw new InvalidBundleError("instance without a valid length");
       const iuid = str(inst.uid);
       if (!iuid) throw new InvalidBundleError("instance without uid");
       instances.push({
@@ -232,6 +235,7 @@ function parseStudySeries(r: any): { files: FileEntry[]; series: SeriesEntry[] }
         lastRecord: Math.floor((offset + length - 1) / RECORD_PLAINTEXT),
       });
       offset += length;
+      if (offset > MAX_FILE_BYTES) throw new InvalidBundleError(`file ${lf.fileId} is longer than ${MAX_FILE_BYTES} bytes`);
     }
     if (!instances.length) throw new InvalidBundleError(`series ${uid} lists no instances`);
     file.plaintextLength = offset;

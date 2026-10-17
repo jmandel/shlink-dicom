@@ -3,14 +3,11 @@
 // 16-byte tag, zip absent or "DEF".
 // WebCrypto + (De)CompressionStream("deflate-raw"); runs in browsers, workers, Bun and Node 20+.
 import { b64urlDecode, b64urlEncode, fromUtf8, utf8 } from "./b64";
+import { inflateRawCapped, InflateLimitError } from "./inflate";
 
-/** The longest compact JWE (a link's Bundle) a reader accepts. */
+/** The longest compact JWE (a link's Bundle) a reader accepts: 64 MiB of characters. */
 export const MAX_JWE_CHARS = 64 * 1024 * 1024;
 
-async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const stream = new Blob([data as BlobPart]).stream().pipeThrough(new CompressionStream("deflate-raw"));
@@ -26,6 +23,7 @@ export class JweError extends Error {
 
 /** Decrypts a compact JWE with a 32-byte key (raw bytes or base64url). Returns the plaintext bytes. */
 export async function decryptJwe(compact: string, key: Uint8Array | string): Promise<Uint8Array> {
+  if (compact.length > MAX_JWE_CHARS) throw new JweError("the file is too large to be a link's Bundle");
   const parts = compact.trim().split(".");
   if (parts.length !== 5) throw new JweError("not a compact JWE");
   const [hdrB64, ekB64, ivB64, ctB64, tagB64] = parts;
@@ -36,7 +34,7 @@ export async function decryptJwe(compact: string, key: Uint8Array | string): Pro
       throw new JweError("not a compact JWE");
     }
   };
-  let header: { alg?: string; enc?: string; zip?: string };
+  let header: { alg?: string; enc?: string; zip?: string; cty?: string };
   try {
     header = JSON.parse(fromUtf8(b64urlDecode(hdrB64)));
   } catch {
@@ -46,6 +44,8 @@ export async function decryptJwe(compact: string, key: Uint8Array | string): Pro
     throw new JweError(`unsupported JWE ${header.alg}/${header.enc}`);
   }
   if (header.zip !== undefined && header.zip !== "DEF") throw new JweError(`unsupported JWE zip ${header.zip}`);
+  // A link's files here are FHIR (spec/README.md §2): a JWE that says it is anything else is not read.
+  if (header.cty !== undefined && header.cty !== "application/fhir+json") throw new JweError(`unsupported JWE content type ${header.cty}`);
   const raw = typeof key === "string" ? dec(key) : key;
   if (raw.length !== 32) throw new JweError("the key must be 32 bytes");
   const iv = dec(ivB64);
@@ -71,9 +71,9 @@ export async function decryptJwe(compact: string, key: Uint8Array | string): Pro
   }
   if (header.zip !== "DEF") return pt;
   try {
-    return await inflateRaw(pt);
-  } catch {
-    throw new JweError("the file's DEFLATE data is damaged");
+    return await inflateRawCapped(pt);
+  } catch (e) {
+    throw new JweError(e instanceof InflateLimitError ? "the file expands past 64 MiB" : "the file's DEFLATE data is damaged");
   }
 }
 

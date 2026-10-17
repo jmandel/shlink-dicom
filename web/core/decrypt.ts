@@ -20,13 +20,17 @@ export interface RecordDecryptor {
 
 const keys = new Map<string, Promise<CryptoKey>>();
 
-/** The key of the series' file as a non-extractable, decrypt-only CryptoKey (imported once per file). */
+/**
+ * The key of the series' file as a non-extractable, decrypt-only CryptoKey, imported once per file
+ * and key: two Bundles may name the same file id with different keys, and each gets its own.
+ */
 export function seriesKey(series: SeriesEntry): Promise<CryptoKey> {
   const { fileId, key } = series.file;
-  let k = keys.get(fileId);
+  const id = `${fileId}:${key}`;
+  let k = keys.get(id);
   if (!k) {
     k = importFileKey(b64urlDecode(key));
-    keys.set(fileId, k);
+    keys.set(id, k);
   }
   return k;
 }

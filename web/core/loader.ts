@@ -35,6 +35,9 @@ export const MERGE_RECORDS = 32;
  */
 export const BULK_BYTES = 1 << 20;
 
+/** The largest single read (ciphertext bytes) the loader holds in one buffer: 2 GiB. */
+export const MAX_READ_BYTES = 2 ** 31;
+
 export interface LoaderOptions {
   /** Range requests in flight at once (default 6). Prefetch and background reads leave two of them free. */
   concurrency?: number;
@@ -200,6 +203,9 @@ export class InstanceLoader {
   /** Records plan.firstRecord..plan.lastRecord of the plan's file, joined into one fresh buffer. */
   private records(series: SeriesEntry, plan: RangePlan, o: LoadOptions, cache: boolean): Promise<Uint8Array> {
     if (o.signal?.aborted) return Promise.reject(abortError());
+    // One read is assembled in one buffer: refused before any per-record state is made when it
+    // can't be (larger instances are read in parts: the slide reader, the video stream).
+    if (plan.ciphertextEnd - plan.ciphertextStart > MAX_READ_BYTES) return Promise.reject(new RangeError(`a read of ${plan.ciphertextEnd - plan.ciphertextStart} bytes is too large to hold`));
     const fileId = plan.fileId;
     const priority = o.priority ?? FetchPriority.Visible;
     const parts: (Uint8Array | Deferred)[] = [];
