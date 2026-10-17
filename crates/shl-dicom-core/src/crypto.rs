@@ -37,26 +37,10 @@ pub fn record_nonce(record_index: u64) -> [u8; 12] {
     n
 }
 
+/// [`encrypt_file_stream`] over a buffer held in memory.
 pub fn encrypt_file(plaintext: &[u8], file_key: &[u8; 32]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new(file_key.into());
-    let n = record_count(plaintext.len() as u64);
     let mut out = Vec::with_capacity(ciphertext_length(plaintext.len() as u64) as usize);
-
-    for i in 0..n {
-        let start = (i * RECORD_PLAINTEXT) as usize;
-        let end = ((i + 1) * RECORD_PLAINTEXT).min(plaintext.len() as u64) as usize;
-        let chunk = if start < plaintext.len() {
-            &plaintext[start..end]
-        } else {
-            &[]
-        };
-        let nonce_bytes = record_nonce(i);
-        let ct = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), chunk)
-            .map_err(|_| Error::AuthenticationFailed { record_index: i })?;
-        out.extend_from_slice(&ct);
-    }
-
+    encrypt_file_stream(plaintext, &mut out, file_key)?;
     Ok(out)
 }
 
@@ -139,4 +123,35 @@ pub fn encrypt_file_stream<R: std::io::Read, W: std::io::Write>(mut reader: R, m
         }
     }
     Ok(written)
+}
+
+/// Readers read one after another as one stream, each one taken from `parts` only when the
+/// previous one ends: the plaintext of a study file, from its instances in order.
+pub struct ReadChain<I, R> {
+    parts: I,
+    cur: Option<R>,
+}
+
+impl<I: Iterator<Item = std::io::Result<R>>, R: std::io::Read> ReadChain<I, R> {
+    pub fn new(parts: I) -> Self {
+        Self { parts, cur: None }
+    }
+}
+
+impl<I: Iterator<Item = std::io::Result<R>>, R: std::io::Read> std::io::Read for ReadChain<I, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.cur.is_none() {
+                match self.parts.next() {
+                    None => return Ok(0),
+                    Some(r) => self.cur = Some(r?),
+                }
+            }
+            let n = self.cur.as_mut().map_or(Ok(0), |r| r.read(buf))?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            self.cur = None;
+        }
+    }
 }

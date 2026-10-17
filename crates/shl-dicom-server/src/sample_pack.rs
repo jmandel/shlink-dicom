@@ -9,12 +9,12 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
 };
 use shl_dicom_core::{
     bundle::{build_fhir_bundle, BundleBuildInput, InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput},
-    crypto::{b64url_encode, encrypt_file_stream, random_bytes},
+    crypto::{b64url_encode, encrypt_file_stream, random_bytes, ReadChain},
     dicom_io::{parse_dicom_header_reader, ParsedDicomInstance, Skipped},
     offset_tables::add_offset_table_to_file,
 };
@@ -172,7 +172,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             let file_id = b64url_encode(&random_bytes::<16>().map_err(|e| e.to_string())?);
             let key = random_bytes::<32>().map_err(|e| e.to_string())?;
             let paths: Vec<PathBuf> = series.iter().flat_map(|(_, m)| m.iter().map(|m| m.path.clone())).collect();
-            let reader = Concat { paths, next: 0, cur: None };
+            let reader = ReadChain::new(paths.iter().map(|p| File::open(p).map(|f| BufReader::with_capacity(1 << 20, f))));
             let part = state.part_path(sid, &file_id);
             let mut out = BufWriter::new(File::create(&part).map_err(|e| e.to_string())?);
             let size = encrypt_file_stream(reader, &mut out, &key).map_err(|e| e.to_string())?;
@@ -219,28 +219,4 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
     })();
     let _ = std::fs::remove_dir_all(scratch);
     result
-}
-
-/// Files read one after another as one stream, opening each only when it is reached.
-struct Concat {
-    paths: Vec<PathBuf>,
-    next: usize,
-    cur: Option<BufReader<File>>,
-}
-
-impl Read for Concat {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            if self.cur.is_none() {
-                let Some(p) = self.paths.get(self.next) else { return Ok(0) };
-                self.cur = Some(BufReader::with_capacity(1 << 20, File::open(p)?));
-                self.next += 1;
-            }
-            let n = self.cur.as_mut().unwrap().read(buf)?;
-            if n > 0 || buf.is_empty() {
-                return Ok(n);
-            }
-            self.cur = None;
-        }
-    }
 }

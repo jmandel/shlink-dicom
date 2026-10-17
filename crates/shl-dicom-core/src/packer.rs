@@ -6,7 +6,7 @@ use crate::{
         build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput,
         InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
     },
-    crypto::{b64url_encode, encrypt_file_stream, random_bytes},
+    crypto::{b64url_encode, encrypt_file_stream, random_bytes, ReadChain},
     range::ciphertext_length,
     dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance, Skipped},
     jwe::encrypt_bundle_jwe,
@@ -270,7 +270,7 @@ impl IngestSession {
             };
             let key_b64 = b64url_encode(&key);
             let mut ciphertext = Vec::with_capacity(ciphertext_length(total_pt_len as u64) as usize);
-            encrypt_file_stream(SliceChain { parts, at: 0 }, &mut ciphertext, &key)?;
+            encrypt_file_stream(ReadChain::new(parts.into_iter().map(Ok)), &mut ciphertext, &key)?;
             drop(series_plain);
             files.push(PackedStudyFile {
                 file_id: file_id.clone(),
@@ -322,29 +322,6 @@ impl IngestSession {
             index,
             files,
         })
-    }
-}
-
-/// Byte slices read one after another as one stream.
-struct SliceChain<'a> {
-    parts: Vec<&'a [u8]>,
-    at: usize,
-}
-
-impl std::io::Read for SliceChain<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        while self.at < self.parts.len() {
-            let part = &mut self.parts[self.at];
-            if part.is_empty() {
-                self.at += 1;
-                continue;
-            }
-            let n = part.len().min(buf.len());
-            buf[..n].copy_from_slice(&part[..n]);
-            *part = &part[n..];
-            return Ok(n);
-        }
-        Ok(0)
     }
 }
 
