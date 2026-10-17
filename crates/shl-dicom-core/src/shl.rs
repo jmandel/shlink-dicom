@@ -66,5 +66,32 @@ pub fn decode_shlink_uri(uri: &str) -> Result<ShlPayload> {
     let payload: ShlPayload =
         serde_json::from_slice(&bytes).map_err(|e| Error::InvalidShlink(e.to_string()))?;
     let _ = payload.key_bytes()?;
+    // SMART Health Links: U SHALL NOT be combined with P, and a reader should not follow a link
+    // of a version it does not know (this one knows 1).
+    let flag = payload.flag.as_deref().unwrap_or("");
+    if flag.contains('U') && flag.contains('P') {
+        return Err(Error::InvalidShlink("flag U may not be combined with P".into()));
+    }
+    if let Some(v) = payload.v.filter(|&v| v != 1) {
+        return Err(Error::InvalidShlink(format!("version {v} is not one this reader knows (1)")));
+    }
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(flag: Option<&str>, v: Option<u32>) -> String {
+        let p = ShlPayload { url: "https://host.example/x".into(), key: "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8".into(), exp: None, flag: flag.map(String::from), label: None, v };
+        encode_shlink_uri(&p, None).unwrap()
+    }
+
+    #[test]
+    fn u_with_p_and_unknown_versions_are_refused() {
+        assert!(decode_shlink_uri(&link(Some("LU"), Some(1))).is_ok());
+        assert!(decode_shlink_uri(&link(Some("LP"), None)).is_ok());
+        assert!(decode_shlink_uri(&link(Some("PU"), None)).unwrap_err().to_string().contains("U may not be combined with P"));
+        assert!(decode_shlink_uri(&link(None, Some(2))).unwrap_err().to_string().contains("version 2"));
+    }
 }
