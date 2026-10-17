@@ -1458,6 +1458,25 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
 mod tests {
     use super::ct_eq;
 
+    /// A share's database opened afresh (a pool miss) keeps a link row not yet in the catalog: it
+    /// may be a link being created (share row first, catalog row last).
+    #[test]
+    fn a_fresh_open_keeps_a_link_being_created() {
+        let dir = std::env::temp_dir().join(format!("fresh_open_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = super::AppState::new(&dir).unwrap();
+        let (sid, _) = state.create_share(false, None).unwrap();
+        let lid = "n".repeat(43);
+        state.open_share_db(&sid).unwrap().lock().unwrap()
+            .execute("INSERT INTO links (lid, long_lived, online, created_at) VALUES (?1, 0, 1, 0)", [&lid])
+            .unwrap();
+        state.pool.lock().unwrap().remove(&sid);
+        let c = state.open_share_db(&sid).unwrap();
+        let n: i64 = c.lock().unwrap().query_row("SELECT COUNT(*) FROM links WHERE lid = ?1", [&lid], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "a fresh open deleted a link being created");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_upload_sweep_recreates_no_deleted_share() {
         let dir = std::env::temp_dir().join(format!("no_recreate_{}", std::process::id()));
