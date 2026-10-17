@@ -19,7 +19,11 @@ pub fn b64url_decode(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::Base64(e.to_string()))
 }
 
+/// A 32-byte key from its base64url form, which is exactly 43 characters (no padding).
 pub fn decode_key_32(s: &str) -> Result<[u8; 32]> {
+    if s.len() != 43 {
+        return Err(Error::InvalidKeyLength);
+    }
     let bytes = b64url_decode(s)?;
     bytes.try_into().map_err(|_| Error::InvalidKeyLength)
 }
@@ -152,6 +156,20 @@ impl<I: Iterator<Item = std::io::Result<R>>, R: std::io::Read> std::io::Read for
                 return Ok(n);
             }
             self.cur = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_is_exactly_43_base64url_characters() {
+        let key = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
+        assert_eq!(decode_key_32(key).unwrap()[0], 0x20);
+        for bad in [format!("{key}="), format!(" {key}"), key[..42].to_string(), format!("{key}A")] {
+            assert!(decode_key_32(&bad).is_err(), "{bad:?}");
         }
     }
 }
