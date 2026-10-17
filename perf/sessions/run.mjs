@@ -29,6 +29,8 @@ const cpu = Number(arg("cpu", device === "phone" ? "4" : "1"));
 const runs = Number(arg("runs", "3"));
 const kinds = arg("kinds", Object.keys(SESSIONS).join(",")).split(",");
 const out = arg("out", "sessions.jsonl");
+/** --reqlog=FILE: each session's encrypted-file requests (Range, start, end, bytes) and drawn pictures, as JSON lines. */
+const reqlog = arg("reqlog");
 const run0 = Number(arg("run0", "0"));
 /** Longest wait for one operation, by profile. */
 const CAP = { home: 30000, fast4g: 60000, slow4g: 60000 }[net] ?? 60000;
@@ -215,6 +217,21 @@ async function session(browser, kind, run) {
   await cdp.send("Network.enable");
   if (cpu > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpu });
   let bytes = 0, requests = 0;
+  const binReqs = new Map(), binLog = [];
+  cdp.on("Network.requestWillBeSent", (e) => {
+    if (reqlog && /\.bin/.test(e.request.url)) {
+      const r = { range: e.request.headers.Range ?? e.request.headers.range, t0: e.timestamp, bytes: 0 };
+      binReqs.set(e.requestId, r);
+      binLog.push(r);
+    }
+  });
+  cdp.on("Network.dataReceived", (e) => {
+    const r = binReqs.get(e.requestId);
+    if (r) {
+      r.bytes += e.dataLength;
+      r.t1 = e.timestamp;
+    }
+  });
   cdp.on("Network.loadingFinished", (e) => {
     bytes += e.encodedDataLength;
     requests++;
@@ -323,6 +340,11 @@ async function session(browser, kind, run) {
     ops,
     errors,
   };
+  if (reqlog) {
+    const draws = await page.evaluate(() => window.__view?.drawLog ?? []).catch(() => []);
+    const nav = await page.evaluate(() => performance.timeOrigin).catch(() => 0);
+    appendFileSync(reqlog, JSON.stringify({ build, net, device, kind, run, timeOrigin: nav, requests: binLog, draws, ops }) + "\n");
+  }
   await context.close();
   return res;
 }
