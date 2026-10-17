@@ -94,6 +94,9 @@ export class AuthServer {
     for (const [k, v] of this.refreshTokens) if (v.exp < t) this.refreshTokens.delete(k);
     for (const [k, v] of this.codes) if (v.exp < t - 600) this.codes.delete(k);
     for (const [k, v] of this.pending) if (v.exp < t) this.pending.delete(k);
+    // A grant is kept while a code, token or refresh token can still use it, and an hour after.
+    const inUse = new Set([...this.codes.values()].map((c) => c.grant.id));
+    for (const [k, v] of this.grants) if (v.exp < t - 3600 && !inUse.has(k)) this.grants.delete(k);
   }
 
   // ---------- client registration ----------
