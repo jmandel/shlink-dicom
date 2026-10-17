@@ -99,7 +99,7 @@ pub fn group_instances(metas_json: &str) -> Result<String, JsError> {
 #[wasm_bindgen]
 pub fn build_bundle(input_json: &str) -> Result<String, JsError> {
     let input: shl_dicom_core::bundle::BundleBuildInput = serde_json::from_str(input_json).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(shl_dicom_core::bundle::build_fhir_bundle(&input).to_string())
+    shl_dicom_core::bundle::build_fhir_bundle(&input).map(|b| b.to_string()).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// A link's Bundle (`shl_dicom_core::bundle::subset_bundle`): the owner Bundle cut down to a JSON

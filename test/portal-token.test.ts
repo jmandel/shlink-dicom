@@ -1,9 +1,13 @@
 // bun test test/portal-token.test.ts: the portal's token goes only to its clinical and imaging
 // servers (web/share/lib/smart.ts); relative addresses resolve against the clinical base; packed
 // reports keep attachment data, never attachment URLs (web/share/lib/pack.ts).
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { fhirSearchAll, inlineAttachments, portalUrl, studiesFromBundle, type PortalAuth } from "../web/share/lib/smart";
 import { buildBundle } from "../web/share/lib/pack";
+import { useShlWasm } from "../web/checks/shl-wasm-bun";
+
+// buildBundle runs the packer's Rust builder.
+beforeAll(() => useShlWasm());
 
 const auth: PortalAuth = { token: "T0KEN", clinicalBase: "https://ehr.example/fhir", imagingBase: "https://img.example/dicomweb" };
 const realFetch = globalThis.fetch;

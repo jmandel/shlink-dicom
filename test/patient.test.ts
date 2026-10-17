@@ -74,3 +74,12 @@ describe("reports that name no study", () => {
     expect(reports((subsetBundle as any)(owner, [first], [loose.id]).bundle)).toEqual([loose.id]);
   });
 });
+
+describe("instance lengths", () => {
+  test("an instance of length 0 is refused", async () => {
+    const c = new Collection();
+    c.addWithHeader("empty.dcm", new MemBytes(new Uint8Array(0)), header("EXAMPLE^JOSH", "MRN-1", "19800202", "2.25.9") as any);
+    await c.finish();
+    expect(() => pack(c)).toThrow(/length 0/);
+  });
+});

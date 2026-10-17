@@ -14,7 +14,8 @@ import { execFileSync } from "node:child_process";
 
 const BASE = process.env.BASE ?? "http://localhost:3333";
 // The portal the Share page offers by default for this site.
-const PORTAL = /\/\/(localhost|127\.0\.0\.1)[:/]/.test(BASE) ? `http://${new URL(BASE).hostname}:3334/fhir` : "https://smart-imaging-sandbox.exe.xyz/fhir";
+// PORTAL overrides it (a sandbox on another port, when :3334 is taken).
+const PORTAL = process.env.PORTAL ?? (/\/\/(localhost|127\.0\.0\.1)[:/]/.test(BASE) ? `http://${new URL(BASE).hostname}:3334/fhir` : "https://smart-imaging-sandbox.exe.xyz/fhir");
 const ROOT = new URL("../../", import.meta.url).pathname;
 const SHOTS = `${ROOT}docs/shots/share/`;
 mkdirSync(SHOTS, { recursive: true });
@@ -438,8 +439,11 @@ async function flowPortal(dev) {
   const { context, page, errors } = await newPage(dev);
   await page.goto(`${BASE}/share`);
   await page.click("[data-src=portal]");
-  const portal = await page.inputValue("#in-portal");
-  check(`${P}: portal defaults to the sandbox`, portal === PORTAL, portal);
+  if (process.env.PORTAL) await page.fill("#in-portal", PORTAL);
+  else {
+    const portal = await page.inputValue("#in-portal");
+    check(`${P}: portal defaults to the sandbox`, portal === PORTAL, portal);
+  }
   await layout(page, `${P} portal panel`, dev);
   await shot(page, `${dev}-1-portal`);
   await Promise.all([page.waitForURL((u) => u.host === new URL(PORTAL).host && u.pathname.includes("/auth")), page.click("#portal-form button[type=submit]")]);

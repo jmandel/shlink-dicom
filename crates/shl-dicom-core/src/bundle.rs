@@ -316,7 +316,16 @@ fn report_entry(source: &Value, id: String, study: Option<(&str, &str)>) -> Valu
 /// The owner Bundle: Patient, then for each study its ImagingStudy (id `study-{n}`), a
 /// Provenance when images were re-encoded, and its reports (ids `report-{n}`); then the reports
 /// that name no study.
-pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
+/// Refuses an instance of length 0: it names no bytes, so a Bundle listing it is wrong (a byte
+/// source that was lost before packing, for example).
+pub fn build_fhir_bundle(input: &BundleBuildInput) -> Result<Value> {
+    for st in &input.studies {
+        for inst in st.series.iter().flat_map(|se| &se.instances) {
+            if inst.length == 0 {
+                return Err(Error::InvalidBundle(format!("instance {} has length 0", inst.uid)));
+            }
+        }
+    }
     let mut entries = Vec::new();
 
     let mut patient = json!({
@@ -465,14 +474,14 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
         entries.push(report_entry(r, format!("report-{report_n}"), None));
     }
 
-    json!({
+    Ok(json!({
         "resourceType": "Bundle",
         "meta": {
             "lastUpdated": input.last_updated,
         },
         "type": "collection",
         "entry": entries,
-    })
+    }))
 }
 
 /// What a link carries (spec/README.md §8.2): whole studies, by ImagingStudy id, and the reports

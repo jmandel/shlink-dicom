@@ -204,7 +204,7 @@ impl IngestSession {
             patient: plan.patient,
             studies: study_inputs,
             loose_reports: Vec::new(),
-        });
+        })?;
         let owner_bundle_json = serde_json::to_string(&new_bundle).map_err(|e| Error::Json(e.to_string()))?;
         let index = parse_study_index(owner_bundle_json.as_bytes())?;
         Ok(PackedStudySet { offset_tables_added, owner_bundle_json, index, files, skipped: self.skipped })

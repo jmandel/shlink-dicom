@@ -432,7 +432,7 @@ fn build_input(series_override: Option<LinkedFileInput>) -> BundleBuildInput {
 #[test]
 fn test_linked_file_default_and_override() {
     let added = LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) };
-    let bundle = build_fhir_bundle(&build_input(Some(added.clone())));
+    let bundle = build_fhir_bundle(&build_input(Some(added.clone()))).unwrap();
     let st_json = &bundle["entry"][1]["resource"];
     assert_eq!(st_json["extension"][0]["url"], EXT_LINKED_FILE);
     // Only the override is written on a series (series 1 names the study's own file: not repeated).
@@ -460,21 +460,21 @@ fn test_linked_file_default_and_override() {
 fn test_linked_file_errors() {
     // One file id with two keys.
     let clash = LinkedFileInput { file_id: "AAAAAAAAAAAAAAAAAAAAAA".into(), key_b64: format!("{}A", "C".repeat(42)) };
-    let mut bundle = build_fhir_bundle(&build_input(Some(clash)));
+    let mut bundle = build_fhir_bundle(&build_input(Some(clash))).unwrap();
     assert!(parse_study_index(bundle.to_string().as_bytes()).is_err());
 
     // A series with no linked-file while the study has none.
-    bundle = build_fhir_bundle(&build_input(Some(LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) })));
+    bundle = build_fhir_bundle(&build_input(Some(LinkedFileInput { file_id: "BBBBBBBBBBBBBBBBBBBBBB".into(), key_b64: format!("{}A", "B".repeat(42)) }))).unwrap();
     bundle["entry"][1]["resource"].as_object_mut().unwrap().remove("extension");
     assert!(parse_study_index(bundle.to_string().as_bytes()).is_err());
 
     // An ImagingStudy without any linked-file is ordinary FHIR: skipped, not an error.
-    bundle = build_fhir_bundle(&build_input(None));
+    bundle = build_fhir_bundle(&build_input(None)).unwrap();
     bundle["entry"][1]["resource"].as_object_mut().unwrap().remove("extension");
     assert_eq!(parse_study_index(bundle.to_string().as_bytes()).unwrap().studies.len(), 0);
 
     // One file linked from two ImagingStudy resources.
-    bundle = build_fhir_bundle(&build_input(None));
+    bundle = build_fhir_bundle(&build_input(None)).unwrap();
     let mut second = bundle["entry"][1].clone();
     second["resource"]["id"] = "study-2".into();
     bundle["entry"].as_array_mut().unwrap().push(second);
@@ -486,17 +486,17 @@ fn test_linked_file_errors() {
 #[test]
 fn test_lengths_empty_series_and_empty_study() {
     let zero = || {
-        let mut b = build_fhir_bundle(&build_input(None));
+        let mut b = build_fhir_bundle(&build_input(None)).unwrap();
         b["entry"][1]["resource"]["series"][0]["instance"][0]["extension"][0]["valueDecimal"] = 0.into();
         b
     };
     assert!(parse_study_index(zero().to_string().as_bytes()).is_err(), "length 0 accepted");
 
-    let mut b = build_fhir_bundle(&build_input(None));
+    let mut b = build_fhir_bundle(&build_input(None)).unwrap();
     b["entry"][1]["resource"]["series"][1]["instance"] = serde_json::json!([]);
     assert!(parse_study_index(b.to_string().as_bytes()).is_err(), "series without instances accepted");
 
-    let mut b = build_fhir_bundle(&build_input(None));
+    let mut b = build_fhir_bundle(&build_input(None)).unwrap();
     b["entry"][1]["resource"]["series"] = serde_json::json!([]);
     assert_eq!(parse_study_index(b.to_string().as_bytes()).unwrap().studies.len(), 0, "empty study listed");
 }
@@ -511,7 +511,7 @@ fn test_unused_study_file_and_key_conflict() {
     for se in input.studies[0].series.iter_mut() {
         se.file = Some(b_file.clone());
     }
-    let bundle = build_fhir_bundle(&input);
+    let bundle = build_fhir_bundle(&input).unwrap();
     let st = &parse_study_index(bundle.to_string().as_bytes()).unwrap().studies[0];
     assert_eq!(st.files.iter().map(|f| f.file_id.as_str()).collect::<Vec<_>>(), vec!["BBBBBBBBBBBBBBBBBBBBBB"]);
     let sub = subset_bundle(&bundle, &LinkSelection { studies: vec!["study-1".into()], loose_reports: vec![] }, "2026-10-15T01:00:00Z").unwrap();
@@ -519,7 +519,7 @@ fn test_unused_study_file_and_key_conflict() {
     assert_eq!(sub.allowed_files, vec!["BBBBBBBBBBBBBBBBBBBBBB.bin"]);
 
     // Every series names the study's file itself, with another key than the study gives.
-    let mut clash = build_fhir_bundle(&build_input(None));
+    let mut clash = build_fhir_bundle(&build_input(None)).unwrap();
     for se in clash["entry"][1]["resource"]["series"].as_array_mut().unwrap() {
         se["extension"] = serde_json::json!([{
             "url": EXT_LINKED_FILE,
@@ -545,7 +545,7 @@ fn test_subset_reports_follow_studies() {
     second.reports = vec![report("second")];
     input.studies.push(second);
     input.loose_reports = vec![report("loose")];
-    let bundle = build_fhir_bundle(&input);
+    let bundle = build_fhir_bundle(&input).unwrap();
     let ids = |b: &serde_json::Value| b["entry"].as_array().unwrap().iter().filter_map(|e| e["resource"]["id"].as_str().map(String::from)).collect::<Vec<_>>();
     assert_eq!(ids(&bundle), ["p1", "study-1", "report-1", "study-2", "report-2", "report-3"]);
     // Kept elements only, the Bundle's Patient, and the study by fullUrl and UID.
@@ -571,7 +571,7 @@ fn test_subset_reports_follow_studies() {
 fn test_subset_leaves_out_provenance() {
     let mut input = build_input(None);
     input.studies[0].reencoded = Some(Reencoded { images: 3, of: 4, encodings: vec!["JPEG Lossless".into()], agent: "test".into() });
-    let bundle = build_fhir_bundle(&input);
+    let bundle = build_fhir_bundle(&input).unwrap();
     let prov = &bundle["entry"][2]["resource"];
     assert_eq!(prov["resourceType"], "Provenance");
     assert_eq!(prov["target"][0]["reference"], bundle["entry"][1]["fullUrl"]);
@@ -593,4 +593,13 @@ fn test_patient_name_from_pn() {
     assert_eq!(human_name_from_pn("Example^Josh").unwrap()["text"], "Josh Example");
     assert_eq!(human_name_from_pn("Josh Example").unwrap(), serde_json::json!({ "text": "Josh Example" }));
     assert!(human_name_from_pn(" ").is_none());
+}
+
+/// An instance of length 0 names no bytes: the builder refuses it.
+#[test]
+fn test_zero_length_instance_refused() {
+    let mut input = build_input(None);
+    input.studies[0].series[1].instances[0].length = 0;
+    let err = build_fhir_bundle(&input).unwrap_err().to_string();
+    assert!(err.contains("2.25.9.2.1") && err.contains("length 0"), "{err}");
 }

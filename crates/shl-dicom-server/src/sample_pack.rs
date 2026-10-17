@@ -183,7 +183,8 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             patient: plan.patient,
             studies: study_inputs,
             loose_reports: Vec::new(),
-        });
+        })
+        .map_err(|e| e.to_string())?;
         Ok(PackedSample { owner_bundle_json: bundle.to_string(), file_ids, instances, bytes, compression, offset_tables_added, skipped })
     })();
     let _ = std::fs::remove_dir_all(scratch);
