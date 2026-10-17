@@ -1,0 +1,106 @@
+# Review findings: fix plan
+
+Written 17 Oct 2026. It covers every finding from the second review round that checked out against the code: the Argon and DeepSeek reviews of the server, crypto and client areas. Each was verified on main at 21e5910 or 7bf2c28. Spurious and refuted claims are listed at the end with the reason.
+
+Rule (Josh): every verified finding gets fixed. Spec SHALL violations, over-sharing, persisted secrets and false claims in our own spec are never "Low".
+
+Nothing builds until the end-to-end A/B finishes ("quiet window over"). Agents write and commit on their branches until then.
+
+## Order
+
+1. **M1 lands first, alone** (`m1-alone`, 73d2051), as soon as builds are allowed.
+2. **X1 next**: the `javascript:` sign-in XSS on the Share page.
+3. Then the server round (`review-fixes-3`), the browser branches and the Rust/spec branch, in parallel. Each lands once its checks match main.
+4. Verify the DeepSeek max reports and the rest of the Argon reports (still running) and add confirmed new items to the lanes below.
+5. Deploy: a server release from CI to the live VM, with `SHL_PUBLIC_ORIGIN`; reseed the sample (it gets new 256-bit link ids); redeploy the sandbox.
+6. Update the review response with the round-2 section and the landed commit hashes.
+
+## Server and sandbox: server agent, branch `review-fixes-3`
+
+Ids are from the server verification (M1–M29).
+
+| Id | Finding | Fix | State |
+|---|---|---|---|
+| M1 | Any share's token can delete another share's link and end its sessions | Bind `lid` to `sid` in both statements; 404 otherwise | Written, `m1-alone` |
+| K4 | Link ids are 128 bits; SHL requires ≥256 bits of entropy in the manifest URL | 32-byte link ids, their own 43-character check; state the rule in our spec | Sent |
+| M3 | `Upload-Length` overflow gets past the share byte limit | Reject above `i64::MAX`; saturating sums | Written |
+| M2 | Clone racing a delete keeps references to deleted blobs | Conditional reference (`ref_count > 0`) | Written |
+| M22 | `seed` runs startup sweeps against the live data | No sweeps in seed | Written |
+| M5 | Publish racing a delete or expiry leaks the blob; recreates the share dir | Record under the share lock, then reference; no dir recreation | Written / sent |
+| M6 | Blob count errors ignored; missing row treated as zero | `Result`, trash only at an observed 0 | Written |
+| M7 | Orphan-link sweep can delete a just-created link | Startup only | Written |
+| M4 | Tar path traversal in `compress` | `unpack_in` | Written |
+| M8 | Access log unbounded; `recipient` up to 32 MiB | 256-byte recipient; newest 10,000 events per share | Written |
+| M9 | Whole-file PUT has no body cap | Cap at declared length and remaining quota; cap local staging with S3 | Sent |
+| M10 | Unlimited links per share; link bundles outside the quota | 100 links; 16 MiB per bundle | Written |
+| M11 | Expired capabilities swept only on share creation | Sweep every minute | Written |
+| M12 | Expiry leaves the share's event channel | Remove it | Written |
+| M13 | No storage bound across shares (256 × 20 GB) | Global byte cap set from disk size | Sent |
+| M14 | Slow-drip upload never ends or gets swept | 2 h request deadline; claims with timestamps | Written |
+| M15 | Share byte limit checked outside the insert | One `BEGIN IMMEDIATE` | Written |
+| M16 | Public sample passcode locks after 5 wrong guesses | Sample link refills | Written, tested |
+| M17 | Origin taken from `X-Forwarded-*` | `SHL_PUBLIC_ORIGIN` | Written |
+| M18 | Server: failed non-resumable PUT publish leaves its upload row | `forget_upload` on that path | Sent |
+| M19 | S3 mode: signed URL usable up to 60 s after revocation | Keep TTL ≤ 60 s; state it in the spec's deployment section | Sent |
+| M20 | Capability lifetime not clamped to 1 h (SHL SHALL) | Clamp | Written |
+| M21 | Stale-upload sweep recreates deleted share databases | Open without CREATE | Written |
+| — | Clone needs no token | Require the source share's token; sample exempt | Sent |
+| — | Reseed gap: `/sample` points at the deleted sample | Close the gap | Sent |
+| M23 | Sandbox Endpoint read has no scope check; default redirect URIs | Scope check; trailing `/` | Written |
+| M24 | Sandbox refresh rejects narrower scopes | Allow any subset the grant covers | Sent |
+| M25 | Sandbox grants never swept | Sweep | Written |
+| M28 | Sandbox `q=0.0` accepted | Parse as a number | Written |
+| M29 | Bootstrap logs `chmod 666`; env file briefly 0644 | Owner-only from creation | Written |
+
+## Browser: JPEG XL agent (after its current landings)
+
+| Id | Finding | Fix |
+|---|---|---|
+| X1 | Share page: a crafted portal's `javascript:` sign-in URL runs script on our origin, which can read saved share tokens | `https:` only (`http:` on localhost) for both endpoints and both bases, including `?portal=` |
+| T1 | Portal token sent to any report attachment URL, `next` link or Endpoint address; a relative URL sends it to our own origin; attachment `url` copied to recipients | Token only to the portal's origins; resolve against the FHIR base; always strip `url` |
+| P1 | Saved upload job keeps the plaintext passcode, file keys, the source link and local paths, with no expiry | No stored passcode; drop the source link once packed; expire at the share's `exp`; clear on every abandon path |
+| K7 | Receiver may use file locations more than an hour after the manifest (SHL SHALL NOT) | Record the manifest time; refresh before 60 min |
+| R1 | Unchecked offset tables: reads that never settle, a 60 s main-thread freeze, negative lengths | Accept only strictly increasing in-range tables; validate ranges; errors reject |
+| R2 | Annotation reader refetches forever above its cache budget (any large bulk annotation) | Build results from fetched records; pin records being read |
+| R3 | Focal planes, optical paths and frame counts drive allocation | Clamp against the instance length |
+| R4 | Instance length from the Bundle unbounded; per-record promises created up front | Cap lengths; create lazily |
+| K3 | No limit on inflating the Bundle (770:1 measured) | 64 MiB inflate cap; JWE size cap |
+| K8 | Key cache keyed by file id only | Key by file id and key |
+| K6 | `location` shape not checked | Reject a last segment with no `.` and no trailing `/` |
+| K2 | Browser JWE reader doesn't check `cty` | Check it, as Rust does |
+| S1 | Re-shared links skip compression and offset tables | Read each series' transfer syntax first |
+| M18 | Upload never completes after a failed final step | Done: `upload-complete`, 7b73a6f |
+
+Where the logic exists in Rust, the browser calls it through wasm instead of adding a TypeScript copy.
+
+## Rust core and spec: decoder agent
+
+| Id | Finding | Fix |
+|---|---|---|
+| P2 | A report that names no study goes into every subset link | Subset links carry only reports naming a study in them; a loose report only when the sharer ticks it (unticked by default); in the single Rust Bundle builder |
+| K1 | `pack --keys` reuses the Bundle IV and file keys on changed input | Store Bundle and per-study plaintext hashes in `keys.json`; refuse changed input |
+| K3 | Rust inflate has no cap | `.take(64 MiB)`; JWE size cap |
+| K5 | Spec §13 claims an older version is detected; an older Bundle isn't | Correct §13; any freshness mechanism goes to Josh first |
+| K9 | Rust accepts a padded 44-character file key | Exactly 43 |
+| W1 | Wasm32 overflow in the header scan's meta loop | `checked_add` |
+| K2 | Rust Bundle JWE has no `cty` | Done on dd-a, 9c626aa; lands with that branch |
+| D1 | Cut-short headers throw; video without delimiter (round 1, 4.1 and 4.2) | Done on `dedup-syntaxes` (77d35e6, 7b883db); lands with the stack |
+
+## Not fixing
+
+| Claim | Why |
+|---|---|
+| Sandbox `/auth` CSRF (Argon SRV-13) | No accounts; PKCE and `state` bind codes to whoever started the flow |
+| One token for all three resource servers (M26) | Josh's ruling, recorded in the sandbox's `CONFORMANCE.md` |
+| 406 when `transfer-syntax` is omitted (M27) | Deliberate; smart-imaging PR #5 allows it |
+| UID path traversal in WADO URLs (Argon C-02 part) | Stays on the same WADO host with the same token |
+| "Tab killed" by huge typed arrays (DS C3 part) | Typed arrays allocate lazily; the real freeze is the plane loops, fixed under R3 |
+| Access log `pending` queue as a memory problem (Argon SRV-5a part) | Drains every 25 ms |
+| `curl … | bash` from main as the trust root (M29 part) | Inherent to a one-line install; the scripts verify everything they download |
+
+## Still to come
+
+- DeepSeek max reports (crypto, server, client): running.
+- Argon crypto report (not written yet) and the rest of the Argon client report.
+
+New confirmed findings join the lanes above; this file is updated as items land.
