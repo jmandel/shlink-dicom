@@ -148,7 +148,7 @@ jobs:
           sha="$(cut -d' ' -f1 "$dir/imaging-sandbox-$tag.tar.gz.sha256")"
           printf '{"tag":"%s","commit":"%s","sha256":"%s"}\n' "$tag" "$GITHUB_SHA" "$sha" > "$dir/latest.json"
           if ! gh release view sandbox-latest > /dev/null 2>&1; then
-            gh release create sandbox-latest --target "$GITHUB_SHA" --latest=false --title "Imaging sandbox: latest" \
+            gh release create sandbox-latest --target "$GITHUB_SHA" --latest=false --prerelease --title "Imaging sandbox: latest" \
               --notes "latest.json names the current sandbox release; deploy/bootstrap-sandbox.sh reads it."
           fi
           gh release upload sandbox-latest "$dir/latest.json" --clobber
