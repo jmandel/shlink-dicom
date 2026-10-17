@@ -95,6 +95,8 @@ jobs:
           }
           RELEASES="file://$RUNNER_TEMP/releases" ORIGIN=http://localhost:8000 bash deploy/bootstrap-shlink-dicom.sh "$tag"
           grep -E "Sample packed|Compressed .* without loss" /var/log/shlink-bootstrap.log | tail -2
+          # The log is readable by its owner only (M29).
+          test "$(stat -c %a /var/log/shlink-bootstrap.log)" = 600
           check
           sel="$(readlink /opt/shlink-dicom-server/current/bin/server)"
           echo "selected: $sel"

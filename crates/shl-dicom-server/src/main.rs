@@ -300,15 +300,7 @@ async fn main() {
             let gc = state.clone();
             tokio::spawn(async move {
                 for round in 0u64.. {
-                    // Every 10 minutes: uploads abandoned for a day.
-                    if round % 10 == 9 {
-                        gc.sweep_stale_uploads();
-                    }
-                    // Every minute: expired capability URLs, and expired shares with their files.
-                    if let Err(e) = gc.run_sweep() {
-                        eprintln!("sweep: {e}");
-                    }
-                    gc.empty_trash().await;
+                    gc.gc_round(round).await;
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             });

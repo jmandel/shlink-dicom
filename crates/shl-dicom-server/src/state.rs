@@ -575,6 +575,19 @@ impl AppState {
         Ok(())
     }
 
+    /// One round of the server's background work, run every minute: expired capability URLs and
+    /// expired shares (with their files), the trash, and every tenth round uploads abandoned for a
+    /// day.
+    pub async fn gc_round(&self, round: u64) {
+        if round % 10 == 9 {
+            self.sweep_stale_uploads();
+        }
+        if let Err(e) = self.run_sweep() {
+            eprintln!("sweep: {e}");
+        }
+        self.empty_trash().await;
+    }
+
     /// Startup only: removes share files (`shares/{sid}.db`, `shares/{sid}/`) with no catalog row.
     ///
     /// Invariant: a share's catalog row exists exactly while its files are meant to. Creating a
