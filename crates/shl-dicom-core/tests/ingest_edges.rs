@@ -225,3 +225,32 @@ fn forged_zip_sizes_are_skipped() {
     let sops: Vec<&str> = parsed.iter().map(|p| p.sop_instance_uid.as_str()).collect();
     assert_eq!(sops, ["2.25.77.1.1", "2.25.77.1.3"], "{skipped:?}");
 }
+
+#[path = "../../../codecs/shl-dicom-decode/tests/support/ds.rs"]
+mod ds;
+
+/// A Deflated Explicit VR Little Endian file: its header is read from the inflated data set (the
+/// UIDs found, the transfer syntax kept), and its bytes are packed as they came.
+#[test]
+fn a_deflated_data_set_is_read_and_kept_as_it_came() {
+    use ds::{part10_meta, Ds, Enc};
+    use std::io::Write;
+    let mut d = Ds::new(Enc::ExplicitLe);
+    d.ui(0x0008, 0x0016, "1.2.840.10008.5.1.4.1.1.7").ui(0x0008, 0x0018, "2.25.88.1.1").text(0x0008, 0x0060, b"CS", "OT");
+    d.ui(0x0020, 0x000D, "2.25.88").ui(0x0020, 0x000E, "2.25.88.1").text(0x0020, 0x0013, b"IS", "1");
+    d.us(0x0028, 0x0002, 1).text(0x0028, 0x0004, b"CS", "MONOCHROME2").us(0x0028, 0x0010, 4).us(0x0028, 0x0011, 4);
+    d.us(0x0028, 0x0100, 8).us(0x0028, 0x0101, 8).us(0x0028, 0x0102, 7).us(0x0028, 0x0103, 0);
+    d.elem(0x7FE0, 0x0010, b"OW", &[9u8; 16]);
+    let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&d.out).unwrap();
+    let deflated = z.finish().unwrap();
+    let file = part10_meta("1.2.840.10008.1.2.1.99", &[(0x0002, "1.2.840.10008.5.1.4.1.1.7"), (0x0003, "2.25.88.1.1")], &deflated, true);
+
+    let p = parse_dicom_bytes("deflated.dcm", file.clone()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((p.study_instance_uid.as_str(), p.series_instance_uid.as_str(), p.sop_instance_uid.as_str()), ("2.25.88", "2.25.88.1", "2.25.88.1.1"));
+    assert_eq!(p.transfer_syntax_uid, "1.2.840.10008.1.2.1.99");
+    assert_eq!(p.bytes, file, "packed as it came");
+    // The same from a reader (the seed and the CLI read headers from disk).
+    let h = shl_dicom_core::dicom_io::parse_dicom_header_reader("deflated.dcm", Cursor::new(&file)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((h.study_instance_uid.as_str(), h.transfer_syntax_uid.as_str()), ("2.25.88", "1.2.840.10008.1.2.1.99"));
+}

@@ -326,6 +326,62 @@ pub fn wrap_bare_data_set(raw: &[u8]) -> std::result::Result<Option<Vec<u8>>, St
     wrap_bare(raw).map(Some)
 }
 
+const DEFLATED_LE: &str = "1.2.840.10008.1.2.1.99";
+/// Inflated bytes of a deflated data set read for its header: far above any real header (Pixel
+/// Data ends the read), small enough that a hostile stream cannot exhaust memory.
+pub const DEFLATED_HEADER_CAP: u64 = 16 << 20;
+
+/// The file meta group of a Part 10 file whose bytes start at `meta` (after "DICM"): its length,
+/// transfer syntax, SOP Class and SOP Instance UIDs. Explicit VR little endian, as Part 10 says.
+fn read_meta(meta: &[u8]) -> Option<(usize, String, String, String)> {
+    let (end, ts) = skip_meta_group(meta)?;
+    let mut p = 0;
+    let (mut class, mut inst) = (String::new(), String::new());
+    while p + 8 <= end {
+        let elem = u16::from_le_bytes([meta[p + 2], meta[p + 3]]);
+        let vr = &meta[p + 4..p + 6];
+        let (len, at) = if matches!(vr, b"OB" | b"OW" | b"OF" | b"SQ" | b"UT" | b"UN") {
+            (u32::from_le_bytes(meta.get(p + 8..p + 12)?.try_into().ok()?) as usize, p + 12)
+        } else {
+            (u16::from_le_bytes([meta[p + 6], meta[p + 7]]) as usize, p + 8)
+        };
+        let v = meta.get(at..at.checked_add(len)?)?;
+        match elem {
+            0x0002 => class = clean_uid(&String::from_utf8_lossy(v)),
+            0x0003 => inst = clean_uid(&String::from_utf8_lossy(v)),
+            _ => {}
+        }
+        p = at + len;
+    }
+    Some((end, ts?, class, inst))
+}
+
+/// A deflated data set (Deflated Explicit VR Little Endian) as dicom-rs can read its header: a
+/// Part 10 file in Explicit VR Little Endian holding the first [`DEFLATED_HEADER_CAP`] inflated
+/// bytes. Only the header is read from it; the file's own bytes are what gets packed.
+fn deflated_header_view(class: &str, inst: &str, deflated: impl Read) -> std::result::Result<Vec<u8>, String> {
+    let mut b = vec![0u8; 128];
+    b.extend_from_slice(b"DICM");
+    b.extend_from_slice(&file_meta("1.2.840.10008.1.2.1", class, inst));
+    flate2::read::DeflateDecoder::new(deflated)
+        .take(DEFLATED_HEADER_CAP)
+        .read_to_end(&mut b)
+        .map_err(|e| format!("deflated data set does not inflate: {e}"))?;
+    Ok(b)
+}
+
+/// Reads a header from a view of a deflated file, keeping the file's own transfer syntax.
+fn parse_deflated_view(source_name: &str, view: &[u8], final_bytes: Vec<u8>) -> std::result::Result<ParsedDicomInstance, String> {
+    let obj = OpenFileOptions::new()
+        .tranfer_syntax_index(Syntaxes)
+        .read_until(Tag(0x7FE0, 0x0000))
+        .from_reader(Cursor::new(view))
+        .map_err(|e| format!("unreadable deflated DICOM: {e}"))?;
+    let mut p = parsed_from_object(source_name, &obj, final_bytes, false)?;
+    p.transfer_syntax_uid = DEFLATED_LE.to_string();
+    Ok(p)
+}
+
 /// Parses a DICOM Part 10 byte buffer (or bare dataset, wrapping it in Part 10 if needed).
 /// `Err` carries the reason a file is not ingested: not DICOM, a `DICOMDIR` index, or unreadable.
 pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::Result<ParsedDicomInstance, String> {
@@ -336,6 +392,13 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::
         return Err("too short to be a DICOM file".into());
     }
 
+    if has_part10_magic(&raw_bytes) {
+        if let Some((end, ts, class, inst)) = read_meta(&raw_bytes[132..]).filter(|m| clean_uid(&m.1) == DEFLATED_LE) {
+            let _ = ts;
+            let view = deflated_header_view(&class, &inst, &raw_bytes[132 + end..])?;
+            return parse_deflated_view(source_name, &view, raw_bytes);
+        }
+    }
     let (file_obj, final_bytes, was_bare_wrapped) = if has_part10_magic(&raw_bytes) {
         let obj = OpenFileOptions::new()
             .tranfer_syntax_index(Syntaxes)
@@ -361,14 +424,29 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::
 /// Reads only the header of a Part 10 file from `reader` (up to Pixel Data), so a large file is
 /// never held. `bytes` in the result is empty. Bare data sets are not handled here.
 /// `Err` carries the reason the file is not ingested, as for [`parse_dicom_bytes`].
-pub fn parse_dicom_header_reader<R: std::io::Read>(source_name: &str, reader: R) -> std::result::Result<ParsedDicomInstance, String> {
+pub fn parse_dicom_header_reader<R: std::io::Read>(source_name: &str, mut reader: R) -> std::result::Result<ParsedDicomInstance, String> {
     if let Some(reason) = non_dicom_name(source_name) {
         return Err(reason);
+    }
+    // The preamble and file meta first, to tell a deflated data set (read through an inflated
+    // view) from any other.
+    let mut head = Vec::with_capacity(4096);
+    (&mut reader).take(132 + 12).read_to_end(&mut head).map_err(|e| e.to_string())?;
+    if head.len() == 144 && &head[128..132] == b"DICM" && &head[132..136] == [0x02, 0x00, 0x00, 0x00] && &head[136..138] == b"UL" {
+        let group = u32::from_le_bytes(head[140..144].try_into().unwrap()) as u64;
+        (&mut reader).take(group.min(1 << 20)).read_to_end(&mut head).map_err(|e| e.to_string())?;
+        if let Some((end, ts, class, inst)) = read_meta(&head[132..]) {
+            if clean_uid(&ts) == DEFLATED_LE {
+                let rest = Cursor::new(head[132 + end..].to_vec()).chain(reader);
+                let view = deflated_header_view(&class, &inst, rest)?;
+                return parse_deflated_view(source_name, &view, Vec::new());
+            }
+        }
     }
     let file_obj = OpenFileOptions::new()
         .tranfer_syntax_index(Syntaxes)
         .read_until(Tag(0x7FE0, 0x0000))
-        .from_reader(reader)
+        .from_reader(Cursor::new(head).chain(reader))
         .map_err(|e| format!("unreadable DICOM: {e}"))?;
     parsed_from_object(source_name, &file_obj, Vec::new(), false)
 }
