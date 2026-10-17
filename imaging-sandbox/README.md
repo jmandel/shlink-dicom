@@ -299,7 +299,7 @@ All settings are environment variables.
 | `HOST` | `0.0.0.0` | listening address |
 | `BASE_URL` | `http://localhost:$PORT` | public origin (and optional path prefix) used in every returned URL, and in the MRN and accession identifier systems |
 | `ALLOWED_ORIGINS` | `*` | CORS: `*`, or a comma-separated list of origins such as `https://share.example.org,http://localhost:3000`. With a list, the server echoes `Origin` only if listed and sends `Vary: Origin`. No cookies are used, so `*` is safe for a public sandbox; a list stops other sites' scripts from using it. |
-| `SHARE_REDIRECT_URIS` | `http://localhost:3000/share/smart-callback,http://127.0.0.1:3000/share/smart-callback` | redirect URIs registered for `client_id=shlink-dicom-share` (exact match) |
+| `SHARE_REDIRECT_URIS` | `http://localhost:3000/share/smart-callback/,http://127.0.0.1:3000/share/smart-callback/` | redirect URIs registered for `client_id=shlink-dicom-share` (exact match) |
 | `CLIENTS_JSON` | (unset) | replaces the client registrations: `[{"client_id":"…","name":"…","redirect_uris":["…"]}]` |
 | `OPEN_CLIENTS` | `true` | also accept any unregistered `client_id` whose `redirect_uri` is `https:`, or `http:` on localhost. Set `false` to allow only registered clients. |
 | `ENDPOINT_MODE` | `external` | how search results carry the WADO-RS Endpoint: `external` (one shared `Endpoint/wado-rs`, returned with `_include`), `contained` (`#wado` in each ImagingStudy), or `capability` (one capability URL per study, as a `urn:uuid:` Bundle entry, always included) |

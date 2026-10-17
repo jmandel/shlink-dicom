@@ -52,7 +52,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     {
       client_id: "shlink-dicom-share",
       name: "SHLink DICOM Share",
-      redirect_uris: (env.SHARE_REDIRECT_URIS || "http://localhost:3000/share/smart-callback,http://127.0.0.1:3000/share/smart-callback")
+      redirect_uris: (env.SHARE_REDIRECT_URIS || "http://localhost:3000/share/smart-callback/,http://127.0.0.1:3000/share/smart-callback/")
         .split(/[\s,]+/)
         .filter(Boolean),
     },

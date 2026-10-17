@@ -623,7 +623,9 @@ export function handleImaging(cfg: Config, store: Store, caps: CapabilityStore, 
   if (req.method !== "GET") return outcome(405, "not-supported", "This server is read-only");
 
   if (type === "Endpoint" && cfg.endpointMode === "external") {
-    if (id !== "wado-rs") return outcome(404, "not-found", `Endpoint/${id} not found`);
+    // The Endpoint is what an ImagingStudy points to: readable with a scope that reads either.
+    if (!scopeAllows(tok.grant.scopes, "Endpoint", "r") && !scopeAllows(tok.grant.scopes, "ImagingStudy", "r")) return insufficientScope("patient/ImagingStudy.r");
+    if (id !== "wado-rs" || path.length > 2) return outcome(404, "not-found", `Endpoint/${path.slice(1).join("/")} not found`);
     return fhirJson(wadoEndpoint(cfg, "wado-rs", u.wado));
   }
 

@@ -515,6 +515,9 @@ async function main() {
   check("Patient-only token: Patient read 200", (await status(`${base}/fhir/Patient/${PATIENT}`, patientOnly.token.access_token)) === 200);
   check("Patient-only token: ImagingStudy search 403", (await status(`${d.imagingBase}/ImagingStudy?patient=${PATIENT}`, patientOnly.token.access_token)) === 403);
   check("Patient-only token: WADO-RS 403", (await status(`${base}/wado-rs/studies/${wrist}`, patientOnly.token.access_token)) === 403);
+  check("Patient-only token: Endpoint read 403", (await status(`${d.imagingBase}/Endpoint/wado-rs`, patientOnly.token.access_token)) === 403);
+  check("Endpoint read with an ImagingStudy token: 200", (await status(`${d.imagingBase}/Endpoint/wado-rs`, at)) === 200);
+  check("Endpoint/wado-rs/extra: 404", (await status(`${d.imagingBase}/Endpoint/wado-rs/extra`, at)) === 404);
   const r403 = await fetch(`${base}/wado-rs/studies/${wrist}`, { headers: { authorization: `Bearer ${patientOnly.token.access_token}`, accept: C.DICOM_ACCEPT } });
   check("403 carries error=insufficient_scope", (r403.headers.get("www-authenticate") ?? "").includes("insufficient_scope"));
   const searchOnly = await httpLaunch(base, { scope: "patient/ImagingStudy.s" });
