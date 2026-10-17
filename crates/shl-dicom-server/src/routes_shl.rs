@@ -132,26 +132,26 @@ pub async fn post_shl_manifest(
         }
 
         if let (Some(salt), Some(expected_hash)) = (salt_opt, hash_opt) {
-            // Atomically decrement remaining_attempts before checking passcode
-            let rem_opt: Option<i64> = tx
-                .query_row(
-                    "UPDATE links SET remaining_attempts = remaining_attempts - 1
-                     WHERE lid = ?1 AND remaining_attempts > 0
-                     RETURNING remaining_attempts",
-                    params![lid],
-                    |r| r.get(0),
-                )
-                .optional()
-                .unwrap_or(None);
+            let provided = req.passcode.as_deref().unwrap_or("");
+            // No passcode is not a wrong one: 401 without using up an attempt. Otherwise an attempt
+            // is used before the passcode is checked (atomically), and given back if it matches;
+            // wrong passcodes count over the link's whole life.
+            let sql = if provided.is_empty() {
+                "SELECT remaining_attempts FROM links WHERE lid = ?1 AND remaining_attempts > 0"
+            } else {
+                "UPDATE links SET remaining_attempts = remaining_attempts - 1
+                 WHERE lid = ?1 AND remaining_attempts > 0
+                 RETURNING remaining_attempts"
+            };
+            let rem_opt: Option<i64> = tx.query_row(sql, params![lid], |r| r.get(0)).optional().unwrap_or(None);
 
             let Some(remaining) = rem_opt else {
                 let _ = tx.commit();
                 return not_found();
             };
 
-            let provided = req.passcode.as_deref().unwrap_or("");
             let actual_hash = hash_passcode(&salt, provided);
-            if actual_hash.as_slice() != expected_hash.as_slice() {
+            if provided.is_empty() || actual_hash.as_slice() != expected_hash.as_slice() {
                 let _ = tx.commit();
                 drop(conn);
                 state.record_access(

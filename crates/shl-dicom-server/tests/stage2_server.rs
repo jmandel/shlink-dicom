@@ -479,6 +479,15 @@ async fn test_passcode_attempt_limit_and_concurrency() {
         .await
         .unwrap();
 
+    // No passcode, or an empty one, is a 401 that uses up no attempt; nor does the right one.
+    for body in [json!({}), json!({ "passcode": "" }), json!({ "passcode": null }), json!({}), json!({ "passcode": "" }), json!({})] {
+        let r = client.post(format!("{base}/shl/{lid}")).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(r.json::<Value>().await.unwrap()["remainingAttempts"], 5, "{body}");
+    }
+    let r = client.post(format!("{base}/shl/{lid}")).json(&json!({ "passcode": "correct-horse" })).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
     // Fire 10 concurrent wrong passcode attempts against the 5-attempt limit
     let mut handles = Vec::new();
     for _ in 0..10 {
