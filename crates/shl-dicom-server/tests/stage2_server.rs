@@ -59,6 +59,20 @@ async fn blob_exists(state: &AppState, key: &str) -> bool {
     }
 }
 
+/// Makes `sid` the server's sample (which anyone may clone), as the seed does.
+fn as_sample(state: &AppState, sid: &str) {
+    let share = state.build_share_resource(sid, "http://localhost").unwrap();
+    state.demo_shares.lock().unwrap().push(shl_dicom_server::state::DemoShareInfo {
+        id: sid.to_string(),
+        title: "Sample".into(),
+        description: String::new(),
+        shlink_uri: "http://localhost/#shlink:/SAMPLE".into(),
+        passcode_hint: None,
+        read_only: true,
+        share,
+    });
+}
+
 /// A file's storage key, from the share's database.
 fn file_key(state: &AppState, sid: &str, fid: &str) -> String {
     let c = state.open_share_db(sid).unwrap();
@@ -962,6 +976,7 @@ async fn test_demo_seeding_cloning_expiry_and_parallel_uploads() {
     let (demo_sid, _unused_ctrl) = state.create_share(true, None).unwrap();
     let fid = b64url_encode(&[77u8; 16]);
     shl_dicom_server::state::store_file(&state, &demo_sid, &fid, &vec![0x55u8; 70_000]).await.unwrap();
+    as_sample(&state, &demo_sid);
 
     // Clone the read-only demo share into a controllable sandbox share
     let clone_resp: Value = client
@@ -1166,6 +1181,7 @@ async fn test_clone_shares_blobs_by_reference() {
     shl_dicom_server::state::store_file(&state, &src, &fid, &data).await.unwrap();
     let key = file_key(&state, &src, &fid);
     assert!(!key.contains(&src), "storage keys name no share: {key}");
+    as_sample(&state, &src);
     let clone: Value = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap().json().await.unwrap();
     let (sid, token) = (clone["share"]["id"].as_str().unwrap().to_string(), clone["controlToken"].as_str().unwrap().to_string());
 
@@ -1729,7 +1745,7 @@ async fn test_deleting_a_share_twice_releases_its_blobs_once() {
         let (src, src_token) = state.create_share(false, None).unwrap();
         shl_dicom_server::state::store_file(&state, &src, &fid, &data).await.unwrap();
         let key = file_key(&state, &src, &fid);
-        let clone: Value = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap().json().await.unwrap();
+        let clone: Value = client.post(format!("{base}/api/shares/{src}/clone")).bearer_auth(&src_token).send().await.unwrap().json().await.unwrap();
         let sid = clone["share"]["id"].as_str().unwrap().to_string();
 
         match round {
@@ -2129,6 +2145,7 @@ async fn test_a_clone_never_names_a_released_blob() {
     let fid = b64url_encode(&[44u8; 16]);
     shl_dicom_server::state::store_file(&state, &src, &fid, &[5u8; 70_000]).await.unwrap();
     let key = file_key(&state, &src, &fid);
+    as_sample(&state, &src);
     // An ordinary clone takes a reference.
     let r = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -2402,5 +2419,30 @@ async fn test_link_ids_carry_256_bits() {
     let short = b64url_encode(&[1u8; 16]);
     assert!(!shl_dicom_server::state::is_valid_lid(&short));
     assert_eq!(client.get(format!("{base}/shl/{short}/bundle.jwe")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only the sample can be cloned without a token; any other share needs its own control token.
+#[tokio::test]
+async fn test_cloning_needs_the_source_token_except_for_the_sample() {
+    let dir = temp_data_dir("clone_auth");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let (src, src_token) = state.create_share(false, None).unwrap();
+    let (_other, other_token) = state.create_share(false, None).unwrap();
+    let clone = |token: Option<String>| {
+        let mut r = client.post(format!("{base}/api/shares/{src}/clone"));
+        if let Some(t) = token {
+            r = r.bearer_auth(t);
+        }
+        async move { r.send().await.unwrap().status() }
+    };
+    assert_eq!(clone(None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(clone(Some(other_token)).await, StatusCode::FORBIDDEN);
+    assert_eq!(clone(Some(src_token)).await, StatusCode::CREATED);
+    let (sample, _) = state.create_share(true, None).unwrap();
+    as_sample(&state, &sample);
+    assert_eq!(client.post(format!("{base}/api/shares/{sample}/clone")).send().await.unwrap().status(), StatusCode::CREATED);
     let _ = std::fs::remove_dir_all(&dir);
 }

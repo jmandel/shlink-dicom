@@ -138,6 +138,14 @@ pub async fn clone_share(
         )
             .into_response();
     }
+    // Anyone may clone the server's sample (the How it works page does); any other share only
+    // with its control token, as a sid alone gives no right to its files.
+    let is_sample = state.demo_shares.lock().unwrap().iter().any(|d| d.id == source_sid);
+    if !is_sample {
+        if let Err(resp) = require_auth(&state, &source_sid, &headers) {
+            return resp;
+        }
+    }
     let Some(src_conn_arc) = state.open_share_db(&source_sid) else {
         return (
             StatusCode::NOT_FOUND,
