@@ -5,6 +5,11 @@ For every expect=decode case of the given formats (default: uncompressed), or ev
 --dir, the `transcode` example re-encodes the file. Each encoded file is then decoded by the references in REFS, and every result
 must equal the original case's oracle exactly. Declines are listed with their reasons. Writes a JSON report.
 
+It fails (exit 1) on a crash or a reference mismatch, and also when the corpus is not all there or
+the encoder does less than it did: a case whose sample is missing, no cases at all, or, against
+--baseline (default: check_corpus.baseline.json beside this script), fewer cases encoded than the
+baseline or any case it encoded now declined. --update-baseline writes the baseline from this run.
+
     cd codec-corpus
     uv run python ../codecs/shl-dicom-transcode/tools/check_corpus.py \
         --transcode /path/to/target/release/examples/transcode --work /media/barracuda/sv1/work
@@ -81,14 +86,24 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--ts", default="1.2.840.10008.1.2.4.70", choices=sorted(REFS))
     ap.add_argument("--report", type=Path)
+    ap.add_argument("--baseline", type=Path, default=Path(__file__).with_name("check_corpus.baseline.json"))
+    ap.add_argument("--update-baseline", action="store_true")
     a = ap.parse_args()
     a.work.mkdir(parents=True, exist_ok=True)
     if a.dir:
         work = [("dir", {"id": "-".join(p.relative_to(a.dir).parts).removesuffix(".dcm"), "path": str(p)})
                 for p in sorted(a.dir.rglob("*")) if p.is_file()]
     else:
-        work = [(f, c) for f in (a.format or ["uncompressed"]) for c in load_cases(f)
-                if c.get("expect") == "decode" and sample_path(f, c["id"]).exists() and (not a.case or a.case in c["id"])]
+        wanted = [(f, c) for f in (a.format or ["uncompressed"]) for c in load_cases(f)
+                  if c.get("expect") == "decode" and (not a.case or a.case in c["id"])]
+        missing = [f"{f}/{c['id']}" for f, c in wanted if not sample_path(f, c["id"]).exists()]
+        if missing:
+            print(f"FAIL: {len(missing)} case(s) have no sample (run discover/generate), e.g. {missing[:3]}")
+            return 1
+        work = wanted
+    if not work:
+        print("FAIL: no cases to check")
+        return 1
     with ThreadPoolExecutor(a.jobs) as ex:
         results = list(ex.map(lambda fc: run(fc[1], fc[0], a.transcode, a.work, a.ts), work))
     counts = Counter(r["outcome"] for r in results)
@@ -107,7 +122,25 @@ def main() -> int:
               f"transcode with both checks {pin / 1e6 / (ms / 1000):.1f} MB/s over {len(enc)} files")
     if a.report:
         a.report.write_text(json.dumps(results, indent=1) + "\n")
-    return 1 if counts.get("crash") or counts.get("reference-mismatch") else 0
+    bad = bool(counts.get("crash") or counts.get("reference-mismatch"))
+    # Against the baseline: the encoder must still encode every case it did (a whole run only).
+    encoded = sorted(f"{r['format']}/{r['case']}" for r in enc)
+    if not a.dir and not a.case:
+        key = f"{a.ts} {' '.join(sorted(a.format or ['uncompressed']))}"
+        base = json.loads(a.baseline.read_text()) if a.baseline.exists() else {}
+        if a.update_baseline:
+            base[key] = {"cases": len(results), "encoded": encoded}
+            a.baseline.write_text(json.dumps(base, indent=1) + "\n")
+            print(f"baseline for {key}: {len(encoded)} of {len(results)} encoded")
+        elif key in base:
+            lost = sorted(set(base[key]["encoded"]) - set(encoded))
+            if lost or len(encoded) < len(base[key]["encoded"]):
+                print(f"FAIL: {len(encoded)} encoded, baseline {len(base[key]['encoded'])}; newly declined or failed: {lost}")
+                bad = True
+        else:
+            print(f"FAIL: no baseline for {key} in {a.baseline} (run with --update-baseline once)")
+            bad = True
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
