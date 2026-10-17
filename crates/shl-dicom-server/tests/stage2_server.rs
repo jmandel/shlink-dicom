@@ -3,7 +3,7 @@ use axum::http::{header, StatusCode};
 use rusqlite::params;
 use serde_json::{json, Value};
 use shl_dicom_core::{
-    crypto::{b64url_encode, decode_key_32, decrypt_range, encrypt_file, random_bytes},
+    crypto::{b64url_decode, b64url_encode, decode_key_32, decrypt_range, encrypt_file, random_bytes},
     jwe::encrypt_bundle_jwe,
     range::ciphertext_range,
 };
@@ -716,7 +716,7 @@ async fn test_multiple_links_subset_scoping_and_orphan_sweep() {
     );
 
     // Simulate a crash between share DB and catalog DB: insert an orphan link into share DB only
-    let orphan_lid = b64url_encode(&[99u8; 16]);
+    let orphan_lid = b64url_encode(&[99u8; 32]);
     {
         let conn_arc = state.open_share_db(&sid).unwrap();
         let conn = conn_arc.lock().unwrap();
@@ -1871,7 +1871,7 @@ async fn test_security_headers_on_every_response() {
     let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
-    let lid = b64url_encode(&[1u8; 16]);
+    let lid = b64url_encode(&[1u8; 32]);
     let responses = [
         client.post(format!("{base}/api/shares")).send().await.unwrap(),
         client.get(format!("{base}/api/shares/nope")).send().await.unwrap(),
@@ -2376,5 +2376,31 @@ async fn test_a_trickling_upload_ends_at_its_deadline() {
     let h = client.head(&url).bearer_auth(&token).send().await.unwrap();
     let off: u64 = h.headers()["upload-offset"].to_str().unwrap().parse().unwrap();
     assert!(off > 0 && off < 2000 && off.is_multiple_of(100), "{off}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Link ids carry 256 bits (32 random bytes, 43 characters), as the SHL specification requires
+/// of the link's url; shorter ids are not looked up.
+#[tokio::test]
+async fn test_link_ids_carry_256_bits() {
+    let dir = temp_data_dir("lid_entropy");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..20 {
+        let l: Value = client.post(format!("{base}/api/shares/{sid}/links")).bearer_auth(&token).json(&json!({ "allowedFiles": [] })).send().await.unwrap().json().await.unwrap();
+        let lid = l["id"].as_str().unwrap().to_string();
+        assert!(shl_dicom_server::state::is_valid_lid(&lid), "{lid}");
+        assert_eq!(b64url_decode(&lid).unwrap().len(), 32);
+        assert!(l["url"].as_str().unwrap().contains(&lid));
+        assert!(seen.insert(lid));
+    }
+    let short = b64url_encode(&[1u8; 16]);
+    assert!(!shl_dicom_server::state::is_valid_lid(&short));
+    assert_eq!(client.get(format!("{base}/shl/{short}/bundle.jwe")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     let _ = std::fs::remove_dir_all(&dir);
 }

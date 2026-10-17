@@ -7,11 +7,12 @@ use shl_dicom_core::{
 };
 use crate::sample_pack::pack_samples;
 use crate::state::{
-    hash_passcode, now_unix, sha256_bytes, AppState, DemoShareInfo,
+    hash_passcode, new_link_id, now_unix, sha256_bytes, AppState, DemoShareInfo,
     DEFAULT_PASSCODE_ATTEMPTS,
 };
 
-const SEED_VERSION: u32 = 5;
+// 6: link ids of 32 random bytes.
+pub const SEED_VERSION: u32 = 6;
 
 /// Title and description of the sample share, from `samples/sample.json` when present.
 #[derive(serde::Deserialize)]
@@ -99,7 +100,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
     let all_allowed_files = packed.file_ids.clone();
 
     // Link 1: U-mode Brain MRI + Wrist link
-    let lid_u = b64url_encode(&random_bytes::<16>().unwrap());
+    let lid_u = new_link_id();
     let key_u = random_bytes::<32>().unwrap();
     let bundle_u = build_link_bundle(
         &owner_bundle_json,
@@ -122,7 +123,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
     )?;
 
     // Link 2: Passcode-protected + Long-Lived manifest link ("LP", passcode "1234")
-    let lid_p = b64url_encode(&random_bytes::<16>().unwrap());
+    let lid_p = new_link_id();
     let key_p = random_bytes::<32>().unwrap();
     let bundle_p = build_link_bundle(
         &owner_bundle_json,
@@ -348,15 +349,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let state = crate::state::AppState::new(&dir).unwrap();
         let (sid, _) = state.create_share(true, None).unwrap();
-        super::insert_seeded_link(&state, &sid, &"a".repeat(22), "u", false, None, false, "x", &[]).unwrap();
-        super::insert_seeded_link(&state, &sid, &"b".repeat(22), "p", true, Some("1234"), true, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &sid, &"a".repeat(43), "u", false, None, false, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &sid, &"b".repeat(43), "p", true, Some("1234"), true, "x", &[]).unwrap();
         let c = state.open_share_db(&sid).unwrap();
         let conn = c.lock().unwrap();
         let get = |lid: String| -> (i64, Option<i64>) {
             conn.query_row("SELECT refill_attempts, remaining_attempts FROM links WHERE lid = ?1", [lid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
         };
-        assert_eq!(get("a".repeat(22)), (0, None));
-        assert_eq!(get("b".repeat(22)), (1, Some(crate::state::DEFAULT_PASSCODE_ATTEMPTS)));
+        assert_eq!(get("a".repeat(43)), (0, None));
+        assert_eq!(get("b".repeat(43)), (1, Some(crate::state::DEFAULT_PASSCODE_ATTEMPTS)));
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }

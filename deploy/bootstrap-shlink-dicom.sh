@@ -207,7 +207,8 @@ fi
 # restarts are immediate. Packing streams one record at a time from scratch files in $DATA.
 # A change to $ENV_FILE (a different store) also packs it again.
 store_env() { $SUDO cat "$ENV_FILE" 2>/dev/null || true; }
-sums="$( (cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json; store_env | sha256sum) | sha256sum | cut -d' ' -f1)"
+# So does a server that lays the sample out differently (seed --print-version).
+sums="$( (cd "$DATA/samples" && sha256sum *.tgz sample.json reports.json; store_env | sha256sum; "$DIR/bin/server" seed --print-version) | sha256sum | cut -d' ' -f1)"
 if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ] || [ ! -f "$DATA/seeded_demos.json" ]; then
   # Read as systemd reads an EnvironmentFile: KEY=value lines, # and ; comments, surrounding
   # whitespace and one pair of quotes around the value removed.

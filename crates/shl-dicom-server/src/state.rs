@@ -66,6 +66,19 @@ pub fn is_valid_id22(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// A link id: 32 random bytes as base64url (43 characters). The SHL specification requires the
+/// link's url, which is built from it, to carry at least 256 bits of entropy.
+pub fn is_valid_lid(s: &str) -> bool {
+    s.len() == 43
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A new link id (see [`is_valid_lid`]).
+pub fn new_link_id() -> String {
+    b64url_encode(&random_bytes::<32>().expect("random bytes"))
+}
+
 pub fn is_valid_token43(s: &str) -> bool {
     s.len() == 43
         && s.bytes()
@@ -628,7 +641,7 @@ impl AppState {
     }
 
     pub fn lookup_sid_by_lid(&self, lid: &str) -> Option<String> {
-        if !is_valid_id22(lid) {
+        if !is_valid_lid(lid) {
             return None;
         }
         let now = now_unix();
@@ -1371,7 +1384,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let state = super::AppState::new(&dir).unwrap();
         let (sid, _) = state.create_share(false, None).unwrap();
-        let lid = "c".repeat(22);
+        let lid = "c".repeat(43);
         state.register_link_in_catalog(&sid, &lid).unwrap();
         let t = state.mint_cap(&lid, 7 * 24 * 3600).unwrap();
         let exp: i64 = state.catalog.lock().unwrap().query_row("SELECT expires_at FROM caps WHERE token = ?1", [t], |r| r.get(0)).unwrap();

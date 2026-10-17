@@ -18,7 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::{
     routes_shl::request_origin,
     state::{
-        build_link_resource_from_row, hash_passcode, is_valid_id22, now_unix,
+        build_link_resource_from_row, hash_passcode, is_valid_id22, is_valid_lid, new_link_id, now_unix,
         adopt_blob, new_storage_key, parse_file_name, record_file, sha256_bytes, AccessEvent, AppState, ShareFileEntry,
         DEFAULT_PASSCODE_ATTEMPTS, DEFAULT_SANDBOX_TTL_SECS, MAX_SHARE_TTL_SECS,
     },
@@ -1016,7 +1016,7 @@ pub async fn create_link(
         file_ids.push(fid.to_string());
     }
 
-    let lid = b64url_encode(&random_bytes::<16>().unwrap());
+    let lid = new_link_id();
     let created_at = now_unix();
     let has_passcode = req.passcode.as_deref().is_some_and(|p| !p.is_empty());
     let (salt_opt, hash_opt, rem_opt) = if let Some(ref p) = req.passcode {
@@ -1112,7 +1112,7 @@ pub async fn put_link_bundle(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
-    if !is_valid_id22(&lid) || body.is_empty() {
+    if !is_valid_lid(&lid) || body.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid lid or empty bundle.jwe" })),
@@ -1168,7 +1168,7 @@ pub async fn patch_link(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
-    if !is_valid_id22(&lid) {
+    if !is_valid_lid(&lid) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let Some(conn_arc) = state.open_share_db(&sid) else {
@@ -1265,7 +1265,7 @@ pub async fn delete_link(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
-    if !is_valid_id22(&lid) {
+    if !is_valid_lid(&lid) {
         return StatusCode::NOT_FOUND.into_response();
     }
     // Rule: delete from catalog first (which cascades to caps), then from share DB. Only a link
@@ -1291,7 +1291,7 @@ pub async fn end_link_sessions(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
-    if !is_valid_id22(&lid) {
+    if !is_valid_lid(&lid) {
         return StatusCode::NOT_FOUND.into_response();
     }
     match state.revoke_caps_for_link(&sid, &lid) {

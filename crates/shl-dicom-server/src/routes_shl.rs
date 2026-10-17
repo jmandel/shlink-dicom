@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 use crate::storage::{ReadDelivery, ReadError};
 use crate::state::{
-    ct_eq, hash_passcode, is_valid_id22, DEFAULT_PASSCODE_ATTEMPTS, now_unix, parse_file_name, AccessEvent, AppState,
+    ct_eq, hash_passcode, is_valid_lid, DEFAULT_PASSCODE_ATTEMPTS, now_unix, parse_file_name, AccessEvent, AppState,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -53,7 +53,7 @@ pub async fn get_shl_file(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    if !is_valid_id22(&lid) {
+    if !is_valid_lid(&lid) {
         return not_found();
     }
     let Some(sid) = state.lookup_sid_by_lid(&lid) else {
@@ -87,7 +87,7 @@ pub async fn post_shl_manifest(
     headers: HeaderMap,
     body: Option<Json<ManifestRequest>>,
 ) -> Response {
-    if !is_valid_id22(&lid) {
+    if !is_valid_lid(&lid) {
         return not_found();
     }
     let Some(sid) = state.lookup_sid_by_lid(&lid) else {

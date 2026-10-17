@@ -146,6 +146,10 @@ enum Commands {
         data_dir: PathBuf,
         #[command(flatten)]
         store: StoreArgs,
+        /// Print the version of the sample's layout this server loads, and exit (the bootstrap
+        /// seeds again when it changes)
+        #[arg(long)]
+        print_version: bool,
     },
     /// Run the Zero-Knowledge SHL Server and Demo Web App
     Serve {
@@ -216,7 +220,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Seed { data_dir, store } => {
+        Commands::Seed { print_version: true, .. } => println!("{}", shl_dicom_server::seed::SEED_VERSION),
+        Commands::Seed { data_dir, store, .. } => {
             let t0 = std::time::Instant::now();
             // The service keeps running on this data directory while the seed works (the bootstrap
             // restarts it afterwards), so the seed runs none of the startup sweeps.
