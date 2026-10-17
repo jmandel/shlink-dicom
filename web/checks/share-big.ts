@@ -7,6 +7,7 @@
 //   bun web/checks/share-big.ts <dir> [slices=1600] [size=1024]
 // Prints JSON: { dir, files, bytes, studyUid }. Reuses the files if <dir>/done.json matches.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeDicom } from "./synthetic";
 
 /** Version of the phantom: files made by an earlier generator are made again. */
 const PHANTOM = 3;
@@ -30,16 +31,6 @@ if (existsSync(done)) {
 }
 mkdirSync(dir, { recursive: true });
 
-const enc = new TextEncoder();
-function el(out: number[], g: number, e: number, vr: string, value: string | Uint8Array) {
-  const v = typeof value === "string" ? Array.from(enc.encode(value)) : Array.from(value);
-  if (v.length % 2) v.push(vr === "UI" || vr === "OB" ? 0 : 0x20);
-  out.push(g & 0xff, g >> 8, e & 0xff, e >> 8, vr.charCodeAt(0), vr.charCodeAt(1));
-  if (vr === "OB") out.push(0, 0, v.length & 0xff, (v.length >> 8) & 0xff, (v.length >> 16) & 0xff, v.length >>> 24);
-  else out.push(v.length & 0xff, v.length >> 8);
-  out.push(...v);
-}
-const us = (x: number) => new Uint8Array([x & 0xff, x >> 8]);
 
 /** A seeded generator (mulberry32): the same sequence on every run. */
 function rng(seed: number) {
@@ -77,7 +68,6 @@ function gauss(r: () => number) {
 }
 
 const studyUid = uid(), seriesUid = uid();
-const CT = "1.2.840.10008.5.1.4.1.1.2";
 
 /**
  * Noise as CT has it: correlated between neighbouring pixels (the reconstruction kernel), here white
@@ -155,51 +145,11 @@ function slice(z: number, k: number): Int16Array {
 let bytes = 0;
 for (let z = 0; z < n; z++) {
   const px = slice(z / Math.max(1, n - 1), z);
-  const sop = uid();
-  const meta: number[] = [];
-  el(meta, 2, 1, "OB", new Uint8Array([0, 1]));
-  el(meta, 2, 2, "UI", CT);
-  el(meta, 2, 3, "UI", sop);
-  el(meta, 2, 0x10, "UI", "1.2.840.10008.1.2.1");
-  el(meta, 2, 0x12, "UI", "2.25.1");
-  const gl: number[] = [];
-  el(gl, 2, 0, "UL", new Uint8Array(new Uint32Array([meta.length]).buffer));
-  const ds: number[] = [];
-  el(ds, 8, 0x16, "UI", CT);
-  el(ds, 8, 0x18, "UI", sop);
-  el(ds, 8, 0x20, "DA", "20260101");
-  el(ds, 8, 0x50, "SH", "SYNBIG01");
-  el(ds, 8, 0x60, "CS", "CT");
-  el(ds, 8, 0x1030, "LO", "Synthetic large CT");
-  el(ds, 8, 0x103e, "LO", `Axial ${size}x${size}`);
-  el(ds, 0x10, 0x10, "PN", "TEST^SYNTHETIC");
-  el(ds, 0x10, 0x20, "LO", "SYN0002");
-  el(ds, 0x20, 0x0d, "UI", studyUid);
-  el(ds, 0x20, 0x0e, "UI", seriesUid);
-  el(ds, 0x20, 0x11, "IS", "1");
-  el(ds, 0x20, 0x13, "IS", String(z + 1));
-  el(ds, 0x28, 2, "US", us(1));
-  el(ds, 0x28, 4, "CS", "MONOCHROME2");
-  el(ds, 0x28, 0x10, "US", us(size));
-  el(ds, 0x28, 0x11, "US", us(size));
-  el(ds, 0x28, 0x100, "US", us(16));
-  el(ds, 0x28, 0x101, "US", us(16));
-  el(ds, 0x28, 0x102, "US", us(15));
-  el(ds, 0x28, 0x103, "US", us(1));
-  el(ds, 0x28, 0x1050, "DS", "40");
-  el(ds, 0x28, 0x1051, "DS", "400");
-  el(ds, 0x28, 0x1052, "DS", "0");
-  el(ds, 0x28, 0x1053, "DS", "1");
-  const pix = new Uint8Array(px.buffer);
-  const pdHead = [0xe0, 0x7f, 0x10, 0x00, 0x4f, 0x57, 0, 0, pix.length & 0xff, (pix.length >> 8) & 0xff, (pix.length >> 16) & 0xff, pix.length >>> 24];
-  const out = new Uint8Array(132 + gl.length + meta.length + ds.length + pdHead.length + pix.length);
-  out.set([0x44, 0x49, 0x43, 0x4d], 128);
-  let o = 132;
-  for (const part of [gl, meta, ds, pdHead]) {
-    out.set(part, o);
-    o += part.length;
-  }
-  out.set(pix, o);
+  const out = writeDicom({
+    sopUid: uid(), studyUid, seriesUid, modality: "CT", accession: "SYNBIG01", patientId: "SYN0002",
+    studyDescription: "Synthetic large CT", seriesDescription: `Axial ${size}x${size}`, seriesNumber: 1, instanceNumber: z + 1,
+    rows: size, columns: size, pixels: px, window: [40, 400],
+  });
   writeFileSync(`${dir}/IM${String(z + 1).padStart(5, "0")}.dcm`, out);
   bytes += out.length;
 }

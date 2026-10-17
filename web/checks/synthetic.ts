@@ -1,17 +1,46 @@
 // Synthetic DICOM for the checks: a 512² CT phantom series and a 2048² DX, written as explicit VR
-// little endian Part 10 files. Fictional patient, generated UIDs (2.25), no real data.
+// little endian Part 10 files. Fictional patient, generated UIDs (2.25), no real data. The element
+// and file writers are also used by share-big.ts and video-fixtures.ts.
+import { LONG_VR } from "../core/dicom";
 
 const enc = new TextEncoder();
 
-function el(out: number[], group: number, elem: number, vr: string, value: string | Uint8Array) {
-  let v = typeof value === "string" ? Array.from(enc.encode(value)) : Array.from(value);
-  if (v.length % 2) v.push(vr === "UI" || vr === "OB" ? 0 : 0x20);
-  const long = ["OB", "OW", "SQ", "UN", "UT"].includes(vr);
-  out.push(group & 0xff, group >> 8, elem & 0xff, elem >> 8, vr.charCodeAt(0), vr.charCodeAt(1));
-  if (long) out.push(0, 0, v.length & 0xff, (v.length >> 8) & 0xff, (v.length >> 16) & 0xff, v.length >>> 24);
-  else out.push(v.length & 0xff, v.length >> 8);
-  for (const b of v) out.push(b);
+/** One explicit VR little endian element; text is padded to even length (UI with NUL). */
+export function element(group: number, elem: number, vr: string, value: string | Uint8Array): Uint8Array {
+  let v = typeof value === "string" ? enc.encode(value) : value;
+  if (v.length % 2) {
+    const p = new Uint8Array(v.length + 1);
+    p.set(v);
+    p[v.length] = vr === "UI" || vr === "OB" ? 0 : 0x20;
+    v = p;
+  }
+  const long = LONG_VR.has(vr);
+  const out = new Uint8Array((long ? 12 : 8) + v.length);
+  const dv = new DataView(out.buffer);
+  dv.setUint16(0, group, true);
+  dv.setUint16(2, elem, true);
+  out[4] = vr.charCodeAt(0);
+  out[5] = vr.charCodeAt(1);
+  if (long) dv.setUint32(8, v.length, true);
+  else dv.setUint16(6, v.length, true);
+  out.set(v, long ? 12 : 8);
+  return out;
 }
+
+/**
+ * A Part 10 file: preamble, file meta (group length, version, SOP class and instance, transfer
+ * syntax, implementation UID), then `body` (the data set's elements and any Pixel Data) as given.
+ */
+export function part10(sopClass: string, sopUid: string, transferSyntax: string, body: Uint8Array[]): Uint8Array {
+  const meta = [element(2, 1, "OB", new Uint8Array([0, 1])), element(2, 2, "UI", sopClass), element(2, 3, "UI", sopUid), element(2, 0x10, "UI", transferSyntax), element(2, 0x12, "UI", "2.25.1")];
+  const metaLen = meta.reduce((a, x) => a + x.length, 0);
+  const parts = [new Uint8Array(128), new Uint8Array([0x44, 0x49, 0x43, 0x4d]), element(2, 0, "UL", new Uint8Array(new Uint32Array([metaLen]).buffer)), ...meta, ...body];
+  const out = new Uint8Array(parts.reduce((a, x) => a + x.length, 0));
+  let o = 0;
+  for (const x of parts) (out.set(x, o), (o += x.length));
+  return out;
+}
+
 const us = (n: number) => new Uint8Array([n & 0xff, n >> 8]);
 
 export function uid(): string {
@@ -21,6 +50,8 @@ export function uid(): string {
 }
 
 export interface SyntheticImage {
+  /** SOP Instance UID (default: a new one). */
+  sopUid?: string;
   studyUid: string;
   seriesUid: string;
   modality: string;
@@ -33,58 +64,51 @@ export interface SyntheticImage {
   /** Signed 16-bit values (CT: Hounsfield units) or unsigned 12-bit in 16. */
   pixels: Int16Array | Uint16Array;
   window?: [number, number];
+  accession?: string;
+  /** Patient ID (default SYN0001). */
+  patientId?: string;
 }
 
 const CT_IMAGE = "1.2.840.10008.5.1.4.1.1.2";
 const DX_IMAGE = "1.2.840.10008.5.1.4.1.1.1.1";
 
-function writeDicom(im: SyntheticImage): Uint8Array {
-  const sop = uid();
+/** One explicit VR little endian Part 10 file. */
+export function writeDicom(im: SyntheticImage): Uint8Array {
+  const sop = im.sopUid ?? uid();
   const sopClass = im.modality === "CT" ? CT_IMAGE : DX_IMAGE;
-  const meta: number[] = [];
-  el(meta, 0x0002, 0x0001, "OB", new Uint8Array([0, 1]));
-  el(meta, 0x0002, 0x0002, "UI", sopClass);
-  el(meta, 0x0002, 0x0003, "UI", sop);
-  el(meta, 0x0002, 0x0010, "UI", "1.2.840.10008.1.2.1");
-  el(meta, 0x0002, 0x0012, "UI", "2.25.1");
-  const head: number[] = [];
-  el(head, 0x0002, 0x0000, "UL", new Uint8Array(new Uint32Array([meta.length]).buffer));
-  const ds: number[] = [];
-  el(ds, 0x0008, 0x0016, "UI", sopClass);
-  el(ds, 0x0008, 0x0018, "UI", sop);
-  el(ds, 0x0008, 0x0020, "DA", "20260101");
-  el(ds, 0x0008, 0x0060, "CS", im.modality);
-  el(ds, 0x0008, 0x1030, "LO", im.studyDescription);
-  el(ds, 0x0008, 0x103e, "LO", im.seriesDescription);
-  el(ds, 0x0010, 0x0010, "PN", "TEST^SYNTHETIC");
-  el(ds, 0x0010, 0x0020, "LO", "SYN0001");
-  el(ds, 0x0020, 0x000d, "UI", im.studyUid);
-  el(ds, 0x0020, 0x000e, "UI", im.seriesUid);
-  el(ds, 0x0020, 0x0011, "IS", String(im.seriesNumber));
-  el(ds, 0x0020, 0x0013, "IS", String(im.instanceNumber));
-  el(ds, 0x0028, 0x0002, "US", us(1));
-  el(ds, 0x0028, 0x0004, "CS", "MONOCHROME2");
-  el(ds, 0x0028, 0x0010, "US", us(im.rows));
-  el(ds, 0x0028, 0x0011, "US", us(im.columns));
-  el(ds, 0x0028, 0x0100, "US", us(16));
-  el(ds, 0x0028, 0x0101, "US", us(im.pixels instanceof Int16Array ? 16 : 12));
-  el(ds, 0x0028, 0x0102, "US", us(im.pixels instanceof Int16Array ? 15 : 11));
-  el(ds, 0x0028, 0x0103, "US", us(im.pixels instanceof Int16Array ? 1 : 0));
+  const ds: Uint8Array[] = [];
+  const el = (g: number, e: number, vr: string, v: string | Uint8Array) => ds.push(element(g, e, vr, v));
+  el(0x0008, 0x0016, "UI", sopClass);
+  el(0x0008, 0x0018, "UI", sop);
+  el(0x0008, 0x0020, "DA", "20260101");
+  if (im.accession) el(0x0008, 0x0050, "SH", im.accession);
+  el(0x0008, 0x0060, "CS", im.modality);
+  el(0x0008, 0x1030, "LO", im.studyDescription);
+  el(0x0008, 0x103e, "LO", im.seriesDescription);
+  el(0x0010, 0x0010, "PN", "TEST^SYNTHETIC");
+  el(0x0010, 0x0020, "LO", im.patientId ?? "SYN0001");
+  el(0x0020, 0x000d, "UI", im.studyUid);
+  el(0x0020, 0x000e, "UI", im.seriesUid);
+  el(0x0020, 0x0011, "IS", String(im.seriesNumber));
+  el(0x0020, 0x0013, "IS", String(im.instanceNumber));
+  el(0x0028, 0x0002, "US", us(1));
+  el(0x0028, 0x0004, "CS", "MONOCHROME2");
+  el(0x0028, 0x0010, "US", us(im.rows));
+  el(0x0028, 0x0011, "US", us(im.columns));
+  el(0x0028, 0x0100, "US", us(16));
+  el(0x0028, 0x0101, "US", us(im.pixels instanceof Int16Array ? 16 : 12));
+  el(0x0028, 0x0102, "US", us(im.pixels instanceof Int16Array ? 15 : 11));
+  el(0x0028, 0x0103, "US", us(im.pixels instanceof Int16Array ? 1 : 0));
   if (im.window) {
-    el(ds, 0x0028, 0x1050, "DS", String(im.window[0]));
-    el(ds, 0x0028, 0x1051, "DS", String(im.window[1]));
+    el(0x0028, 0x1050, "DS", String(im.window[0]));
+    el(0x0028, 0x1051, "DS", String(im.window[1]));
   }
   if (im.modality === "CT") {
-    el(ds, 0x0028, 0x1052, "DS", "0");
-    el(ds, 0x0028, 0x1053, "DS", "1");
+    el(0x0028, 0x1052, "DS", "0");
+    el(0x0028, 0x1053, "DS", "1");
   }
-  el(ds, 0x7fe0, 0x0010, "OW", new Uint8Array(im.pixels.buffer, im.pixels.byteOffset, im.pixels.byteLength));
-  const out = new Uint8Array(132 + head.length + meta.length + ds.length);
-  out.set([0x44, 0x49, 0x43, 0x4d], 128);
-  out.set(head, 132);
-  out.set(meta, 132 + head.length);
-  out.set(ds, 132 + head.length + meta.length);
-  return out;
+  el(0x7fe0, 0x0010, "OW", new Uint8Array(im.pixels.buffer, im.pixels.byteOffset, im.pixels.byteLength));
+  return part10(sopClass, sop, "1.2.840.10008.1.2.1", ds);
 }
 
 /** A chest-like CT phantom: body, two lungs, a spine and ribs, changing along the series. */

@@ -15,6 +15,7 @@ import { packAndShare } from "./pack-share";
 import { splitAnnexB } from "../core/video-remux";
 import { parseStudyIndex } from "../core/bundle";
 import { studyTitle } from "../core/format";
+import { element, part10 } from "./synthetic";
 
 const base = process.argv[2] ?? "http://localhost:3333";
 const dir = process.env.VIDEO_FIXTURES ?? "/media/barracuda/shlink-video/fixtures";
@@ -69,31 +70,16 @@ if (!existsSync(`${dir}/h264-mvc.ts`)) {
 
 // ------------------------------------------------------------------------------------- DICOM
 
-const enc = new TextEncoder();
 const UID_ROOT = "2.25.";
 let uidSeq = 0;
 const uid = () => `${UID_ROOT}${BigInt(Date.now()) * 1000000n + BigInt(++uidSeq)}${Math.floor(Math.random() * 1e6)}`;
 
+/** An element whose value is text, bytes, or US / AT numbers. */
 function el(group: number, elem: number, vr: string, value: Uint8Array | string | number[], kind?: "us" | "at"): Uint8Array {
-  let v: Uint8Array;
-  if (typeof value === "string") {
-    const s = enc.encode(value);
-    const pad = s.length % 2 ? (vr === "UI" ? 0 : 0x20) : -1;
-    v = pad >= 0 ? Uint8Array.from([...s, pad]) : s;
-  } else if (Array.isArray(value)) {
-    const dv = new DataView(new ArrayBuffer(value.length * (kind === "at" ? 4 : 2)));
-    value.forEach((x, i) => (kind === "at" ? (dv.setUint16(i * 4, x >>> 16, true), dv.setUint16(i * 4 + 2, x & 0xffff, true)) : dv.setUint16(i * 2, x, true)));
-    v = new Uint8Array(dv.buffer);
-  } else v = value;
-  const long = ["OB", "OW", "SQ", "UN", "UT"].includes(vr);
-  const h = new DataView(new ArrayBuffer(long ? 12 : 8));
-  h.setUint16(0, group, true);
-  h.setUint16(2, elem, true);
-  h.setUint8(4, vr.charCodeAt(0));
-  h.setUint8(5, vr.charCodeAt(1));
-  if (long) h.setUint32(8, v.length, true);
-  else h.setUint16(6, v.length, true);
-  return Uint8Array.from([...new Uint8Array(h.buffer), ...v]);
+  if (!Array.isArray(value)) return element(group, elem, vr, value);
+  const dv = new DataView(new ArrayBuffer(value.length * (kind === "at" ? 4 : 2)));
+  value.forEach((x, i) => (kind === "at" ? (dv.setUint16(i * 4, x >>> 16, true), dv.setUint16(i * 4 + 2, x & 0xffff, true)) : dv.setUint16(i * 2, x, true)));
+  return element(group, elem, vr, new Uint8Array(dv.buffer));
 }
 
 const u32 = (n: number) => {
@@ -144,14 +130,6 @@ interface VideoDicom {
 function videoDicom(v: VideoDicom): Uint8Array {
   const sop = v.sopClass ?? "1.2.840.10008.5.1.4.1.1.77.1.1.1";
   const inst = uid();
-  const metaBody = [
-    el(2, 1, "OB", Uint8Array.from([0, 1])),
-    el(2, 2, "UI", sop),
-    el(2, 3, "UI", inst),
-    el(2, 0x10, "UI", v.ts),
-    el(2, 0x12, "UI", "2.25.1"),
-  ];
-  const metaLen = metaBody.reduce((a, b) => a + b.length, 0);
   const ds = [
     el(8, 0x16, "UI", sop),
     el(8, 0x18, "UI", inst),
@@ -179,13 +157,7 @@ function videoDicom(v: VideoDicom): Uint8Array {
     el(0x28, 0x102, "US", [7], "us"),
     el(0x28, 0x103, "US", [0], "us"),
   ];
-  const groupLength = Uint8Array.from([2, 0, 0, 0, 0x55, 0x4c, 4, 0, ...u32(metaLen)]); // (0002,0000) UL
-  const parts = [new Uint8Array(128), enc.encode("DICM"), groupLength, ...metaBody, ...ds, ...encapsulate(v.stream, v.fragmentBytes ?? 0x7ffffffe)];
-  const n = parts.reduce((a, b) => a + b.length, 0);
-  const out = new Uint8Array(n);
-  let o = 0;
-  for (const p of parts) (out.set(p, o), (o += p.length));
-  return out;
+  return part10(sop, inst, v.ts, [...ds, ...encapsulate(v.stream, v.fragmentBytes ?? 0x7ffffffe)]);
 }
 
 // ------------------------------------------------------------------------------------- cases
