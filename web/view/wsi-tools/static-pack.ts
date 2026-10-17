@@ -1,11 +1,13 @@
 // Packs a slide folder for a static host (spec/README.md §10, U mode; Appendix C), for slides too
-// large for the local server's upload limit. Records are encrypted one at a time.
+// large for the local server's upload limit. The files are encrypted by the Share page's packer (web/share/lib/pack.ts).
 //   bun web/view/wsi-tools/static-pack.ts <name> <folder> [hostRoot] [hostUrl]
 // Writes <hostRoot>/<id>/ with two encrypted files and two Bundles: bundle.jwe (the files as they
 // are) and bundle-tables.jwe (offset tables added by the core packer's rewrite, through
 // shl-dicom-wasm's offset_table_patch_wasm). Adds <name> to /tmp/wsi-fixtures.json.
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { b64urlDecode, EXT_INSTANCE_LENGTH, EXT_LINKED_FILE, PROFILE_URL, b64urlEncode, encodeShlink, encryptJwe, randomKeyB64, readDicomHeader, recordNonce, RECORD_PLAINTEXT } from "../../core/index";
+import { EXT_INSTANCE_LENGTH, EXT_LINKED_FILE, PROFILE_URL, b64urlEncode, encodeShlink, encryptJwe, randomKeyB64, readDicomHeader, recordCount } from "../../core/index";
+import { BlobBytes, ConcatBytes, MemBytes, SubBytes, type Bytes } from "../../share/lib/bytes";
+import { CHUNK_RECORDS, encryptRecords, fileKey, type PackedFile } from "../../share/lib/pack";
 import { initSync, offset_table_patch_wasm } from "../../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
 initSync({ module: readFileSync("crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm") });
@@ -31,45 +33,25 @@ for (const f of readdirSync(dir).filter((f) => f.endsWith(".dcm"))) {
 parts.sort((a, b) => (Number(a.h.instanceNumber) || 0) - (Number(b.h.instanceNumber) || 0) || a.h.sopInstanceUid.localeCompare(b.h.sopInstanceUid));
 
 /** Byte source of one instance, with or without its offset-table rewrite. */
-const instLen = (p: Part, tables: boolean) => (tables && p.head ? p.head.length + p.size - p.resumeAt! : p.size);
-async function instSlice(p: Part, tables: boolean, a: number, b: number): Promise<Uint8Array> {
-  if (!tables || !p.head) return new Uint8Array(await Bun.file(p.path).slice(a, b).arrayBuffer());
-  const out = new Uint8Array(b - a);
-  const H = p.head.length;
-  if (a < H) out.set(p.head.subarray(a, Math.min(b, H)), 0);
-  if (b > H) {
-    const from = Math.max(a, H);
-    out.set(new Uint8Array(await Bun.file(p.path).slice(p.resumeAt! + from - H, p.resumeAt! + b - H).arrayBuffer()), from - a);
-  }
-  return out;
+function instBytes(p: Part, tables: boolean): Bytes {
+  const file = new BlobBytes(Bun.file(p.path));
+  if (!tables || !p.head) return file;
+  return new ConcatBytes([new MemBytes(p.head), new SubBytes(file, p.resumeAt!, p.size - p.resumeAt!)]);
 }
 
+/** Encrypts the instances, end to end, into one file as the Share page's packer does (pack.ts). */
 async function writeSeries(tables: boolean) {
-  const fileId = rnd(16), keyB64 = rnd(32);
-  const key = await crypto.subtle.importKey("raw", b64urlDecode(keyB64), "AES-GCM", false, ["encrypt"]);
-  const lens = parts.map((p) => instLen(p, tables));
-  const starts: number[] = [];
-  let P = 0;
-  for (const l of lens) (starts.push(P), (P += l));
-  const read = async (a: number, b: number) => {
-    const buf = new Uint8Array(b - a);
-    for (let i = 0; i < parts.length; i++) {
-      const s = starts[i], e = s + lens[i];
-      if (e <= a || s >= b) continue;
-      const from = Math.max(a, s), to = Math.min(b, e);
-      buf.set(await instSlice(parts[i], tables, from - s, to - s), from - a);
-    }
-    return buf;
-  };
-  const w = Bun.file(`${out}/${fileId}.bin`).writer();
-  const n = Math.max(1, Math.ceil(P / RECORD_PLAINTEXT));
-  for (let r = 0; r < n; r++) {
-    const pt = await read(r * RECORD_PLAINTEXT, Math.min(P, (r + 1) * RECORD_PLAINTEXT));
-    w.write(new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: recordNonce(r) }, key, pt)));
-    if (r % 2000 === 0) await w.flush();
+  const instances = parts.map((p) => ({ src: instBytes(p, tables) }));
+  const P = instances.reduce((a, i) => a + i.src.size, 0);
+  const f = { instances, fileId: rnd(16), key: randomKeyB64(), plaintextLength: P, records: recordCount(P) } as unknown as PackedFile;
+  const key = await fileKey(f);
+  const w = Bun.file(`${out}/${f.fileId}.bin`).writer();
+  for (let r = 0; r < f.records; r += CHUNK_RECORDS) {
+    w.write(await encryptRecords(f, key, r, Math.min(f.records, r + CHUNK_RECORDS)));
+    await w.flush();
   }
   await w.end();
-  return { fileId, keyB64, lens, P, ciphertext: statSync(`${out}/${fileId}.bin`).size };
+  return { fileId: f.fileId, keyB64: f.key, lens: instances.map((i) => i.src.size), P, ciphertext: statSync(`${out}/${f.fileId}.bin`).size };
 }
 
 // The rewrite, from the core packer (one implementation for CLI, server and browser).
