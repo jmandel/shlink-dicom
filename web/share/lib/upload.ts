@@ -255,8 +255,14 @@ export interface UploadJob {
    */
   plan?: { fileId: string; key: string; uids: string[] }[];
   recipient: string | null;
-  passcode: string;
+  /**
+   * Whether the link has a passcode. The passcode itself is never saved: with one, the link is
+   * made (with the passcode) as soon as the share is, so continuing after a reload never needs it.
+   */
+  hasPasscode: boolean;
   exp: number | null;
+  /** When the share itself expires (its exp, or the server's longest): the saved job goes then too. */
+  expiresAt: number;
   longLived: boolean;
   /** The studies' names, for the "did not finish" notice. */
   title: string;
@@ -274,10 +280,16 @@ export function saveJob(j: UploadJob): boolean {
   }
 }
 
-export function loadJob(): UploadJob | null {
+/** The saved job, unless there is none or its share has expired (then it is cleared). */
+export function loadJob(now = Math.floor(Date.now() / 1000)): UploadJob | null {
   try {
     const j = JSON.parse(localStorage.getItem(JOB) ?? "null");
-    return j?.sid && j?.token && j?.ownerKey ? j : null;
+    if (!(j?.sid && j?.token && j?.ownerKey)) return null;
+    if (!(typeof j.expiresAt === "number" && j.expiresAt > now)) {
+      clearJob();
+      return null;
+    }
+    return j;
   } catch {
     return null;
   }

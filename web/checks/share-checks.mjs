@@ -390,9 +390,16 @@ async function flowJ2kResume(dev) {
   await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
   await chooseJ2k(page, P);
   await page.click("#rv-next");
+  // With a passcode: the link is made with it when the share is, and the saved job never holds it.
+  const PASS = "7319-resume";
+  await page.fill("#in-pass", PASS);
   await page.click("#who-form button[type=submit]");
   await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 30, null, { timeout: 600000, polling: 100 });
   const before = await page.textContent("#up-main");
+  const saved = await page.evaluate(() => localStorage.getItem("shl-dicom-upload-job") ?? "");
+  const job = JSON.parse(saved || "{}");
+  check(`${P}: the saved job does not hold the passcode`, saved.length > 0 && !saved.includes(PASS) && job.hasPasscode === true && !("passcode" in job), saved ? `hasPasscode ${job.hasPasscode}` : "no saved job");
+  check(`${P}: the saved job expires with the share`, typeof job.expiresAt === "number" && job.expiresAt > Date.now() / 1000, String(job.expiresAt));
   // A reload while requests are in flight can report ERR_ABORTED for the old page; the new one loads all the same.
   await page.reload().catch(() => page.goto(`${BASE}/share`));
   await page.waitForSelector("#resume:not(.hidden)", { timeout: 30000 });
@@ -405,8 +412,9 @@ async function flowJ2kResume(dev) {
   if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
   const result = await page.evaluate(() => window.__share.result);
   made.push(result.manage);
-  const v = verify(result.shlink, [NET_DIR], undefined, ["--pixels"]);
+  const v = verify(result.shlink, [NET_DIR], PASS, ["--pixels"]);
   sameContent(P, v, files.length, "the files", { reencoded: files.length });
+  check(`${P}: the resumed link asks for the passcode it was made with`, verifyFails(result.shlink), "opened without the passcode");
   check(`${P}: the resumed share is all JPEG 2000 Lossless`, v.pixelReport?.transferSyntaxes?.["1.2.840.10008.1.2.4.90"] === files.length, JSON.stringify(v.pixelReport?.transferSyntaxes));
   await noErrors(P, errors);
   await context.close();

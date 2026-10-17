@@ -752,17 +752,18 @@ async function upload() {
   setBar("up-bar-wrap", undefined, undefined);
   $("up-main").textContent = "";
   const form = $("who-form");
-  const job: Omit<UploadJob, "sid" | "token" | "ownerKey" | "title" | "startedAt"> = {
+  const job: Omit<UploadJob, "sid" | "token" | "ownerKey" | "title" | "startedAt" | "expiresAt"> = {
     apiBase: cfg.apiBase,
     source: sourceInfo,
     addOffsetTables: !$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked,
     samePatient: col.samePatient,
     compress: null,
     recipient: $<HTMLInputElement>("in-recipient").value.trim() || null,
-    passcode: $<HTMLInputElement>("in-pass").value,
+    hasPasscode: !!$<HTMLInputElement>("in-pass").value,
     longLived: $<HTMLInputElement>("in-updates").checked,
     exp: expiryFrom(form, "expiry"),
   };
+  const passcode = $<HTMLInputElement>("in-pass").value;
   const studies = col.list().filter((s) => s.include);
   $("up-log").replaceChildren();
   let streaming: ReturnType<typeof startStream> | null = null;
@@ -794,8 +795,14 @@ async function upload() {
     ids?.catch(() => {}); // awaited below; not reported twice if making the share fails first
     const ownerKey = randomKeyB64();
     const early = (c: Connection) => ($("up-main").textContent = c.state === "ok" ? "" : "Connection lost, retrying…");
-    const created = await persist(() => new ShareApi(cfg.apiBase).createShare(job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400), early);
+    const expiresAt = job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400;
+    const created = await persist(() => new ShareApi(cfg.apiBase).createShare(expiresAt), early);
     const api = new ShareApi(cfg.apiBase, { sid: created.share.id, token: created.controlToken });
+    // With a passcode, the link is made now, so the passcode is never saved for a reload.
+    if (passcode) {
+      const allowedFiles = packed.map((p) => `${p.fileId}.bin`);
+      await persist(() => api.createLink({ label: job.recipient, passcode, exp: job.exp, longLived: job.longLived, allowedFiles }), early);
+    }
     // Nothing to compress: the owner Bundle first; with the manage credential it is all a reload
     // needs to continue. Compressing: the files' sizes come later, so the saved job's plan is.
     let owner: any = null;
@@ -811,7 +818,10 @@ async function upload() {
       else await clearHandles();
     }
     const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
-    const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000) };
+    // A link source's address holds its key: it is not kept once the files are planned; continuing
+    // after a reload asks for it again.
+    if (job.source.kind === "link") job.source = { ...job.source, link: undefined };
+    const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000), expiresAt };
     saveJob(full);
     if (streaming) {
       streaming.saved(full);
@@ -986,7 +996,9 @@ async function runUpload(p: Pending) {
     // The reports without a study that the owner Bundle holds are the ones the sharer included.
     const { bundle, allowedFiles } = subsetBundle(owner, studyIds, looseReports(owner).map((r: any) => r.id));
     let link = (await persist(() => api.getShare(), onConn)).links[0];
-    link ??= await persist(() => api.createLink({ label: job.recipient, passcode: job.passcode, exp: job.exp, longLived: job.longLived, allowedFiles }), onConn);
+    // A link made early (with a passcode) gets the files as the Bundle names them.
+    if (link) link = await persist(() => api.patchLink(link!.id, { allowedFiles }), onConn);
+    link ??= await persist(() => api.createLink({ label: job.recipient, exp: job.exp, longLived: job.longLived, allowedFiles }), onConn);
     const made = link;
     link = await persist(() => publishLinkBundle(api, job.ownerKey, made.id, bundle), onConn);
     const cred = { sid: job.sid, token: job.token, ownerKey: job.ownerKey };
@@ -997,7 +1009,7 @@ async function runUpload(p: Pending) {
     pending = null;
     await clearStaging(null);
     result = { shlink, manage: manageUrl(manageBase(), cred), link, studies: studyIds.length };
-    renderDone(saved, !!job.passcode, job.recipient);
+    renderDone(saved, job.hasPasscode, job.recipient);
     show(5);
   } catch (x) {
     uploadFailed(x);
@@ -1073,7 +1085,7 @@ function planFromJob(plan: NonNullable<UploadJob["plan"]>, c: Collection): Packe
   });
 }
 
-async function resumeJob(job: UploadJob, files?: File[]) {
+async function resumeJob(job: UploadJob, files?: File[], link?: string) {
   const api = new ShareApi(job.apiBase, { sid: job.sid, token: job.token });
   show(4);
   setUploadError(null);
@@ -1095,7 +1107,7 @@ async function resumeJob(job: UploadJob, files?: File[]) {
     else if (job.source.kind === "portal") {
       for (const [k, src] of (await st.list()).entries()) await c.add(`staged/${k}`, src);
       await c.finish();
-    } else await loadLink(await openShare(job.source.link!, { recipient: "Share page (re-share)" }), c, on);
+    } else await loadLink(await openShare(link ?? job.source.link!, { recipient: "Share page (re-share)" }), c, on);
     // The same bytes as before: each re-encoded image from its staged copy (or encoded again and checked).
     if (job.compress) {
       const planned = new Set(job.plan?.flatMap((f) => f.uids));
@@ -1133,9 +1145,13 @@ async function resumeJob(job: UploadJob, files?: File[]) {
 async function renderResume(job: UploadJob) {
   $("resume-title").textContent = job.title;
   const needFiles = job.source.kind === "files" && !(await loadHandles());
+  const needLink = job.source.kind === "link" && !job.source.link;
   $("resume-text").textContent = needFiles
     ? `Choose the same ${job.source.files && job.source.files.length > 1 ? "files or folder" : "file"} again to continue. What reached the server is kept.`
-    : "What reached the server is kept. Continue to send the rest.";
+    : needLink
+      ? "Paste the same link again to continue. What reached the server is kept."
+      : "What reached the server is kept. Continue to send the rest.";
+  $("resume-link-row").classList.toggle("hidden", !needLink);
   $("resume-continue").textContent = needFiles ? "Choose the files" : "Continue";
   $("resume-error").classList.add("hidden");
   $("resume").classList.remove("hidden");
@@ -1149,7 +1165,16 @@ $("resume-continue").addEventListener("click", async () => {
     if (h && (await permitted(h).catch(() => false))) return resumeJob(job, await filesFrom(h));
   }
   if (job.source.kind === "files") $<HTMLInputElement>(job.source.files?.some((f) => f.name.includes("/")) ? "in-resume-folder" : "in-resume").click();
-  else resumeJob(job);
+  else if (job.source.kind === "link" && !job.source.link) {
+    const link = extractShlink($<HTMLInputElement>("in-resume-link").value);
+    if (!link) {
+      $("resume-error").textContent = "Paste the link the imaging came from.";
+      $("resume-error").classList.remove("hidden");
+      $("in-resume-link").focus();
+      return;
+    }
+    resumeJob(job, undefined, link);
+  } else resumeJob(job);
 });
 for (const id of ["in-resume", "in-resume-folder"]) {
   $<HTMLInputElement>(id).addEventListener("change", (e) => {
@@ -1216,7 +1241,11 @@ $("again").addEventListener("click", () => {
   show(1, "choose");
   const job = loadJob();
   if (job && job.apiBase === cfg.apiBase) renderResume(job);
-  else await clearStaging(null);
+  else {
+    // A job saved for another server (or none): nothing to continue here.
+    if (job) clearJob();
+    await clearStaging(null);
+  }
   await resumePortal();
   getDecoderPool().catch(() => {});
 })();
