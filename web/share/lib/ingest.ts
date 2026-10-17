@@ -9,7 +9,7 @@
 import { readDicomHeader, type DicomHeader } from "../../core/dicom-header";
 import { modalityName } from "../../core/format";
 import { SYNTAXES } from "../../core/transfer-syntax";
-import { BlobBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
+import { BlobBytes, ConcatBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
 import { shlWasm } from "./shl-wasm";
 import type { Stager } from "./stage";
 
@@ -128,14 +128,22 @@ export class Collection {
       if (/^\./.test(base) || /\.(txt|htm|html|inf|exe|ini|pdf|xml|jpg|png|js|css|ico|dll)$/i.test(base)) return this.skip(name, "not a DICOM file");
       // A bare data set is wrapped in Part 10 as the packer does (spec/README.md §11.1 step 3).
       if (!shlWasm().looks_like_bare_data_set(head)) return this.skip(name, "not a DICOM file (no DICM preamble)");
-      let wrapped: Uint8Array | undefined;
-      try {
-        wrapped = shlWasm().wrap_bare_data_set(await src.read(0, src.size));
-      } catch (x) {
-        return this.skip(name, `unreadable DICOM: ${(x as Error).message}`);
+      // From the file's first bytes (longer ones only when its UIDs come later): the new head, then
+      // the file's own bytes, so a large file is never read whole.
+      const whole = src;
+      let wrap: { head: Uint8Array; skip: number } | null = null;
+      for (const n of [...HEADER_READS, whole.size]) {
+        const prefix = n >= whole.size ? await whole.read(0, whole.size) : n === HEADER_READS[0] ? head : await whole.read(0, n);
+        try {
+          const w = shlWasm().part10_wrap(prefix);
+          wrap = { head: w.head, skip: w.skip };
+          w.free();
+          break;
+        } catch (x) {
+          if (prefix.length >= whole.size) return this.skip(name, `unreadable DICOM: ${(x as Error).message}`);
+        }
       }
-      if (!wrapped) return this.skip(name, "not a DICOM file (no DICM preamble)");
-      src = new MemBytes(wrapped);
+      src = new ConcatBytes([new MemBytes(wrap!.head), new SubBytes(whole, wrap!.skip, whole.size - wrap!.skip)]);
       head = await src.read(0, Math.min(src.size, HEADER_READS[0]));
     }
     let h: DicomHeader | null = null;

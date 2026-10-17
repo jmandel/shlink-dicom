@@ -134,34 +134,46 @@ fn file_meta(ts: &str, class: &str, inst: &str) -> Vec<u8> {
     g
 }
 
-/// A bare data set given the Part 10 preamble and file meta header (spec §11.1 step 3). The data
-/// set's own bytes follow unchanged. A file that starts with its file meta group in explicit VR
-/// (only the preamble missing) gets the preamble alone; one whose meta is in implicit VR gets a
-/// new meta in place of it. The data set is read as explicit VR little endian when its first
-/// element has a VR, else implicit VR little endian, then the other; the meta names the SOP
-/// Class (Secondary Capture when the data set gives none) and SOP Instance UIDs it finds there.
-/// Plain byte reading, no DICOM dictionary: the Share page runs this same code in wasm.
-fn wrap_bare(raw: &[u8]) -> std::result::Result<Vec<u8>, String> {
+/// How a bare data set becomes a Part 10 file (spec §11.1 step 3): `head` (the preamble, DICM and,
+/// unless the file kept its own meta in explicit VR, a new file meta header), then the file's own
+/// bytes from `skip` (past an implicit-VR meta that is replaced). The data set's bytes are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part10Wrap {
+    pub head: Vec<u8>,
+    pub skip: usize,
+}
+
+/// The [`Part10Wrap`] of a bare data set, from `prefix`: its first bytes, through its SOP and Study
+/// Instance UIDs (the whole file works too), so a caller never has to hold a large file whole. A
+/// file that starts with its file meta group in explicit VR (only the preamble missing) gets the
+/// preamble alone; one whose meta is in implicit VR gets a new meta in place of it. The data set is
+/// read as explicit VR little endian when its first element has a VR, else implicit VR little
+/// endian, then the other; the meta names the SOP Class (Secondary Capture when the data set gives
+/// none) and SOP Instance UIDs it finds there. Plain byte reading, no DICOM dictionary: the Share
+/// page runs this same code in wasm. `Err` says why it can't be wrapped (as a skip reason); a
+/// prefix that ends before the UIDs gives the same `Err` as a file without them.
+pub fn part10_wrap(prefix: &[u8]) -> std::result::Result<Part10Wrap, String> {
     const EXPLICIT: &str = "1.2.840.10008.1.2.1";
     const IMPLICIT: &str = "1.2.840.10008.1.2";
-    let part10 = |meta: &[u8], ds: &[u8]| {
-        let mut b = Vec::with_capacity(132 + meta.len() + ds.len());
+    let head = |meta: &[u8]| {
+        let mut b = Vec::with_capacity(132 + meta.len());
         b.extend_from_slice(&[0u8; 128]);
         b.extend_from_slice(b"DICM");
         b.extend_from_slice(meta);
-        b.extend_from_slice(ds);
         b
     };
+    let raw = prefix;
     let has_vr = |b: &[u8]| b.len() >= 6 && b[4].is_ascii_uppercase() && b[5].is_ascii_uppercase();
-    let mut ds = raw;
+    let mut skip = 0;
     let mut order = if has_vr(raw) { [EXPLICIT, IMPLICIT] } else { [IMPLICIT, EXPLICIT] };
-    if raw[0] == 0x02 {
+    if raw.first() == Some(&0x02) {
         let (end, ts) = skip_meta_group(raw).ok_or("unreadable file meta")?;
         // A meta in explicit VR, as Part 10 requires: only the preamble is missing.
         if has_vr(raw) && ts.is_some() && raw.get(end..).is_some_and(|d| d.len() >= 8) {
-            return Ok(part10(&[], raw));
+            return Ok(Part10Wrap { head: head(&[]), skip: 0 });
         }
-        ds = &raw[end..];
+        skip = end;
+        let ds = &raw[end..];
         if ds.len() < 8 {
             return Err("no data set after the file meta".into());
         }
@@ -172,17 +184,27 @@ fn wrap_bare(raw: &[u8]) -> std::result::Result<Vec<u8>, String> {
             _ => [IMPLICIT, EXPLICIT],
         };
     }
+    let ds = &raw[skip..];
     let mut found_inst = false;
     for ts in order {
         match scan_uids(ds, ts == EXPLICIT) {
             Some((class, inst, _)) => {
                 let class = class.unwrap_or_else(|| "1.2.840.10008.5.1.4.1.1.7".to_string());
-                return Ok(part10(&file_meta(ts, &class, &inst), ds));
+                return Ok(Part10Wrap { head: head(&file_meta(ts, &class, &inst)), skip });
             }
             None => found_inst |= scan_inst(ds, ts == EXPLICIT),
         }
     }
     Err(if found_inst { "no Study Instance UID" } else { "no SOP Instance UID" }.into())
+}
+
+/// A bare data set as a Part 10 file: [`part10_wrap`] over the whole file, then its bytes.
+fn wrap_bare(raw: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let w = part10_wrap(raw)?;
+    let mut b = Vec::with_capacity(w.head.len() + raw.len() - w.skip);
+    b.extend_from_slice(&w.head);
+    b.extend_from_slice(&raw[w.skip..]);
+    Ok(b)
 }
 
 /// Whether the data set gives a SOP Instance UID (for the reason a wrap is refused).
@@ -316,15 +338,6 @@ pub fn looks_like_bare_data_set(prefix: &[u8]) -> bool {
     !has_part10_magic(prefix) && looks_like_bare_dicom(prefix)
 }
 
-/// `raw` as the packer stores it when it is a bare data set: wrapped in Part 10 (spec §11.1
-/// step 3; the data set's bytes follow unchanged). None when `raw` already is Part 10 or does not
-/// start like a data set. The Share page calls this through shl-dicom-wasm.
-pub fn wrap_bare_data_set(raw: &[u8]) -> std::result::Result<Option<Vec<u8>>, String> {
-    if has_part10_magic(raw) || !looks_like_bare_dicom(raw) {
-        return Ok(None);
-    }
-    wrap_bare(raw).map(Some)
-}
 
 const DEFLATED_LE: &str = "1.2.840.10008.1.2.1.99";
 /// Inflated bytes of a deflated data set read for its header: far above any real header (Pixel

@@ -112,17 +112,24 @@ pub fn subset_bundle(owner_json: &str, selection_json: &str, last_updated: &str)
     serde_json::to_string(&link).map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// A bare data set wrapped in Part 10 as the packer stores it
-/// (`shl_dicom_core::dicom_io::wrap_bare_data_set`); `undefined` when the bytes are already Part 10
-/// or do not start like a data set. Throws with the reason when they start like one but cannot
-/// be read.
+/// How a bare data set becomes Part 10 (`shl_dicom_core::dicom_io::part10_wrap`), from its first
+/// bytes: the Share page serves `head` and then the file from `skip`, so the file is never read
+/// whole. Throws with the reason it can't be wrapped (a prefix that ends before the SOP and Study
+/// Instance UIDs throws as a file without them does: the caller tries a longer one).
+#[wasm_bindgen(getter_with_clone)]
+pub struct Part10Wrap {
+    pub head: Vec<u8>,
+    pub skip: usize,
+}
+
 #[wasm_bindgen]
-pub fn wrap_bare_data_set(raw: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
-    shl_dicom_core::dicom_io::wrap_bare_data_set(raw).map_err(|e| JsError::new(&e))
+pub fn part10_wrap(prefix: &[u8]) -> Result<Part10Wrap, JsError> {
+    let w = shl_dicom_core::dicom_io::part10_wrap(prefix).map_err(|e| JsError::new(&e))?;
+    Ok(Part10Wrap { head: w.head, skip: w.skip })
 }
 
 /// Whether a file starting with `prefix` is a bare data set to wrap
-/// (`shl_dicom_core::dicom_io::looks_like_bare_data_set`), so a caller reads the whole file only then.
+/// (`shl_dicom_core::dicom_io::looks_like_bare_data_set`), so a caller wraps it (part10_wrap).
 #[wasm_bindgen]
 pub fn looks_like_bare_data_set(prefix: &[u8]) -> bool {
     shl_dicom_core::dicom_io::looks_like_bare_data_set(prefix)

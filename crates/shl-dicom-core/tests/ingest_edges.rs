@@ -4,7 +4,7 @@ use dicom_object::OpenFileOptions;
 use dicom_transfer_syntax_registry::entries::IMPLICIT_VR_LITTLE_ENDIAN;
 use shl_dicom_core::{
     crypto::decrypt_range,
-    dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, MAX_ARCHIVE_ENTRY_BYTES},
+    dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, part10_wrap, MAX_ARCHIVE_ENTRY_BYTES},
     packer::IngestSession,
     range::ciphertext_range,
 };
@@ -70,6 +70,13 @@ fn check_wrapped(name: &str, bare: Vec<u8>, ts: &str, keeps_data_set: bool) -> S
     assert_eq!(&p.bytes[128..132], b"DICM", "{name}");
     if keeps_data_set {
         assert!(p.bytes.ends_with(&bare), "{name}: the data set's bytes follow the new meta unchanged");
+    }
+    // The Share page's wrap, from the file's first bytes only, is the same file.
+    for n in [4096, 64 << 10] {
+        let w = part10_wrap(&bare[..bare.len().min(n)]).unwrap_or_else(|e| panic!("{name}: wrap from {n} bytes: {e}"));
+        let mut from_prefix = w.head;
+        from_prefix.extend_from_slice(&bare[w.skip..]);
+        assert_eq!(from_prefix, p.bytes, "{name}: the wrap from the first {n} bytes is the wrap from the whole file");
     }
     let again = parse_dicom_bytes(name, p.bytes.clone()).unwrap();
     assert!(!again.was_bare_wrapped);
