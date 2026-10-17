@@ -292,6 +292,7 @@ impl AppState {
         state.sweep_orphan_files();
         state.sweep_stale_uploads();
         state.fill_blob_sizes();
+        state.scrub_cap_tokens();
         Ok(state)
     }
 
@@ -481,6 +482,26 @@ impl AppState {
             Some(f) => cat.execute("DELETE FROM reserved WHERE sid = ?1 AND file_id = ?2", params![sid, f]),
             None => cat.execute("DELETE FROM reserved WHERE sid = ?1", params![sid]),
         };
+    }
+
+    /// Startup: access-log rows written before capability tokens were left out of them get the
+    /// token replaced by `…`.
+    fn scrub_cap_tokens(&self) {
+        let sids: Vec<String> = {
+            let cat = self.catalog.lock().unwrap();
+            cat.prepare("SELECT sid FROM shares")
+                .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default()
+        };
+        for sid in sids {
+            let Ok(conn) = open_existing(&self.share_db_path(&sid)) else { continue };
+            let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+            let _ = conn.execute(
+                "UPDATE access_log SET path = '/cap/…' || substr(path, 5 + instr(substr(path, 6), '/'))
+                 WHERE path LIKE '/cap/%' AND path NOT LIKE '/cap/…/%'",
+                [],
+            );
+        }
     }
 
     /// Startup: blobs recorded before they had a size get it from a file row that names them.

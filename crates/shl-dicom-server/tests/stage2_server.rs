@@ -2617,3 +2617,38 @@ async fn test_the_owner_reads_a_links_bundle() {
     assert_eq!(client.get(format!("{base}/api/shares/{b}/links/{lid}/bundle")).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The access log (shown on the Manage page) never holds a capability token: reads through
+/// /cap/{token}/… are logged as /cap/…/{file}, and rows written before are scrubbed at startup.
+#[tokio::test]
+async fn test_the_access_log_holds_no_capability_tokens() {
+    let dir = temp_data_dir("cap_log");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let link: Value = client.post(format!("{base}/api/shares/{sid}/links")).bearer_auth(&token).json(&json!({ "passcode": "1234", "allowedFiles": [] })).send().await.unwrap().json().await.unwrap();
+    let lid = link["id"].as_str().unwrap().to_string();
+    client.put(format!("{base}/api/shares/{sid}/links/{lid}/bundle.jwe")).bearer_auth(&token).body("h..iv.ct.tag").send().await.unwrap();
+    let m: Value = client.post(format!("{base}/shl/{lid}")).json(&json!({ "passcode": "1234" })).send().await.unwrap().json().await.unwrap();
+    let loc = m["files"][0]["location"].as_str().unwrap().to_string();
+    let cap = loc.split("/cap/").nth(1).unwrap().split('/').next().unwrap().to_string();
+    assert_eq!(client.get(&loc).send().await.unwrap().status(), StatusCode::OK);
+    let log = client.get(format!("{base}/api/shares/{sid}/access")).bearer_auth(&token).send().await.unwrap().text().await.unwrap();
+    assert!(log.contains("/cap/…/bundle.jwe"), "{log}");
+    assert!(!log.contains(&cap), "the access log holds the capability token: {log}");
+
+    // A row from before (with its token) is scrubbed when the server starts.
+    {
+        let c = state.open_share_db(&sid).unwrap();
+        c.lock().unwrap().execute("INSERT INTO access_log (ts, lid, method, path, status, bytes) VALUES (1, ?1, 'GET', ?2, 200, 1)", params![lid, format!("/cap/{cap}/x.bin")]).unwrap();
+    }
+    let restarted = test_state(&dir);
+    let c = restarted.open_share_db(&sid).unwrap();
+    let paths: Vec<String> = c.lock().unwrap().prepare("SELECT path FROM access_log").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+    assert!(paths.iter().all(|p| !p.contains(&cap)), "{paths:?}");
+    assert!(paths.contains(&"/cap/…/x.bin".to_string()), "{paths:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

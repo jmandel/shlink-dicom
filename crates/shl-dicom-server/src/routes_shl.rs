@@ -265,7 +265,8 @@ pub async fn get_cap_file(
     let Some((sid, lid)) = state.lookup_cap(&token) else {
         return not_found();
     };
-    let path_str = format!("/cap/{token}/{tail}");
+    // The access log (shown on the Manage page) never holds the capability token itself.
+    let path_str = format!("/cap/…/{tail}");
     if tail == "bundle.jwe" {
         serve_bundle(&state, &sid, &lid, true, &path_str, query.recipient, &headers).await
     } else if let Some(file_id) = parse_file_name(&tail) {
