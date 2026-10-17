@@ -26,7 +26,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Native builds target x86-64-v3 (.cargo/config.toml); the packer's encoder runs here.
       - name: Check the CPU supports x86-64-v3
@@ -49,7 +49,7 @@ jobs:
             | tar -xz -C "$HOME/.cargo/bin" --strip-components=1 "$t/wasm-bindgen"
           cargo --version; wasm-bindgen --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -60,7 +60,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'codecs/Cargo.lock', '.cargo/config.toml') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.bun/install/cache
@@ -88,7 +88,7 @@ jobs:
       - name: Site and demo link
         run: bun pages/build.ts
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist/pages
 
@@ -100,4 +100,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
