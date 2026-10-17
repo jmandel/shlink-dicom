@@ -5,7 +5,8 @@
 //
 //   bun web/checks/frame-identity.ts [file or dir …]     (default: codec-corpus/formats)
 //
-// Exits non-zero on any difference. Files the stream declines (one frame, float pixel data, big
+// Exits 1 on any difference, per-frame values included, and 2 when viewer-kit/dist is older than
+// the decoder sources (rebuild it first). Files the stream declines (one frame, float pixel data, big
 // endian, deflated) are counted, not compared; a file the decoder refuses whole is skipped.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -23,7 +24,15 @@ const inputs = args.length ? args : [join(ROOT, "codec-corpus", "formats")];
 const walk = (p: string): string[] => (statSync(p).isDirectory() ? readdirSync(p).flatMap((f) => walk(join(p, f))) : /\.dcm$/i.test(p) ? [p] : []);
 const files = inputs.flatMap(walk).sort();
 
-const main = new WebAssembly.Module(readFileSync(join(ROOT, "viewer-kit", "dist", "shl_dicom_decode.wasm")));
+// A decoder built before the latest change to its sources gives stale answers: refuse it.
+const DIST_WASM = join(ROOT, "viewer-kit", "dist", "shl_dicom_decode.wasm");
+const newestSource = (p: string): number =>
+  statSync(p).isDirectory() ? Math.max(0, ...readdirSync(p).filter((f) => f !== "target").map((f) => newestSource(join(p, f)))) : /\.rs$|Cargo\.toml$/.test(p) ? statSync(p).mtimeMs : 0;
+if (statSync(DIST_WASM).mtimeMs < newestSource(join(ROOT, "codecs"))) {
+  console.error("viewer-kit/dist is older than the decoder sources in codecs/: run node viewer-kit/scripts/build.mjs");
+  process.exit(2);
+}
+const main = new WebAssembly.Module(readFileSync(DIST_WASM));
 const jxlModule = new WebAssembly.Module(readFileSync(join(ROOT, "viewer-kit", "dist", "shl_dicom_decode_jxl.wasm")));
 let dec = await WasmDecoder.create(main);
 let decJxl: WasmDecoder | null = null;
@@ -60,18 +69,9 @@ function standIns(bytes: Uint8Array) {
   return { series, loader, pool, stats: () => ({ reads, readBytes }) };
 }
 
-const notes: string[] = [];
 function differences(a: DecodedImage, b: DecodedImage): string[] {
   const out: string[] = [];
   const skip = new Set(["pixels", "palette", "header", "decodeMs", "totalMs"]);
-  // The whole decode reads per-frame values until a functional group it cannot parse; frames
-  // after that have none (a decoder limit, reported). The one-frame files each start at their
-  // own item, so every frame has its values: compare the frames the whole decode has.
-  if (a.perFrame && b.perFrame && b.perFrame.length < a.perFrame.length) {
-    notes.push(`the whole decode has per-frame values for ${b.perFrame.length} of ${a.perFrame.length} frames`);
-    if (JSON.stringify(a.perFrame.slice(0, b.perFrame.length)) !== JSON.stringify(b.perFrame)) out.push("perFrame differs");
-    skip.add("perFrame");
-  }
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
     if (skip.has(k)) continue;
     const x = JSON.stringify((a as any)[k]), y = JSON.stringify((b as any)[k]);
@@ -142,7 +142,6 @@ for (const f of files) {
     failed++;
     continue;
   }
-  notes.length = 0;
   const d = differences(img, whole);
   compared++;
   const source = fs.locator.tables[0]?.source ?? "walk";
@@ -150,8 +149,7 @@ for (const f of files) {
   if (d.length) {
     failed++;
     console.log(`FAIL ${name} (${whole.frames} frames, ${source}): ${d.join("; ")}`);
-  } else if (notes.length) console.log(`note ${name}: ${notes.splice(0).join("; ")}`);
-  else console.log(`ok   ${name} (${whole.frames} frames, ${whole.transferSyntax}, ${source}, ${st.reads} reads, ${(st.readBytes / bytes.byteLength).toFixed(2)}× the file)`);
+  } else console.log(`ok   ${name} (${whole.frames} frames, ${whole.transferSyntax}, ${source}, ${st.reads} reads, ${(st.readBytes / bytes.byteLength).toFixed(2)}× the file)`);
 }
 console.log(`\n${compared} compared, ${failed} failed, ${declined} declined, ${skipped} not decodable whole`);
 process.exit(failed ? 1 : 0);
