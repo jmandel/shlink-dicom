@@ -241,6 +241,11 @@ export async function uploadFiles(
   const ledger = o.ledger ?? new SentLedger({}, () => true);
   const total = () => packed.reduce((a, p) => a + ciphertextLength(p.plaintextLength), 0);
   const offsets = new Map<string, number>();
+  /**
+   * Files the server holds whole but has not completed (its last step, such as an S3
+   * CompleteMultipartUpload, failed): they still need an empty append that says Upload-Complete.
+   */
+  const unfinished = new Set<string>();
   for (const p of packed) {
     // A new share has no uploads yet; otherwise ask the server what it has.
     const st = o.fresh ? null : await persist(() => api.uploadOffset(p.fileId), onConn, signal);
@@ -257,14 +262,15 @@ export async function uploadFiles(
       off = -1;
     }
     offsets.set(p.fileId, off);
+    if (st && off >= 0 && !st.complete && known(p) && st.offset === ciphertextLength(p.plaintextLength)) unfinished.add(p.fileId);
   }
   const sentBefore = (p: PackedFile) => packed.reduce((a, q) => a + (q === p ? 0 : Math.max(0, offsets.get(q.fileId)!)), 0);
-  let filesDone = packed.filter((p) => known(p) && offsets.get(p.fileId) === ciphertextLength(p.plaintextLength)).length;
+  let filesDone = packed.filter((p) => known(p) && offsets.get(p.fileId) === ciphertextLength(p.plaintextLength) && !unfinished.has(p.fileId)).length;
   const report = (sent: number, finished?: PackedFile, sending?: UploadProgress["sending"]) => on({ sent, total: total(), filesDone, offsets, finished, sending });
   report([...offsets.values()].reduce((a, n) => a + Math.max(0, n), 0));
   for (const p of packed) {
     let off = offsets.get(p.fileId)!;
-    if (known(p) && off === ciphertextLength(p.plaintextLength)) continue;
+    if (known(p) && off === ciphertextLength(p.plaintextLength) && !unfinished.has(p.fileId)) continue;
     if (off < 0) {
       await persist(() => api.createUpload(p.fileId, known(p) ? ciphertextLength(p.plaintextLength) : null), onConn, signal);
       off = 0;
@@ -289,8 +295,35 @@ export async function uploadFiles(
       return persist(() => encryptRecords(p, key, rec, rec + n), onConn, signal);
     };
     let attempt = 0;
-    while (!known(p) || off < ciphertextLength(p.plaintextLength)) {
+    while (!known(p) || off < ciphertextLength(p.plaintextLength) || unfinished.has(p.fileId)) {
       signal?.throwIfAborted();
+      if (known(p) && off === ciphertextLength(p.plaintextLength)) {
+        // Every byte is there but the upload is not complete: an empty append completes it. A
+        // failure is handled as any append's (retry, then ask the server where it got to).
+        const size = ciphertextLength(p.plaintextLength);
+        try {
+          const r = await api.appendUpload(p.fileId, off, new Uint8Array(0), true, () => {}, size);
+          off = r.offset;
+          unfinished.delete(p.fileId);
+          if (attempt) onConn({ state: "ok" });
+          attempt = 0;
+        } catch (e) {
+          if (signal?.aborted || !isTransient(e)) throw e;
+          const err = e as ApiError;
+          await waitToRetry(attempt++, err.message, onConn, signal);
+          const st = await persist(() => api.uploadOffset(p.fileId), onConn, signal);
+          if (!st) {
+            await persist(() => api.createUpload(p.fileId, size), onConn, signal);
+            off = 0;
+            unfinished.delete(p.fileId);
+          } else {
+            off = st.complete ? size : st.offset;
+            if (st.complete) unfinished.delete(p.fileId);
+          }
+          onConn({ state: "ok" });
+        }
+        continue;
+      }
       const rec = Math.floor(off / RECORD_CIPHERTEXT);
       const n = sendable(rec);
       if (!n) {
@@ -312,6 +345,7 @@ export async function uploadFiles(
       try {
         const r = await api.appendUpload(p.fileId, from, body, from + body.length === size, (loaded) => report(base + from + loaded, undefined, { fileId: p.fileId, offset: from + loaded }), size);
         off = r.offset;
+        if (known(p) && off === ciphertextLength(p.plaintextLength) && !r.complete) unfinished.add(p.fileId);
         if (attempt) onConn({ state: "ok" });
         attempt = 0;
         offsets.set(p.fileId, off);
@@ -333,7 +367,11 @@ export async function uploadFiles(
         if (!st) {
           await persist(() => api.createUpload(p.fileId, known(p) ? ciphertextLength(p.plaintextLength) : null), onConn, signal);
           off = 0;
-        } else off = st.complete ? ciphertextLength(p.plaintextLength) : st.offset;
+        } else {
+          off = st.complete ? ciphertextLength(p.plaintextLength) : st.offset;
+          // The bytes all arrived but the server's completion failed: complete it with an empty append.
+          if (!st.complete && known(p) && st.offset === ciphertextLength(p.plaintextLength)) unfinished.add(p.fileId);
+        }
         onConn({ state: "ok" });
       }
     }
