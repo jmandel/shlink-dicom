@@ -17,7 +17,7 @@ import { DicomParseError, parseDicomSync, T, tag } from "./dicom";
 // ------------------------------------------------------------------------------------- syntaxes
 
 export { VIDEO_SYNTAXES, type VideoCodec, type VideoSyntax } from "./transfer-syntax";
-import { VIDEO_SYNTAXES, type VideoSyntax } from "./transfer-syntax";
+import { TS, VIDEO_SYNTAXES, type VideoSyntax } from "./transfer-syntax";
 
 /**
  * SOP classes whose instances can be video or multi-frame cine: the video IODs, ultrasound,
@@ -77,8 +77,13 @@ export interface MediaHeader {
 
 export class MediaHeaderError extends Error {}
 
-/** Thrown when the bytes end before Pixel Data: read more and parse again. */
-class NeedMore extends Error {}
+/** Thrown when the bytes end before Pixel Data's header: read more and parse again. */
+export class NeedMore extends Error {
+  constructor() {
+    super("the bytes end before Pixel Data");
+    this.name = "NeedMore";
+  }
+}
 
 const ITEM = 0xfffee000;
 const SEQ_END = 0xfffee0dd;
@@ -91,14 +96,23 @@ const SEQ_END = 0xfffee0dd;
 export function parseMediaHeader(b: Uint8Array): MediaHeader {
   let p: ReturnType<typeof parseDicomSync>;
   try {
-    p = parseDicomSync(b);
+    // The data set up to Pixel Data, asking for more bytes where an element runs past `b`.
+    p = parseDicomSync(b, { untilPixelData: true, need: true });
   } catch (e) {
     // A sequence cut off by the end of the bytes reads as damaged: more bytes may fix it.
     throw e instanceof DicomParseError ? new NeedMore() : e;
   }
+  if (p.needBytes || p.dataEnd < 0) throw new NeedMore();
   const ds = p.ds;
-  const pixel = ds.get(T.PixelData);
-  if (!pixel) throw new NeedMore();
+  // Pixel Data's own header, where the reading stopped.
+  const le = p.transferSyntax !== TS.ExplicitBE;
+  const explicit = p.transferSyntax !== TS.ImplicitLE;
+  const q = p.dataEnd;
+  const head = explicit ? 12 : 8;
+  if (q + head > b.length) throw new NeedMore();
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  if (dv.getUint16(q, le) !== 0x7fe0 || dv.getUint16(q + 2, le) !== 0x0010) throw new NeedMore();
+  const encapsulated = dv.getUint32(q + head - 4, le) === 0xffffffff;
   const num = (t: number) => ds.num(t);
   const fiv = ds.nums(tag(0x0028, 0x0009));
   const ftv = ds.nums(T.FrameTimeVector);
@@ -118,7 +132,7 @@ export function parseMediaHeader(b: Uint8Array): MediaHeader {
     startTrim: num(tag(0x0008, 0x2142)),
     stopTrim: num(tag(0x0008, 0x2143)),
     // Encapsulated: the value starts with the first item (the Basic Offset Table).
-    pixelDataItems: pixel.fragments ? pixel.offset : -1,
+    pixelDataItems: encapsulated ? q + head : -1,
   };
 }
 

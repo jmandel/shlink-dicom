@@ -489,7 +489,7 @@ function readElements(
           q = r + 8; // past the item delimiter
         } else {
           if (q + 8 + il > end) short(q + 8 + il);
-          readElements(item, b, q + 8, q + 8 + il, le, itemsExplicit, dec, depth + 1);
+          readElements(item, b, q + 8, Math.min(end, q + 8 + il), le, itemsExplicit, dec, depth + 1);
           q += 8 + il;
         }
         item.end = q;
@@ -626,6 +626,10 @@ export function parseDicomSync(bytes: Uint8Array, o: ParseOptions = {}): ParsedD
       let len: number, vo: number;
       if (/^[A-Z]{2}$/.test(vr)) {
         const long = LONG_VR.has(vr);
+        if (long && p + 12 > bytes.length) {
+          if (o.need) return { meta, ds: new DataSet(bytes, true, true, latin), transferSyntax: meta.str(T.TransferSyntaxUID) ?? ts, metaEnd: p, dataEnd: -1, needBytes: p + 12 };
+          break;
+        }
         len = long ? dv.getUint32(p + 8, true) : dv.getUint16(p + 6, true);
         vo = p + (long ? 12 : 8);
       } else {
