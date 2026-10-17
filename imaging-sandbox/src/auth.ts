@@ -9,7 +9,7 @@
 import type { Config, ClientRegistration } from "./config.ts";
 import type { Store, Study } from "./data.ts";
 import { studiesForPatient } from "./data.ts";
-import { grantableScope, describeScope } from "./scopes.ts";
+import { grantableScope, describeScope, scopeCovered } from "./scopes.ts";
 import { page, esc } from "./pages.ts";
 
 export interface Grant {
@@ -288,7 +288,7 @@ export class AuthServer {
       const scope = p.get("scope");
       if (scope) {
         const want = scope.split(/\s+/).filter(Boolean);
-        if (want.some((s) => !grant.scopes.includes(s))) return tokenError("invalid_scope", "a refresh can only narrow the granted scopes");
+        if (want.some((s) => !scopeCovered(grant.scopes, s))) return tokenError("invalid_scope", "a refresh can only narrow the granted scopes");
         grant = { ...grant, scopes: want };
       }
       return tokenJson(this.issue(grant, false, rt.token));

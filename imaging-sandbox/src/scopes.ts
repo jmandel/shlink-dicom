@@ -53,6 +53,17 @@ export function scopeAllows(scopes: string[], resource: string, perm: Perm): boo
   return false;
 }
 
+// Whether a scope asked for at refresh is within what was granted (SMART App Launch: a refresh may
+// ask for a subset). A resource scope is covered when every permission it names is granted for its
+// resource (or for *), so patient/ImagingStudy.r is within patient/ImagingStudy.rs; other scopes
+// (launch/patient, offline_access) must have been granted as they are.
+export function scopeCovered(granted: string[], want: string): boolean {
+  const w = parseResourceScope(want);
+  if (!w) return granted.includes(want);
+  const held = granted.map(parseResourceScope).filter((g): g is ResourceScope => !!g && g.level === w.level && g.query === w.query && (g.resource === "*" || g.resource === w.resource));
+  return [...w.perms].every((p) => held.some((g) => g.perms.has(p)));
+}
+
 export function describeScope(raw: string): string {
   if (raw === "launch/patient") return "Know which patient you chose";
   if (raw === "offline_access") return "Keep access after you close the app (a refresh token)";
