@@ -285,6 +285,7 @@ impl AppState {
                 .map_err(|e| format!("access-log thread: {e}"))?;
         }
         state.run_sweep()?;
+        state.sweep_orphan_files();
         state.sweep_stale_uploads();
         Ok(state)
     }
@@ -387,8 +388,8 @@ impl AppState {
         }
     }
 
-    /// Startup and periodic sweep: removes expired caps, expired sandbox shares,
-    /// orphan share `.db` files on disk, and orphan links inside share DBs.
+    /// Removes expired caps and expired shares (with their files). Safe to run at any time, from
+    /// any request: a share's files are removed only by whoever deletes its catalog row.
     pub fn run_sweep(&self) -> Result<(), String> {
         let now = now_unix();
         let expired_sids: Vec<String> = {
@@ -398,43 +399,56 @@ impl AppState {
             let mut stmt = cat
                 .prepare("SELECT sid FROM shares WHERE expires_at IS NOT NULL AND expires_at <= ?1")
                 .map_err(|e| e.to_string())?;
-            let rows = stmt
+            let sids: Vec<String> = stmt
                 .query_map(params![now], |r| r.get::<_, String>(0))
-                .map_err(|e| e.to_string())?;
-            let mut sids = Vec::new();
-            for r in rows {
-                if let Ok(sid) = r {
-                    sids.push(sid);
-                }
-            }
-            for sid in &sids {
-                let _ = cat.execute("DELETE FROM shares WHERE sid = ?1", params![sid]);
-            }
-            sids
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .collect();
+            // Only the sweep that removed the row removes the files.
+            sids.into_iter()
+                .filter(|sid| cat.execute("DELETE FROM shares WHERE sid = ?1", params![sid]) == Ok(1))
+                .collect()
         };
 
         for sid in expired_sids {
             self.remove_share_files(&sid);
         }
+        Ok(())
+    }
 
-        // Remove any shares/*.db file whose sid has no catalog row
+    /// Startup only: removes share files (`shares/{sid}.db`, `shares/{sid}/`) with no catalog row.
+    ///
+    /// Invariant: a share's catalog row exists exactly while its files are meant to. Creating a
+    /// share writes its file first and its catalog row last; deleting one removes the catalog row
+    /// first and its files last, and only the caller whose DELETE removed the row removes the files
+    /// (so each file's blob reference is released once). While the server runs, a file with no row
+    /// is a share being created or being deleted, so only a crash leaves orphans, and this scan
+    /// runs before any request can be in flight.
+    fn sweep_orphan_files(&self) {
         let shares_dir = self.data_dir.join("shares");
-        if let Ok(entries) = std::fs::read_dir(&shares_dir) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name();
-                let Some(name_str) = fname.to_str() else {
-                    continue;
-                };
-                if let Some(sid) = name_str.strip_suffix(".db") {
-                    if !is_valid_id22(sid) || !self.catalog_has_share(sid) {
-                        self.remove_share_files(sid);
-                    }
-                } else if entry.path().is_dir() && (!is_valid_id22(name_str) || !self.catalog_has_share(name_str)) {
-                    let _ = std::fs::remove_dir_all(entry.path());
+        let Ok(entries) = std::fs::read_dir(&shares_dir) else { return };
+        let has_row = |sid: &str| {
+            is_valid_id22(sid)
+                && self
+                    .catalog
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT 1 FROM shares WHERE sid = ?1", params![sid], |_| Ok(()))
+                    .is_ok()
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let Some(name_str) = fname.to_str() else {
+                continue;
+            };
+            if let Some(sid) = name_str.strip_suffix(".db") {
+                if !has_row(sid) {
+                    self.remove_share_files(sid);
                 }
+            } else if entry.path().is_dir() && !has_row(name_str) {
+                let _ = std::fs::remove_dir_all(entry.path());
             }
         }
-        Ok(())
     }
 
     /// Drops uploads started more than `STALE_UPLOAD_SECS` ago: their rows, staged files and
@@ -673,11 +687,17 @@ impl AppState {
     }
 
     pub fn delete_share(&self, sid: &str) -> Result<(), String> {
-        // Rule: when deleting, write the catalog first and remove the share file last.
+        // Rule: when deleting, write the catalog first and remove the share file last (see
+        // `sweep_orphan_files`).
         {
             let cat = self.catalog.lock().unwrap();
-            cat.execute("DELETE FROM shares WHERE sid = ?1", params![sid])
+            let removed = cat
+                .execute("DELETE FROM shares WHERE sid = ?1", params![sid])
                 .map_err(|e| e.to_string())?;
+            if removed == 0 {
+                // Already deleted (another request, or the sweep): its files are theirs to remove.
+                return Ok(());
+            }
         }
         self.remove_share_files(sid);
         self.events.lock().unwrap().remove(sid);
@@ -689,26 +709,34 @@ impl AppState {
         // may be gone already, so the database is opened directly.)
         let db = self.pool.lock().unwrap().get(sid).or_else(|| {
             let path = self.share_db_path(sid);
-            path.exists().then(|| Connection::open(&path).ok().map(|c| Arc::new(Mutex::new(c)))).flatten()
+            let conn = path.exists().then(|| Connection::open(&path).ok()).flatten()?;
+            let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+            Some(Arc::new(Mutex::new(conn)))
         });
         if let Some(conn_arc) = db {
-            let (keys, uploads): (Vec<String>, Vec<(String, String)>) = {
-                let conn = conn_arc.lock().unwrap();
-                let keys = conn
-                    .prepare("SELECT storage_key FROM files")
-                    .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
-                    .unwrap_or_default();
-                let uploads = conn
-                    .prepare("SELECT storage_key, s3_upload_id FROM uploads WHERE s3_upload_id IS NOT NULL")
-                    .and_then(|mut st| st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()))
-                    .unwrap_or_default();
-                (keys, uploads)
-            };
-            for k in keys {
-                self.blob_release(&k);
+            // Each row is deleted before its reference is released, so a second run (after a crash
+            // part way through) releases nothing twice. Lock order: the share, then the catalog.
+            let conn = conn_arc.lock().unwrap();
+            let files: Vec<(String, String)> = conn
+                .prepare("SELECT file_id, storage_key FROM files")
+                .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default();
+            let uploads: Vec<(String, String, Option<String>)> = conn
+                .prepare("SELECT file_id, storage_key, s3_upload_id FROM uploads")
+                .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default();
+            let _ = conn.execute("DELETE FROM link_files", []);
+            for (fid, key) in files {
+                if conn.execute("DELETE FROM files WHERE file_id = ?1", params![fid]) == Ok(1) {
+                    self.blob_release(&key);
+                }
             }
-            for (key, id) in uploads {
-                self.trash_upload(&key, &id);
+            for (fid, key, upload_id) in uploads {
+                if conn.execute("DELETE FROM uploads WHERE file_id = ?1", params![fid]) == Ok(1) {
+                    if let Some(id) = upload_id {
+                        self.trash_upload(&key, &id);
+                    }
+                }
             }
         }
         if let Some(conn_arc) = self.pool.lock().unwrap().remove(sid) {

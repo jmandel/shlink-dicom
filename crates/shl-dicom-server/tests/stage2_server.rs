@@ -1656,3 +1656,103 @@ async fn test_a_missing_blob_is_not_found() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A share being created has its file before its catalog row. A sweep meanwhile (each create
+/// runs one) leaves the file alone; only startup removes files with no row.
+#[tokio::test]
+async fn test_a_sweep_spares_a_share_being_created() {
+    let dir = temp_data_dir("create_vs_sweep");
+    let state = test_state(&dir);
+    // A create caught between writing its file and its catalog row.
+    let pending = b64url_encode(&[7u8; 16]);
+    std::fs::write(state.share_db_path(&pending), b"").unwrap();
+    state.run_sweep().unwrap();
+    assert!(state.share_db_path(&pending).exists(), "the sweep removed a share being created");
+
+    // Many creates and sweeps at once: every share created is still there.
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let s = state.clone();
+        tasks.push(std::thread::spawn(move || {
+            (0..6)
+                .map(|_| {
+                    let _ = s.run_sweep();
+                    s.create_share(false, None).unwrap().0
+                })
+                .collect::<Vec<_>>()
+        }));
+    }
+    for t in tasks {
+        for sid in t.join().unwrap() {
+            assert!(state.share_db_path(&sid).exists(), "share {sid} lost its file");
+            assert!(state.open_share_db(&sid).is_some(), "share {sid} not found");
+        }
+    }
+
+    // The next startup removes the orphan.
+    drop(state);
+    let state = test_state(&dir);
+    assert!(!state.share_db_path(&pending).exists(), "orphan left at startup");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deletes of one share at once (requests, and the sweep after it expires) release its files'
+/// blobs once, so a blob a clone still names survives.
+#[tokio::test]
+async fn test_deleting_a_share_twice_releases_its_blobs_once() {
+    let dir = temp_data_dir("double_delete");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let fid = b64url_encode(&[43u8; 16]);
+    let data: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+
+    for round in 0..3 {
+        let (src, src_token) = state.create_share(false, None).unwrap();
+        shl_dicom_server::state::store_file(&state, &src, &fid, &data).await.unwrap();
+        let key = file_key(&state, &src, &fid);
+        let clone: Value = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap().json().await.unwrap();
+        let sid = clone["share"]["id"].as_str().unwrap().to_string();
+
+        match round {
+            // Two DELETE requests at once.
+            0 => {
+                let reqs = (0..2).map(|_| client.delete(format!("{base}/api/shares/{src}")).bearer_auth(&src_token).send());
+                for r in futures_util::future::join_all(reqs).await {
+                    let s = r.unwrap().status();
+                    assert!(s == StatusCode::NO_CONTENT || s == StatusCode::UNAUTHORIZED || s == StatusCode::NOT_FOUND, "{s}");
+                }
+            }
+            // Many deletes on threads.
+            1 => {
+                let ts: Vec<_> = (0..8)
+                    .map(|_| {
+                        let s = state.clone();
+                        let src = src.clone();
+                        std::thread::spawn(move || s.delete_share(&src).unwrap())
+                    })
+                    .collect();
+                ts.into_iter().for_each(|t| t.join().unwrap());
+            }
+            // The share expires: the sweep and a delete race.
+            _ => {
+                state.set_share_expiry(&src, 1).unwrap();
+                let s1 = state.clone();
+                let s2 = state.clone();
+                let src2 = src.clone();
+                let a = std::thread::spawn(move || s1.run_sweep().unwrap());
+                let b = std::thread::spawn(move || s2.delete_share(&src2).unwrap());
+                a.join().unwrap();
+                b.join().unwrap();
+            }
+        }
+        state.empty_trash().await;
+        assert!(!state.share_db_path(&src).exists());
+        assert!(blob_exists(&state, &key).await, "round {round}: blob deleted while the clone names it");
+        assert_eq!(file_key(&state, &sid, &fid), key);
+        state.delete_share(&sid).unwrap();
+        state.empty_trash().await;
+        assert!(!blob_exists(&state, &key).await, "round {round}: blob left behind");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
