@@ -6,7 +6,8 @@
 // For each case with expect=decode: whole-file decode must match the oracle within max_abs.
 // For multi-frame encapsulated cases it also decodes the frames in three ranges (the path
 // DecoderPool.decodeFrames uses) and checks the joined result is byte-identical to the whole decode.
-// expect=error cases must return exit 2 (exit 3 counts as unsupported, as in check.py).
+// expect=error cases must return exit 2 (exit 3 counts as unsupported, as in check.py); any
+// other code is a crash. Exits 1 when a case fails or crashes.
 import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { WasmDecoder } from "../src/wasm-decoder";
@@ -75,3 +76,5 @@ for (const [f, s] of Object.entries(summary)) console.log(`  ${f.padEnd(14)} ` +
 console.log(`  multi-frame encapsulated cases where 3 frame ranges == whole decode: ${ranges}`);
 mkdirSync(join(KIT, "test", "results"), { recursive: true });
 writeFileSync(join(KIT, "test", "results", `verify-oracle-${shard}of${shards}.json`), JSON.stringify(results, null, 1));
+// A failure or a crash is the exit status too, so a script or CI run cannot miss it.
+if (results.some((r) => r.outcome === "fail" || r.outcome === "crash")) process.exit(1);

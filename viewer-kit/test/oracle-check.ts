@@ -55,6 +55,8 @@ export function checkCase(dec: Decoder, bytes: Uint8Array, c: { expect?: string;
   const r = dec.decode(bytes);
   rec.ms = r.ms;
   if (!r.ok && r.code === 3) return { ...rec, outcome: "unsupported", reason: r.message };
+  // CONTRACT.md: 2 is a refusal, 3 unsupported (above), any other code a crash.
+  if (!r.ok && r.code !== 2) return { ...rec, outcome: "crash", reason: `exit ${r.code}: ${r.message}` };
   if (c.expect === "error") {
     rec.outcome = r.ok ? "fail" : "pass";
     if (r.ok) rec.reason = "decoded a file no reference can decode";
@@ -91,10 +93,12 @@ export function checkCase(dec: Decoder, bytes: Uint8Array, c: { expect?: string;
       const per = Math.ceil(info.totalFrames / 3);
       let same = true;
       for (let first = 0; first < info.totalFrames; first += per) {
-        const part = dec.decode(bytes, first, Math.min(per, info.totalFrames - first));
+        const count = Math.min(per, info.totalFrames - first);
+        const part = dec.decode(bytes, first, count);
         if (!part.ok) { same = false; rec.reason = `range ${first}: exit ${part.code} ${part.message}`; break; }
         const pb = new Uint8Array(part.pixels);
-        const ref = whole.subarray(first * info.frameBytes, first * info.frameBytes + pb.length);
+        // The frames asked for, all of them: not just as many bytes as came back.
+        const ref = whole.subarray(first * info.frameBytes, (first + count) * info.frameBytes);
         if (pb.length !== ref.length || pb.some((v, i) => v !== ref[i])) { same = false; rec.reason = `range ${first} differs from whole decode`; break; }
       }
       rec.ranges = same ? "ranges-identical" : "ranges-DIFFER";
