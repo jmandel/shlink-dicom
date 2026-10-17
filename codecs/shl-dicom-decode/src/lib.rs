@@ -18,6 +18,7 @@ mod parse;
 mod pixel;
 mod retired;
 mod scale;
+pub mod syntax;
 mod unwrapped;
 
 use std::fmt;
@@ -26,32 +27,25 @@ pub use infer::Inference;
 use infer::{CodestreamInfo, Layout};
 
 use parse::{
-    Attributes, PixelValue, Syntax, TS_DEFLATED_LE, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_GE_PRIVATE, TS_IMPLICIT_LE,
+    Attributes, PixelValue, Syntax, TS_EXPLICIT_BE, TS_EXPLICIT_LE, TS_GE_PRIVATE, TS_IMPLICIT_LE,
 };
+use syntax::Kind;
 use shl_codec_common::{scaled_extent, ColorOut, DecodeError, DecodeFn, DecodeScaledFn, DecodedFrame, FrameInfo, Photometric};
 
-/// Transfer syntax UID -> codec. Complete from the start so format agents never edit it.
+/// Transfer syntax UID -> codec, from the transfer syntax table ([`syntax`]).
 pub fn codec_for(transfer_syntax: &str) -> Option<DecodeFn> {
-    Some(match transfer_syntax {
-        unwrapped::TS_ENCAPSULATED_UNCOMPRESSED => unwrapped::decode_encapsulated_uncompressed,
-        unwrapped::TS_DEFLATED_IMAGE_FRAME => unwrapped::decode_deflated_frame,
-        "1.2.840.10008.1.2.5" => shl_codec_rle::decode_frame,
+    Some(match syntax::kind(transfer_syntax)? {
+        Kind::EncapsulatedUncompressed => unwrapped::decode_encapsulated_uncompressed,
+        Kind::DeflatedImageFrame => unwrapped::decode_deflated_frame,
+        Kind::Rle => shl_codec_rle::decode_frame,
         // Every JPEG process (T.81): baseline, extended, progressive, arithmetic, lossless and
         // hierarchical. The codec reads the process from the SOF marker.
-        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" | "1.2.840.10008.1.2.4.52" | "1.2.840.10008.1.2.4.53"
-        | "1.2.840.10008.1.2.4.54" | "1.2.840.10008.1.2.4.55" | "1.2.840.10008.1.2.4.56" | "1.2.840.10008.1.2.4.57"
-        | "1.2.840.10008.1.2.4.58" | "1.2.840.10008.1.2.4.59" | "1.2.840.10008.1.2.4.60" | "1.2.840.10008.1.2.4.61"
-        | "1.2.840.10008.1.2.4.62" | "1.2.840.10008.1.2.4.63" | "1.2.840.10008.1.2.4.64" | "1.2.840.10008.1.2.4.65"
-        | "1.2.840.10008.1.2.4.66" | "1.2.840.10008.1.2.4.70" => shl_codec_jpeg::decode_frame,
-        "1.2.840.10008.1.2.4.80" | "1.2.840.10008.1.2.4.81" => shl_codec_jpeg_ls::decode_frame,
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" => {
-            shl_codec_jpeg2000::decode_frame
-        }
+        Kind::Jpeg { .. } => shl_codec_jpeg::decode_frame,
+        Kind::JpegLs => shl_codec_jpeg_ls::decode_frame,
+        Kind::Jpeg2000 { .. } => shl_codec_jpeg2000::decode_frame,
         #[cfg(feature = "jpegxl")]
-        "1.2.840.10008.1.2.4.110" | "1.2.840.10008.1.2.4.111" | "1.2.840.10008.1.2.4.112" => shl_codec_jpegxl::decode_frame,
-        "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203" => {
-            shl_codec_htj2k::decode_frame
-        }
+        Kind::JpegXl => shl_codec_jpegxl::decode_frame,
+        Kind::Htj2k => shl_codec_htj2k::decode_frame,
         _ => return None,
     })
 }
@@ -59,19 +53,12 @@ pub fn codec_for(transfer_syntax: &str) -> Option<DecodeFn> {
 /// Transfer syntax -> the codec's own reduced-resolution decode, for codecs that have one. Every
 /// other syntax is decoded at full size and box-downsampled by [`decode_file_scaled`].
 pub fn scaled_codec_for(transfer_syntax: &str) -> Option<DecodeScaledFn> {
-    Some(match transfer_syntax {
-        // Lossless JPEG (.57, .70) has no reduced decode; the codec would return Unsupported.
-        // The codec returns Unsupported for processes it has no reduced decode for.
-        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" | "1.2.840.10008.1.2.4.52" | "1.2.840.10008.1.2.4.53"
-        | "1.2.840.10008.1.2.4.54" | "1.2.840.10008.1.2.4.55" | "1.2.840.10008.1.2.4.56" | "1.2.840.10008.1.2.4.59"
-        | "1.2.840.10008.1.2.4.60" | "1.2.840.10008.1.2.4.61" | "1.2.840.10008.1.2.4.62" | "1.2.840.10008.1.2.4.63"
-        | "1.2.840.10008.1.2.4.64" => shl_codec_jpeg::decode_frame_scaled,
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" => {
-            shl_codec_jpeg2000::decode_frame_scaled
-        }
-        "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203" => {
-            shl_codec_htj2k::decode_frame_scaled
-        }
+    Some(match syntax::kind(transfer_syntax)? {
+        // Lossless JPEG has no reduced decode. The codec returns Unsupported for the other
+        // processes it has no reduced decode for.
+        Kind::Jpeg { lossless: false, .. } => shl_codec_jpeg::decode_frame_scaled,
+        Kind::Jpeg2000 { .. } => shl_codec_jpeg2000::decode_frame_scaled,
+        Kind::Htj2k => shl_codec_htj2k::decode_frame_scaled,
         _ => return None,
     })
 }
@@ -316,7 +303,7 @@ fn decode_range(
     // JPEG 2000 Part 2 (.92, .93): the frames of a volume may be the components of one
     // codestream, or of one codestream per component collection (PS3.5 A.4.4). Such a volume is
     // decoded whole; a frame range is cut from it.
-    if matches!(ts.as_str(), "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93") {
+    if syntax::kind(&ts) == Some(Kind::Jpeg2000 { part2: true }) {
         let streams = shl_codec_jpeg2000::codestreams(fragments.iter().map(|f| f.data));
         if !streams.is_empty() && streams.len() < frames_n {
             let hints = Hints { native_len: None, codestream: streams.first().and_then(|f| infer::peek_codestream(&ts, f)) };
@@ -1301,17 +1288,10 @@ fn decode_encapsulated_scaled(
     small.canonical(out, out_photometric)
 }
 
-/// Transfer syntaxes whose Pixel Data is stored native (not encapsulated).
-pub fn is_native(ts: &str) -> bool {
-    matches!(ts, TS_IMPLICIT_LE | TS_EXPLICIT_LE | TS_EXPLICIT_BE | TS_DEFLATED_LE | TS_GE_PRIVATE)
-}
+pub use syntax::is_native;
 
 fn is_jpeg2000(ts: &str) -> bool {
-    matches!(
-        ts,
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93"
-            | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
-    )
+    matches!(syntax::kind(ts), Some(Kind::Jpeg2000 { .. } | Kind::Htj2k))
 }
 
 /// Component precisions from a JPEG 2000 codestream's SIZ marker (ISO/IEC 15444-1 A.5.1):
@@ -1328,29 +1308,8 @@ fn j2k_precisions(cs: &[u8]) -> Option<Vec<u16>> {
 
 /// A readable reason for a transfer syntax this decoder has no codec for.
 fn unsupported_syntax(ts: &str) -> String {
-    let name = match ts {
-        "1.2.840.10008.1.2.4.100" | "1.2.840.10008.1.2.4.100.1" => "MPEG-2 video (Main Profile / Main Level)",
-        "1.2.840.10008.1.2.4.101" | "1.2.840.10008.1.2.4.101.1" => "MPEG-2 video (Main Profile / High Level)",
-        "1.2.840.10008.1.2.4.102" | "1.2.840.10008.1.2.4.102.1" | "1.2.840.10008.1.2.4.103"
-        | "1.2.840.10008.1.2.4.103.1" | "1.2.840.10008.1.2.4.104" | "1.2.840.10008.1.2.4.104.1"
-        | "1.2.840.10008.1.2.4.105" | "1.2.840.10008.1.2.4.105.1" | "1.2.840.10008.1.2.4.106"
-        | "1.2.840.10008.1.2.4.106.1" => "MPEG-4 AVC / H.264 video",
-        "1.2.840.10008.1.2.4.107" | "1.2.840.10008.1.2.4.108" => "HEVC / H.265 video",
-        "1.2.840.10008.1.2.4.110" => "JPEG XL Lossless",
-        "1.2.840.10008.1.2.4.111" => "JPEG XL JPEG Recompression",
-        "1.2.840.10008.1.2.4.112" => "JPEG XL",
-        "1.2.840.10008.1.2.4.52" | "1.2.840.10008.1.2.4.53" | "1.2.840.10008.1.2.4.54"
-        | "1.2.840.10008.1.2.4.55" | "1.2.840.10008.1.2.4.56" | "1.2.840.10008.1.2.4.58"
-        | "1.2.840.10008.1.2.4.59" | "1.2.840.10008.1.2.4.60" | "1.2.840.10008.1.2.4.61"
-        | "1.2.840.10008.1.2.4.62" | "1.2.840.10008.1.2.4.63" | "1.2.840.10008.1.2.4.64"
-        | "1.2.840.10008.1.2.4.65" | "1.2.840.10008.1.2.4.66" => {
-            "retired JPEG process (progressive, arithmetic-coded or hierarchical)"
-        }
-        "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93" => "JPEG 2000 Part 2 multi-component",
-        "1.2.840.10008.1.2.4.94" | "1.2.840.10008.1.2.4.95" => "JPIP referenced pixel data",
-        "1.2.840.10008.1.2.6.1" => "RFC 2557 MIME encapsulation",
-        "1.2.840.10008.1.2.7.1" | "1.2.840.10008.1.2.7.2" | "1.2.840.10008.1.2.7.3" => "SMPTE ST 2110 video",
-        _ => return format!("transfer syntax {ts} is not supported"),
-    };
-    format!("{name} ({ts}) is not supported; this decoder has no codec for it")
+    match syntax::lookup(ts) {
+        Some(s) if s.kind != Kind::Native => format!("{} ({ts}) is not supported; this decoder has no codec for it", s.name),
+        _ => format!("transfer syntax {ts} is not supported"),
+    }
 }

@@ -20,12 +20,10 @@ const MAX_DEPTH: u32 = 64;
 /// Upper bound for an inflated Deflated Explicit VR Little Endian data set.
 const MAX_INFLATED: usize = 1 << 31;
 
-pub const TS_IMPLICIT_LE: &str = "1.2.840.10008.1.2";
-pub const TS_EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
-pub const TS_DEFLATED_LE: &str = "1.2.840.10008.1.2.1.99";
-pub const TS_EXPLICIT_BE: &str = "1.2.840.10008.1.2.2";
-/// GE private: an implicit VR little endian data set whose Pixel Data is big endian.
-pub const TS_GE_PRIVATE: &str = "1.2.840.113619.5.2";
+pub use crate::syntax::{
+    DEFLATED_LE as TS_DEFLATED_LE, EXPLICIT_BE as TS_EXPLICIT_BE, EXPLICIT_LE as TS_EXPLICIT_LE, GE_PRIVATE as TS_GE_PRIVATE,
+    IMPLICIT_LE as TS_IMPLICIT_LE,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Syntax {

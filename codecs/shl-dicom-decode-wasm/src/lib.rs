@@ -19,8 +19,11 @@
 
 use std::fmt::Write as _;
 
+// parse.rs names the transfer syntax table as `crate::syntax`.
+use shl_dicom_decode::syntax;
+
 #[path = "../../shl-dicom-decode/src/parse.rs"]
-#[allow(dead_code, clippy::all)]
+#[allow(dead_code, unused_imports, clippy::all)]
 mod parse;
 
 pub use shl_dicom_decode::{decode_file, decode_file_scaled, Canonical, Error};

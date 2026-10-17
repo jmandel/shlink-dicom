@@ -1938,6 +1938,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shl-dicom-core",
+ "shl-dicom-decode",
  "shl-dicom-transcode",
  "tar",
  "tokio",

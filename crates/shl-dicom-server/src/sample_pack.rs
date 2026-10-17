@@ -57,7 +57,7 @@ fn parse_header(path: &Path, name: &str) -> Result<ParsedDicomInstance, String> 
 /// Native transfer syntaxes never take an offset table, so their files are not read again
 /// (offset_tables.rs also declines video syntaxes, from the header).
 fn may_lack_offset_table(ts: &str) -> bool {
-    !matches!(ts, "1.2.840.10008.1.2" | "1.2.840.10008.1.2.1" | "1.2.840.10008.1.2.2" | "1.2.840.10008.1.2.1.99")
+    !shl_dicom_decode::syntax::is_native(ts)
 }
 
 /// Packs every `*.tgz` in `samples_dir` into share `sid`. `scratch` is removed afterwards.

@@ -40,14 +40,10 @@ pub struct CodestreamInfo {
 
 /// Read the image header of a JPEG family (SOF) or JPEG 2000 (SIZ) codestream.
 pub fn peek_codestream(ts: &str, cs: &[u8]) -> Option<CodestreamInfo> {
-    match ts {
-        "1.2.840.10008.1.2.4.50" | "1.2.840.10008.1.2.4.51" | "1.2.840.10008.1.2.4.52" | "1.2.840.10008.1.2.4.53"
-        | "1.2.840.10008.1.2.4.54" | "1.2.840.10008.1.2.4.55" | "1.2.840.10008.1.2.4.56" | "1.2.840.10008.1.2.4.57"
-        | "1.2.840.10008.1.2.4.58" | "1.2.840.10008.1.2.4.70" | "1.2.840.10008.1.2.4.80" | "1.2.840.10008.1.2.4.81" => {
-            peek_jpeg(cs)
-        }
-        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.92" | "1.2.840.10008.1.2.4.93"
-        | "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203" => peek_j2k(cs),
+    use crate::syntax::Kind;
+    match crate::syntax::kind(ts)? {
+        Kind::Jpeg { hierarchical: false, .. } | Kind::JpegLs => peek_jpeg(cs),
+        Kind::Jpeg2000 { .. } | Kind::Htj2k => peek_j2k(cs),
         _ => None,
     }
 }

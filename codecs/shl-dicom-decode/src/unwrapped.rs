@@ -12,8 +12,6 @@ use shl_codec_common::{ColorOut, DecodeError, DecodedFrame, FrameInfo, Photometr
 
 use crate::pixel;
 
-pub const TS_ENCAPSULATED_UNCOMPRESSED: &str = "1.2.840.10008.1.2.1.98";
-pub const TS_DEFLATED_IMAGE_FRAME: &str = "1.2.840.10008.1.2.8.1";
 
 /// Bytes one native frame of `info` occupies: packed bits for Bits Allocated 1, two samples per
 /// pixel for the 4:2:2 photometrics.
@@ -88,7 +86,7 @@ mod tests {
             pixel_representation: 0,
             photometric,
             planar_configuration: pc,
-            transfer_syntax: TS_DEFLATED_IMAGE_FRAME.into(),
+            transfer_syntax: crate::syntax::DEFLATED_IMAGE_FRAME.into(),
         }
     }
 

@@ -45,21 +45,20 @@ use std::fmt;
 use ds::{Elem, Reader, Value, Writer, PIXEL_DATA};
 
 /// Transfer syntax of the output.
-pub const JPEG_LOSSLESS_SV1: &str = "1.2.840.10008.1.2.4.70";
+pub use shl_dicom_decode::syntax::JPEG_LOSSLESS_SV1;
 /// (0002,0012) of a file this crate wrote: shlink-dicom's, so a recipient can tell the file was
 /// re-encoded by its packer.
 pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.222098624467184222580709298353105703221";
 /// (0002,0013) of a file this crate re-encoded as JPEG Lossless SV1.
 pub const IMPLEMENTATION_VERSION_NAME: &str = "SHLDICOM_SV1_1";
 /// JPEG 2000 Image Compression (Lossless Only).
-pub const JPEG_2000_LOSSLESS: &str = "1.2.840.10008.1.2.4.90";
+pub use shl_dicom_decode::syntax::JPEG_2000_LOSSLESS;
 /// (0002,0013) of a file this crate re-encoded as JPEG 2000 Lossless.
 pub const IMPLEMENTATION_VERSION_NAME_J2K: &str = "SHLDICOM_J2K_1";
 /// The transfer syntaxes [`transcode_part10`] writes.
 pub const SUPPORTED_TRANSFER_SYNTAXES: [&str; 2] = [JPEG_LOSSLESS_SV1, JPEG_2000_LOSSLESS];
 
-const TS_IMPLICIT_LE: &str = "1.2.840.10008.1.2";
-const TS_EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
+use shl_dicom_decode::syntax::{DEFLATED_LE, EXPLICIT_BE, EXPLICIT_LE, IMPLICIT_LE};
 
 /// Why a file was left as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,10 +279,10 @@ fn frames_per_chunk(frame_bytes: usize) -> usize {
 fn prepare(input: &[u8]) -> Result<Prepared<'_>, Declined> {
     let meta = read_meta(input)?;
     let explicit = match meta.ts.as_str() {
-        TS_EXPLICIT_LE => true,
-        TS_IMPLICIT_LE => false,
-        "1.2.840.10008.1.2.2" => return Err(no("Explicit VR Big Endian data set")),
-        "1.2.840.10008.1.2.1.99" => return Err(no("deflated data set")),
+        EXPLICIT_LE => true,
+        IMPLICIT_LE => false,
+        EXPLICIT_BE => return Err(no("Explicit VR Big Endian data set")),
+        DEFLATED_LE => return Err(no("deflated data set")),
         ts => return Err(no(format!("not uncompressed: transfer syntax {ts}"))),
     };
     let ds = &input[meta.end..];
