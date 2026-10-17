@@ -191,6 +191,8 @@ pub struct S3Store {
     presigned: Mutex<HashMap<String, (Instant, String)>>,
 }
 
+/// How long a presigned URL works. A URL signed before a link is revoked keeps working this long
+/// (spec/README.md, Appendix C), so keep it at 60 s or less.
 const SIGN_TTL: Duration = Duration::from_secs(60);
 const PRESIGN_REUSE: Duration = Duration::from_secs(30);
 /// Below this, a file is sent with one PutObject at the end rather than a multipart upload.

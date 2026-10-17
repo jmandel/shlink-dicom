@@ -529,3 +529,5 @@ These were tested in October 2026 against GitHub Pages:
 - **CORS:** `Access-Control-Allow-Origin: *` is sent, and `OPTIONS` is answered with 405.
 
 GitHub's documented limits (1 GB per site, a 100 MB file limit for sites published from a branch, no Git LFS) make Pages suitable for demonstrations. Object stores such as S3, R2 and GCS support Range requests and suit full-size studies.
+
+**Redirects to signed URLs.** A server that answers a file request with a redirect to a signed object-store URL, instead of serving the bytes itself, hands out a URL that works until it expires, whatever then happens to the link: a URL signed just before a link is revoked or expires stays usable for its whole lifetime. Keep that lifetime short. The server in this repository signs them for 60 seconds.

@@ -175,7 +175,7 @@ CREATE INDEX access_ts ON access_log(ts);
 4. Read `size` and `storage_key` from `files`, clamp the range to `[0, size)`, and reject multi-range requests (`416`).
 5. `HEAD` is answered here, with the same status and headers and no body, in every mode (a presigned URL is for `GET` only). For `GET`, deliver the range by the store's read mode:
    - **local files**, or **S3 in `proxy` mode**: read the range (a seek in the file, or an S3 `GetObject` with `Range`) and stream it. Respond `206` with `Content-Range: bytes a-b/size`, `Content-Type: application/octet-stream`, no `Content-Encoding`, and `Access-Control-Allow-Origin: *`.
-   - **S3 in `redirect` mode**: respond `307` with `Location` set to a presigned `GetObject` URL valid for 60 s, `Cache-Control: no-store` and `Access-Control-Allow-Origin: *`. The browser repeats its `Range` request there; the bucket answers `206`.
+   - **S3 in `redirect` mode**: respond `307` with `Location` set to a presigned `GetObject` URL valid for 60 s, `Cache-Control: no-store` and `Access-Control-Allow-Origin: *`. The browser repeats its `Range` request there; the bucket answers `206`. A URL signed before the link is revoked stays usable until it expires, so revocation takes effect within 60 s in this mode.
 
    A blob missing from the store is a `404`. In `proxy` mode, S3 must answer `206` (or `200` when the range is the whole file); anything else is a `502`. Store errors are logged; clients get no detail, and presigned URLs never appear in logs or error responses.
 6. Append to `access_log` and notify SSE subscribers. In redirect mode `bytes` is the requested length.
