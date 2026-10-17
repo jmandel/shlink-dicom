@@ -576,9 +576,19 @@ impl AppState {
         Ok(token)
     }
 
-    pub fn revoke_caps_for_link(&self, lid: &str) -> Result<usize, String> {
+    /// Ends a link's capability URLs; `None` when share `sid` has no link `lid`.
+    pub fn revoke_caps_for_link(&self, sid: &str, lid: &str) -> Result<Option<usize>, String> {
         let cat = self.catalog.lock().unwrap();
+        let ours = cat
+            .query_row("SELECT 1 FROM links WHERE lid = ?1 AND sid = ?2", params![lid, sid], |_| Ok(()))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some();
+        if !ours {
+            return Ok(None);
+        }
         cat.execute("DELETE FROM caps WHERE lid = ?1", params![lid])
+            .map(Some)
             .map_err(|e| e.to_string())
     }
 
@@ -791,11 +801,13 @@ impl AppState {
         Ok(())
     }
 
-    pub fn remove_link_from_catalog(&self, lid: &str) -> Result<(), String> {
+    /// Removes share `sid`'s link `lid` from the catalog (its caps cascade); false when the share
+    /// has no such link.
+    pub fn remove_link_from_catalog(&self, sid: &str, lid: &str) -> Result<bool, String> {
         let cat = self.catalog.lock().unwrap();
-        cat.execute("DELETE FROM links WHERE lid = ?1", params![lid])
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        cat.execute("DELETE FROM links WHERE lid = ?1 AND sid = ?2", params![lid, sid])
+            .map(|n| n > 0)
+            .map_err(|e| e.to_string())
     }
 
     pub fn build_share_resource(&self, sid: &str, origin: &str) -> Option<ShareResource> {

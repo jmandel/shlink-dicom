@@ -1238,8 +1238,13 @@ pub async fn delete_link(
     if !is_valid_id22(&lid) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // Rule: delete from catalog first (which cascades to caps), then from share DB.
-    let _ = state.remove_link_from_catalog(&lid);
+    // Rule: delete from catalog first (which cascades to caps), then from share DB. Only a link
+    // of this share: the token proves nothing about other shares' links.
+    match state.remove_link_from_catalog(&sid, &lid) {
+        Ok(true) => {}
+        Ok(false) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
     if let Some(conn_arc) = state.open_share_db(&sid) {
         let conn = conn_arc.lock().unwrap();
         let _ = conn.execute("DELETE FROM links WHERE lid = ?1", params![lid]);
@@ -1259,8 +1264,9 @@ pub async fn end_link_sessions(
     if !is_valid_id22(&lid) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match state.revoke_caps_for_link(&lid) {
-        Ok(revoked_count) => (
+    match state.revoke_caps_for_link(&sid, &lid) {
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Some(revoked_count)) => (
             StatusCode::OK,
             Json(json!({ "revokedCount": revoked_count })),
         )

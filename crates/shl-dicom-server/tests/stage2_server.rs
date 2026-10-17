@@ -1882,3 +1882,51 @@ async fn test_security_headers_on_every_response() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One share's token can't delete or end the sessions of another share's link: 404, and the link
+/// still works. Its own share can.
+#[tokio::test]
+async fn test_a_share_cannot_touch_another_shares_links() {
+    let dir = temp_data_dir("cross_share_links");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let share = || async {
+        let v: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+        (v["share"]["id"].as_str().unwrap().to_string(), v["controlToken"].as_str().unwrap().to_string())
+    };
+    let (a, a_token) = share().await;
+    let (b, b_token) = share().await;
+    let link: Value = client
+        .post(format!("{base}/api/shares/{b}/links"))
+        .bearer_auth(&b_token)
+        .json(&json!({ "allowedFiles": [] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap().to_string();
+    client.put(format!("{base}/api/shares/{b}/links/{lid}/bundle.jwe")).bearer_auth(&b_token).body("dummy..iv.ct.tag").send().await.unwrap();
+    let opens = || async { client.get(format!("{base}/shl/{lid}/bundle.jwe")).send().await.unwrap().status() };
+    assert_eq!(opens().await, StatusCode::OK);
+
+    let r = client.delete(format!("{base}/api/shares/{a}/links/{lid}")).bearer_auth(&a_token).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    let r = client.post(format!("{base}/api/shares/{a}/links/{lid}/end-sessions")).bearer_auth(&a_token).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // Still there, in the catalog and in its share's database (a reopen would sweep an orphan).
+    assert_eq!(opens().await, StatusCode::OK);
+    let share_b: Value = client.get(format!("{base}/api/shares/{b}")).bearer_auth(&b_token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(share_b["links"][0]["id"], lid.as_str());
+
+    let r = client.post(format!("{base}/api/shares/{b}/links/{lid}/end-sessions")).bearer_auth(&b_token).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = client.delete(format!("{base}/api/shares/{b}/links/{lid}")).bearer_auth(&b_token).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(opens().await, StatusCode::NOT_FOUND);
+    let r = client.delete(format!("{base}/api/shares/{b}/links/{lid}")).bearer_auth(&b_token).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND, "deleting it again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
