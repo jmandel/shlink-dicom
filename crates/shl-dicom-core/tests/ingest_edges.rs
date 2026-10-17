@@ -1,10 +1,10 @@
-//! Ingest edge cases: bare data sets (spec §11.1 step 3).
+//! Ingest edge cases: bare data sets (spec §11.1 step 3), and archive headers that lie about sizes.
 use std::io::Cursor;
 use dicom_object::OpenFileOptions;
 use dicom_transfer_syntax_registry::entries::IMPLICIT_VR_LITTLE_ENDIAN;
 use shl_dicom_core::{
     crypto::decrypt_range,
-    dicom_io::parse_dicom_bytes,
+    dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, MAX_ARCHIVE_ENTRY_BYTES},
     packer::IngestSession,
     range::ciphertext_range,
 };
@@ -137,4 +137,84 @@ fn real_bare_files_are_wrapped() {
     if let Ok(acr) = std::fs::read(dir.join("ext-fodicom-GH340.dcm")) {
         assert_eq!(parse_dicom_bytes("acr.dcm", acr).unwrap_err(), "no SOP Instance UID");
     }
+}
+
+
+/// A tar entry whose header claims 1 TiB is skipped with the reason (no allocation of that size),
+/// and the entries before it are read.
+#[test]
+fn a_forged_tar_size_is_skipped() {
+    let good = part10("2.25.77.1.1");
+    let mut tar = Vec::new();
+    {
+        let mut t = tar::Builder::new(&mut tar);
+        let mut h = tar::Header::new_gnu();
+        h.set_size(good.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        t.append_data(&mut h, "good.dcm", good.as_slice()).unwrap();
+        t.finish().unwrap();
+    }
+    tar.truncate(tar.len() - 1024); // drop the end-of-archive blocks
+    let mut h = tar::Header::new_gnu();
+    h.set_path("big.dcm").unwrap();
+    h.set_size(1 << 40);
+    h.set_mode(0o644);
+    h.set_entry_type(tar::EntryType::Regular);
+    h.set_cksum();
+    tar.extend_from_slice(h.as_bytes());
+    tar.extend_from_slice(&good); // far less than it claims
+    tar.extend_from_slice(&[0u8; 1024]);
+    let mut tgz = Vec::new();
+    {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(&mut tgz, flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        gz.finish().unwrap();
+    }
+    let (parsed, skipped) = extract_dicom_from_tar_gz(&tgz).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].sop_instance_uid, "2.25.77.1.1");
+    let big = skipped.iter().find(|s| s.name == "big.dcm").unwrap_or_else(|| panic!("{skipped:?}"));
+    assert!(big.reason.contains("limit"), "{}", big.reason);
+}
+
+/// Sets the uncompressed size a zip's central directory gives for `name` (in its zip64 field).
+fn forge_zip_size(b: &mut [u8], name: &str, size: u64) {
+    let mut at = 0;
+    while let Some(i) = b[at..].windows(4).position(|w| w == [0x50, 0x4b, 0x01, 0x02]) {
+        let c = at + i;
+        let n = u16::from_le_bytes([b[c + 28], b[c + 29]]) as usize;
+        if &b[c + 46..c + 46 + n] == name.as_bytes() {
+            assert_eq!(u32::from_le_bytes(b[c + 24..c + 28].try_into().unwrap()), u32::MAX, "zip64 sizes");
+            let x = c + 46 + n;
+            assert_eq!(&b[x..x + 2], &[1, 0], "zip64 extra field first");
+            b[x + 4..x + 12].copy_from_slice(&size.to_le_bytes());
+            return;
+        }
+        at = c + 4;
+    }
+    panic!("{name} not in the central directory");
+}
+
+/// A zip entry whose central directory claims 1 TiB is skipped with the reason (no allocation of
+/// that size); the others are read. A claim smaller than the data reserves less and reads it all.
+#[test]
+fn forged_zip_sizes_are_skipped() {
+    use std::io::Write;
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let o = zip::write::SimpleFileOptions::default().large_file(true);
+    for (name, sop) in [("big.dcm", "2.25.77.1.2"), ("good.dcm", "2.25.77.1.1"), ("short.dcm", "2.25.77.1.3")] {
+        z.start_file(name, o).unwrap();
+        z.write_all(&part10(sop)).unwrap();
+    }
+    let mut b = z.finish().unwrap().into_inner();
+    forge_zip_size(&mut b, "big.dcm", 1 << 40);
+    forge_zip_size(&mut b, "short.dcm", 1);
+    const _: () = assert!(1u64 << 40 > MAX_ARCHIVE_ENTRY_BYTES);
+    let (parsed, skipped) = extract_dicom_from_zip(&b).unwrap();
+    let reason = |n: &str| skipped.iter().find(|s| s.name == n).map(|s| s.reason.clone());
+    assert!(reason("big.dcm").is_some_and(|r| r.contains("limit")), "{skipped:?}");
+    let sops: Vec<&str> = parsed.iter().map(|p| p.sop_instance_uid.as_str()).collect();
+    assert_eq!(sops, ["2.25.77.1.1", "2.25.77.1.3"], "{skipped:?}");
 }

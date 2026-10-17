@@ -345,6 +345,30 @@ fn parsed_from_object(
     })
 }
 
+/// The largest archive entry read. Archive headers are not trusted for sizes: an entry larger
+/// than this, by its header or by what it inflates to, is skipped with the reason. Real single
+/// instances reach a few GB (a whole-slide level can pass 1 GB, and native Pixel Data is at most
+/// 4 GiB − 2 bytes), so this fails a decompression bomb but not a real slide.
+pub const MAX_ARCHIVE_ENTRY_BYTES: u64 = 4 << 30;
+/// Most bytes reserved before an entry is read; the buffer grows as the bytes actually arrive.
+const MAX_PREALLOCATE: u64 = 8 << 20;
+
+/// Reads one archive entry that says it is `declared` bytes long, holding to
+/// [`MAX_ARCHIVE_ENTRY_BYTES`]. `Err(Ok(reason))`: skip the entry; `Err(Err(e))`: a read error.
+fn read_entry(r: impl Read, declared: u64) -> std::result::Result<Vec<u8>, std::result::Result<String, std::io::Error>> {
+    let max = MAX_ARCHIVE_ENTRY_BYTES.min(usize::MAX as u64);
+    let too_big = || Ok(format!("larger than the {} GiB limit for one file", MAX_ARCHIVE_ENTRY_BYTES >> 30));
+    if declared > max {
+        return Err(too_big());
+    }
+    let mut buf = Vec::with_capacity(declared.min(MAX_PREALLOCATE) as usize);
+    r.take(max + 1).read_to_end(&mut buf).map_err(Err)?;
+    if buf.len() as u64 > max {
+        return Err(too_big());
+    }
+    Ok(buf)
+}
+
 /// The DICOM instances in a `.tar.gz`, and every other file in it with the reason it was skipped.
 pub fn extract_dicom_from_tar_gz(tgz_bytes: &[u8]) -> Result<(Vec<ParsedDicomInstance>, Vec<Skipped>)> {
     let gz = GzDecoder::new(Cursor::new(tgz_bytes));
@@ -355,8 +379,18 @@ pub fn extract_dicom_from_tar_gz(tgz_bytes: &[u8]) -> Result<(Vec<ParsedDicomIns
         .entries()
         .map_err(|e| Error::Dicom(format!("tar entries: {e}")))?;
 
+    // An entry whose header claims more than the limit is skipped unread; if that header lied,
+    // the archive can't be followed past it.
+    let mut after_oversize: Option<String> = None;
     for entry_res in entries {
-        let mut entry = entry_res.map_err(|e| Error::Dicom(format!("tar entry: {e}")))?;
+        let mut entry = match (entry_res, &after_oversize) {
+            (Ok(e), _) => e,
+            (Err(e), Some(prev)) => {
+                skipped.push(Skipped { name: format!("(the rest of the archive, after {prev})"), reason: format!("unreadable: {e}") });
+                break;
+            }
+            (Err(e), None) => return Err(Error::Dicom(format!("tar entry: {e}"))),
+        };
         if !entry.header().entry_type().is_file() {
             continue;
         }
@@ -368,10 +402,16 @@ pub fn extract_dicom_from_tar_gz(tgz_bytes: &[u8]) -> Result<(Vec<ParsedDicomIns
             skipped.push(Skipped { name: path, reason: "hidden file".into() });
             continue;
         }
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| Error::Dicom(format!("tar read {path}: {e}")))?;
+        let declared = entry.size();
+        let buf = match read_entry(&mut entry, declared) {
+            Ok(b) => b,
+            Err(Ok(reason)) => {
+                after_oversize = (declared > MAX_ARCHIVE_ENTRY_BYTES).then(|| path.clone());
+                skipped.push(Skipped { name: path, reason });
+                continue;
+            }
+            Err(Err(e)) => return Err(Error::Dicom(format!("tar read {path}: {e}"))),
+        };
         match parse_dicom_bytes(&path, buf) {
             Ok(parsed) => out.push(parsed),
             Err(reason) => skipped.push(Skipped { name: path, reason }),
@@ -399,9 +439,20 @@ pub fn extract_dicom_from_zip(zip_bytes: &[u8]) -> Result<(Vec<ParsedDicomInstan
             skipped.push(Skipped { name, reason: "hidden file".into() });
             continue;
         }
-        let mut buf = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut buf)
-            .map_err(|e| Error::Dicom(format!("zip read {name}: {e}")))?;
+        let declared = file.size();
+        let buf = match read_entry(&mut file, declared) {
+            Ok(b) => b,
+            Err(Ok(reason)) => {
+                skipped.push(Skipped { name, reason });
+                continue;
+            }
+            // Zip entries stand alone, so one that can't be read (a size or CRC that doesn't
+            // match its data) is skipped and the rest are still read.
+            Err(Err(e)) => {
+                skipped.push(Skipped { name, reason: format!("unreadable: {e}") });
+                continue;
+            }
+        };
         match parse_dicom_bytes(&name, buf) {
             Ok(parsed) => out.push(parsed),
             Err(reason) => skipped.push(Skipped { name, reason }),
