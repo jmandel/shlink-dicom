@@ -27,14 +27,21 @@ pub struct Quotas {
     pub request_bytes: u64,
     /// Lifetime of a passcode link's capability URL (`/cap/{token}/…`), in seconds.
     pub cap_ttl_secs: i64,
+    /// Longest one upload request (PUT or PATCH) may take, in seconds, however steadily its body
+    /// arrives; what came is kept and the client goes on with another request.
+    pub upload_request_secs: u64,
 }
 
 impl Default for Quotas {
     fn default() -> Self {
-        Self { share_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS }
+        Self { share_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS, upload_request_secs: DEFAULT_UPLOAD_REQUEST_SECS }
     }
 }
 
+pub const DEFAULT_UPLOAD_REQUEST_SECS: u64 = 2 * 3600;
+/// A claim on an upload older than its request could last, plus this, belongs to a request that
+/// is stuck (for example in a call to the store); the stale-upload sweep breaks it.
+const CLAIM_GRACE_SECS: u64 = 600;
 pub const DEFAULT_SANDBOX_TTL_SECS: i64 = 24 * 3600; // 24 hours
 pub const DEFAULT_CAP_TTL_SECS: i64 = 3600; // 1 hour
 /// Longest a capability URL lives, whatever `--cap-ttl-secs` says.
@@ -221,7 +228,8 @@ pub struct AppState {
     /// (see `routes_shl::request_origin`).
     pub public_origin: Option<String>,
     /// `{sid}/{fileId}` uploads in progress (one request at a time per file).
-    pub uploading: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// The value is the claim's id and when it was taken.
+    pub uploading: Arc<Mutex<HashMap<String, (u64, std::time::Instant)>>>,
     /// Where finished files live (local disk or S3).
     pub store: Arc<dyn BlobStore>,
     catalog: Arc<Mutex<Connection>>,
@@ -288,7 +296,7 @@ impl AppState {
             data_dir,
             quotas,
             public_origin: None,
-            uploading: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            uploading: Arc::new(Mutex::new(HashMap::new())),
             store,
             catalog: Arc::new(Mutex::new(conn)),
             pool: Arc::new(Mutex::new(ShareDbPool::new())),
@@ -534,6 +542,7 @@ impl AppState {
     /// Drops uploads started more than `STALE_UPLOAD_SECS` ago: their rows, staged files and
     /// multipart uploads. Uploads with a request in progress are left alone.
     pub fn sweep_stale_uploads(&self) {
+        self.break_claims_older_than(std::time::Duration::from_secs(self.quotas.upload_request_secs + CLAIM_GRACE_SECS));
         let cutoff = now_unix() - STALE_UPLOAD_SECS;
         let sids: Vec<String> = {
             let cat = self.catalog.lock().unwrap();
@@ -571,7 +580,23 @@ impl AppState {
     /// Marks `{sid}/{fileId}` as having a request in progress; None when one already has.
     pub fn claim_upload(&self, sid: &str, file_id: &str) -> Option<UploadClaim> {
         let key = format!("{sid}/{file_id}");
-        self.uploading.lock().unwrap().insert(key.clone()).then(|| UploadClaim(self.clone(), key))
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut map = self.uploading.lock().unwrap();
+        if map.contains_key(&key) {
+            return None;
+        }
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        map.insert(key.clone(), (id, std::time::Instant::now()));
+        Some(UploadClaim(self.clone(), key, id))
+    }
+
+    /// Ends claims held longer than `age`: their requests are stuck. A broken claim's request, if
+    /// it ever ends, removes nothing (another claim may hold the key by then).
+    pub fn break_claims_older_than(&self, age: std::time::Duration) -> usize {
+        let mut map = self.uploading.lock().unwrap();
+        let before = map.len();
+        map.retain(|_, (_, at)| at.elapsed() <= age);
+        before - map.len()
     }
 
     pub fn catalog_has_share(&self, sid: &str) -> bool {
@@ -1100,10 +1125,13 @@ pub fn build_link_resource_from_row(
 }
 
 /// A request in progress on an upload; dropping it ends the claim.
-pub struct UploadClaim(AppState, String);
+pub struct UploadClaim(AppState, String, u64);
 impl Drop for UploadClaim {
     fn drop(&mut self) {
-        self.0.uploading.lock().unwrap().remove(&self.1);
+        let mut map = self.0.uploading.lock().unwrap();
+        if map.get(&self.1).is_some_and(|(id, _)| *id == self.2) {
+            map.remove(&self.1);
+        }
     }
 }
 
@@ -1317,6 +1345,23 @@ mod tests {
         assert!(!state.share_db_path(&sid).exists());
         assert!(state.open_share_db(&sid).is_none());
         assert!(!state.share_db_path(&sid).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stuck_claim_can_be_broken() {
+        let dir = std::env::temp_dir().join(format!("claims_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = super::AppState::new(&dir).unwrap();
+        let old = state.claim_upload("s", "f").unwrap();
+        assert!(state.claim_upload("s", "f").is_none());
+        assert_eq!(state.break_claims_older_than(std::time::Duration::from_secs(3600)), 0);
+        assert_eq!(state.break_claims_older_than(std::time::Duration::ZERO), 1);
+        let new = state.claim_upload("s", "f").unwrap();
+        drop(old); // the stuck request ends at last: the new claim stands
+        assert!(state.claim_upload("s", "f").is_none());
+        drop(new);
+        assert!(state.claim_upload("s", "f").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

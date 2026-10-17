@@ -331,7 +331,7 @@ async fn test_size_quotas_and_409_foreign_key() {
     // Set small quota of 200 KB max
     let state = AppState::with_store(
         &dir,
-        shl_dicom_server::state::Quotas { share_bytes: Some(200_000), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600 },
+        shl_dicom_server::state::Quotas { share_bytes: Some(200_000), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600, ..Default::default() },
         test_store(&dir),
     )
     .unwrap();
@@ -1373,7 +1373,7 @@ async fn test_the_byte_limit_holds_while_the_length_is_unknown() {
     let dir = temp_data_dir("unknown_length_quota");
     let state = AppState::with_store(
         &dir,
-        shl_dicom_server::state::Quotas { share_bytes: Some(10 << 20), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600 },
+        shl_dicom_server::state::Quotas { share_bytes: Some(10 << 20), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600, ..Default::default() },
         test_store(&dir),
     )
     .unwrap();
@@ -1806,7 +1806,7 @@ async fn test_deleting_a_file_mid_upload_is_a_conflict() {
     // Wait until the server has claimed the upload.
     let mut busy = false;
     for _ in 0..200 {
-        if state.uploading.lock().unwrap().contains(&format!("{sid}/{fid}")) {
+        if state.uploading.lock().unwrap().contains_key(&format!("{sid}/{fid}")) {
             busy = true;
             break;
         }
@@ -2331,5 +2331,50 @@ async fn test_concurrent_uploads_stay_within_the_byte_limit() {
     let ok = statuses.iter().filter(|s| **s == StatusCode::CREATED).count();
     assert_eq!(ok, 3, "{statuses:?}");
     assert!(statuses.iter().all(|s| *s == StatusCode::CREATED || *s == StatusCode::PAYLOAD_TOO_LARGE), "{statuses:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An append whose body keeps trickling in ends at the request's deadline, keeping what came.
+#[tokio::test]
+async fn test_a_trickling_upload_ends_at_its_deadline() {
+    let dir = temp_data_dir("upload_deadline");
+    let state = AppState::with_store(
+        &dir,
+        shl_dicom_server::state::Quotas { upload_request_secs: 2, ..Default::default() },
+        test_store(&dir),
+    )
+    .unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[46u8; 16]));
+    assert_eq!(client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap().status(), StatusCode::CREATED);
+    // 100 bytes every 300 ms, for up to 6 s.
+    let trickle = futures_util::stream::unfold(0u32, |n| async move {
+        if n == 20 {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Some((Ok::<_, std::io::Error>(vec![7u8; 100]), n + 1))
+    });
+    let t0 = std::time::Instant::now();
+    let r = client
+        .patch(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/partial-upload")
+        .header("Upload-Offset", "0")
+        .header("Upload-Complete", "?0")
+        .body(reqwest::Body::wrap_stream(trickle))
+        .send()
+        .await;
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5), "{:?}", t0.elapsed());
+    if let Ok(r) = r {
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+    let h = client.head(&url).bearer_auth(&token).send().await.unwrap();
+    let off: u64 = h.headers()["upload-offset"].to_str().unwrap().parse().unwrap();
+    assert!(off > 0 && off < 2000 && off.is_multiple_of(100), "{off}");
     let _ = std::fs::remove_dir_all(&dir);
 }

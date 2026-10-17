@@ -276,6 +276,7 @@ async fn main() {
                 shares: (max_shares > 0).then_some(max_shares),
                 request_bytes: max_chunk_bytes,
                 cap_ttl_secs,
+                ..Quotas::default()
             };
             let store = store.store(&data_dir);
             println!("Files: {}", store.describe());

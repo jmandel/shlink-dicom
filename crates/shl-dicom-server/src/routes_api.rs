@@ -515,9 +515,12 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
     }
     let mut got: u64 = 0;
     let mut stream = body.into_data_stream();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(state.quotas.upload_request_secs);
     loop {
-        // A body that stops arriving for BODY_IDLE ends the request; what came is kept.
-        let next = match tokio::time::timeout(BODY_IDLE, stream.next()).await {
+        // A body that stops arriving for BODY_IDLE, or is still arriving at the request's
+        // deadline (however steadily), ends the request; what came is kept.
+        let wait = BODY_IDLE.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        let next = match tokio::time::timeout(wait, stream.next()).await {
             Ok(Some(c)) => c,
             Ok(None) => break,
             Err(_) => {
