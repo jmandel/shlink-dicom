@@ -20,7 +20,7 @@ import {
   COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, uncompressedImages, workers,
   type CompressMode, type CompressProgress, type CompressSummary, type Encoding, type SeriesEstimate,
 } from "./lib/compress";
-import { clearJob, loadJob, persist, saveJob, SentLedger, startShare, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
+import { clearJob, freeJobs, holdJob, loadJob, loadJobs, persist, releaseJob, saveJob, SentLedger, startShare, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
 import { StreamPlan } from "./lib/stream";
 import { recordCount } from "../core/range";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
@@ -359,7 +359,7 @@ async function runLoad(title: string, fn: Loader) {
   $("found").textContent = foundLine(col);
   $("doing").textContent = "";
   try {
-    await clearStaging(loadJob()?.source.stage, loadJob()?.compress?.stage);
+    await clearStaging(...jobStages());
     stager = await openStager();
     await loadShlWasm();
     await fn(col, stager, on, ctl.signal);
@@ -813,8 +813,7 @@ async function upload() {
         if (job.source.kind === "files") {
           $("up-tech").textContent = "Noting which files these are, to continue after a reload";
           job.source = { ...job.source, files: await ids! };
-          if (pickedHandles) await saveHandles(pickedHandles);
-          else await clearHandles();
+          if (pickedHandles) await saveHandles(sid, pickedHandles);
         }
         const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
         // A link source's address holds its key: it is not kept once the files are planned;
@@ -822,6 +821,7 @@ async function upload() {
         if (job.source.kind === "link") job.source = { ...job.source, link: undefined };
         const full: UploadJob = { ...job, sid, token, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000), expiresAt };
         saveJob(full);
+        await holdJob(sid);
         return { api, full, owner };
       },
     );
@@ -985,7 +985,7 @@ async function runUpload(p: Pending) {
       onConn,
       {
         fresh: p.fresh,
-        ledger: new SentLedger((job.sent ??= {}), () => saveJob(job) || (clearJob(), false)),
+        ledger: new SentLedger((job.sent ??= {}), () => saveJob(job) || (clearJob(job.sid), false)),
         // A file starting again under a new id and key: saved (with the job, and in the owner
         // Bundle when it is stored already) before any of it is sent.
         rekeyed: async (f, oldId) => {
@@ -996,7 +996,7 @@ async function runUpload(p: Pending) {
             const ownerJwe = await encryptJwe(utf8(JSON.stringify(p.owner)), job.ownerKey);
             await persist(() => api.putOwner(ownerJwe), onConn);
           }
-          if (!saveJob(job)) clearJob();
+          if (!saveJob(job)) clearJob(job.sid);
         },
       },
     );
@@ -1021,10 +1021,11 @@ async function runUpload(p: Pending) {
     const cred = { sid: job.sid, token: job.token, ownerKey: job.ownerKey };
     const shlink = await shlinkFor(link, job.ownerKey, cfg.viewerPrefix);
     const saved = saveShare({ ...cred, title: `${job.title}${job.recipient ? ` · for ${job.recipient}` : ""}`, createdAt: job.startedAt, apiBase: cfg.apiBase });
-    clearJob();
-    await clearHandles();
+    clearJob(job.sid);
+    releaseJob(job.sid);
+    await clearHandles(job.sid);
     pending = null;
-    await clearStaging(null);
+    await clearStaging(...jobStages());
     result = { shlink, manage: manageUrl(manageBase(), cred), link, studies: studyIds.length };
     renderDone(saved, job.hasPasscode, job.recipient);
     show(5);
@@ -1110,6 +1111,7 @@ async function resumeJob(job: UploadJob, files?: File[], link?: string) {
   $("up-main").textContent = "Reading the files again";
   setBar("up-bar-wrap", undefined, undefined);
   try {
+    if (!(await holdJob(job.sid))) throw new Error("This upload is being continued in another tab.");
     // Compressed on the way: the owner Bundle is a draft until the files are up (what the person
     // chose); the job's plan says what the files are.
     const stored = await readOwnerBundle(api, job.ownerKey);
@@ -1162,9 +1164,22 @@ async function resumeJob(job: UploadJob, files?: File[], link?: string) {
   }
 }
 
+/** Staging sessions that saved jobs continue from: every cleanup keeps them. */
+const jobStages = () => loadJobs().flatMap((j) => [j.source.stage, j.compress?.stage]);
+/** The job the "did not finish" notice offers to continue. */
+let offered: UploadJob | null = null;
+const offeredJob = () => (offered ? loadJob(offered.sid) : null);
+
+/** Offers to continue the newest upload for this server that no other tab is working on. */
+async function offerResume() {
+  const job = (await freeJobs()).find((j) => j.apiBase === cfg.apiBase);
+  if (job) await renderResume(job);
+}
+
 async function renderResume(job: UploadJob) {
+  offered = job;
   $("resume-title").textContent = job.title;
-  const needFiles = job.source.kind === "files" && !(await loadHandles());
+  const needFiles = job.source.kind === "files" && !(await loadHandles(job.sid));
   const needLink = job.source.kind === "link" && !job.source.link;
   $("resume-text").textContent = needFiles
     ? `Choose the same ${job.source.files && job.source.files.length > 1 ? "files or folder" : "file"} again to continue. What reached the server is kept.`
@@ -1177,11 +1192,11 @@ async function renderResume(job: UploadJob) {
   $("resume").classList.remove("hidden");
 }
 $("resume-continue").addEventListener("click", async () => {
-  const job = loadJob();
+  const job = offeredJob();
   if (!job) return;
   if (job.source.kind === "files") {
     // Remembered handles: one permission click, then continue with the same files.
-    const h = await loadHandles();
+    const h = await loadHandles(job.sid);
     if (h && (await permitted(h).catch(() => false))) return resumeJob(job, await filesFrom(h));
   }
   if (job.source.kind === "files") $<HTMLInputElement>(job.source.files?.some((f) => f.name.includes("/")) ? "in-resume-folder" : "in-resume").click();
@@ -1201,17 +1216,22 @@ for (const id of ["in-resume", "in-resume-folder"]) {
     const input = e.target as HTMLInputElement;
     const files = [...(input.files ?? [])];
     input.value = "";
-    const job = loadJob();
+    const job = offeredJob();
     if (job && files.length) resumeJob(job, files);
   });
 }
 $("resume-discard").addEventListener("click", async () => {
-  await clearHandles();
-  const job = loadJob();
-  if (job) await new ShareApi(job.apiBase, { sid: job.sid, token: job.token }).deleteShare().catch(() => {});
-  clearJob();
-  await clearStaging(null);
+  const job = offeredJob();
   $("resume").classList.add("hidden");
+  offered = null;
+  if (job) {
+    await clearHandles(job.sid);
+    await new ShareApi(job.apiBase, { sid: job.sid, token: job.token }).deleteShare().catch(() => {});
+    clearJob(job.sid);
+    releaseJob(job.sid);
+  }
+  await clearStaging(...jobStages());
+  await offerResume();
 });
 
 // ---------------------------------------------------------------------------- 5. hand over
@@ -1259,13 +1279,9 @@ $("again").addEventListener("click", () => {
   $<HTMLAnchorElement>("top-manage").href = manageBase();
   renderChoices();
   show(1, "choose");
-  const job = loadJob();
-  if (job && job.apiBase === cfg.apiBase) renderResume(job);
-  else {
-    // A job saved for another server (or none): nothing to continue here.
-    if (job) clearJob();
-    await clearStaging(null);
-  }
+  await offerResume();
+  // Staging no saved job continues from and no other tab is using.
+  await clearStaging(...jobStages());
   await resumePortal();
   getDecoderPool().catch(() => {});
 })();

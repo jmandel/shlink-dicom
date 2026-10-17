@@ -399,7 +399,7 @@ async function flowJ2kResume(dev) {
   await page.click("#who-form button[type=submit]");
   await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 30, null, { timeout: 600000, polling: 100 });
   const before = await page.textContent("#up-main");
-  const saved = await page.evaluate(() => localStorage.getItem("shl-dicom-upload-job") ?? "");
+  const saved = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("shl-dicom-upload-job:")).map((k) => localStorage.getItem(k)).join("") ?? "");
   const job = JSON.parse(saved || "{}");
   check(`${P}: the saved job does not hold the passcode`, saved.length > 0 && !saved.includes(PASS) && job.hasPasscode === true && !("passcode" in job), saved ? `hasPasscode ${job.hasPasscode}` : "no saved job");
   check(`${P}: the saved job expires with the share`, typeof job.expiresAt === "number" && job.expiresAt > Date.now() / 1000, String(job.expiresAt));

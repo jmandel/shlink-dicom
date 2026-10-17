@@ -30,26 +30,27 @@ async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBReq
   });
 }
 
-export async function saveHandles(h: PickedHandles): Promise<boolean> {
+/** The files of the upload to share `sid`, kept to continue it after a reload. */
+export async function saveHandles(sid: string, h: PickedHandles): Promise<boolean> {
   try {
-    await tx("readwrite", (s) => s.put(h, KEY));
+    await tx("readwrite", (s) => s.put(h, `${KEY}:${sid}`));
     return true;
   } catch {
     return false;
   }
 }
 
-export async function loadHandles(): Promise<PickedHandles | null> {
+export async function loadHandles(sid: string): Promise<PickedHandles | null> {
   try {
-    return ((await tx("readonly", (s) => s.get(KEY))) as PickedHandles) ?? null;
+    return ((await tx("readonly", (s) => s.get(`${KEY}:${sid}`))) as PickedHandles) ?? null;
   } catch {
     return null;
   }
 }
 
-export async function clearHandles() {
+export async function clearHandles(sid: string) {
   try {
-    await tx("readwrite", (s) => s.delete(KEY));
+    await tx("readwrite", (s) => s.delete(`${KEY}:${sid}`));
   } catch {}
 }
 

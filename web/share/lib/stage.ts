@@ -93,23 +93,57 @@ class MemoryStager implements Stager {
   }
 }
 
+const stageLock = (session: string) => `shl-dicom-stage:${session}`;
+/** Sessions this tab uses, each with its Web Lock's release. */
+const heldStages = new Map<string, () => void>();
+
+/** Marks the session as this tab's until the tab closes, so another tab's clearStaging skips it. */
+function holdStage(session: string): Promise<void> {
+  const locks = (globalThis.navigator as any)?.locks;
+  if (!locks || heldStages.has(session)) return Promise.resolve();
+  return new Promise((resolve) => {
+    locks
+      .request(stageLock(session), { ifAvailable: true }, (lock: unknown) => {
+        resolve();
+        // Another tab has it: it stays theirs (and neither tab clears it while it does).
+        if (!lock) return;
+        return new Promise<void>((release) => heldStages.set(session, release));
+      })
+      .catch(() => resolve());
+  });
+}
+
 /** A stager for a session (a new one when `session` is omitted). */
 export async function openStager(session = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`): Promise<Stager> {
   const root = await opfsRoot();
   if (!root) return new MemoryStager(session);
+  await holdStage(session);
   const base = await root.getDirectoryHandle(ROOT, { create: true });
   return new OpfsStager(session, await base.getDirectoryHandle(session, { create: true }));
 }
 
-/** Removes staged sessions other than those in `keep`. */
+/**
+ * Removes staged sessions other than those in `keep`, and other than those another tab is using
+ * (its Web Lock is held). This tab's own sessions not kept are released and removed.
+ */
 export async function clearStaging(...keep: (string | null | undefined)[]) {
   const root = await opfsRoot();
   if (!root) return;
+  const locks = (globalThis.navigator as any)?.locks;
   try {
     const base = await root.getDirectoryHandle(ROOT, { create: true });
     const names: string[] = [];
     for await (const [name, h] of (base as any).entries()) if (h.kind === "directory" && !keep.includes(name)) names.push(name);
-    for (const name of names) await base.removeEntry(name, { recursive: true });
+    for (const name of names) {
+      const remove = () => base.removeEntry(name, { recursive: true }).catch(() => {});
+      const mine = heldStages.get(name);
+      if (mine) {
+        await remove();
+        mine();
+        heldStages.delete(name);
+      } else if (!locks) await remove();
+      else await locks.request(stageLock(name), { ifAvailable: true }, (lock: unknown) => (lock ? remove() : undefined));
+    }
   } catch {}
 }
 

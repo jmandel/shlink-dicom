@@ -391,24 +391,25 @@ export interface UploadJob {
   startedAt: number;
 }
 
-const JOB = "shl-dicom-upload-job";
+/** Each share's job is saved under its own key, so uploads in two tabs don't overwrite each other. */
+const JOB = "shl-dicom-upload-job:";
 
 export function saveJob(j: UploadJob): boolean {
   try {
-    localStorage.setItem(JOB, JSON.stringify(j));
+    localStorage.setItem(JOB + j.sid, JSON.stringify(j));
     return true;
   } catch {
     return false;
   }
 }
 
-/** The saved job, unless there is none or its share has expired (then it is cleared). */
-export function loadJob(now = Math.floor(Date.now() / 1000)): UploadJob | null {
+/** A saved job, unless there is none or its share has expired (then it is cleared). */
+export function loadJob(sid: string, now = Math.floor(Date.now() / 1000)): UploadJob | null {
   try {
-    const j = JSON.parse(localStorage.getItem(JOB) ?? "null");
+    const j = JSON.parse(localStorage.getItem(JOB + sid) ?? "null");
     if (!(j?.sid && j?.token && j?.ownerKey)) return null;
     if (!(typeof j.expiresAt === "number" && j.expiresAt > now)) {
-      clearJob();
+      clearJob(sid);
       return null;
     }
     return j;
@@ -417,8 +418,62 @@ export function loadJob(now = Math.floor(Date.now() / 1000)): UploadJob | null {
   }
 }
 
-export function clearJob() {
+/** Every saved job, newest first (those whose share has expired are cleared). */
+export function loadJobs(now = Math.floor(Date.now() / 1000)): UploadJob[] {
+  const sids: string[] = [];
   try {
-    localStorage.removeItem(JOB);
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(JOB)) sids.push(k.slice(JOB.length));
+    }
   } catch {}
+  return sids
+    .map((sid) => loadJob(sid, now))
+    .filter((j): j is UploadJob => !!j)
+    .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+export function clearJob(sid: string) {
+  try {
+    localStorage.removeItem(JOB + sid);
+  } catch {}
+}
+
+const jobLock = (sid: string) => `shl-dicom-upload:${sid}`;
+const heldJobs = new Map<string, () => void>();
+
+/**
+ * Marks the job as this tab's (a Web Lock held until `releaseJob` or the tab closes), so another
+ * tab neither offers to continue it nor clears it. False when another tab has it.
+ */
+export function holdJob(sid: string): Promise<boolean> {
+  if (heldJobs.has(sid)) return Promise.resolve(true);
+  const locks = (globalThis.navigator as any)?.locks;
+  if (!locks) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    locks
+      .request(jobLock(sid), { ifAvailable: true }, (lock: unknown) => {
+        if (!lock) return resolve(false);
+        resolve(true);
+        return new Promise<void>((release) => heldJobs.set(sid, release));
+      })
+      .catch(() => resolve(true));
+  });
+}
+
+export function releaseJob(sid: string) {
+  heldJobs.get(sid)?.();
+  heldJobs.delete(sid);
+}
+
+/** Saved jobs no other tab is working on, newest first. */
+export async function freeJobs(now?: number): Promise<UploadJob[]> {
+  const jobs = loadJobs(now);
+  const locks = (globalThis.navigator as any)?.locks;
+  if (!locks) return jobs;
+  let held = new Set<string>();
+  try {
+    held = new Set(((await locks.query()).held ?? []).map((l: any) => l.name));
+  } catch {}
+  return jobs.filter((j) => heldJobs.has(j.sid) || !held.has(jobLock(j.sid)));
 }
