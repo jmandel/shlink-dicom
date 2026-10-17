@@ -148,6 +148,14 @@ impl FrameValues {
             *slot = first_number(v);
         }
     }
+    /// The window only when it has both a centre and a width (a centre alone is not a window).
+    fn whole_window(self) -> FrameValues {
+        if self.window_center.is_some() && self.window_width.is_some() {
+            self
+        } else {
+            FrameValues { window_center: None, window_width: None, ..self }
+        }
+    }
     /// Each value from `self`, else from `o`; the window (centre and width) as a pair.
     fn or(self, o: FrameValues) -> FrameValues {
         let own_window = self.window_center.is_some() && self.window_width.is_some();
@@ -406,10 +414,10 @@ pub fn read_extra(bytes: &[u8]) -> Extra {
         window_width: e.window_width,
     };
     for f in &mut e.per_frame {
-        *f = f.or(shared).or(top);
+        *f = f.or(shared).or(top).whole_window();
     }
     // The image-level values are frame 1's.
-    let image = e.per_frame.first().copied().unwrap_or(shared.or(top));
+    let image = e.per_frame.first().copied().unwrap_or(shared.or(top).whole_window());
     e.rescale_slope = image.rescale_slope;
     e.rescale_intercept = image.rescale_intercept;
     e.window_center = image.window_center;
@@ -910,5 +918,10 @@ mod tests {
         // Item 1's lone centre does not make a window with the top level's width.
         assert_eq!(got, [(Some(2.0), Some(-5.0), Some(100.0), Some(50.0)), (Some(7.0), Some(-5.0), Some(10.0), Some(20.0))]);
         assert_eq!((e.rescale_slope, e.rescale_intercept, e.window_center, e.window_width), (Some(2.0), Some(-5.0), Some(100.0), Some(50.0)));
+        // A centre without a width is no window.
+        let mut lone = Ds::new(LE);
+        lone.text(0x0028, 0x1050, b"DS", "128");
+        let e = read_extra(&part10(EXPLICIT_LE, &lone.out, true));
+        assert_eq!((e.window_center, e.window_width), (None, None));
     }
 }
