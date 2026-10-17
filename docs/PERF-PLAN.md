@@ -108,9 +108,14 @@ Bench at load 5–8 (b65cd88), ours ÷ libjxl:
 
 The ideas left (an EPF row ring, Gaborish fused into the EPF) are small. Native lossy needs AVX2-width code: a fused XYB pass was 41% slower natively because the four-lane type falls back to scalar arrays there, which compile-time AVX2 (perf-t8b) may change. See jpeg-xl PERF.md.
 
-### T7. JPEG-LS colour (ILV 2)
+### T7. JPEG-LS
 
-1.05–1.24× CharLS. We run about 94 instructions per sample against CharLS's 70, in the context and bias bookkeeping on the serial chain. Grey is already faster than CharLS.
+**Stopped.** The x86-64-v3 build brought native colour to 0.91–1.01× CharLS. In wasm against Cornerstone's CharLS, colour is 0.89–1.09, CR and small CT are faster, and the 2048² DX remains 1.17–1.29. Three wasm attempts on the regular-mode chain missed:
+- C as i32: fewer instructions, more cycles;
+- context fields split into separate arrays: +10%;
+- run mode out of line in wasm: within Node's run-to-run noise.
+
+The next idea (overlapping the next sample's context load with the current Golomb decode) needs a quiet machine to measure. See jpeg-ls PERF.md, "Track T7".
 
 ### T8. Removing `unsafe`
 
