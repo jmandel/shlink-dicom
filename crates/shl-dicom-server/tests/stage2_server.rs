@@ -2652,3 +2652,47 @@ async fn test_the_access_log_holds_no_capability_tokens() {
     assert!(paths.contains(&"/cap/…/x.bin".to_string()), "{paths:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Uploads of unknown length streaming at once can't together stage more than the share's byte
+/// limit, or the server's (each is granted room a slice at a time, counting the others).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_concurrent_unknown_length_uploads_stay_within_the_byte_limit() {
+    for server_wide in [false, true] {
+    let dir = temp_data_dir(if server_wide { "stream_quota_server" } else { "stream_quota" });
+    let q = if server_wide {
+        shl_dicom_server::state::Quotas { total_bytes: Some(1 << 20), ..Default::default() }
+    } else {
+        shl_dicom_server::state::Quotas { share_bytes: Some(1 << 20), ..Default::default() }
+    };
+    let state = AppState::with_store(&dir, q, test_store(&dir)).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = |k: u8| format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[60 + k; 16]));
+    // Four uploads of 900 KiB in 64 KiB chunks; every request starts before any bytes arrive.
+    let puts = (0..4u8).map(|k| {
+        let body = futures_util::stream::unfold(0usize, move |sent| async move {
+            if sent >= 900 << 10 {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(if sent == 0 { 300 } else { 20 })).await;
+            let n = (64 << 10).min((900 << 10) - sent);
+            Some((Ok::<_, std::io::Error>(vec![k; n]), sent + n))
+        });
+        let r = client.put(url(k)).bearer_auth(&token).header("Upload-Complete", "?0").body(reqwest::Body::wrap_stream(body)).send();
+        tokio::spawn(async move { r.await.map(|r| r.status()) })
+    });
+    let _ = futures_util::future::join_all(puts).await;
+    let mut staged = 0u64;
+    for k in 0..4u8 {
+        if let Ok(h) = client.head(url(k)).bearer_auth(&token).send().await {
+            staged += h.headers().get("upload-offset").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        }
+    }
+    assert!(staged <= 1 << 20, "server_wide={server_wide}: staged {staged} bytes against a 1 MiB limit");
+    assert!(staged >= 900 << 10, "server_wide={server_wide}: at least one upload got its bytes in: {staged}");
+    let _ = std::fs::remove_dir_all(&dir);
+    }
+}

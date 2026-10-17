@@ -246,6 +246,10 @@ pub struct AppState {
     /// `{sid}/{fileId}` uploads in progress (one request at a time per file).
     /// The value is the claim's id and when it was taken.
     pub uploading: Arc<Mutex<HashMap<String, (u64, std::time::Instant)>>>,
+    /// Appends of unknown length in progress, by (sid, fileId): the offset up to which each may
+    /// write. Room is granted a slice at a time under this lock (routes_api::grant_room), so
+    /// appends at once can't each see the same room.
+    pub streaming: Arc<Mutex<HashMap<(String, String), u64>>>,
     /// Where finished files live (local disk or S3).
     pub store: Arc<dyn BlobStore>,
     catalog: Arc<Mutex<Connection>>,
@@ -315,6 +319,7 @@ impl AppState {
             quotas,
             public_origin: None,
             uploading: Arc::new(Mutex::new(HashMap::new())),
+            streaming: Arc::new(Mutex::new(HashMap::new())),
             store,
             catalog: Arc::new(Mutex::new(conn)),
             pool: Arc::new(Mutex::new(ShareDbPool::new())),
@@ -473,6 +478,13 @@ impl AppState {
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(true)
+    }
+
+    /// Sets an upload's recorded bytes (an upload of unknown length, as its bytes are granted or
+    /// arrive). Only an upload already recorded: a dropped one stays dropped.
+    pub fn set_reserved(&self, sid: &str, file_id: &str, bytes: u64) {
+        let cat = self.catalog.lock().unwrap();
+        let _ = cat.execute("UPDATE reserved SET bytes = ?3 WHERE sid = ?1 AND file_id = ?2", params![sid, file_id, bytes as i64]);
     }
 
     /// The upload no longer counts (finished, dropped, or its share deleted).

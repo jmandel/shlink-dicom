@@ -504,17 +504,11 @@ fn flushed_bytes(state: &AppState, sid: &str, file_id: &str) -> u64 {
 /// The staged file holds the bytes from `flushed_bytes` on.
 async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, total: Option<u64>, max_body: Option<u64>, body: Body) -> Append {
     use tokio::io::AsyncWriteExt;
-    // A length not known yet: the share's byte limit is checked as the bytes arrive.
-    let quota_end = match (total, state.quotas.share_bytes) {
-        (None, Some(cap)) => cap.saturating_sub(share_bytes_in_use(state, sid, file_id)),
-        _ => u64::MAX,
-    };
-    // And the server-wide limit, for a length not known yet.
-    let server_end = match (total, state.quotas.total_bytes) {
-        // (This upload's own bytes are its offset: counted by the comparison below.)
-        (None, Some(cap)) => cap.saturating_sub(state.total_bytes_in_use((sid, file_id))),
-        _ => u64::MAX,
-    };
+    // A length not known yet: the share's and the server's byte limits are checked as the bytes
+    // arrive, room granted a slice at a time (grant_room). A known length was checked when the
+    // upload began.
+    let limited = total.is_none() && (state.quotas.share_bytes.is_some() || state.quotas.total_bytes.is_some());
+    let mut room = Streaming { state, key: (sid.to_string(), file_id.to_string()), end: start, active: false };
     let part = state.part_path(sid, file_id);
     let flushed = flushed_bytes(state, sid, file_id);
     let Some(local) = start.checked_sub(flushed) else {
@@ -560,15 +554,18 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
             drain(&mut stream, state.quotas.request_bytes).await;
             return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", max_body.unwrap_or_default())));
         }
-        if start + got + chunk.len() as u64 > server_end {
-            let _ = file.set_len(local).await;
-            drain(&mut stream, state.quotas.request_bytes).await;
-            return Append::Fail(json_err(StatusCode::INSUFFICIENT_STORAGE, "QUOTA_SERVER_FULL"));
-        }
-        if start + got + chunk.len() as u64 > quota_end {
-            let _ = file.set_len(local).await;
-            drain(&mut stream, state.quotas.request_bytes).await;
-            return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED"));
+        let have = start + got;
+        if limited && have + chunk.len() as u64 > room.end {
+            let want = (chunk.len() as u64).max(ROOM_SLICE);
+            match grant_room(&mut room, have, want, chunk.len() as u64) {
+                Ok(()) => {}
+                Err(over) => {
+                    let _ = file.set_len(local).await;
+                    room.end = start;
+                    drain(&mut stream, state.quotas.request_bytes).await;
+                    return Append::Fail(over);
+                }
+            }
         }
         if file.write_all(&chunk).await.is_err() {
             let _ = file.set_len(local).await;
@@ -598,6 +595,74 @@ async fn drain(stream: &mut (impl futures_util::Stream<Item = Result<bytes::Byte
             _ => break,
         }
     }
+}
+
+/// Room granted at a time to an append of unknown length (see grant_room).
+const ROOM_SLICE: u64 = 1 << 20;
+
+/// An append of unknown length's granted room. Dropped when the request ends: the upload then
+/// counts at what it holds.
+struct Streaming<'a> {
+    state: &'a AppState,
+    key: (String, String),
+    /// Offset up to which this request may write.
+    end: u64,
+    active: bool,
+}
+
+impl Drop for Streaming<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.state.streaming.lock().unwrap().remove(&self.key);
+            let (sid, fid) = &self.key;
+            let held = flushed_bytes(self.state, sid, fid) + std::fs::metadata(self.state.part_path(sid, fid)).map(|m| m.len()).unwrap_or(0);
+            self.state.set_reserved(sid, fid, held);
+        }
+    }
+}
+
+/// Grants an append of unknown length room to write up to `have + want` bytes (at least `need`),
+/// against the share's and the server's byte limits, counting what every other upload holds or
+/// has been granted. Counted and granted under one lock, so appends at once can't each see the
+/// same room. Err is the response when not even `need` fits.
+#[allow(clippy::result_large_err)] // the Err is the response to send
+fn grant_room(room: &mut Streaming, have: u64, want: u64, need: u64) -> Result<(), Response> {
+    let state = room.state;
+    let (sid, fid) = (room.key.0.as_str(), room.key.1.as_str());
+    let mut map = state.streaming.lock().unwrap();
+    let held_by = |s: &str, f: &str| flushed_bytes(state, s, f) + std::fs::metadata(state.part_path(s, f)).map(|m| m.len()).unwrap_or(0);
+    let mut grant = want;
+    let mut server_full = false;
+    if let Some(cap) = state.quotas.share_bytes {
+        // Others' room beyond what they already hold (which share_bytes_in_use counts).
+        let ahead: u64 = map
+            .iter()
+            .filter(|((s, f), _)| s == sid && f != fid)
+            .map(|((s, f), end)| end.saturating_sub(held_by(s, f)))
+            .sum();
+        let left = cap.saturating_sub(share_bytes_in_use(state, sid, fid)).saturating_sub(ahead).saturating_sub(have);
+        grant = grant.min(left);
+    }
+    if let Some(cap) = state.quotas.total_bytes {
+        // Uploads of unknown length count in `reserved` at what they hold or were granted.
+        let left = cap.saturating_sub(state.total_bytes_in_use((sid, fid))).saturating_sub(have);
+        if left < grant {
+            grant = left;
+            server_full = true;
+        }
+    }
+    if grant < need {
+        return Err(if server_full {
+            json_err(StatusCode::INSUFFICIENT_STORAGE, "QUOTA_SERVER_FULL")
+        } else {
+            json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED")
+        });
+    }
+    room.end = have + grant;
+    room.active = true;
+    map.insert(room.key.clone(), room.end);
+    state.set_reserved(sid, fid, room.end);
+    Ok(())
 }
 
 /// Encrypted bytes a share holds or has on the way, apart from upload `except`: finished files,
