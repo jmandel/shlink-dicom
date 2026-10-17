@@ -15,6 +15,7 @@ import {
 } from "./lib/ingest";
 import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
+import { loadShlWasm } from "./lib/shl-wasm";
 import {
   COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, uncompressedImages, workers,
   type CompressMode, type CompressProgress, type CompressSummary, type Encoding, type SeriesEstimate,
@@ -360,6 +361,7 @@ async function runLoad(title: string, fn: Loader) {
   try {
     await clearStaging(loadJob()?.source.stage, loadJob()?.compress?.stage);
     stager = await openStager();
+    await loadShlWasm();
     await fn(col, stager, on, ctl.signal);
     if (ctl.signal.aborted) return;
     sourceInfo.stage = stager.onDisk ? stager.session : undefined;
@@ -1035,6 +1037,7 @@ async function resumeJob(job: UploadJob, files?: File[]) {
   try {
     // Compressed on the way: no owner Bundle until the files are up; the job's plan says what they are.
     const owner = job.plan ? null : await readOwnerBundle(api, job.ownerKey);
+    await loadShlWasm();
     const c = new Collection();
     const st = await openStager(job.source.stage);
     const on = (_c: Collection, p: Progress) => {

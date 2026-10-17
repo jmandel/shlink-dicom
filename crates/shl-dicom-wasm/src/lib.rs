@@ -1,6 +1,7 @@
-//! WebAssembly bindings used by the web app. The Share page adds frame offset tables to
-//! multi-frame instances that lack them with the same code as the CLI and the server's seed
-//! (`shl_dicom_core::offset_tables`). Everything else in the browser is TypeScript (`web/core`).
+//! WebAssembly bindings used by the Share page, so it runs the same code as the CLI and the
+//! server's seed: frame offset tables for multi-frame instances that lack them
+//! (`shl_dicom_core::offset_tables`) and the rule for which instances the lossless encoder is
+//! offered (`shl_dicom_transcode::is_uncompressed_image`).
 use shl_dicom_core::offset_tables::{
     offset_table_first_fragment, offset_table_patch, offset_table_patch_from_fragments, FragmentInfo, OffsetTableKind,
     OffsetTablePatch,
@@ -73,4 +74,12 @@ pub fn offset_table_patch_from_fragments_wasm(
         .map(|i| FragmentInfo { pos: positions[i] as u64, len: lengths[i], head: &heads[8 * i..8 * i + head_lens[i].min(8) as usize] })
         .collect();
     offset_table_patch_from_fragments(prefix, &frags).map(to_wasm)
+}
+
+/// Whether the Share page offers an instance to its lossless encoder: the packer's rule
+/// (`shl_dicom_transcode::is_uncompressed_image`), from the instance's Transfer Syntax UID, SOP
+/// Class UID and length in bytes.
+#[wasm_bindgen]
+pub fn is_uncompressed_image(transfer_syntax: &str, sop_class_uid: &str, len: f64) -> bool {
+    shl_dicom_transcode::is_uncompressed_image(transfer_syntax, sop_class_uid, len as u64)
 }

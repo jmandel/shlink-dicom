@@ -60,6 +60,52 @@ pub const SUPPORTED_TRANSFER_SYNTAXES: [&str; 2] = [JPEG_LOSSLESS_SV1, JPEG_2000
 
 use shl_dicom_decode::syntax::{DEFLATED_LE, EXPLICIT_BE, EXPLICIT_LE, IMPLICIT_LE};
 
+/// SOP Class UIDs without pixel data to re-encode (one ending in "." is a prefix): SR (including
+/// KO), encapsulated documents (PDF, CDA), presentation states, waveforms, Raw Data, spatial
+/// registration and fiducials, surface segmentation, tractography results, RT structure sets,
+/// treatment records and plans.
+const NO_PIXEL_DATA: [&str; 14] = [
+    "1.2.840.10008.5.1.4.1.1.88.",
+    "1.2.840.10008.5.1.4.1.1.104.",
+    "1.2.840.10008.5.1.4.1.1.11.",
+    "1.2.840.10008.5.1.4.1.1.9.",
+    "1.2.840.10008.5.1.4.1.1.66",
+    "1.2.840.10008.5.1.4.1.1.66.1",
+    "1.2.840.10008.5.1.4.1.1.66.2",
+    "1.2.840.10008.5.1.4.1.1.66.3",
+    "1.2.840.10008.5.1.4.1.1.66.5",
+    "1.2.840.10008.5.1.4.1.1.66.6",
+    "1.2.840.10008.5.1.4.1.1.481.3",
+    "1.2.840.10008.5.1.4.1.1.481.4",
+    "1.2.840.10008.5.1.4.1.1.481.5",
+    "1.2.840.10008.5.1.4.1.1.481.8",
+];
+
+/// Image SOP classes kept as they are. Segmentation and Label Map Segmentation: receivers that
+/// read them as segmentations (dcmqi and 3D Slicer, DCMTK's dcmseg) accept only uncompressed or
+/// RLE data, not JPEG Lossless or JPEG 2000. Height Map Segmentation: its pixel data is Float
+/// Pixel Data, which is native only (PS3.5 8.2).
+const KEPT_NATIVE: [&str; 3] = [
+    "1.2.840.10008.5.1.4.1.1.66.4",
+    "1.2.840.10008.5.1.4.1.1.66.7",
+    "1.2.840.10008.5.1.4.1.1.66.8",
+];
+
+/// Instances larger than this are kept as they are (encoding one takes about 3–4 times its size
+/// in memory).
+pub const MAX_INSTANCE_BYTES: u64 = 256 << 20;
+
+/// Whether a packer should offer an instance to [`transcode_part10`]: uncompressed (implicit or
+/// explicit VR little endian), of a SOP class that has pixel data, and at most
+/// [`MAX_INSTANCE_BYTES`]. The Share page (through shl-dicom-wasm) and the server's seed use this
+/// one rule; the encoder still declines what it cannot take.
+pub fn is_uncompressed_image(transfer_syntax: &str, sop_class_uid: &str, len: u64) -> bool {
+    matches!(transfer_syntax, IMPLICIT_LE | EXPLICIT_LE)
+        && !NO_PIXEL_DATA.iter().any(|p| if p.ends_with('.') { sop_class_uid.starts_with(p) } else { sop_class_uid == *p })
+        && !KEPT_NATIVE.contains(&sop_class_uid)
+        && len <= MAX_INSTANCE_BYTES
+}
+
 /// Why a file was left as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declined(pub String);
@@ -583,6 +629,28 @@ fn same_bytes(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn which_instances_are_offered_to_the_encoder() {
+        let mb = 1 << 20;
+        for (sop, want) in [
+            ("1.2.840.10008.5.1.4.1.1.2", true),         // CT
+            ("1.2.840.10008.5.1.4.1.1.481.2", true),     // RT Dose
+            ("1.2.840.10008.5.1.4.1.1.66.4", false),     // Segmentation
+            ("1.2.840.10008.5.1.4.1.1.66.7", false),     // Label Map Segmentation
+            ("1.2.840.10008.5.1.4.1.1.66.8", false),     // Height Map Segmentation
+            ("1.2.840.10008.5.1.4.1.1.66", false),       // Raw Data
+            ("1.2.840.10008.5.1.4.1.1.66.5", false),     // Surface Segmentation
+            ("1.2.840.10008.5.1.4.1.1.88.59", false),    // Key Object Selection
+            ("1.2.840.10008.5.1.4.1.1.104.1", false),    // Encapsulated PDF
+            ("1.2.840.10008.5.1.4.1.1.481.5", false),    // RT Plan
+        ] {
+            assert_eq!(is_uncompressed_image(EXPLICIT_LE, sop, mb), want, "{sop}");
+        }
+        assert!(!is_uncompressed_image(EXPLICIT_BE, "1.2.840.10008.5.1.4.1.1.2", mb));
+        assert!(!is_uncompressed_image(JPEG_LOSSLESS_SV1, "1.2.840.10008.5.1.4.1.1.2", mb));
+        assert!(!is_uncompressed_image(IMPLICIT_LE, "1.2.840.10008.5.1.4.1.1.2", MAX_INSTANCE_BYTES + 1));
+    }
+
     use super::*;
 
     #[test]

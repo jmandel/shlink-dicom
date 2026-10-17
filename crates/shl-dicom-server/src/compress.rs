@@ -1,7 +1,7 @@
-//! Lossless compression of the sample at seed time (spec/README.md §11.1), with the same rules as the
-//! Share page (web/share/lib/compress.ts): uncompressed images are re-encoded as JPEG Lossless SV1
-//! by `shl-dicom-transcode`, which checks its own output bit for bit; everything else, and any image
-//! the encoder declines, is kept as it is.
+//! Lossless compression of the sample at seed time (spec/README.md §11.1), with the Share page's
+//! rule (`shl_dicom_transcode::is_uncompressed_image`): uncompressed images are re-encoded as JPEG
+//! Lossless SV1 by `shl-dicom-transcode`, which checks its own output bit for bit; everything else,
+//! and any image the encoder declines, is kept as it is.
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -9,30 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Uncompressed transfer syntaxes the encoder takes: implicit and explicit VR little endian.
-const NATIVE: [&str; 2] = ["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"];
-
-/// SOP classes without pixel data to compress: SR, PDF and CDA, KO, presentation states,
-/// waveforms, raw data, RT plans and structures.
-const NOT_IMAGES: [&str; 9] = [
-    "1.2.840.10008.5.1.4.1.1.88.",
-    "1.2.840.10008.5.1.4.1.1.104.",
-    "1.2.840.10008.5.1.4.1.1.11.",
-    "1.2.840.10008.5.1.4.1.1.9.",
-    "1.2.840.10008.5.1.4.1.1.66",
-    "1.2.840.10008.5.1.4.1.1.481.3",
-    "1.2.840.10008.5.1.4.1.1.481.4",
-    "1.2.840.10008.5.1.4.1.1.481.5",
-    "1.2.840.10008.5.1.4.1.1.481.8",
-];
-
-/// Instances larger than this are kept as they are (encoding takes about 3–4 times the input).
-const MAX_INSTANCE: u64 = 256 << 20;
-
-/// Whether an instance is an uncompressed image the encoder may take.
-pub fn is_uncompressed_image(transfer_syntax: &str, sop_class: &str, len: u64) -> bool {
-    NATIVE.contains(&transfer_syntax) && !NOT_IMAGES.iter().any(|p| sop_class.starts_with(p)) && len <= MAX_INSTANCE
-}
+use shl_dicom_transcode::is_uncompressed_image;
 
 /// What compression did: images tried, re-encoded, and their bytes before and after.
 #[derive(Default, Debug, Clone)]

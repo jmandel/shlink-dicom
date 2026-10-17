@@ -11,6 +11,7 @@
 import { assetUrl } from "../../core/config";
 import type { Bytes } from "./bytes";
 import type { Collection, Instance, SeriesModel, StudyModel } from "./ingest";
+import { shlWasm } from "./shl-wasm";
 import type { Stager } from "./stage";
 
 export type CompressMode = "sv1" | "j2k" | "exact";
@@ -22,31 +23,12 @@ export const COMPRESS_DEFAULT: CompressMode = "sv1";
 export const ENCODING_TS: Record<Encoding, string> = { sv1: "1.2.840.10008.1.2.4.70", j2k: "1.2.840.10008.1.2.4.90" };
 export const ENCODING_NAME: Record<Encoding, string> = { sv1: "JPEG Lossless", j2k: "JPEG 2000 Lossless" };
 
-/** Uncompressed transfer syntaxes the encoders take: implicit and explicit VR little endian. */
-const NATIVE = new Set(["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"]);
-
-/** SOP classes without pixel data to compress: SR, PDF and CDA, KO, presentation states, waveforms, raw data, RT plans and structures. */
-const NOT_IMAGES = [
-  "1.2.840.10008.5.1.4.1.1.88.",
-  "1.2.840.10008.5.1.4.1.1.104.",
-  "1.2.840.10008.5.1.4.1.1.11.",
-  "1.2.840.10008.5.1.4.1.1.9.",
-  "1.2.840.10008.5.1.4.1.1.66",
-  "1.2.840.10008.5.1.4.1.1.481.3",
-  "1.2.840.10008.5.1.4.1.1.481.4",
-  "1.2.840.10008.5.1.4.1.1.481.5",
-  "1.2.840.10008.5.1.4.1.1.481.8",
-];
-
-/** Instances larger than this are kept as they are (encoding one takes about 3–4 times its size in memory). */
-const MAX_INSTANCE = 256 << 20;
-
-/** Whether an instance is an uncompressed image the encoders may take. */
+/**
+ * Whether an instance is an uncompressed image the encoders may take: the packer's rule
+ * (shl_dicom_transcode::is_uncompressed_image, through shl-dicom-wasm). Needs loadShlWasm first.
+ */
 export function isUncompressedImage(inst: Instance): boolean {
-  const h = inst.h;
-  if (!NATIVE.has(h.transferSyntax)) return false;
-  if (NOT_IMAGES.some((p) => h.sopClassUid.startsWith(p))) return false;
-  return inst.src.size <= MAX_INSTANCE;
+  return shlWasm().is_uncompressed_image(inst.h.transferSyntax, inst.h.sopClassUid, inst.src.size);
 }
 
 export function uncompressedImages(studies: StudyModel[]): { se: SeriesModel; inst: Instance }[] {

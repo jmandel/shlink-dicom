@@ -18,8 +18,9 @@ use shl_dicom_core::{
     dicom_io::{parse_dicom_header_reader, ParsedDicomInstance, Skipped},
     offset_tables::add_offset_table_to_file,
 };
+use shl_dicom_transcode::is_uncompressed_image;
 use crate::{
-    compress::{compress_file, is_uncompressed_image, CompressStats},
+    compress::{compress_file, CompressStats},
     state::{new_storage_key, record_file, AppState},
 };
 

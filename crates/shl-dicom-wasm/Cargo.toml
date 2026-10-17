@@ -8,4 +8,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 shl-dicom-core = { path = "../shl-dicom-core" }
+# is_uncompressed_image only; the linker drops the encoders.
+shl-dicom-transcode = { path = "../../codecs/shl-dicom-transcode" }
 wasm-bindgen = "=0.2.128"

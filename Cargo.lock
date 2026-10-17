@@ -1965,6 +1965,7 @@ name = "shl-dicom-wasm"
 version = "0.1.0"
 dependencies = [
  "shl-dicom-core",
+ "shl-dicom-transcode",
  "wasm-bindgen",
 ]
 

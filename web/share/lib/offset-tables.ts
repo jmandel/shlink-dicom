@@ -4,9 +4,9 @@
 // CLI's --add-offset-tables uses; fragment bytes stay as they are. Files are never held whole: the
 // header and the fragment item headers are read from the byte source, and the rewritten instance is
 // the new head followed by the original bytes from where the patch resumes.
-import { assetUrl } from "../../core/config";
 import { ConcatBytes, MemBytes, SubBytes, WindowReader, type Bytes } from "./bytes";
 import type { Instance, SeriesModel } from "./ingest";
+import { loadShlWasm } from "./shl-wasm";
 
 /** Whether the review step's "Add frame offset tables" box starts ticked when it is shown. */
 export const ADD_OFFSET_TABLES_DEFAULT = true;
@@ -16,17 +16,6 @@ const VIDEO = /^1\.2\.840\.10008\.1\.2\.4\.10[0-8](\.1)?$/;
 /** Header bytes read to find the first fragment item. */
 const PREFIX_READS = [256 << 10, 4 << 20, 32 << 20];
 
-type Wasm = typeof import("../../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js");
-let wasm: Promise<Wasm> | null = null;
-function loadWasm(): Promise<Wasm> {
-  wasm ??= import("../../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js").then(async (m) => {
-    // In Bun the caller has already run initSync.
-    if (typeof window !== "undefined") await m.default({ module_or_path: assetUrl("shl_dicom_wasm_bg.wasm") });
-    return m;
-  });
-  return wasm;
-}
-
 const firstFragment = new WeakMap<Bytes, { prefix: Uint8Array; at: number } | null>();
 
 /** The file's prefix through the empty BOT item, when the instance needs a table; else null. */
@@ -34,7 +23,7 @@ async function needsTable(inst: Instance): Promise<{ prefix: Uint8Array; at: num
   const ts = inst.h.transferSyntax;
   if (!ts || NATIVE.has(ts) || VIDEO.test(ts)) return null;
   if (firstFragment.has(inst.src)) return firstFragment.get(inst.src)!;
-  const m = await loadWasm();
+  const m = await loadShlWasm();
   let found: { prefix: Uint8Array; at: number } | null = null;
   for (const n of PREFIX_READS) {
     const prefix = await inst.src.read(0, Math.min(inst.src.size, n));
@@ -112,7 +101,7 @@ export async function addOffsetTable(se: SeriesModel, inst: Instance): Promise<b
 }
 
 async function patchInstance(se: SeriesModel, inst: Instance, need: { prefix: Uint8Array; at: number }): Promise<boolean> {
-  const m = await loadWasm();
+  const m = await loadShlWasm();
   const f = await fragments(inst.src, need.at);
   const patch = f && m.offset_table_patch_from_fragments_wasm(need.prefix, f.positions, f.lengths, f.heads, f.headLens);
   if (!patch) return false;
