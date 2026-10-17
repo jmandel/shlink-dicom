@@ -2,7 +2,7 @@ use std::io::{Cursor, Read};
 use dicom_core::Tag;
 use dicom_dictionary_std::tags;
 use dicom_encoding::transfer_syntax::{Codec, TransferSyntax, TransferSyntaxIndex};
-use dicom_object::{FileDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions};
+use dicom_object::{FileDicomObject, InMemDicomObject, OpenFileOptions};
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use flate2::read::GzDecoder;
 use std::sync::OnceLock;
@@ -59,6 +59,8 @@ pub struct ParsedDicomInstance {
     pub accession_number: Option<String>,
     pub patient_name: Option<String>,
     pub patient_id: Option<String>,
+    /// Issuer of Patient ID (0010,0021).
+    pub patient_id_issuer: Option<String>,
     pub patient_birth_date: Option<String>,
 }
 
@@ -73,12 +75,73 @@ fn looks_like_bare_dicom(bytes: &[u8]) -> bool {
     bytes.len() >= 64 && (0x01..=0x10).contains(&bytes[0]) && bytes[1] == 0x00
 }
 
+/// The SOP Class, SOP Instance and Study Instance UIDs among a data set's first top-level
+/// elements, read as explicit or implicit VR little endian; None when there is no SOP Instance or
+/// Study Instance UID.
+fn scan_uids(ds: &[u8], explicit: bool) -> Option<(Option<String>, String, String)> {
+    use crate::offset_tables::{read_el, skip_undefined};
+    let (mut class, mut inst, mut study) = (None, None, None);
+    let mut p = 0usize;
+    while p + 8 <= ds.len() {
+        let (tag, vr, vo, len) = read_el(ds, p, explicit)?;
+        if tag > 0x0020_000D {
+            break;
+        }
+        if len == 0xFFFF_FFFF {
+            p = skip_undefined(ds, vo, explicit && &vr != b"UN", 1)?;
+            continue;
+        }
+        let end = vo.checked_add(len as usize)?;
+        let value = || Some(clean_uid(&String::from_utf8_lossy(ds.get(vo..end)?)));
+        match tag {
+            0x0008_0016 => class = value(),
+            0x0008_0018 => inst = value(),
+            0x0020_000D => study = value(),
+            _ => {}
+        }
+        p = end;
+    }
+    Some((class.filter(|c| !c.is_empty()), inst.filter(|i| !i.is_empty())?, study.filter(|s| !s.is_empty())?))
+}
+
+/// A file meta group (with its group length) for a data set of `ts`.
+fn file_meta(ts: &str, class: &str, inst: &str) -> Vec<u8> {
+    let el = |b: &mut Vec<u8>, e: u16, vr: &[u8; 2], v: &[u8], pad: u8| {
+        let mut v = v.to_vec();
+        if v.len() % 2 == 1 {
+            v.push(pad);
+        }
+        b.extend_from_slice(&0x0002u16.to_le_bytes());
+        b.extend_from_slice(&e.to_le_bytes());
+        b.extend_from_slice(vr);
+        if vr == b"OB" {
+            b.extend_from_slice(&[0, 0]);
+            b.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        } else {
+            b.extend_from_slice(&(v.len() as u16).to_le_bytes());
+        }
+        b.extend_from_slice(&v);
+    };
+    let mut m = Vec::new();
+    el(&mut m, 0x0001, b"OB", &[0, 1], 0);
+    el(&mut m, 0x0002, b"UI", class.as_bytes(), 0);
+    el(&mut m, 0x0003, b"UI", inst.as_bytes(), 0);
+    el(&mut m, 0x0010, b"UI", ts.as_bytes(), 0);
+    el(&mut m, 0x0012, b"UI", shl_dicom_transcode::IMPLEMENTATION_CLASS_UID.as_bytes(), 0);
+    let mut g = Vec::new();
+    el(&mut g, 0x0000, b"UL", &(m.len() as u32).to_le_bytes(), 0);
+    g.extend_from_slice(&m);
+    g
+}
+
 /// A bare data set given the Part 10 preamble and file meta header (spec §11.1 step 3). The data
-/// set's own bytes follow unchanged. A file that starts with its file meta group (only the
-/// preamble missing) gets the preamble alone, or, when that meta can't be read (some are written
-/// in implicit VR), a new meta in place of it. A data set is read as explicit VR little endian when
-/// its first element has a VR, else implicit VR little endian, then the other.
-fn wrap_bare(raw: &[u8]) -> std::result::Result<(FileDicomObject<InMemDicomObject>, Vec<u8>), String> {
+/// set's own bytes follow unchanged. A file that starts with its file meta group in explicit VR
+/// (only the preamble missing) gets the preamble alone; one whose meta is in implicit VR gets a
+/// new meta in place of it. The data set is read as explicit VR little endian when its first
+/// element has a VR, else implicit VR little endian, then the other; the meta names the SOP
+/// Class (Secondary Capture when the data set gives none) and SOP Instance UIDs it finds there.
+/// Plain byte reading, no DICOM dictionary: the Share page runs this same code in wasm.
+fn wrap_bare(raw: &[u8]) -> std::result::Result<Vec<u8>, String> {
     const EXPLICIT: &str = "1.2.840.10008.1.2.1";
     const IMPLICIT: &str = "1.2.840.10008.1.2";
     let part10 = |meta: &[u8], ds: &[u8]| {
@@ -89,63 +152,56 @@ fn wrap_bare(raw: &[u8]) -> std::result::Result<(FileDicomObject<InMemDicomObjec
         b.extend_from_slice(ds);
         b
     };
-    let read = |b: &[u8]| {
-        OpenFileOptions::new()
-            .tranfer_syntax_index(Syntaxes)
-            .read_until(Tag(0x7FE0, 0x0000))
-            .from_reader(Cursor::new(b))
-            .map_err(|e| format!("unreadable DICOM data set: {e}"))
-    };
-    let meta = |ts: &str, class: &str, inst: &str| -> std::result::Result<Vec<u8>, String> {
-        let table = FileMetaTableBuilder::new()
-            .transfer_syntax(ts)
-            .media_storage_sop_class_uid(class)
-            .media_storage_sop_instance_uid(inst)
-            .build()
-            .map_err(|e| format!("cannot build a Part 10 header: {e}"))?;
-        let mut m = Vec::new();
-        table.write(&mut m).map_err(|e| format!("cannot write a Part 10 header: {e}"))?;
-        Ok(m)
-    };
-
+    let has_vr = |b: &[u8]| b.len() >= 6 && b[4].is_ascii_uppercase() && b[5].is_ascii_uppercase();
     let mut ds = raw;
-    let mut order = if raw[4].is_ascii_uppercase() && raw[5].is_ascii_uppercase() { [EXPLICIT, IMPLICIT] } else { [IMPLICIT, EXPLICIT] };
+    let mut order = if has_vr(raw) { [EXPLICIT, IMPLICIT] } else { [IMPLICIT, EXPLICIT] };
     if raw[0] == 0x02 {
-        let b = part10(&[], raw);
-        let first_err = match read(&b) {
-            Ok(o) => return Ok((o, b)),
-            Err(e) => e,
-        };
-        // Step over the meta group, noting its transfer syntax.
-        let (end, ts) = skip_meta_group(raw).ok_or(first_err)?;
+        let (end, ts) = skip_meta_group(raw).ok_or("unreadable file meta")?;
+        // A meta in explicit VR, as Part 10 requires: only the preamble is missing.
+        if has_vr(raw) && ts.is_some() && raw.get(end..).is_some_and(|d| d.len() >= 8) {
+            return Ok(part10(&[], raw));
+        }
         ds = &raw[end..];
         if ds.len() < 8 {
             return Err("no data set after the file meta".into());
         }
-        let has_vr = ds[4].is_ascii_uppercase() && ds[5].is_ascii_uppercase();
         order = match ts.as_deref() {
             Some(IMPLICIT) => [IMPLICIT, EXPLICIT],
             Some(EXPLICIT) => [EXPLICIT, IMPLICIT],
-            _ if has_vr => [EXPLICIT, IMPLICIT],
+            _ if has_vr(ds) => [EXPLICIT, IMPLICIT],
             _ => [IMPLICIT, EXPLICIT],
         };
     }
-    let mut first_err = None;
+    let mut found_inst = false;
     for ts in order {
-        // Read once with a stand-in meta for the SOP UIDs, then write the real one.
-        let attempt = meta(ts, "1.2", "1.2").and_then(|m| read(&part10(&m, ds))).and_then(|o| {
-            let inst = get_uid_tag(&o, tags::SOP_INSTANCE_UID).ok_or("no SOP Instance UID")?;
-            let class = get_uid_tag(&o, tags::SOP_CLASS_UID).unwrap_or_else(|| "1.2.840.10008.5.1.4.1.1.7".to_string());
-            let b = part10(&meta(ts, &class, &inst)?, ds);
-            read(&b).map(|o| (o, b))
-        });
-        match attempt {
-            Ok(r) if get_uid_tag(&r.0, tags::STUDY_INSTANCE_UID).is_some() => return Ok(r),
-            Ok(_) => first_err = first_err.or(Some("no Study Instance UID".to_string())),
-            Err(e) => first_err = first_err.or(Some(e)),
+        match scan_uids(ds, ts == EXPLICIT) {
+            Some((class, inst, _)) => {
+                let class = class.unwrap_or_else(|| "1.2.840.10008.5.1.4.1.1.7".to_string());
+                return Ok(part10(&file_meta(ts, &class, &inst), ds));
+            }
+            None => found_inst |= scan_inst(ds, ts == EXPLICIT),
         }
     }
-    Err(first_err.unwrap_or_default())
+    Err(if found_inst { "no Study Instance UID" } else { "no SOP Instance UID" }.into())
+}
+
+/// Whether the data set gives a SOP Instance UID (for the reason a wrap is refused).
+fn scan_inst(ds: &[u8], explicit: bool) -> bool {
+    use crate::offset_tables::read_el;
+    let mut p = 0usize;
+    while let Some((tag, _, vo, len)) = read_el(ds, p, explicit) {
+        if tag == 0x0008_0018 {
+            return true;
+        }
+        if tag > 0x0008_0018 || len == 0xFFFF_FFFF {
+            return false;
+        }
+        match vo.checked_add(len as usize) {
+            Some(e) => p = e,
+            None => return false,
+        }
+    }
+    false
 }
 
 /// The end of a file meta group at the start of `b` (explicit or implicit VR elements), and its
@@ -267,7 +323,7 @@ pub fn wrap_bare_data_set(raw: &[u8]) -> std::result::Result<Option<Vec<u8>>, St
     if has_part10_magic(raw) || !looks_like_bare_dicom(raw) {
         return Ok(None);
     }
-    wrap_bare(raw).map(|(_, bytes)| Some(bytes))
+    wrap_bare(raw).map(Some)
 }
 
 /// Parses a DICOM Part 10 byte buffer (or bare dataset, wrapping it in Part 10 if needed).
@@ -288,7 +344,12 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::
             .map_err(|e| format!("unreadable DICOM: {e}"))?;
         (obj, raw_bytes, false)
     } else if looks_like_bare_dicom(&raw_bytes) {
-        let (obj, bytes) = wrap_bare(&raw_bytes)?;
+        let bytes = wrap_bare(&raw_bytes)?;
+        let obj = OpenFileOptions::new()
+            .tranfer_syntax_index(Syntaxes)
+            .read_until(Tag(0x7FE0, 0x0000))
+            .from_reader(Cursor::new(&bytes))
+            .map_err(|e| format!("unreadable DICOM data set: {e}"))?;
         (obj, bytes, true)
     } else {
         return Err("not a DICOM file (no DICM preamble)".into());
@@ -385,6 +446,7 @@ fn parsed_from_object(
         study_time: get_str_tag(&file_obj, tags::STUDY_TIME),
         patient_name: get_str_tag(&file_obj, tags::PATIENT_NAME),
         patient_id: get_str_tag(&file_obj, tags::PATIENT_ID),
+        patient_id_issuer: get_str_tag(&file_obj, tags::ISSUER_OF_PATIENT_ID),
         patient_birth_date: get_str_tag(&file_obj, tags::PATIENT_BIRTH_DATE),
     })
 }

@@ -1901,6 +1901,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shl-dicom-transcode",
  "tar",
  "thiserror",
  "zip",
@@ -1964,6 +1965,7 @@ dependencies = [
 name = "shl-dicom-wasm"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "shl-dicom-core",
  "shl-dicom-transcode",
  "wasm-bindgen",

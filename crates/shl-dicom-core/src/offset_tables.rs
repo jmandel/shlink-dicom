@@ -96,7 +96,7 @@ fn is_long_vr(vr: &[u8]) -> bool {
 }
 
 /// One element header: (tag, vr, value offset, value length).
-fn read_el(b: &[u8], p: usize, explicit: bool) -> Option<(u32, [u8; 2], usize, u32)> {
+pub(crate) fn read_el(b: &[u8], p: usize, explicit: bool) -> Option<(u32, [u8; 2], usize, u32)> {
     let tag = tag_at(b, p)?;
     if tag >> 16 == 0xFFFE {
         return Some((tag, *b"  ", p + 8, u32le(b, p + 4)?));
@@ -115,7 +115,7 @@ fn read_el(b: &[u8], p: usize, explicit: bool) -> Option<(u32, [u8; 2], usize, u
 }
 
 /// Skips an undefined-length value starting at `p`; returns the position after its delimiter.
-fn skip_undefined(b: &[u8], mut p: usize, explicit: bool, depth: u32) -> Option<usize> {
+pub(crate) fn skip_undefined(b: &[u8], mut p: usize, explicit: bool, depth: u32) -> Option<usize> {
     if depth > 64 {
         return None;
     }

@@ -5,7 +5,7 @@
 //   dist/web/how/index.html        How it works      (/how), plus how/data.json and the pages it links (web/how/bake.ts)
 //   dist/web/share/                Share             (/share, /share/manage, /share/smart-callback)
 //   dist/web/assets/               one bundle per entry point + shared chunks, decoder worker,
-//                                  shl_dicom_decode.wasm, shl_dicom_decode_jxl.wasm (loaded only for JPEG XL), shl_dicom_wasm_bg.wasm (Share: offset tables), CSS
+//                                  shl_dicom_decode.wasm, shl_dicom_decode_jxl.wasm (loaded only for JPEG XL), shl_dicom_wasm_bg.wasm (Share and Manage: the packer's Rust code), CSS
 //
 // Pages reference assets relatively, so the static parts can be served from any path.
 // Run: bun web/build.ts   (package.json: build:web)
@@ -29,6 +29,16 @@ if (!existsSync(decodeWasm)) {
 const offsetWasm = "crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm";
 if (!existsSync(offsetWasm)) {
   throw new Error(`${offsetWasm} missing: cargo build --release --target wasm32-unknown-unknown -p shl-dicom-wasm, then wasm-bindgen --target web (see deploy/bootstrap-shlink-dicom.sh)`);
+}
+// Its size budget: about 157 kB gzipped, nearly all of it the packer's Bundle builder, study order
+// and one-patient rule (with the serde_json reading of their inputs), kept in one Rust
+// implementation rather than copied into TypeScript. Only the Share and Manage pages load it; the
+// viewer never does. Growth past the budget means something unplanned came in: look before raising it.
+const SHL_WASM_GZ_BUDGET = 180_000;
+{
+  const { gzipSync } = await import("node:zlib");
+  const gz = gzipSync(readFileSync(offsetWasm), { level: 9 }).length;
+  if (gz > SHL_WASM_GZ_BUDGET) throw new Error(`${offsetWasm} is ${gz} bytes gzipped, over its budget of ${SHL_WASM_GZ_BUDGET} (see web/build.ts)`);
 }
 
 rmSync(out, { recursive: true, force: true });

@@ -74,7 +74,14 @@ fn check_wrapped(name: &str, bare: Vec<u8>, ts: &str, keeps_data_set: bool) -> S
     let again = parse_dicom_bytes(name, p.bytes.clone()).unwrap();
     assert!(!again.was_bare_wrapped);
     assert_eq!((again.sop_instance_uid.as_str(), again.study_instance_uid.as_str(), again.transfer_syntax_uid.as_str()), (p.sop_instance_uid.as_str(), p.study_instance_uid.as_str(), ts));
-    OpenFileOptions::new().from_reader(Cursor::new(&p.bytes)).unwrap_or_else(|e| panic!("{name}: dicom-rs reads the whole wrapped file: {e}"));
+    let whole = OpenFileOptions::new().from_reader(Cursor::new(&p.bytes)).unwrap_or_else(|e| panic!("{name}: dicom-rs reads the whole wrapped file: {e}"));
+    // The meta written by hand reads back as dicom-rs reads any file meta.
+    let meta = whole.meta();
+    assert_eq!(meta.transfer_syntax().trim_end_matches('\0'), ts, "{name}");
+    assert_eq!(meta.media_storage_sop_instance_uid().trim_end_matches('\0'), p.sop_instance_uid, "{name}");
+    if keeps_data_set {
+        assert_eq!(meta.implementation_class_uid().trim_end_matches('\0'), shl_dicom_transcode::IMPLEMENTATION_CLASS_UID, "{name}");
+    }
 
     let mut s = IngestSession::new();
     assert!(s.ingest_dicom_bytes(name, bare).unwrap(), "{name}: {:?}", s.skipped());

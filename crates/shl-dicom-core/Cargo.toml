@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# IMPLEMENTATION_CLASS_UID, written in the file meta of a wrapped bare data set.
+shl-dicom-transcode = { path = "../../codecs/shl-dicom-transcode" }
 aes-gcm = "0.10"
 base64 = "0.22"
 dicom-core = "0.7"
