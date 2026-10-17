@@ -457,10 +457,33 @@ impl AppState {
             if let Some(sid) = name_str.strip_suffix(".db") {
                 if !has_row(sid) {
                     self.remove_share_files(sid);
+                } else {
+                    self.sweep_orphan_links(sid);
                 }
             } else if entry.path().is_dir() && !has_row(name_str) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
+        }
+    }
+
+    /// Startup only: removes links in a share's database that have no catalog row. Creating a link
+    /// writes the share's row first and the catalog's last, so while the server runs such a row may
+    /// be a link being created; only a crash leaves one behind.
+    fn sweep_orphan_links(&self, sid: &str) {
+        let Ok(conn) = Connection::open_with_flags(self.share_db_path(sid), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) else { return };
+        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+        let valid: std::collections::HashSet<String> = {
+            let cat = self.catalog.lock().unwrap();
+            cat.prepare("SELECT lid FROM links WHERE sid = ?1")
+                .and_then(|mut st| st.query_map(params![sid], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default()
+        };
+        let lids: Vec<String> = conn
+            .prepare("SELECT lid FROM links")
+            .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+            .unwrap_or_default();
+        for lid in lids.into_iter().filter(|l| !valid.contains(l)) {
+            let _ = conn.execute("DELETE FROM links WHERE lid = ?1", params![lid]);
         }
     }
 
@@ -612,33 +635,6 @@ impl AppState {
         }
         let conn = Connection::open(&path).ok()?;
         init_share_db(&conn).ok()?;
-
-        // Sweep any orphan links in this share file that have no catalog entry
-        let valid_lids: Vec<String> = {
-            let cat = self.catalog.lock().unwrap();
-            let mut stmt = cat
-                .prepare("SELECT lid FROM links WHERE sid = ?1")
-                .ok()?;
-            let res: Vec<String> = stmt
-                .query_map(params![sid], |r| r.get::<_, String>(0))
-                .ok()?
-                .flatten()
-                .collect();
-            res
-        };
-        {
-            let mut stmt = conn.prepare("SELECT lid FROM links").ok()?;
-            let all_lids: Vec<String> = stmt
-                .query_map([], |r| r.get::<_, String>(0))
-                .ok()?
-                .flatten()
-                .collect();
-            for lid in all_lids {
-                if !valid_lids.iter().any(|v| v == &lid) {
-                    let _ = conn.execute("DELETE FROM links WHERE lid = ?1", params![lid]);
-                }
-            }
-        }
 
         let arc = Arc::new(Mutex::new(conn));
         self.pool.lock().unwrap().insert(sid.to_string(), arc.clone());

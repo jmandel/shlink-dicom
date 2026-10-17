@@ -736,6 +736,15 @@ async fn test_multiple_links_subset_scoping_and_orphan_sweep() {
             .status(),
         StatusCode::NOT_FOUND
     );
+    // Only startup removes it (while running, such a row may be a link being created).
+    let count = |st: &AppState| -> i64 {
+        let c = st.open_share_db(&sid).unwrap();
+        let conn = c.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM links WHERE lid = ?1", params![orphan_lid], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(count(&state), 1);
+    let restarted = test_state(&dir);
+    assert_eq!(count(&restarted), 0, "the startup sweep removes the orphan link");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
