@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 use crate::storage::{ReadDelivery, ReadError};
 use crate::state::{
-    hash_passcode, is_valid_id22, now_unix, parse_file_name, AccessEvent, AppState,
+    ct_eq, hash_passcode, is_valid_id22, now_unix, parse_file_name, AccessEvent, AppState,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -151,7 +151,7 @@ pub async fn post_shl_manifest(
             };
 
             let actual_hash = hash_passcode(&salt, provided);
-            if provided.is_empty() || actual_hash.as_slice() != expected_hash.as_slice() {
+            if provided.is_empty() || !ct_eq(&actual_hash, &expected_hash) {
                 let _ = tx.commit();
                 drop(conn);
                 state.record_access(

@@ -79,6 +79,16 @@ pub fn hash_passcode(salt: &[u8], passcode: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Whether two hashes are equal, taking the same time wherever they differ. (Only the length,
+/// which is public, ends it early.)
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    std::hint::black_box(diff) == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareFileEntry {
@@ -769,7 +779,7 @@ impl AppState {
             return false;
         };
         let provided_hash = sha256_bytes(bearer.as_bytes());
-        stored_hash.as_slice() == provided_hash.as_slice()
+        ct_eq(&stored_hash, &provided_hash)
     }
 
     pub fn register_link_in_catalog(&self, sid: &str, lid: &str) -> Result<(), String> {
@@ -1174,4 +1184,22 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS access_ts ON access_log(ts);
          CREATE INDEX IF NOT EXISTS access_lid ON access_log(lid);",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ct_eq;
+
+    #[test]
+    fn ct_eq_compares_bytes() {
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(&[7u8; 32], &[7u8; 32]));
+        let mut b = [7u8; 32];
+        b[31] = 6;
+        assert!(!ct_eq(&[7u8; 32], &b));
+        b[31] = 7;
+        b[0] = 0;
+        assert!(!ct_eq(&[7u8; 32], &b));
+        assert!(!ct_eq(&[7u8; 32], &[7u8; 31]));
+    }
 }
