@@ -188,6 +188,34 @@ The viewer reads the link, the manifest's location and the Bundle with the reade
 
 The cost is the module's bytes: on Fast 4G they share the link with view.js, the decoder's wasm and the Bundle. Opening the sample's Bundle in the worker takes about 28 ms. A worker started by view.js, which then fetched its script and its module, opened the overview at 1234 ms on Fast 4G. Leaving out the decoder wasm's preload gave 757 ms, but the first thumbnail came about 320 ms later.
 
+## Record priorities on the scheduler (branch `loading-spikes`)
+
+A separate round of loader work, on branch `loading-spikes` (tip bfe2a3e), built on the scheduler branch. Its full write-up and evidence are in that branch's `perf/sessions/README.md` and `perf/sessions/results/loading-*.json`. It is not on main, and its gains are measured against the scheduler (frozen control c96f38c), not against main's loader.
+
+**Selected behaviour** (preset in `web/core/loading-experiments.ts`): `recordPriorities`, `preserveTransportUrgency`, `rankedMerges`, `gapReuse`.
+- When the image on screen needs only the tail of a queued prefetch read, those records are moved ahead of the rest of that read.
+- Each record keeps track of who asked for it, so splitting or merging queued reads keeps every reader's promise, progress and cancellation, including exports.
+- A request already sent keeps its original priority.
+- Record size stays 64 KiB; range limits, concurrency and the export plan are unchanged.
+
+**Browser results**, scheduler control → record priorities (screened for host load; one matched pair per row unless noted):
+
+| Session | Control | Candidate |
+|---|---|---|
+| Fast 4G desktop CT cold jump | 2.240 s | 1.810 s |
+| Fast 4G desktop CT volume ready | 19.433 s | 19.266 s |
+| Fast 4G desktop MRI volume ready | 9.213 s | 9.134 s |
+| Slow 4G CT cold jump | 12.996 s | 10.457 s |
+| Slow 4G CT volume ready | 108.121 s | 107.809 s |
+| Fast 4G phone emulation CT jump (3 runs each) | 2.237–2.269 s | 1.754–1.827 s |
+
+- Exports (verified byte for byte): MRI ZIP on Fast 4G 28.603 → 28.448 s; CT streaming ZIP at home 5.562 → 5.613 s (0.9% slower, about 0.4% more bytes).
+- A deterministic model (426 paired conditions, 16 activities, three links) found the selected preset never transferred more bytes and rarely made volume readiness or the last byte later (largest increase about 52–83 ms, all on the home link).
+
+**Tried and not selected:** small ranges and tight speculative budgets; an adaptive policy found by search (MRI stale time during export 4.6 → 6.6 s); fully live urgency, which also reordered frame admission and decoding; preempting responses already in flight (mixed MRI results, and a later jump 728 ms slower); `liveDemand` (slow-link CT volume 7.28 s later).
+
+**What integration would take:** the scheduler branch first (which main does not have), then the record-priority, ranked-merge, gap-reuse and ownership changes with their tests, re-measured against main with the method under "Measurement". The browser comparisons above are one or a few pairs per cell, which "Measurement" says is too few for anything bimodal.
+
 ## Causes found
 
 **MR scroll-back stall.** Eight sessions with the request log, Fast 4G desktop, scheduler branch, 4 at each size.
