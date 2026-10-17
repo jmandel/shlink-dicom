@@ -1,6 +1,11 @@
 // Test helper: share files on a server the way the Share page does (web/share/lib), from Bun.
 //   const s = await packAndShare(base, files, { addOffsetTables });
 //   const link = await s.mint(s.bundle, { label: "…" });
+// What it packs is kept in a cache keyed by its inputs and the packer's code (PACK_CACHE, default
+// <tmp>/shl-pack-cache), so a fresh server only gets the encrypted files uploaded again.
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { encodeShlink, encryptJwe, parseIndex, randomKeyB64 } from "../core/index";
 import { Collection } from "../share/lib/ingest";
 import { buildBundle, encryptFile, planStudyFiles } from "../share/lib/pack";
@@ -62,11 +67,37 @@ export function linksFor(base: string, sid: string, token: string) {
   };
 }
 
-export async function packAndShare(
-  base: string,
-  files: { name: string; bytes: Uint8Array }[],
-  o: { addOffsetTables?: boolean } = {},
-): Promise<SharedFixture> {
+/** Code whose change changes what is packed: the packer's wasm and the Share page's packing. */
+const PACKER_SOURCES = [
+  "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm",
+  "../share/lib/ingest.ts",
+  "../share/lib/pack.ts",
+  "../share/lib/offset-tables.ts",
+  "../share/lib/bytes.ts",
+  "./pack-share.ts",
+];
+
+/** The cache key of a packing: the packer's code, the options, and every file's name and bytes. */
+function cacheKey(files: { name: string; bytes: Uint8Array }[], o: object): string {
+  const h = new Bun.CryptoHasher("sha256");
+  for (const f of PACKER_SOURCES) h.update(readFileSync(new URL(f, import.meta.url)));
+  h.update(JSON.stringify(o));
+  for (const f of files) h.update(`\0${f.name}\0${f.bytes.length}\0`).update(f.bytes);
+  return h.digest("hex");
+}
+
+interface Packed {
+  bundle: any;
+  plaintextBytes: number;
+  ciphertextBytes: number;
+  tablesAdded: number;
+  skipped: { name: string; reason: string }[];
+  /** The encrypted files, as they go to the server. */
+  files: string[];
+}
+
+/** Packs the files as the Share page does, into `dir`: one `{fileId}.bin` each, and pack.json. */
+async function pack(files: { name: string; bytes: Uint8Array }[], o: { addOffsetTables?: boolean }, dir: string): Promise<Packed> {
   await useShlWasm();
   const col = new Collection();
   // Check fixtures gather sample files from many sources and people; they are shared as one
@@ -80,24 +111,51 @@ export async function packAndShare(
     tablesAdded = await addOffsetTables(studies.flatMap((s) => s.series));
   }
   const packed = planStudyFiles(studies);
-  const created = await j(await fetch(`${base}/api/shares`, { method: "POST" }));
-  const sid: string = created.share.id, token: string = created.controlToken;
-  const auth = { Authorization: `Bearer ${token}` };
   let ciphertextBytes = 0, plaintextBytes = 0;
   for (const p of packed) {
     const ct = await encryptFile(p);
     ciphertextBytes += ct.length;
     plaintextBytes += p.plaintextLength;
+    writeFileSync(join(dir, `${p.fileId}.bin`), ct);
+  }
+  const out: Packed = { bundle: buildBundle(col, packed), plaintextBytes, ciphertextBytes, tablesAdded, skipped: col.skipped, files: packed.map((p) => `${p.fileId}.bin`) };
+  writeFileSync(join(dir, "pack.json"), JSON.stringify(out));
+  return out;
+}
+
+export async function packAndShare(
+  base: string,
+  files: { name: string; bytes: Uint8Array }[],
+  o: { addOffsetTables?: boolean } = {},
+): Promise<SharedFixture> {
+  const root = process.env.PACK_CACHE ?? join(tmpdir(), "shl-pack-cache");
+  const dir = join(root, cacheKey(files, { addOffsetTables: !!o.addOffsetTables }));
+  let p: Packed;
+  if (existsSync(join(dir, "pack.json"))) p = JSON.parse(readFileSync(join(dir, "pack.json"), "utf8"));
+  else {
+    // Packed beside the cache, then moved into place whole, so a cut-short run leaves no entry.
+    const work = `${dir}.part-${process.pid}`;
+    rmSync(work, { recursive: true, force: true });
+    mkdirSync(work, { recursive: true });
+    p = await pack(files, o, work);
+    rmSync(dir, { recursive: true, force: true });
+    renameSync(work, dir);
+  }
+  const created = await j(await fetch(`${base}/api/shares`, { method: "POST" }));
+  const sid: string = created.share.id, token: string = created.controlToken;
+  const auth = { Authorization: `Bearer ${token}` };
+  for (const f of p.files) {
+    const ct = Bun.file(join(dir, f));
     await j(
-      await fetch(`${base}/api/shares/${sid}/files/${p.fileId}.bin`, {
+      await fetch(`${base}/api/shares/${sid}/files/${f}`, {
         method: "PUT",
-        headers: { ...auth, "Content-Type": "application/octet-stream", "X-Expected-Size": String(ct.length) },
+        headers: { ...auth, "Content-Type": "application/octet-stream", "X-Expected-Size": String(ct.size) },
         body: ct,
       }),
     );
   }
-  const bundle = buildBundle(col, packed);
-  const ownerJwe = await encryptJwe(new TextEncoder().encode(JSON.stringify(bundle)), randomKeyB64());
+  const ownerJwe = await encryptJwe(new TextEncoder().encode(JSON.stringify(p.bundle)), randomKeyB64());
   await j(await fetch(`${base}/api/shares/${sid}/owner.jwe`, { method: "PUT", headers: { ...auth, "Content-Type": "application/jose" }, body: ownerJwe }));
-  return { sid, token, bundle, plaintextBytes, ciphertextBytes, tablesAdded, skipped: col.skipped, ...linksFor(base, sid, token) };
+  const { files: _f, ...rest } = p;
+  return { sid, token, ...rest, ...linksFor(base, sid, token) };
 }
