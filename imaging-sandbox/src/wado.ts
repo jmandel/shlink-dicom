@@ -68,10 +68,13 @@ function dicomPreferences(accept: MediaRange[]): { prefs: Preference[]; missing:
   accept.forEach((m, order) => {
     if (m.type !== "multipart/related") return;
     if ((m.params.type ?? "application/dicom").toLowerCase() !== "application/dicom") return;
+    const raw = m.params.q === undefined ? 1 : Number(m.params.q);
+    const q = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1) : 1;
+    // q=0 means "not acceptable": such a range asks for nothing, so it can't be missing a syntax.
+    if (q === 0) return;
     const ts = m.params["transfer-syntax"];
     if (!ts) { missing = true; return; }
-    const q = m.params.q === undefined ? 1 : Number(m.params.q);
-    prefs.push({ ts, q: Number.isFinite(q) ? Math.min(Math.max(q, 0), 1) : 1, order });
+    prefs.push({ ts, q, order });
   });
   return { prefs: prefs.filter((p) => p.q > 0).sort((a, b) => b.q - a.q || a.order - b.order), missing };
 }

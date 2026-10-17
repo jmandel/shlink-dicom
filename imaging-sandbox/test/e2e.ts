@@ -324,6 +324,8 @@ async function main() {
     check("transfer-syntax missing: 406 with an example Accept", missing.status === 406 && (missing.json?.example ?? "").includes("transfer-syntax=*"));
     const zero = await get(`${base}/wado-rs/studies/${ct}`, [range(SV1, 0), range("*", 0)].join(", "));
     check("every range at q=0: 406", zero.status === 406);
+    const zeroNoTs = await get(`${base}/wado-rs/studies/${ct}`, ['multipart/related; type="application/dicom"; q=0', range("*")].join(", "));
+    check("a q=0 range without transfer-syntax is not a missing one (it and *: 200, as stored)", zeroNoTs.status === 200 && zeroNoTs.parts.length === ctStored.parts.length && zeroNoTs.parts.every((p) => tsOf(p) === storedTs(p)));
     const crJ2kOnly = await get(`${base}/wado-rs/studies/${wrist}`, range(J2K));
     check("radiographs, J2K only (no *): 200, every image has a copy", crJ2kOnly.status === 200 && crJ2kOnly.parts.length === 3 && crJ2kOnly.parts.every((p) => tsOf(p) === J2K));
 
