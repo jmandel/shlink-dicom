@@ -50,8 +50,9 @@ jobs:
           out="$RUNNER_TEMP/pack"
           ./target/release/shl-dicom-server compress web/how/data/bench --out "$RUNNER_TEMP/compressed"
           ./target/release/shl-dicom-server pack web/how/data/bench --out "$out" --base-url https://host.example/s/
-          ls -l "$out"
-          test "$(ls "$out"/*.bin | wc -l)" -ge 1 && test -s "$out/bundle.jwe"
+          ls -lR "$out"
+          # pack writes the hosted files under one random 256-bit folder.
+          test "$(ls "$out"/*/*.bin | wc -l)" -ge 1 && test -s "$(ls "$out"/*/bundle.jwe)"
 
       - name: Test vector (reference receiver), with fixtures/golden unchanged
         run: |
