@@ -18,101 +18,84 @@ fn sha256_hex(data: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// fixtures/golden/vector.json, written by reference/test-vector.ts (spec/README.md Appendix B).
+fn vector() -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string("../../fixtures/golden/vector.json").unwrap()).unwrap()
+}
+
 #[test]
 fn test_appendix_b_vector_and_f0_golden_share() {
-    let file_key = decode_key_32("ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8").unwrap();
-    let total: usize = 150_000;
+    let v = vector();
+    let files = v["files"].as_array().unwrap();
+    let u = |x: &serde_json::Value| x.as_u64().unwrap();
+    let s = |x: &serde_json::Value| x.as_str().unwrap().to_string();
+    // The study file: byte k is k mod 251 (Appendix B).
+    let f0 = &files[0];
+    let file_key = decode_key_32(&s(&f0["key"])).unwrap();
+    let total = u(&f0["plaintextLength"]) as usize;
     let plaintext: Vec<u8> = (0..total).map(|k| (k % 251) as u8).collect();
-
-    assert_eq!(
-        sha256_hex(&plaintext),
-        "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b"
-    );
+    assert_eq!(sha256_hex(&plaintext), s(&f0["plaintextSha256"]));
 
     let ct = encrypt_file(&plaintext, &file_key).unwrap();
-    assert_eq!(ct.len(), 150_048);
+    assert_eq!(ct.len() as u64, u(&f0["ciphertextLength"]));
     assert_eq!(ct.len() as u64, ciphertext_length(total as u64));
-    assert_eq!(
-        sha256_hex(&ct),
-        "f3205658d3fee29b343d3ba3ef20f52b3e66c2cb05974a93b65504866665fc4e"
-    );
+    assert_eq!(sha256_hex(&ct), s(&f0["ciphertextSha256"]));
 
-    let expected_tags = [
-        "9a8421bd6740aeac5eb211cf59511b2f",
-        "4cd810f700957e87ae68edc29e40caf9",
-        "cf980ddc661684644fa17e5b00b08819",
-    ];
-    for (i, expected_tag) in expected_tags.iter().enumerate() {
+    for (i, expected_tag) in f0["recordTags"].as_array().unwrap().iter().enumerate() {
         let start = i * RECORD_CIPHERTEXT as usize;
         let end = ((i + 1) * RECORD_CIPHERTEXT as usize).min(ct.len());
         let rec = &ct[start..end];
-        let tag_hex: String = rec[rec.len() - 16..]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(&tag_hex, expected_tag, "record {i} tag mismatch");
+        let tag_hex: String = rec[rec.len() - 16..].iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(tag_hex, s(expected_tag), "record {i} tag mismatch");
     }
 
     // Whole-file round trip
     let whole = decrypt_range(&ct, 0, total as u64, total as u64, &file_key).unwrap();
     assert_eq!(whole, plaintext);
 
-    // Instance 2 range read [70000, 150000)
-    let r = ciphertext_range(70_000, 150_000, total as u64).unwrap();
-    assert_eq!(r.first_record, 1);
-    assert_eq!(r.last_record, 2);
-    assert_eq!(r.ciphertext_start, 65_536);
-    assert_eq!(r.ciphertext_end, 150_048);
-
-    let inst2 = decrypt_range(
-        &ct[r.ciphertext_start as usize..r.ciphertext_end as usize],
-        70_000,
-        150_000,
-        total as u64,
-        &file_key,
-    )
-    .unwrap();
-    assert_eq!(inst2, &plaintext[70_000..150_000]);
+    // Instance 2's range read
+    let lens: Vec<u64> = f0["instanceLengths"].as_array().unwrap().iter().map(u).collect();
+    let (from, to) = (lens[0], lens[0] + lens[1]);
+    let r = ciphertext_range(from, to, total as u64).unwrap();
+    let want = &f0["instance2Range"];
+    assert_eq!(r.first_record, u(&want["first"]));
+    assert_eq!(r.last_record, u(&want["last"]));
+    assert_eq!(r.ciphertext_start, u(&want["from"]));
+    assert_eq!(r.ciphertext_end, u(&want["to"]));
+    let inst2 = decrypt_range(&ct[r.ciphertext_start as usize..r.ciphertext_end as usize], from, to, total as u64, &file_key).unwrap();
+    assert_eq!(inst2, &plaintext[from as usize..to as usize]);
 
     // The golden share written by reference/test-vector.ts (spec/README.md Appendix A): the study
-    // file holds series 2 and 997; series 3 has a file of its own.
+    // file holds series 2 and 997; series 3 has a file of its own, where byte k is k mod 241.
+    let f1 = &files[1];
     let golden_jwe = std::fs::read_to_string("../../fixtures/golden/bundle.jwe").unwrap();
-    let golden_bin = std::fs::read("../../fixtures/golden/AAECAwQFBgcICQoLDA0ODw.bin").unwrap();
+    let golden_bin = std::fs::read(format!("../../fixtures/golden/{}.bin", s(&f0["fileId"]))).unwrap();
     assert_eq!(golden_bin, ct);
-    let added_bin = std::fs::read("../../fixtures/golden/EBESExQVFhcYGRobHB0eHw.bin").unwrap();
-    let added_key: [u8; 32] = std::array::from_fn(|i| 0x60 + i as u8);
-    let added_plain: Vec<u8> = (0..20_000usize).map(|k| (k % 241) as u8).collect();
+    let added_bin = std::fs::read(format!("../../fixtures/golden/{}.bin", s(&f1["fileId"]))).unwrap();
+    let added_key = decode_key_32(&s(&f1["key"])).unwrap();
+    let added_plain: Vec<u8> = (0..u(&f1["plaintextLength"]) as usize).map(|k| (k % 241) as u8).collect();
+    assert_eq!(sha256_hex(&added_plain), s(&f1["plaintextSha256"]));
     assert_eq!(added_bin, encrypt_file(&added_plain, &added_key).unwrap());
-    assert_eq!(
-        sha256_hex(&added_bin),
-        "acfa75bf344f92fbe3c3122d8391a65c60e12b384ef4459d2c9c5d793488f41c"
-    );
+    assert_eq!(sha256_hex(&added_bin), s(&f1["ciphertextSha256"]));
 
-    let shl_key = decode_key_32("QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8").unwrap();
+    let shl_key = decode_key_32(&s(&v["shlKey"])).unwrap();
     let bundle_bytes = decrypt_bundle_jwe(&golden_jwe, &shl_key).unwrap();
     let index = parse_study_index(&bundle_bytes).unwrap();
     assert_eq!(index.studies.len(), 1);
     let st = &index.studies[0];
-    let at: Vec<(&str, u64, u64)> = st
-        .series
-        .iter()
-        .map(|se| (se.file.file_id.as_str(), se.offset, se.bytes))
-        .collect();
-    assert_eq!(
-        at,
-        vec![
-            ("AAECAwQFBgcICQoLDA0ODw", 0, 70_000),
-            ("AAECAwQFBgcICQoLDA0ODw", 70_000, 80_000),
-            ("EBESExQVFhcYGRobHB0eHw", 0, 20_000),
-        ]
-    );
-    assert_eq!(st.files.len(), 2);
-    assert_eq!(st.files[0].plaintext_length, 150_000);
-    assert_eq!(st.files[0].ciphertext_length, 150_048);
-    assert_eq!(st.files[1].plaintext_length, 20_000);
+    let at: Vec<(String, u64, u64)> = st.series.iter().map(|se| (se.file.file_id.clone(), se.offset, se.bytes)).collect();
+    let layout: Vec<(String, u64, u64)> =
+        v["layout"].as_array().unwrap().iter().map(|l| (s(&l["fileId"]), u(&l["offset"]), u(&l["length"]))).collect();
+    assert_eq!(at, layout);
+    assert_eq!(st.files.len(), files.len());
+    for (got, f) in st.files.iter().zip(files) {
+        assert_eq!(got.file_id, s(&f["fileId"]));
+        assert_eq!(got.plaintext_length, u(&f["plaintextLength"]));
+        assert_eq!(got.ciphertext_length, u(&f["ciphertextLength"]));
+    }
     assert_eq!(st.series[1].file, st.files[0]);
-    assert_eq!(st.series[1].instances[0].offset, 70_000);
-    assert_eq!((st.series[1].first_record, st.series[1].last_record), (1, 2));
+    assert_eq!(st.series[1].instances[0].offset, from);
+    assert_eq!((st.series[1].first_record, st.series[1].last_record), (u(&want["first"]), u(&want["last"])));
     assert_eq!(st.series[2].file.key_bytes().unwrap(), added_key);
 }
 
@@ -231,57 +214,28 @@ fn test_jwe_and_shlink_roundtrip() {
 
 /// A synthetic explicit-VR-little-endian Part 10 file (fictional patient, 2.25 UIDs) whose
 /// pixel data is `rows × cols` 16-bit values seeded by `seed`.
+#[path = "../../../codecs/shl-dicom-decode/tests/support/ds.rs"]
+mod ds;
+
+#[allow(clippy::too_many_arguments)]
 fn synthetic_dicom(study: &str, series: &str, sop: &str, modality: &str, series_no: i32, inst_no: i32, rows: u16, cols: u16, seed: u32) -> Vec<u8> {
-    fn el(b: &mut Vec<u8>, g: u16, e: u16, vr: &[u8; 2], v: &[u8]) {
-        let mut v = v.to_vec();
-        if v.len() % 2 == 1 {
-            v.push(if vr == b"UI" { 0 } else { b' ' });
-        }
-        b.extend_from_slice(&g.to_le_bytes());
-        b.extend_from_slice(&e.to_le_bytes());
-        b.extend_from_slice(vr);
-        if matches!(vr, b"OB" | b"OW") {
-            b.extend_from_slice(&[0, 0]);
-            b.extend_from_slice(&(v.len() as u32).to_le_bytes());
-        } else {
-            b.extend_from_slice(&(v.len() as u16).to_le_bytes());
-        }
-        b.extend_from_slice(&v);
-    }
-    let sop_class: &[u8] = if modality == "CT" { b"1.2.840.10008.5.1.4.1.1.2" } else { b"1.2.840.10008.5.1.4.1.1.1" };
-    let mut meta = Vec::new();
-    el(&mut meta, 0x0002, 0x0001, b"OB", &[0, 1]);
-    el(&mut meta, 0x0002, 0x0002, b"UI", sop_class);
-    el(&mut meta, 0x0002, 0x0003, b"UI", sop.as_bytes());
-    el(&mut meta, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1");
-    let mut b = vec![0u8; 128];
-    b.extend_from_slice(b"DICM");
-    el(&mut b, 0x0002, 0x0000, b"UL", &(meta.len() as u32).to_le_bytes());
-    b.extend_from_slice(&meta);
-    el(&mut b, 0x0008, 0x0016, b"UI", sop_class);
-    el(&mut b, 0x0008, 0x0018, b"UI", sop.as_bytes());
-    el(&mut b, 0x0008, 0x0020, b"DA", b"20260101");
-    el(&mut b, 0x0008, 0x0060, b"CS", modality.as_bytes());
-    el(&mut b, 0x0008, 0x1030, b"LO", format!("Synthetic {modality}").as_bytes());
-    el(&mut b, 0x0010, 0x0010, b"PN", b"TEST^SYNTHETIC");
-    el(&mut b, 0x0010, 0x0020, b"LO", b"SYN0001");
-    el(&mut b, 0x0020, 0x000D, b"UI", study.as_bytes());
-    el(&mut b, 0x0020, 0x000E, b"UI", series.as_bytes());
-    el(&mut b, 0x0020, 0x0011, b"IS", series_no.to_string().as_bytes());
-    el(&mut b, 0x0020, 0x0013, b"IS", inst_no.to_string().as_bytes());
-    el(&mut b, 0x0028, 0x0002, b"US", &1u16.to_le_bytes());
-    el(&mut b, 0x0028, 0x0004, b"CS", b"MONOCHROME2");
-    el(&mut b, 0x0028, 0x0010, b"US", &rows.to_le_bytes());
-    el(&mut b, 0x0028, 0x0011, b"US", &cols.to_le_bytes());
-    el(&mut b, 0x0028, 0x0100, b"US", &16u16.to_le_bytes());
-    el(&mut b, 0x0028, 0x0101, b"US", &12u16.to_le_bytes());
-    el(&mut b, 0x0028, 0x0102, b"US", &11u16.to_le_bytes());
-    el(&mut b, 0x0028, 0x0103, b"US", &0u16.to_le_bytes());
+    use ds::{part10_meta, Ds, Enc};
+    let sop_class = if modality == "CT" { "1.2.840.10008.5.1.4.1.1.2" } else { "1.2.840.10008.5.1.4.1.1.1" };
+    let mut d = Ds::new(Enc::ExplicitLe);
+    d.ui(0x0008, 0x0016, sop_class).ui(0x0008, 0x0018, sop);
+    d.text(0x0008, 0x0020, b"DA", "20260101").text(0x0008, 0x0060, b"CS", modality);
+    d.text(0x0008, 0x1030, b"LO", &format!("Synthetic {modality}"));
+    d.text(0x0010, 0x0010, b"PN", "TEST^SYNTHETIC").text(0x0010, 0x0020, b"LO", "SYN0001");
+    d.ui(0x0020, 0x000D, study).ui(0x0020, 0x000E, series);
+    d.text(0x0020, 0x0011, b"IS", &series_no.to_string()).text(0x0020, 0x0013, b"IS", &inst_no.to_string());
+    d.us(0x0028, 0x0002, 1).text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+    d.us(0x0028, 0x0010, rows).us(0x0028, 0x0011, cols);
+    d.us(0x0028, 0x0100, 16).us(0x0028, 0x0101, 12).us(0x0028, 0x0102, 11).us(0x0028, 0x0103, 0);
     let px: Vec<u8> = (0..rows as u32 * cols as u32)
         .flat_map(|i| (((i.wrapping_mul(2654435761) ^ seed) >> 7) as u16 & 0x0FFF).to_le_bytes())
         .collect();
-    el(&mut b, 0x7FE0, 0x0010, b"OW", &px);
-    b
+    d.elem(0x7FE0, 0x0010, b"OW", &px);
+    part10_meta("1.2.840.10008.1.2.1", &[(0x0002, sop_class), (0x0003, sop)], &d.out, true)
 }
 
 /// A two-study share built from synthetic files: a CT of two series (4 slices that each cross a

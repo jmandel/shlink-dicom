@@ -184,6 +184,12 @@ fn temp_data_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+/// The golden share's study file id, from fixtures/golden/vector.json (reference/test-vector.ts).
+fn golden_file_id() -> String {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string("../../fixtures/golden/vector.json").unwrap()).unwrap();
+    v["files"][0]["fileId"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn test_zero_knowledge_upload_and_u_mode_range() {
     let dir = temp_data_dir("u_mode_range");
@@ -205,8 +211,9 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
 
     // Load F0 golden share fixtures
     let golden_jwe = std::fs::read_to_string("../../fixtures/golden/bundle.jwe").unwrap();
-    let golden_bin = std::fs::read("../../fixtures/golden/AAECAwQFBgcICQoLDA0ODw.bin").unwrap();
-    let file_id = "AAECAwQFBgcICQoLDA0ODw";
+    let file_id = golden_file_id();
+    let file_id = file_id.as_str();
+    let golden_bin = std::fs::read(format!("../../fixtures/golden/{file_id}.bin")).unwrap();
 
     // Upload owner.jwe and verify GET owner.jwe
     let put_owner = client
@@ -786,8 +793,9 @@ async fn test_controls_mid_download_resumption_expiry_and_traversal() {
     let sid = create_resp["share"]["id"].as_str().unwrap().to_string();
     let token = create_resp["controlToken"].as_str().unwrap().to_string();
 
-    let golden_bin = std::fs::read("../../fixtures/golden/AAECAwQFBgcICQoLDA0ODw.bin").unwrap();
-    let file_id = "AAECAwQFBgcICQoLDA0ODw";
+    let file_id = golden_file_id();
+    let file_id = file_id.as_str();
+    let golden_bin = std::fs::read(format!("../../fixtures/golden/{file_id}.bin")).unwrap();
     client
         .put(format!("{base}/api/shares/{sid}/files/{file_id}.bin"))
         .bearer_auth(&token)

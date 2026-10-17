@@ -46,3 +46,8 @@ pub enum Error {
     #[error("JSON error: {0}")]
     Json(String),
 }
+
+/// The repository's synthetic DICOM builder, for unit tests.
+#[cfg(test)]
+#[path = "../../../codecs/shl-dicom-decode/tests/support/ds.rs"]
+pub(crate) mod test_ds;

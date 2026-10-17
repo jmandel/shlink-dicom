@@ -465,22 +465,19 @@ pub fn extract_dicom_from_zip(zip_bytes: &[u8]) -> Result<(Vec<ParsedDicomInstan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::offset_tables::tests::synthetic;
+    use crate::offset_tables::tests::{synthetic, synthetic_ts};
 
-    /// The synthetic slide with another transfer syntax UID of the same length.
-    fn with_ts(uid: &[u8; 23]) -> Vec<u8> {
-        let mut b = synthetic(3, &[1], false);
-        let at = b.windows(23).position(|w| w == b"1.2.840.10008.1.2.4.50\0").unwrap();
-        b[at..at + 23].copy_from_slice(uid);
-        b
+    /// The synthetic slide under another transfer syntax UID.
+    fn with_ts(uid: &str) -> Vec<u8> {
+        synthetic_ts(uid, 3, &[1], false)
     }
 
     #[test]
     fn reads_syntaxes_missing_from_the_dicom_rs_registry() {
-        for uid in [b"1.2.840.10008.1.2.4.110", b"1.2.840.10008.1.2.4.111", b"1.2.840.10008.1.2.4.112", b"1.2.840.10008.1.2.4.201", b"1.2.840.10008.1.2.4.203", b"1.2.840.10008.1.2.4.55\0", b"1.2.840.10008.1.2.8.1\0\0"] {
+        for uid in ["1.2.840.10008.1.2.4.110", "1.2.840.10008.1.2.4.111", "1.2.840.10008.1.2.4.112", "1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.203", "1.2.840.10008.1.2.4.55", "1.2.840.10008.1.2.8.1"] {
             let b = with_ts(uid);
             let p = parse_dicom_bytes("slide.dcm", b.clone()).unwrap();
-            assert_eq!(p.transfer_syntax_uid.as_bytes(), uid.strip_suffix(b"\0\0").or(uid.strip_suffix(b"\0")).unwrap_or(uid));
+            assert_eq!(p.transfer_syntax_uid, uid);
             assert_eq!(p.study_instance_uid, "1.2.3.4");
             assert_eq!(p.bytes, b);
             let h = parse_dicom_header_reader("slide.dcm", Cursor::new(&b)).unwrap();
@@ -500,7 +497,7 @@ mod tests {
         broken.truncate(200);
         assert!(reason("a.dcm", broken).contains("unreadable"));
         // A transfer syntax outside DICOM's own is reported, not dropped.
-        let unknown = with_ts(b"1.2.3.4.5.6.7.8.9.10.11");
+        let unknown = with_ts("1.2.3.4.5.6.7.8.9.10.11");
         assert!(reason("a.dcm", unknown).contains("unreadable"));
     }
 }

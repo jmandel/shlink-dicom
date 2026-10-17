@@ -4,125 +4,12 @@
 use shl_codec_common::{ColorOut, DecodeError, DecodedFrame, FrameInfo, Result as CodecResult};
 use shl_dicom_decode::{decode_file, decode_file_with, Error};
 
-const EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
-const IMPLICIT_LE: &str = "1.2.840.10008.1.2";
-const EXPLICIT_BE: &str = "1.2.840.10008.1.2.2";
-const DEFLATED: &str = "1.2.840.10008.1.2.1.99";
+use shl_dicom_decode::syntax::{DEFLATED_LE as DEFLATED, EXPLICIT_BE, EXPLICIT_LE, IMPLICIT_LE};
 const RLE: &str = "1.2.840.10008.1.2.5";
 
-#[derive(Clone, Copy, PartialEq)]
-enum Enc {
-    ExplicitLe,
-    ImplicitLe,
-    ExplicitBe,
-}
-
-struct Ds {
-    enc: Enc,
-    out: Vec<u8>,
-}
-
-impl Ds {
-    fn new(enc: Enc) -> Self {
-        Self { enc, out: Vec::new() }
-    }
-    fn u16(&mut self, v: u16) {
-        let b = if self.enc == Enc::ExplicitBe { v.to_be_bytes() } else { v.to_le_bytes() };
-        self.out.extend_from_slice(&b);
-    }
-    fn u32(&mut self, v: u32) {
-        let b = if self.enc == Enc::ExplicitBe { v.to_be_bytes() } else { v.to_le_bytes() };
-        self.out.extend_from_slice(&b);
-    }
-    fn elem(&mut self, g: u16, e: u16, vr: &[u8; 2], value: &[u8]) -> &mut Self {
-        self.u16(g);
-        self.u16(e);
-        if self.enc == Enc::ImplicitLe {
-            self.u32(value.len() as u32);
-        } else {
-            self.out.extend_from_slice(vr);
-            if matches!(vr, b"OB" | b"OW" | b"OF" | b"OD" | b"OL" | b"SQ" | b"UN" | b"OV" | b"UT") {
-                self.out.extend_from_slice(&[0, 0]);
-                self.u32(value.len() as u32);
-            } else {
-                self.u16(value.len() as u16);
-            }
-        }
-        self.out.extend_from_slice(value);
-        self
-    }
-    fn us(&mut self, g: u16, e: u16, v: u16) -> &mut Self {
-        let b = if self.enc == Enc::ExplicitBe { v.to_be_bytes() } else { v.to_le_bytes() };
-        self.elem(g, e, b"US", &b)
-    }
-    fn text(&mut self, g: u16, e: u16, vr: &[u8; 2], s: &str) -> &mut Self {
-        let mut v = s.as_bytes().to_vec();
-        if v.len() % 2 == 1 {
-            v.push(b' ');
-        }
-        self.elem(g, e, vr, &v)
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn image(&mut self, spp: u16, photometric: &str, planar: Option<u16>, frames: Option<&str>, rows: u16, cols: u16, ba: u16, bs: u16, pr: u16) -> &mut Self {
-        self.us(0x0028, 0x0002, spp);
-        self.text(0x0028, 0x0004, b"CS", photometric);
-        if let Some(p) = planar {
-            self.us(0x0028, 0x0006, p);
-        }
-        if let Some(f) = frames {
-            self.text(0x0028, 0x0008, b"IS", f);
-        }
-        self.us(0x0028, 0x0010, rows);
-        self.us(0x0028, 0x0011, cols);
-        self.us(0x0028, 0x0100, ba);
-        self.us(0x0028, 0x0101, bs);
-        self.us(0x0028, 0x0103, pr)
-    }
-    fn encapsulated(&mut self, bot: &[u32], fragments: &[&[u8]]) -> &mut Self {
-        self.u16(0x7FE0);
-        self.u16(0x0010);
-        if self.enc != Enc::ImplicitLe {
-            self.out.extend_from_slice(b"OB\0\0");
-        }
-        self.u32(0xFFFF_FFFF);
-        let item = |ds: &mut Ds, data: &[u8]| {
-            ds.u16(0xFFFE);
-            ds.u16(0xE000);
-            ds.u32(data.len() as u32);
-            ds.out.extend_from_slice(data);
-        };
-        let bot_bytes: Vec<u8> = bot.iter().flat_map(|v| v.to_le_bytes()).collect();
-        item(self, &bot_bytes);
-        for f in fragments {
-            item(self, f);
-        }
-        self.u16(0xFFFE);
-        self.u16(0xE0DD);
-        self.u32(0);
-        self
-    }
-}
-
-fn part10(ts: &str, dataset: &[u8], preamble: bool) -> Vec<u8> {
-    let mut f = Vec::new();
-    if preamble {
-        f.extend_from_slice(&[0u8; 128]);
-        f.extend_from_slice(b"DICM");
-    }
-    let mut meta = Ds::new(Enc::ExplicitLe);
-    meta.elem(0x0002, 0x0001, b"OB", &[0, 1]);
-    let mut uid = ts.as_bytes().to_vec();
-    if uid.len() % 2 == 1 {
-        uid.push(0);
-    }
-    meta.elem(0x0002, 0x0010, b"UI", &uid);
-    let mut group_len = Ds::new(Enc::ExplicitLe);
-    group_len.elem(0x0002, 0x0000, b"UL", &(meta.out.len() as u32).to_le_bytes());
-    f.extend_from_slice(&group_len.out);
-    f.extend_from_slice(&meta.out);
-    f.extend_from_slice(dataset);
-    f
-}
+#[path = "support/ds.rs"]
+mod ds;
+use ds::{part10, Ds, Enc};
 
 fn u16s(d: &[u8]) -> Vec<u16> {
     d.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()

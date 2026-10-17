@@ -2,70 +2,34 @@
 //! by tools/check_corpus.py against the reference decoders.
 use shl_dicom_transcode::{transcode_part10, IMPLEMENTATION_CLASS_UID, IMPLEMENTATION_VERSION_NAME, JPEG_LOSSLESS_SV1};
 
-fn el(out: &mut Vec<u8>, g: u16, e: u16, vr: &[u8; 2], v: &[u8], explicit: bool) {
-    out.extend_from_slice(&g.to_le_bytes());
-    out.extend_from_slice(&e.to_le_bytes());
-    if explicit {
-        out.extend_from_slice(vr);
-        if matches!(vr, b"OB" | b"OW" | b"SQ" | b"UN") {
-            out.extend_from_slice(&[0, 0]);
-            out.extend_from_slice(&(v.len() as u32).to_le_bytes());
-        } else {
-            out.extend_from_slice(&(v.len() as u16).to_le_bytes());
-        }
-    } else {
-        out.extend_from_slice(&(v.len() as u32).to_le_bytes());
-    }
-    out.extend_from_slice(v);
-}
+#[path = "../../shl-dicom-decode/tests/support/ds.rs"]
+mod ds;
+use ds::{part10_meta, Ds, Enc};
 
 /// A Part 10 file: `frames` frames of rows × cols × spp 16-bit samples (12 stored), with a private
 /// element and a sequence before Pixel Data, and an element after it.
 fn file(ts: &str, explicit: bool, spp: u16, planar: u16, frames: u16, rows: u16, cols: u16) -> Vec<u8> {
-    let mut f = vec![0u8; 128];
-    f.extend_from_slice(b"DICM");
-    let mut meta = Vec::new();
-    let mut tsv = ts.as_bytes().to_vec();
-    if tsv.len() % 2 == 1 {
-        tsv.push(0);
-    }
-    el(&mut meta, 2, 1, b"OB", &[0, 1], true);
-    el(&mut meta, 2, 0x10, b"UI", &tsv, true);
-    el(&mut meta, 2, 0x12, b"UI", b"1.2.3.4", true);
-    el(&mut f, 2, 0, b"UL", &(meta.len() as u32).to_le_bytes(), true);
-    f.extend_from_slice(&meta);
-    let us = |v: u16| v.to_le_bytes();
-    el(&mut f, 0x0008, 0x0060, b"CS", b"CT", explicit);
-    el(&mut f, 0x0009, 0x0010, b"LO", b"ACME", explicit);
-    el(&mut f, 0x0009, 0x1001, b"UN", &[1, 2, 3, 4], explicit);
+    let mut d = Ds::new(if explicit { Enc::ExplicitLe } else { Enc::ImplicitLe });
+    d.text(0x0008, 0x0060, b"CS", "CT");
+    d.text(0x0009, 0x0010, b"LO", "ACME");
+    d.elem(0x0009, 0x1001, b"UN", &[1, 2, 3, 4]);
     // (0008,1140) Referenced Image Sequence, undefined length, one undefined-length item.
-    let mut item = Vec::new();
-    el(&mut item, 0x0008, 0x1150, b"UI", b"1.2\0", explicit);
-    f.extend_from_slice(&[0x08, 0x00, 0x40, 0x11]);
-    if explicit {
-        f.extend_from_slice(b"SQ\0\0");
-    }
-    f.extend_from_slice(&[0xFF; 4]);
-    f.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF]);
-    f.extend_from_slice(&item);
-    f.extend_from_slice(&[0xFE, 0xFF, 0x0D, 0xE0, 0, 0, 0, 0, 0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
-    el(&mut f, 0x0028, 0x0002, b"US", &us(spp), explicit);
-    el(&mut f, 0x0028, 0x0004, b"CS", if spp == 3 { b"RGB " } else { b"MONOCHROME2 " }, explicit);
+    d.seq(0x0008, 0x1140, &[&|i: &mut Ds| {
+        i.ui(0x0008, 0x1150, "1.2");
+    }]);
+    let photometric = if spp == 3 { "RGB" } else { "MONOCHROME2" };
+    d.us(0x0028, 0x0002, spp).text(0x0028, 0x0004, b"CS", photometric);
     if spp == 3 {
-        el(&mut f, 0x0028, 0x0006, b"US", &us(planar), explicit);
+        d.us(0x0028, 0x0006, planar);
     }
-    el(&mut f, 0x0028, 0x0008, b"IS", format!("{frames:<2}").as_bytes(), explicit);
-    el(&mut f, 0x0028, 0x0010, b"US", &us(rows), explicit);
-    el(&mut f, 0x0028, 0x0011, b"US", &us(cols), explicit);
-    el(&mut f, 0x0028, 0x0100, b"US", &us(16), explicit);
-    el(&mut f, 0x0028, 0x0101, b"US", &us(12), explicit);
-    el(&mut f, 0x0028, 0x0102, b"US", &us(11), explicit);
-    el(&mut f, 0x0028, 0x0103, b"US", &us(0), explicit);
+    d.text(0x0028, 0x0008, b"IS", &frames.to_string());
+    d.us(0x0028, 0x0010, rows).us(0x0028, 0x0011, cols);
+    d.us(0x0028, 0x0100, 16).us(0x0028, 0x0101, 12).us(0x0028, 0x0102, 11).us(0x0028, 0x0103, 0);
     let n = usize::from(frames) * usize::from(rows) * usize::from(cols) * usize::from(spp);
     let px: Vec<u8> = (0..n).flat_map(|i| (((i * 7 + i / 13) % 4096) as u16).to_le_bytes()).collect();
-    el(&mut f, 0x7FE0, 0x0010, b"OW", &px, explicit);
-    el(&mut f, 0xFFFC, 0xFFFC, b"OB", &[0, 0], explicit);
-    f
+    d.elem(0x7FE0, 0x0010, b"OW", &px);
+    d.elem(0xFFFC, 0xFFFC, b"OB", &[0, 0]);
+    part10_meta(ts, &[(0x0012, "1.2.3.4")], &d.out, true)
 }
 
 fn meta_value(f: &[u8], element: u16) -> Option<String> {

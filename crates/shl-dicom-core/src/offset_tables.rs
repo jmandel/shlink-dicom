@@ -475,57 +475,26 @@ pub(crate) mod tests {
     /// A synthetic multi-frame JPEG-baseline-syntax file: `frames` frames, frame k split into
     /// `split[k]` fragments, each starting with SOI only at the frame's first fragment.
     pub(crate) fn synthetic(frames: usize, split: &[usize], with_seq: bool) -> Vec<u8> {
-        let mut b = vec![0u8; 128];
-        b.extend_from_slice(b"DICM");
-        let el = |b: &mut Vec<u8>, g: u16, e: u16, vr: &[u8; 2], v: &[u8]| {
-            b.extend_from_slice(&g.to_le_bytes());
-            b.extend_from_slice(&e.to_le_bytes());
-            b.extend_from_slice(vr);
-            if is_long_vr(vr) {
-                b.extend_from_slice(&[0, 0]);
-                b.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            } else {
-                b.extend_from_slice(&(v.len() as u16).to_le_bytes());
-            }
-            b.extend_from_slice(v);
-        };
-        let ts = b"1.2.840.10008.1.2.4.50\0";
-        let mut meta = Vec::new();
-        el(&mut meta, 0x0002, 0x0001, b"OB", &[0, 1]);
-        el(&mut meta, 0x0002, 0x0002, b"UI", b"1.2.840.10008.5.1.4.1.1.77.1.6\0");
-        el(&mut meta, 0x0002, 0x0003, b"UI", b"1.2.3.4.5.6\0");
-        el(&mut meta, 0x0002, 0x0010, b"UI", ts);
-        el(&mut b, 0x0002, 0x0000, b"UL", &(meta.len() as u32).to_le_bytes());
-        b.extend_from_slice(&meta);
-        el(&mut b, 0x0008, 0x0016, b"UI", b"1.2.840.10008.5.1.4.1.1.77.1.6\0");
-        el(&mut b, 0x0008, 0x0018, b"UI", b"1.2.3.4.5.6\0");
-        el(&mut b, 0x0008, 0x0060, b"CS", b"SM");
+        synthetic_ts("1.2.840.10008.1.2.4.50", frames, split, with_seq)
+    }
+
+    /// [`synthetic`] under transfer syntax `ts`.
+    pub(crate) fn synthetic_ts(ts: &str, frames: usize, split: &[usize], with_seq: bool) -> Vec<u8> {
+        use crate::test_ds::{part10_meta, Ds, Enc};
+        const SM: &str = "1.2.840.10008.5.1.4.1.1.77.1.6";
+        let mut d = Ds::new(Enc::ExplicitLe);
+        d.ui(0x0008, 0x0016, SM).ui(0x0008, 0x0018, "1.2.3.4.5.6").text(0x0008, 0x0060, b"CS", "SM");
         if with_seq {
-            el(&mut b, 0x0008, 0x0070, b"LO", b"x ");
+            d.text(0x0008, 0x0070, b"LO", "x");
             // An undefined-length sequence with an undefined-length item, to exercise skipping.
-            b.extend_from_slice(&[0x08, 0x00, 0x15, 0x11, b'S', b'Q', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
-            b.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF]);
-            el(&mut b, 0x0008, 0x1155, b"UI", b"1.2.3\0");
-            b.extend_from_slice(&[0xFE, 0xFF, 0x0D, 0xE0, 0, 0, 0, 0]);
-            b.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+            d.seq(0x0008, 0x1115, &[&|i: &mut Ds| {
+                i.ui(0x0008, 0x1155, "1.2.3");
+            }]);
         }
-        el(&mut b, 0x0010, 0x0010, b"PN", b"Test^Slide");
-        el(&mut b, 0x0020, 0x000D, b"UI", b"1.2.3.4\0");
-        el(&mut b, 0x0020, 0x000E, b"UI", b"1.2.3.4.1\0");
-        el(&mut b, 0x0020, 0x0013, b"IS", b"1 ");
-        el(&mut b, 0x0028, 0x0002, b"US", &1u16.to_le_bytes());
-        el(&mut b, 0x0028, 0x0004, b"CS", b"MONOCHROME2 ");
-        let nf = format!("{frames}");
-        let nf = if nf.len() % 2 == 1 { format!("{nf} ") } else { nf };
-        el(&mut b, 0x0028, 0x0008, b"IS", nf.as_bytes());
-        el(&mut b, 0x0028, 0x0010, b"US", &8u16.to_le_bytes());
-        el(&mut b, 0x0028, 0x0011, b"US", &8u16.to_le_bytes());
-        el(&mut b, 0x0028, 0x0100, b"US", &8u16.to_le_bytes());
-        el(&mut b, 0x0028, 0x0101, b"US", &8u16.to_le_bytes());
-        el(&mut b, 0x0028, 0x0102, b"US", &7u16.to_le_bytes());
-        el(&mut b, 0x0028, 0x0103, b"US", &0u16.to_le_bytes());
-        b.extend_from_slice(&[0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
-        b.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]);
+        d.text(0x0010, 0x0010, b"PN", "Test^Slide");
+        d.ui(0x0020, 0x000D, "1.2.3.4").ui(0x0020, 0x000E, "1.2.3.4.1").text(0x0020, 0x0013, b"IS", "1");
+        d.image(1, "MONOCHROME2", None, Some(&frames.to_string()), 8, 8, 8, 8, 0);
+        let mut frags = Vec::new();
         for k in 0..frames {
             for f in 0..split[k % split.len()] {
                 let mut v = if f == 0 { vec![0xFF, 0xD8] } else { vec![0x11, 0x22] };
@@ -533,13 +502,11 @@ pub(crate) mod tests {
                 if v.len() % 2 == 1 {
                     v.push(0);
                 }
-                b.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
-                b.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                b.extend_from_slice(&v);
+                frags.push(v);
             }
         }
-        b.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
-        b
+        d.encapsulated(&[], &frags.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
+        part10_meta(ts, &[(0x0002, SM), (0x0003, "1.2.3.4.5.6")], &d.out, true)
     }
 
     #[test]
