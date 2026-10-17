@@ -359,28 +359,38 @@ impl AppState {
     }
 
     /// One more file row names this blob: a new blob (an upload, the seed).
-    pub fn blob_add(&self, key: &str) {
+    pub fn blob_add(&self, key: &str) -> Result<(), String> {
         let cat = self.catalog.lock().unwrap();
-        let _ = cat.execute(
+        cat.execute(
             "INSERT INTO blobs (storage_key, ref_count) VALUES (?1, 1)
              ON CONFLICT(storage_key) DO UPDATE SET ref_count = ref_count + 1",
             params![key],
-        );
+        )
+        .map(|_| ())
+        .map_err(|e| format!("blob reference: {e}"))
     }
 
-    /// One fewer; at zero the blob goes to the trash (deleted by `empty_trash`).
-    pub fn blob_release(&self, key: &str) {
+    /// One fewer; the blob goes to the trash (deleted by `empty_trash`) only when this release
+    /// took its count to 0. A key with no row, or a failed write, trashes nothing: a blob is never
+    /// deleted on a guess.
+    pub fn blob_release(&self, key: &str) -> Result<(), String> {
         let cat = self.catalog.lock().unwrap();
-        let _ = cat.execute("UPDATE blobs SET ref_count = ref_count - 1 WHERE storage_key = ?1", params![key]);
         let left: Option<i64> = cat
-            .query_row("SELECT ref_count FROM blobs WHERE storage_key = ?1", params![key], |r| r.get(0))
+            .query_row(
+                "UPDATE blobs SET ref_count = ref_count - 1 WHERE storage_key = ?1 RETURNING ref_count",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()
-            .ok()
-            .flatten();
-        if left.is_none_or(|n| n <= 0) {
-            let _ = cat.execute("DELETE FROM blobs WHERE storage_key = ?1", params![key]);
-            let _ = cat.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, NULL)", params![key]);
+            .map_err(|e| format!("blob release: {e}"))?;
+        if left == Some(0) {
+            let tx = cat.unchecked_transaction().map_err(|e| e.to_string())?;
+            if tx.execute("DELETE FROM blobs WHERE storage_key = ?1 AND ref_count <= 0", params![key]).map_err(|e| e.to_string())? == 1 {
+                tx.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, NULL)", params![key]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
         }
+        Ok(())
     }
 
     /// A blob no file names, to delete from the store.
@@ -774,7 +784,9 @@ impl AppState {
             let _ = conn.execute("DELETE FROM link_files", []);
             for (fid, key) in files {
                 if conn.execute("DELETE FROM files WHERE file_id = ?1", params![fid]) == Ok(1) {
-                    self.blob_release(&key);
+                    if let Err(e) = self.blob_release(&key) {
+                        eprintln!("share {sid}: {e} (the blob {key} stays)");
+                    }
                 }
             }
             for (fid, key, upload_id) in uploads {
@@ -1107,10 +1119,13 @@ pub fn adopt_blob(state: &AppState, sid: &str, file_id: &str, key: &str, size: u
         return orphan("share not found".into());
     }
     match record_file(&conn, file_id, key, size) {
-        Ok(entry) => {
-            state.blob_add(key);
-            Ok(entry)
-        }
+        Ok(entry) => match state.blob_add(key) {
+            Ok(()) => Ok(entry),
+            Err(e) => {
+                let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
+                orphan(e)
+            }
+        },
         Err(e) => orphan(e),
     }
 }

@@ -2136,7 +2136,7 @@ async fn test_a_clone_never_names_a_released_blob() {
     state.delete_share(&first).unwrap();
 
     // The source's delete, as another process would run it, has released the last reference.
-    state.blob_release(&key);
+    state.blob_release(&key).unwrap();
     assert!(!state.blob_ref(&key).unwrap(), "no reference to a blob at 0");
     let shares_before = std::fs::read_dir(dir.join("shares")).unwrap().count();
     let r = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap();
@@ -2192,5 +2192,29 @@ async fn test_a_file_finished_after_its_share_went_is_trashed() {
     state.empty_trash().await;
     assert!(blob_exists(&state, &key).await);
     assert_eq!(file_key(&state, &sid, &fid), key);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Releasing a blob no row counts trashes nothing; a blob goes only when a release takes its count
+/// to 0.
+#[tokio::test]
+async fn test_a_blob_goes_only_when_its_count_reaches_0() {
+    let dir = temp_data_dir("blob_release");
+    let state = test_state(&dir);
+    let scratch = dir.join("part.bin");
+    std::fs::write(&scratch, [3u8; 5000]).unwrap();
+    let key = shl_dicom_server::state::new_storage_key();
+    state.store.put_file(&key, &scratch).await.unwrap();
+    state.blob_release(&key).unwrap();
+    state.empty_trash().await;
+    assert!(blob_exists(&state, &key).await, "a blob with no row was trashed");
+    state.blob_add(&key).unwrap();
+    assert!(state.blob_ref(&key).unwrap());
+    state.blob_release(&key).unwrap();
+    state.empty_trash().await;
+    assert!(blob_exists(&state, &key).await, "trashed at 1");
+    state.blob_release(&key).unwrap();
+    state.empty_trash().await;
+    assert!(!blob_exists(&state, &key).await, "kept at 0");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -184,7 +184,7 @@ pub async fn clone_share(
                 return Err((StatusCode::CONFLICT, "the source share is being deleted".into()));
             }
             if let Err(e) = record_file(&dst_conn, &fid, &key, size as u64) {
-                state.blob_release(&key);
+                let _ = state.blob_release(&key);
                 return Err(internal(e));
             }
         }
@@ -937,7 +937,10 @@ pub async fn delete_share_file(
         let key: Option<String> = conn.query_row("SELECT storage_key FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok();
         let res = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
         if let (Ok(1), Some(key)) = (&res, &key) {
-            state.blob_release(key);
+            // The file is gone either way; a failed release keeps the blob (never deletes one).
+            if let Err(e) = state.blob_release(key) {
+                eprintln!("share {sid}: {e} (the blob {key} stays)");
+            }
         }
         res.map(|n| n + had_upload as usize)
     };
