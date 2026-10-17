@@ -1,6 +1,6 @@
 # Review findings: fix plan
 
-Written 17 Oct 2026. Status at 18:00 CDT: M1 (d4d60ff), X1 (74e8928), the server round (598b0c5, deployed live on both VMs) and dd-a (0678bcb, with `cty`) are on main. It covers every finding from the second review round that checked out against the code: the Argon and DeepSeek reviews of the server, crypto and client areas. Each was verified on main at 21e5910 or 7bf2c28. Spurious and refuted claims are listed at the end with the reason.
+Written 17 Oct 2026. Status at the end of 17 Oct: every verified finding below has landed on main with a test shown failing before the fix, except the items under "Not fixing". Live: server-a54d65d (shlink-dicom.exe.xyz), sandbox-55fa7df.
 
 Rule (Josh): every verified finding gets fixed. Spec SHALL violations, over-sharing, persisted secrets and false claims in our own spec are never "Low".
 
