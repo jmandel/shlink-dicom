@@ -5,6 +5,7 @@
 // walking fragment headers) is in wsi-source.ts.
 import type { SeriesEntry } from "./bundle";
 import { NeedMoreBytes, parseDicomSync, T as dicomT, UNDEF, type DataSet } from "./dicom";
+import { TS } from "./transfer-syntax";
 
 const WSI_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.77.1.6";
 
@@ -219,7 +220,7 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
   };
   const r = parseDicomSync(bytes, { untilPixelData: true, need: true });
   h.transferSyntax = r.meta.str(dicomT.TransferSyntaxUID) ?? "";
-  if (h.transferSyntax === "1.2.840.10008.1.2.1.99" || h.transferSyntax === "1.2.840.10008.1.2.2") {
+  if (h.transferSyntax === TS.Deflated || h.transferSyntax === TS.ExplicitBE) {
     throw new SlideHeaderError(`transfer syntax ${h.transferSyntax} is not supported for slides`);
   }
   const ds = r.ds;
@@ -301,7 +302,7 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     // The Pixel Data element and, for encapsulated data, its Basic Offset Table item.
     const p = r.dataEnd;
     if (((dv.getUint16(p, true) << 16) | dv.getUint16(p + 2, true)) >>> 0 === TAG.PixelData) {
-      const explicit = h.transferSyntax !== "1.2.840.10008.1.2";
+      const explicit = h.transferSyntax !== TS.ImplicitLE;
       const long = explicit && /^[A-Z]{2}$/.test(String.fromCharCode(bytes[p + 4], bytes[p + 5]));
       const vo = p + (long ? 12 : 8);
       if (vo > end) need = vo;

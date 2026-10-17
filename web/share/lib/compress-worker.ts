@@ -2,6 +2,7 @@
 // Lossless), or a reason it declined. The encoder (shl-dicom-transcode-wasm) decodes its result and
 // compares it with the original pixels bit for bit before returning it; a difference is a decline.
 import { assetUrl } from "../../core/config";
+import { TS as SYNTAX } from "../../core/transfer-syntax";
 
 type Result = { bytes?: Uint8Array; declined?: string; tsUid?: string; free?(): void };
 type Transcoder = {
@@ -10,7 +11,7 @@ type Transcoder = {
   supported_transfer_syntaxes?(): string[];
 };
 
-const TS = { sv1: "1.2.840.10008.1.2.4.70", j2k: "1.2.840.10008.1.2.4.90" } as const;
+const TS = { sv1: SYNTAX.JPEGLosslessSV1, j2k: SYNTAX.J2KLossless } as const;
 
 let transcoder: Promise<Transcoder | null> | null = null;
 function load(): Promise<Transcoder | null> {

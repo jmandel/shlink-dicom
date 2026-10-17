@@ -24,6 +24,7 @@ import { FetchPriority, type InstanceLoader } from "./loader";
 import { planBytes, RECORD_PLAINTEXT } from "./range";
 import { FrameLocator, type ByteSource, type ReadOptions } from "./wsi-source";
 import { parseSlideHeader, type SlideHeader } from "./wsi";
+import { TS } from "./transfer-syntax";
 
 
 /**
@@ -201,10 +202,10 @@ export class FrameStream {
       n = Math.min(inst.length, (Math.floor(want / RECORD_PLAINTEXT) + 1) * RECORD_PLAINTEXT - inst.offset);
     }
     const end = headerEnd(bytes);
-    const elementBytes = h.encapsulated || h.transferSyntax !== "1.2.840.10008.1.2" ? 12 : 8;
+    const elementBytes = h.encapsulated || h.transferSyntax !== TS.ImplicitLE ? 12 : 8;
     if (h.numberOfFrames < 2 || !h.rows || !h.columns || h.pixelDataValueOffset !== end + elementBytes) return null;
     // JPEG 2000 Part 2: the frames of a volume may be components of one codestream.
-    if (h.transferSyntax === "1.2.840.10008.1.2.4.92" || h.transferSyntax === "1.2.840.10008.1.2.4.93") return null;
+    if (h.transferSyntax === TS.J2KPart2Lossless || h.transferSyntax === TS.J2KPart2) return null;
     const header = bytes.slice(0, end);
     locator.takeHeader(i, bytes);
     if (!locator.frameFiles(i)) return null;

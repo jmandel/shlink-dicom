@@ -9,6 +9,8 @@
 // In implicit VR files the VR comes from a small dictionary of the attributes this viewer reads;
 // an unknown element whose value starts with an item tag is read as a sequence.
 
+import { TS } from "./transfer-syntax";
+
 export const tag = (g: number, e: number) => ((g << 16) | e) >>> 0;
 export const tagHex = (t: number) => `(${(t >>> 16).toString(16).padStart(4, "0").toUpperCase()},${(t & 0xffff).toString(16).padStart(4, "0").toUpperCase()})`;
 
@@ -585,7 +587,7 @@ export async function parseDicom(bytes: Uint8Array, o: { untilPixelData?: boolea
   return parseDicomSync(bytes, { ...o, inflated: await inflate(bytes.subarray(r.metaEnd)) });
 }
 
-const DEFLATED = "1.2.840.10008.1.2.1.99";
+const DEFLATED = TS.Deflated;
 
 export interface ParseOptions {
   /** Stop before Pixel Data (or Float / Double Float Pixel Data), for header-only parsing. */
@@ -610,11 +612,11 @@ export function parseDicomSync(bytes: Uint8Array, o: ParseOptions = {}): ParsedD
   const latin = new TextDecoder("windows-1252");
   const meta = new DataSet(bytes, true, true, latin);
   let start = 0;
-  let ts = "1.2.840.10008.1.2";
+  let ts: string = TS.ImplicitLE;
   const preamble = bytes.length >= 132 && bytes[128] === 0x44 && bytes[129] === 0x49 && bytes[130] === 0x43 && bytes[131] === 0x4d;
   const metaAt0 = !preamble && bytes.length > 8 && bytes[0] === 0x02 && bytes[1] === 0x00;
   if (!preamble && !metaAt0 && bytes.length > 8 && /^[A-Z]{2}$/.test(String.fromCharCode(bytes[4], bytes[5]))) {
-    ts = "1.2.840.10008.1.2.1"; // no meta, but explicit VR
+    ts = TS.ExplicitLE; // no meta, but explicit VR
   }
   if (preamble || metaAt0) {
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -649,8 +651,8 @@ export function parseDicomSync(bytes: Uint8Array, o: ParseOptions = {}): ParsedD
     body = o.inflated;
     start = 0;
   }
-  const le = ts !== "1.2.840.10008.1.2.2";
-  const explicit = ts !== "1.2.840.10008.1.2";
+  const le = ts !== TS.ExplicitBE;
+  const explicit = ts !== TS.ImplicitLE;
   // Read Specific Character Set first, then the data set with the right text decoder.
   const probe = new DataSet(body, le, explicit, latin);
   readElements(probe, body, start, body.length, le, explicit, latin, 0, tag(0x0008, 0x0006));

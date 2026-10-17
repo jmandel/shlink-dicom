@@ -18,6 +18,7 @@ import type { RecordDecryptor } from "./decrypt";
 import { planBytes, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "./range";
 import type { LinkResolver } from "./resolver";
 import { FrameFiles } from "./frame-file";
+import { TS } from "./transfer-syntax";
 import type { RecordState } from "./loader";
 import {
   buildPyramid,
@@ -402,7 +403,7 @@ export class FrameLocator {
     this.tables[i] = h.complete ? frameTableFromHeader(h, this.series.instances[i].length) : null;
     this.files.delete(i);
     if (h.complete) {
-      const start = h.pixelDataValueOffset - (h.transferSyntax === "1.2.840.10008.1.2" ? 8 : 12);
+      const start = h.pixelDataValueOffset - (h.transferSyntax === TS.ImplicitLE ? 8 : 12);
       this.headerBytes[i] = { header: bytes.slice(0, start), pixelElement: bytes.slice(start, h.pixelDataValueOffset) };
     } else this.headerBytes[i] = null;
     return h;

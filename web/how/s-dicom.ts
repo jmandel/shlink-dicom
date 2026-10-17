@@ -7,27 +7,11 @@ import { displayPlan } from "../core/display";
 import { showImage, Viewport } from "../core/render";
 import { byteRow, byteView, u16be, u16le, u32le, type Field } from "./bytes";
 import { code, excerpt, h, mb, n, para, S } from "./state";
+import { SYNTAXES } from "../core/transfer-syntax";
 
 const IMPL_UID = tag(0x0002, 0x0012);
 const IMPL_NAME = tag(0x0002, 0x0013);
 
-const TS_NAMES: Record<string, string> = {
-  "1.2.840.10008.1.2": "Implicit VR Little Endian (uncompressed)",
-  "1.2.840.10008.1.2.1": "Explicit VR Little Endian (uncompressed)",
-  "1.2.840.10008.1.2.2": "Explicit VR Big Endian (uncompressed)",
-  "1.2.840.10008.1.2.5": "RLE Lossless",
-  "1.2.840.10008.1.2.4.50": "JPEG Baseline",
-  "1.2.840.10008.1.2.4.51": "JPEG Extended",
-  "1.2.840.10008.1.2.4.57": "JPEG Lossless",
-  "1.2.840.10008.1.2.4.70": "JPEG Lossless, first-order prediction (SV1)",
-  "1.2.840.10008.1.2.4.80": "JPEG-LS Lossless",
-  "1.2.840.10008.1.2.4.81": "JPEG-LS near-lossless",
-  "1.2.840.10008.1.2.4.90": "JPEG 2000 Lossless",
-  "1.2.840.10008.1.2.4.91": "JPEG 2000",
-  "1.2.840.10008.1.2.4.201": "HTJ2K Lossless",
-  "1.2.840.10008.1.2.4.203": "HTJ2K",
-};
-const LOSSLESS = new Set(["1.2.840.10008.1.2.5", "1.2.840.10008.1.2.4.57", "1.2.840.10008.1.2.4.70", "1.2.840.10008.1.2.4.80", "1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.202"]);
 /** A file meta written by shlink-dicom's transcoder (it sets its Implementation Version Name). */
 const OURS = /shl|shlink/i;
 
@@ -250,7 +234,7 @@ export async function mountDicom(pic: HTMLElement, exact: HTMLElement) {
   const { ds, meta, transferSyntax } = parseDicomSync(bytes);
   const px = ds.get(T.PixelData);
   const encapsulated = !!px?.fragments?.length;
-  const tsName = TS_NAMES[transferSyntax] ?? transferSyntax;
+  const tsName = SYNTAXES[transferSyntax]?.name ?? transferSyntax;
   const implName = meta.str(IMPL_NAME) ?? "";
   const implUid = meta.str(IMPL_UID) ?? "";
   const row = (t: number, name: string, value: string, d: DataSet = ds) => `${tagHex(t)} ${(d.get(t)?.vr ?? "  ").padEnd(2)}  ${name.padEnd(27)} ${value}`;
@@ -314,7 +298,7 @@ export async function mountDicom(pic: HTMLElement, exact: HTMLElement) {
   const pixelBytes = img.rows * img.columns * img.samplesPerPixel * (img.bitsAllocated / 8);
   const stored = encapsulated ? px!.fragments!.slice(1).reduce((a, f) => a + f.length, 0) : px?.length ?? 0;
   const parts: string[] = [];
-  if (encapsulated && LOSSLESS.has(transferSyntax)) {
+  if (encapsulated && SYNTAXES[transferSyntax]?.lossless) {
     parts.push(`The Pixel Data is compressed with ${tsName}, without loss: decoding gives back every pixel value exactly, ${mb(pixelBytes)} of pixels from ${mb(stored)}.`);
     if (OURS.test(implName)) parts.push("shlink-dicom compressed it when the study was shared, so the pixel values are identical to those in the scanner's file.");
   } else if (encapsulated) {

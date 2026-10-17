@@ -9,6 +9,7 @@ import { EXT_LINKED_FILE } from "../../core/bundle";
 import { ciphertextLength, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
 import { sharePatient, type Collection, type Instance, type StudyModel } from "./ingest";
 import { shlWasm } from "./shl-wasm";
+import { encodingName } from "./compress";
 
 /** One study's encrypted file. */
 export interface PackedFile {
@@ -92,8 +93,6 @@ export function relinkFile(owner: any, oldId: string, fileId: string, key: strin
   }
 }
 
-/** Names of the lossless transfer syntaxes the Share page writes. */
-const TS_LOSSLESS: Record<string, string> = { "1.2.840.10008.1.2.4.70": "JPEG Lossless", "1.2.840.10008.1.2.4.90": "JPEG 2000 Lossless" };
 
 /**
  * The owner Bundle, built by the packer's one builder (shl_dicom_core::bundle::build_fhir_bundle,
@@ -137,7 +136,7 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
           ? {
               images: reencoded.length,
               of: instances.length,
-              encodings: [...new Set(reencoded.map((i) => TS_LOSSLESS[i.h.transferSyntax] ?? "lossless"))],
+              encodings: [...new Set(reencoded.map((i) => encodingName(i.h.transferSyntax) ?? "lossless"))],
               agent: "shlink-dicom Share page",
             }
           : null,

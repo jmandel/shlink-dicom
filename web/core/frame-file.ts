@@ -10,6 +10,7 @@
 // Optical Path Sequence) are left out: the decoder does not read them, and on a slide they are
 // most of a tile's header.
 import { parseDicomSync, T, UNDEF } from "./dicom";
+import { TS } from "./transfer-syntax";
 import type { SlideHeader } from "./wsi";
 
 const ITEM = new Uint8Array([0xfe, 0xff, 0x00, 0xe0, 0, 0, 0, 0]);
@@ -59,7 +60,7 @@ export class FrameFiles {
     } catch {
       return null;
     }
-    if (r.transferSyntax === "1.2.840.10008.1.2.1.99" || r.transferSyntax === "1.2.840.10008.1.2.2" || !r.meta.get(T.TransferSyntaxUID)) return null;
+    if (r.transferSyntax === TS.Deflated || r.transferSyntax === TS.ExplicitBE || !r.meta.get(T.TransferSyntaxUID)) return null;
     const pre: Uint8Array[] = [header.subarray(0, r.metaEnd)];
     const post: Uint8Array[] = [];
     let perFrame: { head: Uint8Array; items: [number, number][]; undefined: boolean } | null = null;

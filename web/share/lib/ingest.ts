@@ -8,6 +8,7 @@
 // file system (lib/stage.ts).
 import { readDicomHeader, type DicomHeader } from "../../core/dicom-header";
 import { modalityName } from "../../core/format";
+import { SYNTAXES } from "../../core/transfer-syntax";
 import { BlobBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
 import { shlWasm } from "./shl-wasm";
 import type { Stager } from "./stage";
@@ -294,29 +295,11 @@ function dicomDate(da: string, _tm: string): string | null {
 
 // ------------------------------------------------------------------------------------- display
 
-const TS_NAMES: Record<string, string> = {
-  "1.2.840.10008.1.2": "uncompressed",
-  "1.2.840.10008.1.2.1": "uncompressed",
-  "1.2.840.10008.1.2.2": "uncompressed",
-  "1.2.840.10008.1.2.1.99": "deflated",
-  "1.2.840.10008.1.2.5": "RLE",
-  "1.2.840.10008.1.2.4.50": "JPEG",
-  "1.2.840.10008.1.2.4.51": "JPEG",
-  "1.2.840.10008.1.2.4.57": "JPEG lossless",
-  "1.2.840.10008.1.2.4.70": "JPEG lossless",
-  "1.2.840.10008.1.2.4.80": "JPEG-LS",
-  "1.2.840.10008.1.2.4.81": "JPEG-LS",
-  "1.2.840.10008.1.2.4.90": "JPEG 2000",
-  "1.2.840.10008.1.2.4.91": "JPEG 2000",
-  "1.2.840.10008.1.2.4.201": "HTJ2K",
-  "1.2.840.10008.1.2.4.202": "HTJ2K",
-  "1.2.840.10008.1.2.4.203": "HTJ2K",
-};
 
 /** "uncompressed", "JPEG", or "uncompressed + JPEG". */
 export function encodingSummary(study: StudyModel): string {
   const names = new Set<string>();
-  for (const se of study.series) for (const ts of se.transferSyntaxes) names.add(TS_NAMES[ts] ?? "compressed");
+  for (const se of study.series) for (const ts of se.transferSyntaxes) names.add(SYNTAXES[ts]?.family ?? "compressed");
   return [...names].join(" + ");
 }
 

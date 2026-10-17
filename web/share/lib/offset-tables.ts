@@ -4,6 +4,7 @@
 // CLI's --add-offset-tables uses; fragment bytes stay as they are. Files are never held whole: the
 // header and the fragment item headers are read from the byte source, and the rewritten instance is
 // the new head followed by the original bytes from where the patch resumes.
+import { NATIVE_SYNTAXES, VIDEO_SYNTAXES } from "../../core/transfer-syntax";
 import { ConcatBytes, MemBytes, SubBytes, WindowReader, type Bytes } from "./bytes";
 import type { Instance, SeriesModel } from "./ingest";
 import { loadShlWasm } from "./shl-wasm";
@@ -11,8 +12,6 @@ import { loadShlWasm } from "./shl-wasm";
 /** Whether the review step's "Add frame offset tables" box starts ticked when it is shown. */
 export const ADD_OFFSET_TABLES_DEFAULT = true;
 
-const NATIVE = new Set(["1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2", "1.2.840.10008.1.2.1.99"]);
-const VIDEO = /^1\.2\.840\.10008\.1\.2\.4\.10[0-8](\.1)?$/;
 /** Header bytes read to find the first fragment item. */
 const PREFIX_READS = [256 << 10, 4 << 20, 32 << 20];
 
@@ -21,7 +20,7 @@ const firstFragment = new WeakMap<Bytes, { prefix: Uint8Array; at: number } | nu
 /** The file's prefix through the empty BOT item, when the instance needs a table; else null. */
 async function needsTable(inst: Instance): Promise<{ prefix: Uint8Array; at: number } | null> {
   const ts = inst.h.transferSyntax;
-  if (!ts || NATIVE.has(ts) || VIDEO.test(ts)) return null;
+  if (!ts || NATIVE_SYNTAXES.has(ts) || VIDEO_SYNTAXES[ts]) return null;
   if (firstFragment.has(inst.src)) return firstFragment.get(inst.src)!;
   const m = await loadShlWasm();
   let found: { prefix: Uint8Array; at: number } | null = null;

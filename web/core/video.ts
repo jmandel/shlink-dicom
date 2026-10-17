@@ -16,37 +16,8 @@ import { DicomParseError, parseDicomSync, T, tag } from "./dicom";
 
 // ------------------------------------------------------------------------------------- syntaxes
 
-export type VideoCodec = "h264" | "hevc" | "mpeg2";
-
-export interface VideoSyntax {
-  codec: VideoCodec;
-  /** Plain name, e.g. "H.264 video". */
-  label: string;
-  /** How a stereo or 3D syntax is shown. */
-  view: "2d" | "3d" | "stereo";
-}
-
-const VS = (codec: VideoCodec, label: string, view: VideoSyntax["view"] = "2d"): VideoSyntax => ({ codec, label, view });
-
-/** Video transfer syntaxes (PS3.5 §8.2.5–8.2.11, §10.x), including the fragmentable .x.1 forms. */
-export const VIDEO_SYNTAXES: Record<string, VideoSyntax> = {
-  "1.2.840.10008.1.2.4.100": VS("mpeg2", "MPEG-2 video"),
-  "1.2.840.10008.1.2.4.100.1": VS("mpeg2", "MPEG-2 video"),
-  "1.2.840.10008.1.2.4.101": VS("mpeg2", "MPEG-2 HD video"),
-  "1.2.840.10008.1.2.4.101.1": VS("mpeg2", "MPEG-2 HD video"),
-  "1.2.840.10008.1.2.4.102": VS("h264", "H.264 video"),
-  "1.2.840.10008.1.2.4.102.1": VS("h264", "H.264 video"),
-  "1.2.840.10008.1.2.4.103": VS("h264", "H.264 video"),
-  "1.2.840.10008.1.2.4.103.1": VS("h264", "H.264 video"),
-  "1.2.840.10008.1.2.4.104": VS("h264", "H.264 video"),
-  "1.2.840.10008.1.2.4.104.1": VS("h264", "H.264 video"),
-  "1.2.840.10008.1.2.4.105": VS("h264", "H.264 3D video", "3d"),
-  "1.2.840.10008.1.2.4.105.1": VS("h264", "H.264 3D video", "3d"),
-  "1.2.840.10008.1.2.4.106": VS("h264", "H.264 stereo video", "stereo"),
-  "1.2.840.10008.1.2.4.106.1": VS("h264", "H.264 stereo video", "stereo"),
-  "1.2.840.10008.1.2.4.107": VS("hevc", "HEVC (H.265) video"),
-  "1.2.840.10008.1.2.4.108": VS("hevc", "HEVC (H.265) Main 10 video"),
-};
+export { VIDEO_SYNTAXES, type VideoCodec, type VideoSyntax } from "./transfer-syntax";
+import { VIDEO_SYNTAXES, type VideoSyntax } from "./transfer-syntax";
 
 /**
  * SOP classes whose instances can be video or multi-frame cine: the video IODs, ultrasound,

@@ -9,6 +9,7 @@
 // returning it. Each re-encoded file is staged with its SHA-256, so an interrupted upload continues
 // with exactly the bytes it started with.
 import { assetUrl } from "../../core/config";
+import { TS } from "../../core/transfer-syntax";
 import type { Bytes } from "./bytes";
 import type { Collection, Instance, SeriesModel, StudyModel } from "./ingest";
 import { shlWasm } from "./shl-wasm";
@@ -20,8 +21,14 @@ export type Encoding = Exclude<CompressMode, "exact">;
 /** The review step's choice when it is first shown. */
 export const COMPRESS_DEFAULT: CompressMode = "sv1";
 
-export const ENCODING_TS: Record<Encoding, string> = { sv1: "1.2.840.10008.1.2.4.70", j2k: "1.2.840.10008.1.2.4.90" };
+export const ENCODING_TS: Record<Encoding, string> = { sv1: TS.JPEGLosslessSV1, j2k: TS.J2KLossless };
 export const ENCODING_NAME: Record<Encoding, string> = { sv1: "JPEG Lossless", j2k: "JPEG 2000 Lossless" };
+
+/** The name of the encoding the Share page writes as transfer syntax `ts`, if it is one. */
+export function encodingName(ts: string): string | undefined {
+  const e = (Object.keys(ENCODING_TS) as Encoding[]).find((k) => ENCODING_TS[k] === ts);
+  return e && ENCODING_NAME[e];
+}
 
 /**
  * Whether an instance is an uncompressed image the encoders may take: the packer's rule
