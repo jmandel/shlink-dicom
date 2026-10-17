@@ -119,6 +119,8 @@ Searched without adding files:
 - dicom-rs: it has no image files of its own; its tests use the `dicom-test-files` mirror of pydicom data.
 - OpenJPEG data and OpenJPEG/CharLS issue attachments: bare J2K and JPEG-LS codestreams, not DICOM. Most are fuzzing PoCs.
 - DCMTK: ships no test images.
+- Real vendor H.264 video (October 2026): none openly licensed was found, so the video checks (web/checks/video-fixtures.ts) use synthetic ffmpeg streams. IDC and TCIA hold no video. The one real recording found, OHIF viewer-testdata `dcm/mixedVideo/video/OT.1.3.6.1.4.1.5962.99.3.434174349.6916.500660925.201.dcm` (ESCAPE CX-PRIME, .4.103, 1920x1080, 56.7 s, a horse), is not used: the repository is MIT, but the folder's README limits it to OHIF viewer testing ("Distribution for OHIF viewer testing is agreed").
+- Enhanced MR Color Image in JPEG Baseline (October 2026): none openly licensed was found (IDC has no Enhanced MR; the NEMA WG16 Enhanced MR samples are grayscale; pydicom's colour JPEG Baseline multi-frame is Ultrasound). The jpeg-dct case `gen-enhanced-mr-color-80x64x6-ijg-baseline` is synthetic (`scripts/sources/enhanced_color.py`).
 
 ## All cases
 

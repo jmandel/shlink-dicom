@@ -1349,6 +1349,38 @@
       "disputed": false
     },
     {
+      "id": "gen-enhanced-mr-color-80x64x6-ijg-baseline",
+      "notes": "multi-frame Enhanced MR Color Image (4.3), JPEG Baseline YBR_FULL_422 by dcmcjpeg; synthetic, no openly licensed one exists (scripts/sources/enhanced_color.py)",
+      "tags": [
+        "enhanced-color",
+        "multiframe",
+        "ybr-full-422"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.50",
+      "rows": 64,
+      "columns": 80,
+      "frames": 6,
+      "samples_per_pixel": 3,
+      "bits_allocated": 8,
+      "bits_stored": 8,
+      "pixel_representation": 0,
+      "photometric": "YBR_FULL_422",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "generated",
+        "seed": "enhanced-mr-color-80x64x6",
+        "encoder": "ijg-baseline"
+      },
+      "truth": "references",
+      "sha256": "9730c2d84830bff0f5218695a2da50a39e7b8a54ccff7464a514c63f8424d0e1",
+      "size": 9080,
+      "expect": "decode",
+      "max_abs": 13,
+      "oracle_sha256": "f1d5c33ef86891230b4dac6b6a1a07c8c8b865c59020d2785918ace82496c19a",
+      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']",
+      "disputed": false
+    },
+    {
       "id": "gen-pydicom-MR_small-dcmtk-prog",
       "notes": "",
       "tags": [
