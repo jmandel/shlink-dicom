@@ -2,6 +2,7 @@
 // for files stored under IDs such as DICOM/ST000001/SE000001/IM000001.
 import type { DicomHeader } from "./dicom-header";
 import { LONG_VR } from "./dicom";
+import { IMPLEMENTATION_CLASS_UID, IMPLEMENTATION_VERSION_NAME_DICOMDIR } from "./implementation";
 
 export interface DicomdirEntry {
   /** Path components of the file inside the file set, e.g. ["DICOM","ST000001","SE000001","IM000001"]. */
@@ -171,8 +172,8 @@ export function buildDicomdir(entries: DicomdirEntry[], fileSetId = "SHLDICOM"):
   element(meta, 0x0002, 0x0002, "UI", "1.2.840.10008.1.3.10");
   element(meta, 0x0002, 0x0003, "UI", sopInstance);
   element(meta, 0x0002, 0x0010, "UI", "1.2.840.10008.1.2.1");
-  element(meta, 0x0002, 0x0012, "UI", "2.25.329800735698586629295641978511506172918");
-  element(meta, 0x0002, 0x0013, "SH", "SHL_DICOM_1");
+  element(meta, 0x0002, 0x0012, "UI", IMPLEMENTATION_CLASS_UID);
+  element(meta, 0x0002, 0x0013, "SH", IMPLEMENTATION_VERSION_NAME_DICOMDIR);
   const metaGroup = new W();
   element(metaGroup, 0x0002, 0x0000, "UL", meta.length);
   metaGroup.bytes(meta.parts);
