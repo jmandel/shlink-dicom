@@ -186,3 +186,19 @@ fn voi_lut_descriptor_takes_the_rescaled_range() {
     // A rescale that does not read leaves the VR unknown: declined, not guessed.
     assert!(lut_descriptor_vr("minus").unwrap_err().contains("VOI LUT"));
 }
+
+/// Frames are encoded on several threads from 8 MiB of pixels (one thread per 4 MiB): just below
+/// and just above that, the output is the one-thread output byte for byte.
+#[test]
+fn threaded_output_matches_one_thread_at_the_threshold() {
+    use shl_codec_common::parallel::{threads, with_thread_limit};
+    for frames in [15u16, 16] {
+        // 512 × 512 × 2 bytes = 0.5 MiB a frame: 15 frames are 7.5 MiB, 16 are 8 MiB.
+        let input = file("1.2.840.10008.1.2.1", true, 1, 0, frames, 512, 512);
+        let want_threads = threads(usize::from(frames).min(usize::from(frames) * (512 * 512 * 2) / (4 << 20)));
+        assert_eq!(want_threads > 1, frames == 16 && threads(2) > 1, "{frames} frames: {want_threads} threads");
+        let threaded = transcode_part10(&input, JPEG_LOSSLESS_SV1).expect("encoded");
+        let one = with_thread_limit(1, || transcode_part10(&input, JPEG_LOSSLESS_SV1)).expect("encoded");
+        assert!(threaded == one, "{frames} frames: threaded output differs");
+    }
+}

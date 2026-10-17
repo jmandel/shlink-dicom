@@ -170,33 +170,12 @@ fn code_bands(buf: &[i32], w: usize, h: usize, levels: u32, t1: &mut T1) -> Vec<
         None => Block { passes: 0, bitplanes: 0, data: Vec::new() },
         Some(c) => Block { passes: c.passes, bitplanes: c.bitplanes, data: t1.mq.finish().to_vec() },
     };
-    let mut blocks: Vec<Block> = {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(w * h / (256 * 256)).max(1);
-            if threads > 1 {
-                let per = jobs.len().div_ceil(threads);
-                std::thread::scope(|s| {
-                    let hs: Vec<_> = jobs
-                        .chunks(per)
-                        .map(|run| {
-                            let code = &code;
-                            s.spawn(move || {
-                                let mut t1 = T1::new();
-                                run.iter().map(|j| code(&mut t1, j)).collect::<Vec<_>>()
-                            })
-                        })
-                        .collect();
-                    hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-                })
-            } else {
-                jobs.iter().map(|j| code(t1, j)).collect()
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            jobs.iter().map(|j| code(t1, j)).collect()
-        }
+    // One thread per 256 × 256 pixels of the component.
+    let threads = shl_codec_common::parallel::threads(w * h / (256 * 256));
+    let mut blocks: Vec<Block> = if threads > 1 {
+        shl_codec_common::parallel::map_chunks(&jobs, threads, T1::new, |t1, j| code(t1, j))
+    } else {
+        jobs.iter().map(|j| code(t1, j)).collect()
     };
     let mut bands = Vec::with_capacity(geo.len());
     for &(_, _, bw, bh, _, gain) in geo.iter().rev() {

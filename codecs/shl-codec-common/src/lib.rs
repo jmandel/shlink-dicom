@@ -163,3 +163,85 @@ mod tests {
         assert_eq!(scaled_extent(u32::MAX, 40), 1);
     }
 }
+
+/// Work split over threads (outside wasm), for codecs whose output does not depend on how it is
+/// split: the encoders' code-blocks and frames.
+pub mod parallel {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LIMIT: Cell<usize> = const { Cell::new(usize::MAX) };
+    }
+
+    /// Runs `f` with at most `n` threads for [`threads`] on this thread: tests compare a threaded
+    /// result with the one-thread result.
+    #[doc(hidden)]
+    pub fn with_thread_limit<R>(n: usize, f: impl FnOnce() -> R) -> R {
+        let before = LIMIT.with(|l| l.replace(n.max(1)));
+        let r = f();
+        LIMIT.with(|l| l.set(before));
+        r
+    }
+
+    /// Threads for `want` units of work: up to 8, as many as the machine has, at least 1; 1 in wasm.
+    pub fn threads(want: usize) -> usize {
+        if cfg!(target_arch = "wasm32") {
+            return 1;
+        }
+        let have = std::thread::available_parallelism().map_or(1, |n| n.get());
+        want.min(have).min(8).min(LIMIT.with(Cell::get)).max(1)
+    }
+
+    /// `f` over `items`, results in order, the items split into `threads` runs; each run gets its
+    /// own state from `init`. A worker's panic is raised again here, so a failure is never a
+    /// silently shorter result.
+    pub fn map_chunks<T: Sync, S, R: Send>(items: &[T], threads: usize, init: impl Fn() -> S + Sync, f: impl Fn(&mut S, &T) -> R + Sync) -> Vec<R> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if threads > 1 && items.len() > 1 {
+            let per = items.len().div_ceil(threads);
+            let (init, f) = (&init, &f);
+            return std::thread::scope(|s| {
+                let hs: Vec<_> = items
+                    .chunks(per)
+                    .map(|run| {
+                        s.spawn(move || {
+                            let mut st = init();
+                            run.iter().map(|t| f(&mut st, t)).collect::<Vec<R>>()
+                        })
+                    })
+                    .collect();
+                hs.into_iter().flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+            });
+        }
+        let _ = threads;
+        let mut st = init();
+        items.iter().map(|t| f(&mut st, t)).collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn threaded_results_match_one_thread_in_order() {
+            let items: Vec<u32> = (0..1000).collect();
+            let one = map_chunks(&items, 1, || 0u32, |n, &x| { *n += 1; x * 3 });
+            for t in [2, 3, 7] {
+                assert_eq!(map_chunks(&items, t, || 0u32, |_, &x| x * 3), one, "{t} threads");
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "item 500")]
+        fn a_worker_panic_is_raised() {
+            let items: Vec<u32> = (0..1000).collect();
+            map_chunks(&items, 4, || (), |_, &x| if x == 500 { panic!("item 500") } else { x });
+        }
+
+        #[test]
+        fn the_limit_applies() {
+            assert_eq!(with_thread_limit(1, || threads(100)), 1);
+            assert!(threads(1) == 1);
+        }
+    }
+}

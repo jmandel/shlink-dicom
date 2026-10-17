@@ -487,22 +487,10 @@ fn encode_frames(input: &[u8], first: &shl_dicom_decode::Canonical, ts: &str) ->
     Ok(out)
 }
 
-/// `f` over `items`, in order; outside wasm on up to 8 threads when there is enough work.
+/// `f` over `items`, in order; outside wasm on up to 8 threads, one per 4 MiB of input.
 fn map_parallel<T: Sync + Copy, R: Send>(items: &[T], bytes: usize, f: impl Fn(T) -> R + Sync) -> Vec<R> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(items.len()).min(bytes / (4 << 20)).max(1);
-        if threads > 1 {
-            let per = items.len().div_ceil(threads);
-            let f = &f;
-            return std::thread::scope(|s| {
-                let hs: Vec<_> = items.chunks(per).map(|run| s.spawn(move || run.iter().map(|&t| f(t)).collect::<Vec<R>>())).collect();
-                hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-            });
-        }
-    }
-    let _ = bytes;
-    items.iter().map(|&t| f(t)).collect()
+    let threads = shl_codec_common::parallel::threads(items.len().min(bytes / (4 << 20)));
+    shl_codec_common::parallel::map_chunks(items, threads, || (), |_, &t| f(t))
 }
 
 /// Benchmark builds only (`--features bench`): the stages of a transcode, timed separately.
@@ -665,6 +653,14 @@ fn same_bytes(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A panic in a frame-encoding thread reaches the caller; it never leaves frames out silently.
+    #[test]
+    #[should_panic(expected = "item 5")]
+    fn a_worker_panic_is_raised() {
+        let items: Vec<u32> = (0..8).collect();
+        let _ = map_parallel(&items, 64 << 20, |x| if x == 5 { panic!("item 5") } else { x });
+    }
+
     #[test]
     fn which_instances_are_offered_to_the_encoder() {
         let mb = 1 << 20;
