@@ -71,7 +71,16 @@ pub fn encrypt_bundle_jwe_with_iv(
     ))
 }
 
+/// The largest Bundle a reader inflates: far above any real one (a Bundle lists studies, not their
+/// pixels), and small enough that a hostile JWE cannot exhaust memory by inflating without end.
+pub const MAX_BUNDLE_BYTES: u64 = 64 << 20;
+/// The largest compact JWE a reader takes: a 64 MiB payload in base64url, plus the header.
+pub const MAX_JWE_CHARS: usize = (MAX_BUNDLE_BYTES as usize).div_ceil(3) * 4 + 4096;
+
 pub fn decrypt_bundle_jwe(jwe_compact: &str, shl_key: &[u8; 32]) -> Result<Vec<u8>> {
+    if jwe_compact.len() > MAX_JWE_CHARS {
+        return Err(Error::Jwe(format!("JWE is longer than {MAX_JWE_CHARS} characters")));
+    }
     let parts: Vec<&str> = jwe_compact.trim().split('.').collect();
     if parts.len() != 5 || !parts[1].is_empty() {
         return Err(Error::Jwe("invalid compact JWE format".into()));
@@ -119,11 +128,15 @@ pub fn decrypt_bundle_jwe(jwe_compact: &str, shl_key: &[u8; 32]) -> Result<Vec<u
 
     match header.zip.as_deref() {
         Some("DEF") => {
-            let mut decoder = DeflateDecoder::new(&decrypted[..]);
+            // One byte past the cap tells a Bundle that is too large from one exactly at it.
+            let mut decoder = DeflateDecoder::new(&decrypted[..]).take(MAX_BUNDLE_BYTES + 1);
             let mut out = Vec::new();
             decoder
                 .read_to_end(&mut out)
                 .map_err(|e| Error::Jwe(format!("DEFLATE decompression failed: {e}")))?;
+            if out.len() as u64 > MAX_BUNDLE_BYTES {
+                return Err(Error::Jwe(format!("Bundle inflates past {MAX_BUNDLE_BYTES} bytes")));
+            }
             Ok(out)
         }
         None => Ok(decrypted),
@@ -157,5 +170,18 @@ mod tests {
         for header in [r#"{"alg":"dir","enc":"A256GCM"}"#, r#"{"alg":"dir","enc":"A256GCM","cty":"application/smart-health-card"}"#] {
             assert!(decrypt_bundle_jwe(&jwe_with_header(header, &key), &key).is_err(), "{header}");
         }
+    }
+
+    #[test]
+    fn oversized_bundles_and_jwes_are_refused() {
+        let key = [3u8; 32];
+        // One repeated byte deflates about 1000:1, so a 64 MiB Bundle is a small JWE.
+        let big = vec![b' '; (MAX_BUNDLE_BYTES + 1) as usize];
+        let jwe = encrypt_bundle_jwe(&big, &key).unwrap();
+        assert!(jwe.len() < MAX_JWE_CHARS);
+        assert!(decrypt_bundle_jwe(&jwe, &key).unwrap_err().to_string().contains("inflates past"));
+        let ok = vec![b' '; MAX_BUNDLE_BYTES as usize];
+        assert_eq!(decrypt_bundle_jwe(&encrypt_bundle_jwe(&ok, &key).unwrap(), &key).unwrap().len(), ok.len());
+        assert!(decrypt_bundle_jwe(&"a".repeat(MAX_JWE_CHARS + 1), &key).is_err());
     }
 }
