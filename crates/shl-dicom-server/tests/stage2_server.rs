@@ -2509,3 +2509,28 @@ async fn test_an_append_to_a_deleted_share_leaves_nothing() {
     assert!(!state.staging_dir(&sid).exists(), "staging directory left behind");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The first request of a resumable upload is held to the append limit even without a length
+/// (chunked), so no single request stages more than that.
+#[tokio::test]
+async fn test_a_resumable_put_body_is_held_to_the_append_limit() {
+    let dir = temp_data_dir("put_append_limit");
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas { request_bytes: 1 << 20, ..Default::default() }, test_store(&dir)).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[49u8; 16]));
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> = (0..5).map(|_| Ok(vec![2u8; 256 << 10])).collect();
+    let r = client
+        .put(&url)
+        .bearer_auth(&token)
+        .header("Upload-Complete", "?0")
+        .body(reqwest::Body::wrap_stream(futures_util::stream::iter(chunks)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let _ = std::fs::remove_dir_all(&dir);
+}

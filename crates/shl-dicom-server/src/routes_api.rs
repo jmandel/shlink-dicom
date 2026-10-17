@@ -811,7 +811,11 @@ pub async fn put_share_file(
     if let Err(resp) = start_upload(&state, &sid, &file_id, total, resumable.is_some()).await {
         return resp;
     }
-    let end = match append_body(&state, &sid, &file_id, 0, total, None, body).await {
+    // A resumable upload's first request is its first append, held to the append limit like any
+    // other. A whole-file PUT is held to its declared length, which start_upload has checked
+    // against the share's byte limit (and which can't exceed i64::MAX).
+    let max_body = if resumable.is_some() { Some(state.quotas.request_bytes) } else { total };
+    let end = match append_body(&state, &sid, &file_id, 0, total, max_body, body).await {
         Append::Ok(n) => n,
         Append::Fail(resp) => {
             if resumable.is_none() {
