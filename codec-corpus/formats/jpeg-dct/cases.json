@@ -215,10 +215,12 @@
       "sha256": "0c7290e3f67bb2d8dd805d58cc1eb5d4cae6894ad6c0cebd4da72ad4f7603794",
       "size": 77752,
       "expect": "decode",
-      "max_abs": 148,
+      "max_abs": 4,
       "oracle_sha256": "f562ebf296423b38e2439a08a26f4a28fd324a48cdf5097dbe20fce9438163ee",
-      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']",
-      "disputed": false
+      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']; max_abs set by ruling (colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle)",
+      "disputed": false,
+      "max_abs_override": 4,
+      "max_abs_reason": "colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle"
     },
     {
       "id": "ext-fodicom-GH538-jpeg1",
@@ -411,10 +413,12 @@
       "sha256": "f8e2d45fa1a85d812b62ea026b404520b3f18b1d98c24f15129eb9591e21c066",
       "size": 36624,
       "expect": "decode",
-      "max_abs": 158,
+      "max_abs": 4,
       "oracle_sha256": "d247ce212973d11d1027d1b73ee2067f5a3900c07812d265e05b6b02a8ac8e1e",
-      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']",
-      "disputed": false
+      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']; max_abs set by ruling (colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle)",
+      "disputed": false,
+      "max_abs_override": 4,
+      "max_abs_reason": "colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle"
     },
     {
       "id": "ext-gdcm-JPEGNote_bogus",
@@ -511,10 +515,12 @@
       "sha256": "85abba26bc85930f7f0853e16e44a8abb3d4d2472248d53db84de366e47d0ab2",
       "size": 108068,
       "expect": "decode",
-      "max_abs": 192,
+      "max_abs": 3,
       "oracle_sha256": "865ee6e1b2ec11bf2800c713089992a8b66cd87eaac418b91608b20df411fca1",
-      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']",
-      "disputed": false
+      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']; max_abs set by ruling (colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle)",
+      "disputed": false,
+      "max_abs_override": 3,
+      "max_abs_reason": "colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle"
     },
     {
       "id": "ext-gdcm-LEADTOOLS_FLOWERS-8-MONO2-JpegLossy",
@@ -929,10 +935,12 @@
       "sha256": "be49450fd4d7af989063fda6ea64f39573e7aee2d8fe3cd8ff5bbd1d9ea9c7f0",
       "size": 118790,
       "expect": "decode",
-      "max_abs": 137,
+      "max_abs": 3,
       "oracle_sha256": "b1d5020e24b2533f090bdd7f2fe2cfb2c4628fd664741c9b0785564e1be46ebd",
-      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']",
-      "disputed": false
+      "confidence": "lossy; 3 reference(s); families agreeing exactly: ['libjpeg-richter']; max_abs set by ruling (colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle)",
+      "disputed": false,
+      "max_abs_override": 3,
+      "max_abs_reason": "colour ruling (FORMAT.md): JFIF and Adobe markers win over the label, so dcmtk's default output, which follows the label, is not a valid decoding here; the tolerance is the IJG reference that follows the markers (gdcm) against the oracle"
     },
     {
       "id": "ext-issue-pydicom_1881-image-00000",
