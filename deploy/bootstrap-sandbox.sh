@@ -122,6 +122,10 @@ if ! $SUDO test -f /etc/imaging-sandbox.env; then
   $SUDO install -m 600 -o root -g root /dev/null /etc/imaging-sandbox.env
   echo "INTROSPECTION_KEY=$(openssl rand -hex 24)" | $SUDO tee -a /etc/imaging-sandbox.env >/dev/null
 fi
+# An existing file (an earlier install may have left it 0644) is closed up before it is rewritten;
+# sed -i and tee -a keep its mode.
+$SUDO chown root:root /etc/imaging-sandbox.env
+$SUDO chmod 600 /etc/imaging-sandbox.env
 $SUDO sed -i '/^\(PORT\|BASE_URL\|HOST\|ALLOWED_ORIGINS\|LOG_REQUESTS\|SHARE_REDIRECT_URIS\)=/d' /etc/imaging-sandbox.env
 $SUDO tee -a /etc/imaging-sandbox.env >/dev/null <<EOF
 PORT=$PORT
@@ -131,7 +135,6 @@ ALLOWED_ORIGINS=*
 LOG_REQUESTS=true
 SHARE_REDIRECT_URIS=$SHARE_ORIGIN/share/smart-callback/,http://localhost:3333/share/smart-callback/,http://127.0.0.1:3333/share/smart-callback/
 EOF
-$SUDO chmod 600 /etc/imaging-sandbox.env
 
 $SUDO tee /etc/systemd/system/imaging-sandbox.service >/dev/null <<EOF
 [Unit]
