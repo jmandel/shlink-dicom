@@ -47,9 +47,9 @@
       <h2 id="h-trace">One slice, from link to pixels</h2>
       <ol class="trace">
         <li>The viewer reads the key from the link, after the <code>#</code>.</li>
-        <li>It fetches <code>demo-links/bundle.jwe</code> ({{BUNDLE_KB}} KB) and decrypts it with that key. Inside is an ordinary FHIR R4 Bundle, with an ImagingStudy for each study.</li>
+        <li>It fetches <code>{{LINK_DIR}}/bundle.jwe</code> ({{BUNDLE_KB}} KB) and decrypts it with that key. Inside is an ordinary FHIR R4 Bundle, with an ImagingStudy for each study.</li>
         <li>For slice {{SLICE_N}} of MRI series {{SLICE_SERIES}}, it adds up the lengths of the images listed before it. The slice starts at byte {{SLICE_OFFSET}} of the study’s DICOM bytes and lies in records {{SLICE_RECORDS}} of the file’s {{MRI_RECORDS}}.</li>
-        <li>It sends one request for <code>demo-links/{{MRI_FILE}}</code> with <code>Range: {{SLICE_RANGE}}</code>. GitHub Pages answers <code>206 Partial Content</code> with those {{SLICE_RECORD_COUNT}} records.</li>
+        <li>It sends one request for <code>{{LINK_DIR}}/{{MRI_FILE}}</code> with <code>Range: {{SLICE_RANGE}}</code>. GitHub Pages answers <code>206 Partial Content</code> with those {{SLICE_RECORD_COUNT}} records.</li>
         <li>It checks each record’s AES-256-GCM tag before using its bytes, then decodes and draws the slice. A record that fails the check is not shown.</li>
       </ol>
       <p class="small muted">The specification covers <a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#93-locating-and-authenticating-byte-ranges">locating records</a>, <a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#10-fetch-contract">what a host must do</a> and <a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#appendix-c-hosting-notes">notes on GitHub Pages</a>.</p>

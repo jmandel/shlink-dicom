@@ -6,13 +6,15 @@
     "A file key must never encrypt different bytes (spec/README.md section 13). To change the input or",
     "siteUrl, edit source or siteUrl and run `bun pages/build.ts --new-keys`: it draws a new link key,",
     "Bundle IV, file ids and file keys, and records them with the new hashes. The link then changes.",
-    "These keys are public: the link itself carries the link key, and the Bundle carries the file keys."
+    "These keys are public: the link itself carries the link key, and the Bundle carries the file keys.",
+    "segment names the link's folder under demo-links/ (256 random bits, as the SHL specification requires of the link's url); --new-keys draws it too."
   ],
   "siteUrl": "https://joshuamandel.com/shlink-dicom/",
   "label": "Josh Example: brain MRI and left wrist X-rays",
   "link": "shlink:/eyJ1cmwiOiJodHRwczovL2pvc2h1YW1hbmRlbC5jb20vc2hsaW5rLWRpY29tL2RlbW8tbGlua3MvYnVuZGxlLmp3ZSIsImtleSI6IkNoa3duempLT20ycmFvUTUzdm1tc25XbnZpX1BtZUdnSWJxNG9tYzM2ajgiLCJmbGFnIjoiVSIsImxhYmVsIjoiSm9zaCBFeGFtcGxlOiBicmFpbiBNUkkgYW5kIGxlZnQgd3Jpc3QgWC1yYXlzIiwidiI6MX0",
   "shlKey": "ChkwnzjKOm2raoQ53vmmsnWnvi_PmeGgIbq4omc36j8",
   "bundleIv": "5MW7gKQgOLwfbDKT",
+  "segment": "",
   "lastUpdated": "2026-10-17T00:27:59Z",
   "bundleSha256": "c8b7723cda24b511d1b88396a48d53338cabf84ff0a228caca935d5f4145a75c",
   "source": {

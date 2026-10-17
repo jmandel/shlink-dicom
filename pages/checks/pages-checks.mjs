@@ -123,6 +123,12 @@ for (const dev of ["desktop", "phone"]) {
     viewerLink = await page.getAttribute("a.btn-primary", "href");
     check(`${label}: viewer link`, /\/view\/#shlink:\//.test(viewerLink ?? ""), viewerLink?.slice(0, 60));
     check(`${label}: QR code`, (await page.locator(".qr svg").count()) === 1);
+    if (dev === "desktop" && scheme === "light") {
+      // The SHL specification: the link's url carries at least 256 bits of entropy.
+      const payload = JSON.parse(Buffer.from((viewerLink ?? "").split("shlink:/")[1] ?? "", "base64url").toString());
+      const seg = /\/demo-links\/([A-Za-z0-9_-]{43})\/bundle\.jwe$/.exec(payload.url ?? "")?.[1];
+      check("link url: bundle.jwe under a 256-bit folder", !!seg && Buffer.from(seg, "base64url").length === 32, payload.url);
+    }
     check(`${label}: no horizontal overflow`, (await overflow(page)) <= 0);
     check(`${label}: no unfilled placeholders`, !(await page.content()).includes("{{"));
     check(`${label}: no console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));

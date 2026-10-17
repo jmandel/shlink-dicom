@@ -4,8 +4,8 @@
 //   index.html                 about this copy, the demo link and its QR code (pages/index.html)
 //   view/index.html, assets/   the viewer, as web/build.ts builds it (run that first)
 //   config.json                the viewer's sample link (web/core/config.ts)
-//   demo-links/bundle.jwe      the link's encrypted Bundle
-//   demo-links/{fileId}.bin    one encrypted file per study
+//   demo-links/{segment}/bundle.jwe      the link's encrypted Bundle ({segment}: 256 random bits)
+//   demo-links/{segment}/{fileId}.bin    one encrypted file per study
 //
 // The link's input, keys and hashes are in pages/demo-link.json. The DICOM files are fetched from
 // my-health-data at the pinned commit, re-encoded without loss (JPEG Lossless SV1) and packed with
@@ -59,6 +59,9 @@ interface Config {
   link: string;
   shlKey: string;
   bundleIv: string;
+  /** The link's folder under demo-links/: 32 random bytes as base64url, so the link's url carries
+   * the 256 bits of entropy the SHL specification requires. */
+  segment: string;
   lastUpdated: string;
   bundleSha256: string;
   source: { repo: string; commit: string; files: { path: string; sha256: string }[] };
@@ -85,6 +88,7 @@ const check = (what: string, recorded: string, actual: string, set: (v: string) 
   );
 };
 
+if (!newKeys && !/^[A-Za-z0-9_-]{43}$/.test(cfg.segment ?? "")) fail("pages/demo-link.json records no link folder (segment): run bun pages/build.ts --new-keys (the link changes)");
 if (!existsSync(join(root, "dist/web/view/index.html"))) fail("dist/web missing: run bun web/build.ts first");
 if (!existsSync(server)) fail(`${server} missing: cargo build --release -p shl-dicom-server`);
 rmSync(work, { recursive: true, force: true });
@@ -93,6 +97,7 @@ mkdirSync(work, { recursive: true });
 if (newKeys) {
   cfg.shlKey = b64url(randomBytes(32));
   cfg.bundleIv = b64url(randomBytes(12));
+  cfg.segment = b64url(randomBytes(32));
   cfg.lastUpdated = new Date().toISOString().replace(/\.\d+Z$/, "Z");
   cfg.bundleSha256 = "";
   cfg.link = "";
@@ -133,6 +138,7 @@ writeFileSync(
   JSON.stringify({
     shlKey: cfg.shlKey,
     bundleIv: cfg.bundleIv,
+    segment: cfg.segment,
     lastUpdated: cfg.lastUpdated,
     studies: Object.fromEntries(cfg.studies.map((s) => [s.studyInstanceUid, { fileId: s.fileId, key: s.key }])),
   }),
@@ -149,7 +155,7 @@ for (const st of cfg.studies) {
   const entry = index.studies.find((s) => s.studyInstanceUid === st.studyInstanceUid) ?? fail(`study ${st.studyInstanceUid} not packed`);
   const file = entry.files[0];
   if (entry.files.length !== 1 || file.fileId !== st.fileId || file.key !== st.key) fail(`study ${st.studyInstanceUid}: unexpected file in the Bundle`);
-  const ct = readFileSync(join(packDir, `${st.fileId}.bin`));
+  const ct = readFileSync(join(packDir, cfg.segment, `${st.fileId}.bin`));
   if (ct.length !== file.ciphertextLength) fail(`${st.fileId}.bin: ${ct.length} bytes, the Bundle says ${file.ciphertextLength}`);
   // Decrypt record by record (§9.2) to hash the plaintext.
   const key = Buffer.from(st.key, "base64url");
@@ -177,7 +183,8 @@ console.log("study files, Bundle and link match pages/demo-link.json");
 
 // 5. The site.
 rmSync(out, { recursive: true, force: true });
-mkdirSync(join(out, "demo-links"), { recursive: true });
+const linkDir = `demo-links/${cfg.segment}`;
+mkdirSync(join(out, linkDir), { recursive: true });
 const web = join(root, "dist/web");
 // Pages compresses on its own and ignores the .br and .gz copies.
 cpSync(join(web, "assets"), join(out, "assets"), { recursive: true, filter: (p) => !/\.(br|gz)$/.test(p) });
@@ -197,8 +204,8 @@ viewHtml = replaceOnce(
 mkdirSync(join(out, "view"), { recursive: true });
 writeFileSync(join(out, "view/index.html"), viewHtml);
 writeFileSync(join(out, "config.json"), JSON.stringify({ viewerPrefix: `${siteUrl}view/`, sampleLink: link }) + "\n");
-cpSync(join(packDir, "bundle.jwe"), join(out, "demo-links/bundle.jwe"));
-for (const st of cfg.studies) cpSync(join(packDir, `${st.fileId}.bin`), join(out, `demo-links/${st.fileId}.bin`));
+cpSync(join(packDir, cfg.segment, "bundle.jwe"), join(out, linkDir, "bundle.jwe"));
+for (const st of cfg.studies) cpSync(join(packDir, cfg.segment, `${st.fileId}.bin`), join(out, linkDir, `${st.fileId}.bin`));
 
 // The entry page, with this build's numbers.
 const viewerLink = `${siteUrl}view/#${link}`;
@@ -215,9 +222,10 @@ const mb = (n: number) => (n / 1e6).toFixed(1);
 const fmt = (n: number) => n.toLocaleString("en-US");
 const vars: Record<string, string> = {
   LINK: link,
+  LINK_DIR: linkDir,
   VIEWER_LINK: viewerLink,
   QR: qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true }),
-  BUNDLE_KB: String(Math.round(statSync(join(out, "demo-links/bundle.jwe")).size / 1000)),
+  BUNDLE_KB: String(Math.round(statSync(join(out, linkDir, "bundle.jwe")).size / 1000)),
   MRI_SERIES: String(mri.numberOfSeries),
   MRI_INSTANCES: String(mri.numberOfInstances),
   MRI_MB: mb(mri.files[0].ciphertextLength),
@@ -242,5 +250,5 @@ writeFileSync(join(out, "index.html"), page);
 cpSync(join(root, "pages/pages.css"), join(out, "assets/pages.css"));
 rmSync(work, { recursive: true, force: true });
 
-const sizes = readdirSync(join(out, "demo-links")).map((f) => `  demo-links/${f}  ${fmt(statSync(join(out, "demo-links", f)).size)} B`);
+const sizes = readdirSync(join(out, linkDir)).map((f) => `  ${linkDir}/${f}  ${fmt(statSync(join(out, linkDir, f)).size)} B`);
 console.log(`site: ${out}\n${sizes.join("\n")}\nlink: ${viewerLink}`);
