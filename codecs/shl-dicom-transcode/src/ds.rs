@@ -6,6 +6,15 @@
 //! sequences and items (Explicit VR headers can be longer) and of group length elements, and keeps
 //! undefined lengths undefined. A data set read from Explicit VR LE and written back is the same
 //! bytes, as long as its lengths were right.
+//!
+//! This reader is the one DICOM element reader in the repository that does not use
+//! `shl_dicom_decode::parse::walk`, on purpose. `walk` reads leniently so that damaged files still
+//! display: it reads past a stray top-level item, rereads an element whose explicit VR is missing
+//! as implicit, and hands back values but not the bytes around them. A re-encoded file must be the
+//! input with only the pixel data changed, so this reader refuses those inputs (the file is then
+//! shared as it is) and keeps undefined-length non-sequence values as raw spans, which is what
+//! lets the writer reproduce the input byte for byte. `a_damaged_data_set_is_read_by_walk_and_refused_here`
+//! pins the difference.
 
 
 
@@ -413,6 +422,41 @@ mod tests {
         assert!(vr_kept(0x0028_0107, AMBIGUOUS, *b"US") && vr_kept(0x0028_0107, AMBIGUOUS, *b"SS"));
         assert!(!vr_kept(0x0028_0107, AMBIGUOUS, *b"OW"));
         assert!(vr_kept(0x0009_1001, AMBIGUOUS, *b"UN"));
+    }
+
+    /// Elements `parse::walk` sees at the top level, or its error.
+    fn walked(ds: &[u8]) -> Result<Vec<u32>, String> {
+        struct Tags(Vec<u32>);
+        impl<'a> shl_dicom_decode::parse::Visitor<'a> for Tags {
+            fn element(&mut self, e: &shl_dicom_decode::parse::Element<'a>) -> shl_dicom_decode::parse::Step {
+                if e.depth == 0 {
+                    self.0.push(e.tag);
+                }
+                shl_dicom_decode::parse::Step::Next
+            }
+        }
+        let mut t = Tags(Vec::new());
+        let syntax = shl_dicom_decode::parse::Syntax { explicit: true, little: true };
+        shl_dicom_decode::parse::walk(ds, syntax, &|_| false, &mut t).map_err(|e| e.to_string())?;
+        Ok(t.0)
+    }
+
+    #[test]
+    fn a_damaged_data_set_is_read_by_walk_and_refused_here() {
+        // A stray (FFFE,E000) item among the top-level elements (fo-dicom #364).
+        let mut stray = Vec::new();
+        stray.extend_from_slice(b"\x08\x00\x60\x00CS\x02\x00CT");
+        stray.extend_from_slice(b"\xFE\xFF\x00\xE0\x04\x00\x00\x00junk");
+        stray.extend_from_slice(b"\x10\x00\x10\x00PN\x02\x00A ");
+        // An element written implicit in an Explicit VR data set (no VR after the tag).
+        let mut no_vr = Vec::new();
+        no_vr.extend_from_slice(b"\x08\x00\x60\x00CS\x02\x00CT");
+        no_vr.extend_from_slice(b"\x08\x00\x80\x00\x03\x00\x00\x00abc");
+        no_vr.extend_from_slice(b"\x10\x00\x10\x00PN\x02\x00A ");
+        for (name, ds, tags) in [("stray item", &stray, vec![0x0008_0060, 0x0010_0010]), ("missing VR", &no_vr, vec![0x0008_0060, 0x0008_0080, 0x0010_0010])] {
+            assert_eq!(walked(ds).as_deref(), Ok(&tags[..]), "{name}: walk reads past it");
+            assert!(Reader { buf: ds, explicit: true }.elems(0, ds.len(), false, 0).is_err(), "{name}: the transcoder declines it");
+        }
     }
 
     #[test]
