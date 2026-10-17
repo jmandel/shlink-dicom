@@ -48,8 +48,8 @@ pub struct Extra {
     /// PALETTE COLOR lookup table as RGBA8, with its First Mapped value. None when the instance
     /// has no (non-segmented) Red/Green/Blue Palette Color LUT.
     pub palette: Option<Palette>,
-    /// First item of the Real World Value Mapping Sequence (0040,9096), from the top level, else
-    /// the Shared Functional Groups, else Per-Frame item 0.
+    /// First item of the Real World Value Mapping Sequence (0040,9096), from Per-Frame Functional
+    /// Groups item 0, else the Shared Functional Groups, else the top level.
     pub real_world: Option<RealWorld>,
 }
 
@@ -79,10 +79,13 @@ struct RawPalette<'a> {
     data: [Option<&'a [u8]>; 3],
 }
 
-/// Build an RGBA8 LUT as pydicom's `apply_color_lut` reads the tables (PS3.3 C.7.6.3.1.5):
-/// descriptor = (entries, 0 meaning 65536; first mapped value; bits per entry). 16-bit entries
-/// are scaled to 8 bits by taking the high byte; 8-bit tables stored in 16-bit words are read as
-/// words.
+/// Build the Palette Color Lookup Table as RGBA8, for display. The descriptor (PS3.3 C.7.6.3.1.5)
+/// is (number of entries, 0 meaning 65536; first stored pixel value mapped, signed when Pixel
+/// Representation is 1; bits per entry, 8 or 16). The data (C.7.6.3.1.6) hold one entry per
+/// stored value from the first mapped one; a 16-bit entry's full range 0–65535 is the output
+/// range, so it becomes round(v × 255 / 65535) (v / 257, exact at both ends). 8-bit entries are
+/// read one per byte, or one per 16-bit word when the data are that long (older writers padded
+/// them so).
 fn build_palette(raw: &RawPalette<'_>, little: bool, signed: bool) -> Option<Palette> {
     let mut first = 0i32;
     let mut count = 0usize;
@@ -106,7 +109,7 @@ fn build_palette(raw: &RawPalette<'_>, little: bool, signed: bool) -> Option<Pal
                 .take(n)
                 .map(|c| {
                     let v = parse::read_u16(c, little).unwrap_or(0);
-                    if bits == 8 { v.min(255) as u8 } else { (v >> 8) as u8 }
+                    if bits == 8 { v.min(255) as u8 } else { ((u32::from(v) + 128) / 257) as u8 }
                 })
                 .collect()
         } else if data.len() >= n {
@@ -145,12 +148,19 @@ impl FrameValues {
             *slot = first_number(v);
         }
     }
+    /// Each value from `self`, else from `o`; the window (centre and width) as a pair.
     fn or(self, o: FrameValues) -> FrameValues {
+        let own_window = self.window_center.is_some() && self.window_width.is_some();
+        let (window_center, window_width) = if own_window || o.window_center.is_none() || o.window_width.is_none() {
+            (self.window_center.or(o.window_center), self.window_width.or(o.window_width))
+        } else {
+            (o.window_center, o.window_width)
+        };
         FrameValues {
             rescale_slope: self.rescale_slope.or(o.rescale_slope),
             rescale_intercept: self.rescale_intercept.or(o.rescale_intercept),
-            window_center: self.window_center.or(o.window_center),
-            window_width: self.window_width.or(o.window_width),
+            window_center,
+            window_width,
         }
     }
 }
@@ -242,9 +252,10 @@ impl<'a> Walker<'a> {
                 let child_ctx = match (ctx, tag) {
                     (Ctx::Top, 0x5200_9229) => Ctx::Shared,
                     (Ctx::Top, 0x5200_9230) => Ctx::PerFrameItems,
-                    (Ctx::Top, 0x0040_9096) => Ctx::RealWorld { rank: 0, units: false },
+                    // Rank: Per-Frame, then Shared Functional Groups, then the top level (decision (b)).
+                    (Ctx::PerFrame(_), 0x0040_9096) => Ctx::RealWorld { rank: 0, units: false },
                     (Ctx::Shared, 0x0040_9096) => Ctx::RealWorld { rank: 1, units: false },
-                    (Ctx::PerFrame(_), 0x0040_9096) => Ctx::RealWorld { rank: 2, units: false },
+                    (Ctx::Top, 0x0040_9096) => Ctx::RealWorld { rank: 2, units: false },
                     (Ctx::RealWorld { rank, .. }, 0x0040_08EA) => Ctx::RealWorld { rank, units: true },
                     (Ctx::Shared | Ctx::PerFrame(_), _) => ctx, // functional group macros
                     _ => Ctx::Ignore,
@@ -364,9 +375,10 @@ impl Walker<'_> {
 
 /// Read [`Extra`] from a DICOM file. Never fails: values it cannot read are `None`.
 ///
-/// Top-level values win. Otherwise the first value from the Per-Frame Functional Groups item 0,
-/// then the Shared Functional Groups, is reported as the image-level value; `per_frame` keeps
-/// every per-frame item, with shared values filled in where the item has none.
+/// A functional group value wins over the top-level one, as in an enhanced multi-frame instance the
+/// functional groups describe the frames: the image-level value is the Per-Frame Functional Groups
+/// item 0's, else the Shared Functional Groups', else the top level's. `per_frame` keeps every
+/// per-frame item, filled in the same order (shared, then top level) where the item has none.
 pub fn read_extra(bytes: &[u8]) -> Extra {
     let Ok(prepared) = parse::prepare(bytes) else { return Extra::default() };
     let ds: &[u8] = &prepared.dataset;
@@ -387,16 +399,21 @@ pub fn read_extra(bytes: &[u8]) -> Extra {
     let mut e = w.extra;
     e.palette = palette;
     e.real_world = real_world;
+    let top = FrameValues {
+        rescale_slope: e.rescale_slope,
+        rescale_intercept: e.rescale_intercept,
+        window_center: e.window_center,
+        window_width: e.window_width,
+    };
     for f in &mut e.per_frame {
-        *f = f.or(shared);
+        *f = f.or(shared).or(top);
     }
-    let fg = e.per_frame.first().copied().unwrap_or_default().or(shared);
-    e.rescale_slope = e.rescale_slope.or(fg.rescale_slope);
-    e.rescale_intercept = e.rescale_intercept.or(fg.rescale_intercept);
-    if e.window_center.is_none() || e.window_width.is_none() {
-        e.window_center = fg.window_center;
-        e.window_width = fg.window_width;
-    }
+    // The image-level values are frame 1's.
+    let image = e.per_frame.first().copied().unwrap_or(shared.or(top));
+    e.rescale_slope = image.rescale_slope;
+    e.rescale_intercept = image.rescale_intercept;
+    e.window_center = image.window_center;
+    e.window_width = image.window_width;
     e
 }
 
@@ -784,45 +801,30 @@ mod exports {
 }
 
 #[cfg(test)]
+#[path = "../../shl-dicom-decode/tests/support/ds.rs"]
+mod ds;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ds::{part10, Ds, Enc};
 
-    fn short(out: &mut Vec<u8>, group: u16, element: u16, vr: &[u8; 2], v: &[u8]) {
-        out.extend_from_slice(&group.to_le_bytes());
-        out.extend_from_slice(&element.to_le_bytes());
-        out.extend_from_slice(vr);
-        out.extend_from_slice(&(v.len() as u16).to_le_bytes());
-        out.extend_from_slice(v);
-    }
-
-    fn el(out: &mut Vec<u8>, g: u16, e: u16, vr: &[u8; 2], v: &[u8]) {
-        short(out, g, e, vr, v);
-    }
+    const LE: Enc = Enc::ExplicitLe;
+    const EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
 
     #[test]
     fn reads_top_level_and_functional_groups() {
-        let mut ds = Vec::new();
-        el(&mut ds, 0x0008, 0x0060, b"CS", b"CT");
-        el(&mut ds, 0x0028, 0x1052, b"DS", b"-1024 ");
+        let mut ds = Ds::new(LE);
+        ds.text(0x0008, 0x0060, b"CS", "CT");
+        ds.text(0x0028, 0x1052, b"DS", "-1024");
         // Shared FG: Frame VOI LUT seq with WC/WW, undefined lengths.
-        let mut inner = Vec::new();
-        el(&mut inner, 0x0028, 0x1050, b"DS", b"40\\50 ");
-        el(&mut inner, 0x0028, 0x1051, b"DS", b"400 ");
-        let mut voi = vec![0x28, 0x00, 0x32, 0x91, b'S', b'Q', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF];
-        voi.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF]);
-        voi.extend_from_slice(&inner);
-        voi.extend_from_slice(&[0xFE, 0xFF, 0x0D, 0xE0, 0, 0, 0, 0, 0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
-        ds.extend_from_slice(&[0x00, 0x52, 0x29, 0x92, b'S', b'Q', 0, 0]);
-        let item_len = voi.len() as u32;
-        ds.extend_from_slice(&(item_len + 8).to_le_bytes());
-        ds.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
-        ds.extend_from_slice(&item_len.to_le_bytes());
-        ds.extend_from_slice(&voi);
-        let mut file = vec![0u8; 128];
-        file.extend_from_slice(b"DICM");
-        short(&mut file, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
-        file.extend_from_slice(&ds);
-        let e = read_extra(&file);
+        let voi = |i: &mut Ds| {
+            i.text(0x0028, 0x1050, b"DS", "40\\50").text(0x0028, 0x1051, b"DS", "400");
+        };
+        let mut shared = Ds::new(LE);
+        shared.seq(0x0028, 0x9132, &[&voi]);
+        ds.seq_defined(0x5200, 0x9229, &[&shared.out]);
+        let e = read_extra(&part10(EXPLICIT_LE, &ds.out, true));
         assert_eq!(e.modality.as_deref(), Some("CT"));
         assert_eq!(e.rescale_intercept, Some(-1024.0));
         assert_eq!(e.window_center, Some(40.0));
@@ -832,82 +834,81 @@ mod tests {
     #[test]
     fn reads_real_world_value_mapping_from_shared_groups() {
         // Shared FG item > RWVM item (slope 2.5, intercept -1, label, units code "mm2/s").
-        let mut units = Vec::new();
-        el(&mut units, 0x0008, 0x0100, b"SH", b"mm2/s ");
-        el(&mut units, 0x0008, 0x0104, b"LO", b"mm2/s ");
-        let mut rw = Vec::new();
+        let mut units = Ds::new(LE);
+        units.text(0x0008, 0x0100, b"SH", "mm2/s").text(0x0008, 0x0104, b"LO", "mm2/s");
+        let mut rw = Ds::new(LE);
+        rw.seq_defined(0x0040, 0x08EA, &[&units.out]);
+        rw.text(0x0040, 0x9210, b"SH", "ADC");
         for (tag, x) in [(0x9224u16, -1.0f64), (0x9225, 2.5)] {
-            el(&mut rw, 0x0040, tag, b"FD", &x.to_le_bytes());
+            rw.elem(0x0040, tag, b"FD", &x.to_le_bytes());
         }
-        el(&mut rw, 0x0040, 0x9210, b"SH", b"ADC ");
-        let seq = |out: &mut Vec<u8>, g: u16, e: u16, item: &[u8]| {
-            out.extend_from_slice(&g.to_le_bytes());
-            out.extend_from_slice(&e.to_le_bytes());
-            out.extend_from_slice(b"SQ\0\0");
-            out.extend_from_slice(&(item.len() as u32 + 8).to_le_bytes());
-            out.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
-            out.extend_from_slice(&(item.len() as u32).to_le_bytes());
-            out.extend_from_slice(item);
-        };
-        seq(&mut rw, 0x0040, 0x08EA, &units);
-        let mut shared = Vec::new();
-        seq(&mut shared, 0x0040, 0x9096, &rw);
-        let mut file = vec![0u8; 128];
-        file.extend_from_slice(b"DICM");
-        short(&mut file, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
-        seq(&mut file, 0x5200, 0x9229, &shared);
-        let e = read_extra(&file);
+        let mut shared = Ds::new(LE);
+        shared.seq_defined(0x0040, 0x9096, &[&rw.out]);
+        let mut ds = Ds::new(LE);
+        ds.seq_defined(0x5200, 0x9229, &[&shared.out]);
+        let e = read_extra(&part10(EXPLICIT_LE, &ds.out, true));
         let rw = e.real_world.expect("mapping");
         assert_eq!((rw.slope, rw.intercept), (Some(2.5), Some(-1.0)));
         assert_eq!(rw.label.as_deref(), Some("ADC"));
         assert_eq!(rw.units.as_deref(), Some("mm2/s"));
     }
 
-    /// A defined-length explicit VR SQ holding one defined-length item per `items` entry.
-    fn sq(out: &mut Vec<u8>, g: u16, e: u16, items: &[Vec<u8>]) {
-        let body: Vec<u8> = items
-            .iter()
-            .flat_map(|it| {
-                let mut v = vec![0xFE, 0xFF, 0x00, 0xE0];
-                v.extend_from_slice(&(it.len() as u32).to_le_bytes());
-                v.extend_from_slice(it);
-                v
-            })
-            .collect();
-        out.extend_from_slice(&g.to_le_bytes());
-        out.extend_from_slice(&e.to_le_bytes());
-        out.extend_from_slice(b"SQ\0\0");
-        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        out.extend_from_slice(&body);
+    /// One Per-Frame Functional Groups item: a Frame VOI LUT Sequence (centre, and width when
+    /// given) and a Pixel Value Transformation Sequence (intercept and slope, when given).
+    fn frame_item(window: Option<(&str, Option<&str>)>, rescale: (Option<&str>, Option<&str>)) -> Vec<u8> {
+        let mut item = Ds::new(LE);
+        if let Some((c, w)) = window {
+            let mut voi = Ds::new(LE);
+            voi.text(0x0028, 0x1050, b"DS", c);
+            if let Some(w) = w {
+                voi.text(0x0028, 0x1051, b"DS", w);
+            }
+            item.seq_defined(0x0028, 0x9132, &[&voi.out]);
+        }
+        if rescale.0.is_some() || rescale.1.is_some() {
+            let mut pvt = Ds::new(LE);
+            if let Some(i) = rescale.0 {
+                pvt.text(0x0028, 0x1052, b"DS", i);
+            }
+            if let Some(sl) = rescale.1 {
+                pvt.text(0x0028, 0x1053, b"DS", sl);
+            }
+            item.seq_defined(0x0028, 0x9145, &[&pvt.out]);
+        }
+        item.out
     }
 
     #[test]
     fn per_frame_values_stay_with_their_frame() {
         // Legacy Converted Enhanced PET shape: each Per-Frame Functional Groups item holds a
         // Pixel Value Transformation Sequence and a Frame VOI LUT Sequence (nested sequences).
-        let mut per_frame = Vec::new();
-        for (k, (slope, center)) in [("2", "100"), ("3", "200"), ("4.5", "300")].iter().enumerate() {
-            let mut pvt = Vec::new();
-            el(&mut pvt, 0x0028, 0x1052, b"DS", format!("{k} ").as_bytes());
-            el(&mut pvt, 0x0028, 0x1053, b"DS", format!("{slope:<4}").as_bytes());
-            let mut voi = Vec::new();
-            el(&mut voi, 0x0028, 0x1050, b"DS", format!("{center:<4}").as_bytes());
-            el(&mut voi, 0x0028, 0x1051, b"DS", b"50");
-            let mut item = Vec::new();
-            sq(&mut item, 0x0028, 0x9132, &[voi]);
-            sq(&mut item, 0x0028, 0x9145, &[pvt]);
-            per_frame.push(item);
-        }
-        let mut file = vec![0u8; 128];
-        file.extend_from_slice(b"DICM");
-        short(&mut file, 0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2.1\0");
-        sq(&mut file, 0x5200, 0x9230, &per_frame);
-        let e = read_extra(&file);
+        let items: Vec<Vec<u8>> = [("0", "2", "100"), ("1", "3", "200"), ("2", "4.5", "300")]
+            .iter()
+            .map(|(i, sl, c)| frame_item(Some((c, Some("50"))), (Some(i), Some(sl))))
+            .collect();
+        let mut ds = Ds::new(LE);
+        ds.seq_defined(0x5200, 0x9230, &items.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
+        let e = read_extra(&part10(EXPLICIT_LE, &ds.out, true));
         assert_eq!(e.per_frame.len(), 3);
         let got: Vec<(Option<f64>, Option<f64>, Option<f64>)> =
             e.per_frame.iter().map(|f| (f.rescale_slope, f.rescale_intercept, f.window_center)).collect();
         assert_eq!(got, [(Some(2.0), Some(0.0), Some(100.0)), (Some(3.0), Some(1.0), Some(200.0)), (Some(4.5), Some(2.0), Some(300.0))]);
         // The image-level values are frame 1's.
         assert_eq!((e.rescale_slope, e.window_center), (Some(2.0), Some(100.0)));
+    }
+
+    #[test]
+    fn functional_groups_win_over_the_top_level() {
+        // Item 0 has a slope and a whole window; item 1 a window centre only.
+        let items = [frame_item(Some(("100", Some("50"))), (None, Some("2"))), frame_item(Some(("300", None)), (None, None))];
+        let mut ds = Ds::new(LE);
+        ds.text(0x0028, 0x1050, b"DS", "10").text(0x0028, 0x1051, b"DS", "20");
+        ds.text(0x0028, 0x1052, b"DS", "-5").text(0x0028, 0x1053, b"DS", "7");
+        ds.seq_defined(0x5200, 0x9230, &[&items[0], &items[1]]);
+        let e = read_extra(&part10(EXPLICIT_LE, &ds.out, true));
+        let got: Vec<_> = e.per_frame.iter().map(|f| (f.rescale_slope, f.rescale_intercept, f.window_center, f.window_width)).collect();
+        // Item 1's lone centre does not make a window with the top level's width.
+        assert_eq!(got, [(Some(2.0), Some(-5.0), Some(100.0), Some(50.0)), (Some(7.0), Some(-5.0), Some(10.0), Some(20.0))]);
+        assert_eq!((e.rescale_slope, e.rescale_intercept, e.window_center, e.window_width), (Some(2.0), Some(-5.0), Some(100.0), Some(50.0)));
     }
 }
