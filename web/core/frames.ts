@@ -8,15 +8,14 @@
 // The instance's header is read first (growing ranges up to Pixel Data), then each frame is
 // located by the slide viewer's FrameLocator (wsi-source.ts): Extended or Basic Offset Table,
 // native frame arithmetic, or a walk over the fragment items. A frame's bytes go to the decoder
-// as a small Part 10 file: the instance's own header with Number of Frames 1, only that frame's
-// Per-Frame Functional Groups item, and only that frame's pixel data. The decoder reads such a
-// file exactly as it reads that frame of the whole instance, so the frames are filled into one
-// DecodedImage that matches a decode of the whole instance (web/checks/frame-identity.ts).
+// as a one-frame Part 10 file made from the instance's own header (frame-file.ts). The decoder
+// reads such a file as it reads that frame of the whole instance, so the frames are filled into
+// one DecodedImage that matches a decode of the whole instance (web/checks/frame-identity.ts).
 //
 // Reads go through the InstanceLoader (`range`), so they share its queue and record cache with
-// any other read of the instance. After the first frame, the others are read in stored order at
-// Prefetch priority (dropped with the series' other prefetch when the viewer leaves it); a frame
-// asked for meanwhile goes ahead of them.
+// any other read of the instance. After the first frame, the others are read at Prefetch priority
+// (dropped with the series' other prefetch when the viewer leaves it), nearest the frame asked for
+// last first.
 import { headerEnd } from "../../viewer-kit/src/header-end";
 import type { DecodedImage, DecoderPool } from "../../viewer-kit/src/index";
 import type { SeriesEntry } from "./bundle";
@@ -24,10 +23,8 @@ import { RecordAuthenticationError } from "./decrypt";
 import { FetchPriority, type InstanceLoader } from "./loader";
 import { planBytes, RECORD_PLAINTEXT } from "./range";
 import { FrameLocator, type ByteSource, type ReadOptions } from "./wsi-source";
-import { frameTableFromHeader, parseSlideHeader, type SlideHeader } from "./wsi";
+import { parseSlideHeader, type SlideHeader } from "./wsi";
 
-const UNDEF = 0xffffffff;
-const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
 
 /**
  * SOP classes whose instances are often multi-frame: worth reading a frame at a time. Single-frame
@@ -107,165 +104,6 @@ export class LoaderBytes implements ByteSource {
   }
 }
 
-// ------------------------------------------------------------------------------- one-frame files
-
-/** One top-level element of a header: [start, end) with its value at vo (len UNDEF: undefined). */
-interface El {
-  tag: number;
-  start: number;
-  vo: number;
-  len: number;
-  end: number;
-}
-
-/**
- * The header of a one-frame file for frame k: the instance's header (bytes before Pixel Data)
- * with Number of Frames 1, only item k of the Per-Frame Functional Groups Sequence, and no
- * Extended Offset Table. Null for a header this cannot rewrite (big endian, deflated).
- */
-export function frameHeader(header: Uint8Array, k: number): { bytes: Uint8Array; explicit: boolean } | null {
-  const dv = new DataView(header.buffer, header.byteOffset, header.byteLength);
-  const n = header.byteLength;
-  if (n < 132 || dv.getUint32(128) !== 0x4449434d) return null;
-  let p = 132;
-  let ts = "";
-  while (p + 8 <= n && dv.getUint16(p, true) === 0x0002) {
-    const vr = String.fromCharCode(header[p + 4], header[p + 5]);
-    const long = LONG_VR.has(vr);
-    const len = long ? dv.getUint32(p + 8, true) : dv.getUint16(p + 6, true);
-    const vo = p + (long ? 12 : 8);
-    if (dv.getUint16(p + 2, true) === 0x0010) ts = String.fromCharCode(...header.subarray(vo, vo + len)).replace(/[\0 ]+$/, "");
-    p = vo + len;
-  }
-  if (ts === "1.2.840.10008.1.2.1.99" || ts === "1.2.840.10008.1.2.2" || !ts) return null;
-  const explicit = ts !== "1.2.840.10008.1.2";
-
-  const readEl = (q: number): El | null => {
-    if (q + 8 > n) return null;
-    const tag = ((dv.getUint16(q, true) << 16) | dv.getUint16(q + 2, true)) >>> 0;
-    let len: number, vo: number;
-    const vr = String.fromCharCode(header[q + 4], header[q + 5]);
-    if (tag >>> 16 !== 0xfffe && explicit && /^[A-Z]{2}$/.test(vr)) {
-      if (LONG_VR.has(vr)) {
-        if (q + 12 > n) return null;
-        len = dv.getUint32(q + 8, true);
-        vo = q + 12;
-      } else {
-        len = dv.getUint16(q + 6, true);
-        vo = q + 8;
-      }
-    } else {
-      len = dv.getUint32(q + 4, true);
-      vo = q + 8;
-    }
-    const end = len === UNDEF ? skipUndefined(vo) : vo + len;
-    return end < 0 || end > n ? null : { tag, start: q, vo, len, end };
-  };
-  /** Position after the delimiter closing an undefined-length value at q, or -1. */
-  const skipUndefined = (q: number): number => {
-    while (q + 8 <= n) {
-      if (dv.getUint16(q, true) === 0xfffe) {
-        const e = dv.getUint16(q + 2, true), len = dv.getUint32(q + 4, true);
-        if (e === 0xe0dd || e === 0xe00d) return q + 8;
-        const end = len === UNDEF ? skipUndefined(q + 8) : q + 8 + len;
-        if (end < 0) return -1;
-        q = end;
-        continue;
-      }
-      const el = readEl(q);
-      if (!el) return -1;
-      q = el.end;
-    }
-    return -1;
-  };
-
-  const parts: Uint8Array[] = [header.subarray(0, p)];
-  let frames = false;
-  while (p < n) {
-    const el = readEl(p);
-    if (!el) return null;
-    if (el.tag === 0x00280008) {
-      // Number of Frames (IS): "1" padded to the value's length.
-      const v = header.slice(el.start, el.end);
-      const off = el.vo - el.start;
-      v.fill(0x20, off);
-      v[off] = 0x31;
-      parts.push(v);
-      frames = true;
-    } else if (el.tag === 0x52009230) {
-      // Per-Frame Functional Groups: item k only.
-      const items: [number, number][] = [];
-      let q = el.vo;
-      const stop = el.len === UNDEF ? el.end - 8 : el.end;
-      while (q < stop) {
-        if (dv.getUint16(q, true) !== 0xfffe || dv.getUint16(q + 2, true) !== 0xe000) return null;
-        const len = dv.getUint32(q + 4, true);
-        const end = len === UNDEF ? skipUndefined(q + 8) : q + 8 + len;
-        if (end < 0 || end > stop) return null;
-        items.push([q, end]);
-        q = end;
-      }
-      const item = items[k];
-      if (!item) return null;
-      const head = header.slice(el.start, el.vo);
-      const hv = new DataView(head.buffer);
-      hv.setUint32(head.byteLength - 4, el.len === UNDEF ? UNDEF : item[1] - item[0], true);
-      parts.push(head, header.subarray(item[0], item[1]));
-      if (el.len === UNDEF) parts.push(new Uint8Array([0xfe, 0xff, 0xdd, 0xe0, 0, 0, 0, 0]));
-    } else if (el.tag === 0x7fe00001 || el.tag === 0x7fe00002) {
-      // Extended Offset Table (Lengths): they describe every frame; the file holds one.
-    } else {
-      parts.push(header.subarray(el.start, el.end));
-    }
-    p = el.end;
-  }
-  if (!frames) return null;
-  return { bytes: concat(parts), explicit };
-}
-
-function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(parts.reduce((a, x) => a + x.byteLength, 0));
-  let o = 0;
-  for (const x of parts) {
-    out.set(x, o);
-    o += x.byteLength;
-  }
-  return out;
-}
-
-/**
- * A one-frame Part 10 file: `head` from frameHeader, then Pixel Data holding `frame` (the
- * frame's fragment items, or its native bytes; a 1-bit frame starting at bit `bitShift`).
- * `pixelElement` is the instance's own Pixel Data element header (its VR is kept).
- */
-export function frameFile(head: { bytes: Uint8Array; explicit: boolean }, pixelElement: Uint8Array, h: SlideHeader, frame: Uint8Array, bitShift = 0): Uint8Array<ArrayBuffer> {
-  const el = pixelElement.slice();
-  const ev = new DataView(el.buffer);
-  const lenAt = el.byteLength - 4;
-  if (h.encapsulated) {
-    ev.setUint32(lenAt, UNDEF, true);
-    // The frame's bytes are items: keep whole items only.
-    const fv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-    let used = 0;
-    while (used + 8 <= frame.byteLength && fv.getUint16(used, true) === 0xfffe && fv.getUint16(used + 2, true) === 0xe000) {
-      const len = fv.getUint32(used + 4, true);
-      if (len === UNDEF || used + 8 + len > frame.byteLength) break;
-      used += 8 + len;
-    }
-    return concat([head.bytes, el, new Uint8Array([0xfe, 0xff, 0x00, 0xe0, 0, 0, 0, 0]), frame.subarray(0, used), new Uint8Array([0xfe, 0xff, 0xdd, 0xe0, 0, 0, 0, 0])]);
-  }
-  let data = frame;
-  if (h.bitsAllocated === 1) {
-    // Frames of 1-bit data are packed back to back: re-align this one to its first byte.
-    const out = new Uint8Array(Math.ceil((h.rows * h.columns * h.samplesPerPixel) / 8));
-    for (let i = 0; i < out.length; i++) out[i] = ((frame[i] >> bitShift) | ((frame[i + 1] ?? 0) << (8 - bitShift))) & 0xff;
-    data = out;
-  }
-  const pad = data.byteLength % 2 ? new Uint8Array(1) : new Uint8Array(0);
-  ev.setUint32(lenAt, data.byteLength + pad.byteLength, true);
-  return concat([head.bytes, el, data, pad]);
-}
-
 // ------------------------------------------------------------------------------------- the stream
 
 export interface FrameReadOptions {
@@ -325,7 +163,6 @@ export class FrameStream {
     /** The instance's bytes before Pixel Data. */
     readonly header: Uint8Array,
     readonly h: SlideHeader,
-    private pixelElement: Uint8Array,
   ) {
     this.ready = new Uint8Array(h.numberOfFrames);
     this.complete = new Promise((res, rej) => ((this.resolveComplete = res), (this.rejectComplete = rej)));
@@ -369,10 +206,8 @@ export class FrameStream {
     // JPEG 2000 Part 2: the frames of a volume may be components of one codestream.
     if (h.transferSyntax === "1.2.840.10008.1.2.4.92" || h.transferSyntax === "1.2.840.10008.1.2.4.93") return null;
     const header = bytes.slice(0, end);
-    const head0 = frameHeader(header, 0);
-    if (!head0) return null;
-    locator.headers[i] = h;
-    locator.tables[i] = frameTableFromHeader(h, inst.length);
+    locator.takeHeader(i, bytes);
+    if (!locator.frameFiles(i)) return null;
     if (!h.encapsulated && h.photometric.startsWith("YBR") && h.photometric.endsWith("_422")) {
       // Native YBR_FULL_422 stores two samples per pixel, not three.
       const fb = (h.rows * h.columns * 2 * h.bitsAllocated) / 8;
@@ -381,7 +216,7 @@ export class FrameStream {
       locator.tables[i] = { source: "native", range: (k) => (k < h.numberOfFrames ? [base + k * fb, base + (k + 1) * fb] : null) };
     }
     if (!locator.tables[i] && !h.encapsulated) return null;
-    return new FrameStream(pool, locator, series, i, header, h, bytes.slice(end, h.pixelDataValueOffset));
+    return new FrameStream(pool, locator, series, i, header, h);
   }
 
   /** True when the stream gave up (a frame failed to read or decode): read the instance whole. */
@@ -505,10 +340,8 @@ export class FrameStream {
     const bytes = await this.locator.frameBytes(this.instance, k, { priority: job.priority, purpose: "image" });
     if (this.ready[k]) return;
     if (!bytes) throw new Error(`frame ${k + 1} of ${this.frames} was not found in the Pixel Data`);
-    const head = frameHeader(this.header, k);
-    if (!head) throw new Error("the header could not be read frame by frame");
-    const shift = this.locator.tables[this.instance]?.bitShift?.(k) ?? 0;
-    const file = frameFile(head, this.pixelElement, this.h, bytes, shift);
+    const file = this.locator.frameFile(this.instance, k, bytes);
+    if (!file) throw new Error(`frame ${k + 1} of ${this.frames} could not be made into a one-frame file`);
     const img = await this.pool.decode(file, { priority: job.priority, key: `${this.series.id}/${this.instance}#${k}` });
     if (!this.ready[k]) this.fill(k, img);
   }

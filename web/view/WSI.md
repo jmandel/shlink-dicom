@@ -59,7 +59,7 @@ A fragment starts a new frame when it begins with a codestream start marker: SOI
 
 Decryption is the core's `WebCryptoDecryptor`. Adjacent tiles of a row are adjacent in the file, so one record usually serves several tiles.
 
-**Decode.** For each tile, `singleFrameFile` builds a minimal Part 10 file of about 300 bytes. It holds the pixel attributes, Number of Frames 1 and the frame's own fragment items. The file goes to `pool.decode` in the viewer-kit workers.
+**Decode.** For each tile, `FrameLocator.frameFile` (`web/core/frame-file.ts`) builds a one-frame Part 10 file from the instance's own header: Number of Frames 1, the tile's item of the Per-Frame Functional Groups, no ICC profiles (the decoder does not read them), and the frame's own fragment items. The file goes to `pool.decode` in the viewer-kit workers.
 
 The pool's `decodeFrames` was not used, because for a single frame it adds a probe round trip and then calls `decode` anyway. No addition to viewer-kit was needed.
 

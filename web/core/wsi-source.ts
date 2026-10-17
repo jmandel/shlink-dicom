@@ -17,13 +17,13 @@ import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
 import { planBytes, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "./range";
 import type { LinkResolver } from "./resolver";
+import { FrameFiles } from "./frame-file";
 import type { RecordState } from "./loader";
 import {
   buildPyramid,
   FragmentWalker,
   frameTableFromHeader,
   parseSlideHeader,
-  singleFrameFile,
   type FrameTable,
   type Pyramid,
   type SlideHeader,
@@ -346,6 +346,9 @@ export class FrameLocator {
   /** Called when walking makes progress. */
   onWalk: ((w: WalkState) => void) | null = null;
   private walkers = new Map<number, Walker>();
+  /** Per instance, once its header is complete: its bytes before Pixel Data and the Pixel Data element header. */
+  private headerBytes: ({ header: Uint8Array; pixelElement: Uint8Array } | null)[] = [];
+  private files = new Map<number, FrameFiles | null>();
 
   constructor(
     readonly series: SeriesEntry,
@@ -375,10 +378,7 @@ export class FrameLocator {
     const inst = this.series.instances[i];
     const sig = { priority, signal: this.signal, purpose: "header" as const };
     for (;;) {
-      const bytes = await this.bytes.read(inst.offset, inst.offset + n, sig);
-      const h = parseSlideHeader(bytes, { partial: true });
-      this.headers[i] = h;
-      this.tables[i] = h.complete ? frameTableFromHeader(h, inst.length) : null;
+      const h = this.takeHeader(i, await this.bytes.read(inst.offset, inst.offset + n, sig));
       if (h.complete) return 0;
       // Label, overview and thumbnail images are read whole when shown, so their attributes are
       // enough here; Pixel Data's position is not needed.
@@ -390,6 +390,38 @@ export class FrameLocator {
       n = Math.min(inst.length, (Math.floor(want / RECORD_PLAINTEXT) + 1) * RECORD_PLAINTEXT - inst.offset);
       if (once) return n;
     }
+  }
+
+  /**
+   * Parses instance i's first bytes (a header read) and keeps what it learns: the header, the
+   * frame table, and, when the header is complete, its bytes for one-frame files.
+   */
+  takeHeader(i: number, bytes: Uint8Array): SlideHeader {
+    const h = parseSlideHeader(bytes, { partial: true });
+    this.headers[i] = h;
+    this.tables[i] = h.complete ? frameTableFromHeader(h, this.series.instances[i].length) : null;
+    this.files.delete(i);
+    if (h.complete) {
+      const start = h.pixelDataValueOffset - (h.transferSyntax === "1.2.840.10008.1.2" ? 8 : 12);
+      this.headerBytes[i] = { header: bytes.slice(0, start), pixelElement: bytes.slice(start, h.pixelDataValueOffset) };
+    } else this.headerBytes[i] = null;
+    return h;
+  }
+
+  /** The one-frame files of an instance (frame-file.ts), or null when its header can't make them. */
+  frameFiles(instance: number): FrameFiles | null {
+    let ff = this.files.get(instance);
+    if (ff === undefined) {
+      const hb = this.headerBytes[instance];
+      ff = hb ? FrameFiles.of(hb.header, hb.pixelElement, this.headers[instance]!) : null;
+      this.files.set(instance, ff);
+    }
+    return ff;
+  }
+
+  /** A one-frame Part 10 file holding `frame`, the bytes of frame k of an instance. */
+  frameFile(instance: number, k: number, frame: Uint8Array): Uint8Array<ArrayBuffer> | null {
+    return this.frameFiles(instance)?.file(k, frame, this.tables[instance]?.bitShift?.(k) ?? 0) ?? null;
   }
 
   walkState(instance: number): WalkState {
@@ -710,9 +742,7 @@ export class SlideSource extends FrameLocator {
     const ref = this.pyramid.levels[level].frameRef(tx, ty, plane, path);
     if (!ref) return null;
     const bytes = await this.frameBytes(ref.instance, ref.frame, o);
-    if (!bytes) return null;
-    const shift = this.tables[ref.instance]?.bitShift?.(ref.frame) ?? 0;
-    return singleFrameFile(this.headers[ref.instance]!, bytes, shift);
+    return bytes && this.frameFile(ref.instance, ref.frame, bytes);
   }
 
   /**
