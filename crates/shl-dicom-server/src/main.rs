@@ -114,6 +114,12 @@ enum Commands {
         /// Extended Offset Table past 4 GiB). Fragment bytes are unchanged.
         #[arg(long)]
         add_offset_tables: bool,
+        /// Pack with given keys instead of random ones, so the same input gives the same files: a
+        /// JSON file {"shlKey", "bundleIv", "lastUpdated", "studies": {"<StudyInstanceUID>":
+        /// {"fileId", "key"}}}. Every study packed must be listed, and every listed study packed.
+        /// Never give a file id and key to different content (spec/README.md §13).
+        #[arg(long)]
+        keys: Option<PathBuf>,
     },
     /// Re-encode the uncompressed images in DICOM files and .tgz archives without loss, as the seed
     /// and the Share page do (JPEG Lossless SV1, checked bit for bit), writing every file (re-encoded
@@ -182,8 +188,9 @@ async fn main() {
             base_url,
             label,
             add_offset_tables,
+            keys,
         } => {
-            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref(), add_offset_tables) {
+            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref(), add_offset_tables, keys.as_deref()) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }

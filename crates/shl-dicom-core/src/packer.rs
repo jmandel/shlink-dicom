@@ -44,9 +44,17 @@ pub struct LinkBundleOutput {
     pub allowed_files: Vec<String>,
 }
 
+/// A study's file id (base64url, 16 bytes) and key, given instead of drawn at random.
+#[derive(Debug, Clone)]
+pub struct StudyFile {
+    pub file_id: String,
+    pub key: [u8; 32],
+}
+
 pub struct IngestSession {
     instances: Vec<ParsedDicomInstance>,
     add_offset_tables: bool,
+    study_files: Option<BTreeMap<String, StudyFile>>,
 }
 
 impl Default for IngestSession {
@@ -60,7 +68,16 @@ impl IngestSession {
         Self {
             instances: Vec::new(),
             add_offset_tables: false,
+            study_files: None,
         }
+    }
+
+    /// Uses these file ids and keys, by Study Instance UID, instead of random ones, so packing the
+    /// same instances again gives the same files byte for byte (a link whose files must not change
+    /// between builds). `pack` fails for a study without an entry. The caller must never give an
+    /// id and key to different content (spec/README.md §13, nonce safety).
+    pub fn set_study_files(&mut self, files: BTreeMap<String, StudyFile>) {
+        self.study_files = Some(files);
     }
 
     /// When on, `pack` gives each encapsulated multi-frame instance that has an empty Basic Offset
@@ -115,6 +132,7 @@ impl IngestSession {
             return Err(Error::Dicom("no DICOM instances ingested".into()));
         }
 
+        let study_files = self.study_files;
         let mut patient_name = None;
         let mut patient_id = None;
         let mut patient_birth_date = None;
@@ -222,8 +240,15 @@ impl IngestSession {
                 })
                 .collect();
             let total_pt_len: usize = parts.iter().map(|p| p.len()).sum();
-            let file_id = b64url_encode(&random_bytes::<16>()?);
-            let key = random_bytes::<32>()?;
+            let (file_id, key) = match &study_files {
+                Some(given) => {
+                    let f = given
+                        .get(&study_uid)
+                        .ok_or_else(|| Error::Dicom(format!("no file id and key given for study {study_uid}")))?;
+                    (f.file_id.clone(), f.key)
+                }
+                None => (b64url_encode(&random_bytes::<16>()?), random_bytes::<32>()?),
+            };
             let key_b64 = b64url_encode(&key);
             let mut ciphertext = Vec::with_capacity(ciphertext_length(total_pt_len as u64) as usize);
             encrypt_file_stream(SliceChain { parts, at: 0 }, &mut ciphertext, &key)?;

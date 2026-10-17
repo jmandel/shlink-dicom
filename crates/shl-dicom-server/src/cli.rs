@@ -2,12 +2,45 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use shl_dicom_core::{
     bundle::parse_study_index,
-    crypto::{decrypt_range, random_bytes},
-    jwe::decrypt_bundle_jwe,
-    packer::{build_link_bundle, IngestSession},
+    crypto::{b64url_decode, decode_key_32, decrypt_range, random_bytes},
+    jwe::{decrypt_bundle_jwe, encrypt_bundle_jwe_with_iv},
+    packer::{build_link_bundle, IngestSession, StudyFile},
     range::ciphertext_range,
     shl::{compute_shl_flag, decode_shlink_uri, encode_shlink_uri, ShlPayload},
 };
+
+/// `pack --keys`: the link key, the Bundle's IV and lastUpdated, and each study's file id and key.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PackKeys {
+    shl_key: String,
+    bundle_iv: String,
+    last_updated: String,
+    studies: std::collections::BTreeMap<String, PackKeyFile>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PackKeyFile {
+    file_id: String,
+    key: String,
+}
+
+fn read_pack_keys(path: &Path) -> Result<PackKeys, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {:?}: {e}", path))?;
+    let keys: PackKeys = serde_json::from_str(&text).map_err(|e| format!("{:?}: {e}", path))?;
+    for (uid, f) in &keys.studies {
+        if f.file_id.len() != 22 || b64url_decode(&f.file_id).ok().map(|b| b.len()) != Some(16) {
+            return Err(format!("study {uid}: fileId must be 16 bytes, base64url without padding"));
+        }
+        decode_key_32(&f.key).map_err(|e| format!("study {uid}: key: {e}"))?;
+    }
+    decode_key_32(&keys.shl_key).map_err(|e| format!("shlKey: {e}"))?;
+    if b64url_decode(&keys.bundle_iv).ok().map(|b| b.len()) != Some(12) {
+        return Err("bundleIv must be 12 bytes, base64url without padding".into());
+    }
+    Ok(keys)
+}
 
 pub fn run_pack_cli(
     inputs: &[PathBuf],
@@ -15,16 +48,34 @@ pub fn run_pack_cli(
     base_url: Option<&str>,
     label: Option<&str>,
     add_offset_tables: bool,
+    keys_path: Option<&Path>,
 ) -> Result<(), String> {
+    let keys = keys_path.map(read_pack_keys).transpose()?;
     let mut session = IngestSession::new();
     for path in inputs {
         ingest_path(&mut session, path)?;
     }
     let missing = session.instances_missing_offset_tables();
     session.set_add_offset_tables(add_offset_tables);
+    if let Some(k) = &keys {
+        let mut files = std::collections::BTreeMap::new();
+        for (uid, f) in &k.studies {
+            files.insert(uid.clone(), StudyFile { file_id: f.file_id.clone(), key: decode_key_32(&f.key).map_err(|e| e.to_string())? });
+        }
+        session.set_study_files(files);
+    }
 
-    let now_iso = Utc::now().to_rfc3339();
-    let packed = session.pack(&now_iso).map_err(|e| e.to_string())?;
+    let now_iso = keys.as_ref().map(|k| k.last_updated.clone()).unwrap_or_else(|| Utc::now().to_rfc3339());
+    let mut packed = session.pack(&now_iso).map_err(|e| e.to_string())?;
+    if let Some(k) = &keys {
+        packed.owner_bundle_json = stable_full_urls(&packed.owner_bundle_json)?;
+        let packed_uids: std::collections::BTreeSet<&String> = packed.files.iter().map(|f| &f.study_uid).collect();
+        for uid in k.studies.keys() {
+            if !packed_uids.contains(uid) {
+                return Err(format!("--keys lists study {uid}, which is not in the input"));
+            }
+        }
+    }
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("create {:?}: {e}", out_dir))?;
     for sf in &packed.files {
@@ -33,9 +84,18 @@ pub fn run_pack_cli(
             .map_err(|e| format!("write {:?}: {e}", bin_path))?;
     }
 
-    let shl_key = random_bytes::<32>().map_err(|e| e.to_string())?;
-    let link_out =
+    let shl_key = match &keys {
+        Some(k) => decode_key_32(&k.shl_key).map_err(|e| e.to_string())?,
+        None => random_bytes::<32>().map_err(|e| e.to_string())?,
+    };
+    let mut link_out =
         build_link_bundle(&packed.owner_bundle_json, &[], &shl_key, &now_iso).map_err(|e| e.to_string())?;
+    if let Some(k) = &keys {
+        // The same Bundle under the same key and IV gives the same bundle.jwe. The caller checks
+        // the Bundle is unchanged before publishing (a different Bundle needs a new IV).
+        let iv: [u8; 12] = b64url_decode(&k.bundle_iv).map_err(|e| e.to_string())?.try_into().map_err(|_| "bundleIv")?;
+        link_out.bundle_jwe = encrypt_bundle_jwe_with_iv(link_out.bundle_json.as_bytes(), &shl_key, &iv).map_err(|e| e.to_string())?;
+    }
 
     let jwe_path = out_dir.join("bundle.jwe");
     std::fs::write(&jwe_path, &link_out.bundle_jwe)
@@ -83,6 +143,23 @@ pub fn run_pack_cli(
     }
     println!("\nSHL URI:\n{shlink}");
     Ok(())
+}
+
+/// Replaces each entry's random `urn:uuid:` fullUrl with one derived from its resource type and id,
+/// so packing the same input gives the same Bundle.
+fn stable_full_urls(bundle_json: &str) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut b: serde_json::Value = serde_json::from_str(bundle_json).map_err(|e| e.to_string())?;
+    for entry in b["entry"].as_array_mut().into_iter().flatten() {
+        let r = &entry["resource"];
+        let name = format!("{}/{}", r["resourceType"].as_str().unwrap_or(""), r["id"].as_str().unwrap_or(""));
+        let mut h: [u8; 16] = Sha256::digest(format!("shlink-dicom fullUrl {name}").as_bytes())[..16].try_into().unwrap();
+        h[6] = (h[6] & 0x0f) | 0x50; // version 5 layout (name-based, SHA)
+        h[8] = (h[8] & 0x3f) | 0x80;
+        let x: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        entry["fullUrl"] = serde_json::json!(format!("urn:uuid:{}-{}-{}-{}-{}", &x[0..8], &x[8..12], &x[12..16], &x[16..20], &x[20..32]));
+    }
+    serde_json::to_string(&b).map_err(|e| e.to_string())
 }
 
 fn ingest_path(session: &mut IngestSession, path: &Path) -> Result<(), String> {

@@ -2519,14 +2519,15 @@ function wireStatic() {
     location.hash = link;
   });
   $<HTMLInputElement>("input-link").addEventListener("input", () => $<HTMLInputElement>("input-link").setCustomValidity(""));
-  // The current sample (its link changes when the server re-seeds it).
+  // The current sample (its link changes when the server re-seeds it), or the site's fixed one (config.json).
   $("btn-sample").addEventListener("click", async () => {
     const btn = $<HTMLButtonElement>("btn-sample");
     btn.disabled = true;
     try {
-      const pub = (await fetchSampleLinks(await loadConfig())).find((s) => !s.passcodeHint && s.shlink);
-      if (!pub) throw new Error("no sample");
-      location.hash = pub.shlink;
+      const cfg = await loadConfig();
+      const link = cfg.sampleLink ?? (await fetchSampleLinks(cfg)).find((s) => !s.passcodeHint && s.shlink)?.shlink;
+      if (!link) throw new Error("no sample");
+      location.hash = link;
     } catch {
       btn.disabled = false;
       btn.textContent = "The sample isn't available right now";

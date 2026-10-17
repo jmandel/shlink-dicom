@@ -2,7 +2,7 @@
 //
 // Sources, later wins:
 //   1. defaults, which work when the Rust server serves the site (API on the same origin);
-//   2. `config.json` at the site root (optional; a static deployment writes it);
+//   2. `config.json` at the site root (optional; a static deployment writes it, as pages/build.ts does);
 //   3. URL query: `?api=https://host`.
 
 export interface SiteConfig {
@@ -10,6 +10,9 @@ export interface SiteConfig {
   apiBase: string;
   /** Viewer prefix put in front of `#shlink:/…` when this site builds a link. */
   viewerPrefix: string;
+  /** The sample link the viewer offers, for a site without the API (`shlink:/…`). Unset: the
+   *  server's public sample, from GET /api/demo-shares. */
+  sampleLink?: string;
 }
 
 /** Site root, derived from where the bundles are served (`<root>/assets/*.js`). */
@@ -52,6 +55,7 @@ export function loadConfig(): Promise<SiteConfig> {
         const j = await res.json();
         if (typeof j.apiBase === "string" && j.apiBase) cfg.apiBase = j.apiBase;
         if (typeof j.viewerPrefix === "string" && j.viewerPrefix) cfg.viewerPrefix = j.viewerPrefix;
+        if (typeof j.sampleLink === "string" && j.sampleLink.startsWith("shlink:/")) cfg.sampleLink = j.sampleLink;
       }
     } catch {}
     const q = new URLSearchParams(globalThis.location?.search ?? "");
