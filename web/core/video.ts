@@ -281,6 +281,9 @@ export async function* videoPayload(
   let first = true;
   try {
     for (;;) {
+      // The data may end at an item boundary without the sequence delimiter (as parse.rs, dicom.ts
+      // and wsi.ts read it): that is the end. A cut inside an item header or value is an error.
+      if (!buf.length && !(await more())) return;
       await ensure(8);
       const dv = new DataView(buf.buffer, buf.byteOffset, 8);
       const item = ((dv.getUint16(0, true) << 16) | dv.getUint16(2, true)) >>> 0;
