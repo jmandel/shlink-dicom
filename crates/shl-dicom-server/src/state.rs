@@ -950,6 +950,7 @@ impl AppState {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one per column of the row
 pub fn build_link_resource_from_row(
     conn: &Connection,
     origin: &str,

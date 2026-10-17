@@ -29,6 +29,7 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     auth.strip_prefix("Bearer ").map(str::trim)
 }
 
+#[allow(clippy::result_large_err)] // the Err is the response to send
 fn require_auth(state: &AppState, sid: &str, headers: &HeaderMap) -> Result<(), Response> {
     if !is_valid_id22(sid) || !state.catalog_has_share(sid) {
         return Err((StatusCode::NOT_FOUND, Json(json!({ "error": "share not found" }))).into_response());
@@ -494,7 +495,7 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
         return Append::Fail(json_err(StatusCode::CONFLICT, "that part of the upload has already been stored"));
     };
     let _ = tokio::fs::create_dir_all(state.staging_dir(sid)).await;
-    let Ok(mut file) = tokio::fs::OpenOptions::new().create(true).write(true).open(&part).await else {
+    let Ok(mut file) = tokio::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&part).await else {
         return Append::Fail(json_err(StatusCode::INTERNAL_SERVER_ERROR, "could not open the upload file"));
     };
     if file.set_len(local).await.is_err() || tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(local)).await.is_err() {
@@ -561,8 +562,10 @@ fn share_bytes_in_use(state: &AppState, sid: &str, except: &str) -> u64 {
     files as u64 + known as u64 + arrived
 }
 
-/// An upload's storage key, its multipart id, and the parts sent so far, in order.
-fn upload_row(state: &AppState, sid: &str, file_id: &str) -> Option<(String, Option<String>, Vec<(u32, String)>)> {
+/// An upload's storage key, its multipart id, and the parts sent so far (number, ETag), in order.
+type UploadRow = (String, Option<String>, Vec<(u32, String)>);
+
+fn upload_row(state: &AppState, sid: &str, file_id: &str) -> Option<UploadRow> {
     let c = state.open_share_db(sid)?;
     let conn = c.lock().unwrap();
     let (key, id): (String, Option<String>) = conn

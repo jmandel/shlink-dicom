@@ -102,7 +102,9 @@ pub async fn post_shl_manifest(
             Err(_) => return not_found(),
         };
 
-        let row: Option<(bool, Option<i64>, bool, Option<Vec<u8>>, Option<Vec<u8>>, bool, Option<i64>)> = tx
+        // online, exp, long_lived, passcode_salt, passcode_hash, has bundle, bundle_updated_at
+        type LinkRow = (bool, Option<i64>, bool, Option<Vec<u8>>, Option<Vec<u8>>, bool, Option<i64>);
+        let row: Option<LinkRow> = tx
             .query_row(
                 "SELECT online != 0, exp, long_lived != 0, passcode_salt, passcode_hash,
                         bundle IS NOT NULL, bundle_updated_at
@@ -281,7 +283,9 @@ async fn serve_bundle(
         return not_found();
     };
     let now = now_unix();
-    let row: Option<(bool, Option<i64>, bool, Option<Vec<u8>>, Option<String>)> = {
+    // online, exp, has passcode, bundle, bundle_etag
+    type BundleRow = (bool, Option<i64>, bool, Option<Vec<u8>>, Option<String>);
+    let row: Option<BundleRow> = {
         let conn = conn_arc.lock().unwrap();
         conn.query_row(
             "SELECT online != 0, exp, passcode_hash IS NOT NULL, bundle, bundle_etag
