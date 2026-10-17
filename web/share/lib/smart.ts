@@ -13,8 +13,25 @@ export interface Discovery {
   imagingBase: string;
 }
 
+const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * `url` when it is https: (or http: on this machine, for local testing); otherwise an Error that
+ * names `what`. The portal's token goes to these addresses, so it never travels in the clear.
+ */
+export function secureUrl(url: unknown, what: string): string {
+  let u: URL;
+  try {
+    u = new URL(String(url));
+  } catch {
+    throw new Error(`The portal's ${what} is not a valid address.`);
+  }
+  if (u.protocol === "https:" || (u.protocol === "http:" && LOCAL.has(u.hostname))) return String(url);
+  throw new Error(`The portal's ${what} must use https (${u.protocol}//${u.host}).`);
+}
+
 export async function discover(clinicalBase: string): Promise<Discovery> {
-  const base = clinicalBase.trim().replace(/\/+$/, "");
+  const base = secureUrl(clinicalBase.trim(), "address").replace(/\/+$/, "");
   let res: Response;
   try {
     res = await fetch(`${base}/.well-known/smart-configuration`, { headers: { accept: "application/json" } });
@@ -29,6 +46,9 @@ export async function discover(clinicalBase: string): Promise<Discovery> {
   for (const ae of smart.associated_endpoints ?? []) if (!imagingBase && has(ae.capabilities)) imagingBase = String(ae.url).replace(/\/+$/, "");
   if (!imagingBase) throw new Error("This portal does not offer SMART Imaging Access.");
   if (!smart.code_challenge_methods_supported?.includes("S256")) throw new Error("This portal does not support PKCE (S256).");
+  secureUrl(imagingBase, "imaging server address");
+  secureUrl(smart.authorization_endpoint, "authorization endpoint");
+  secureUrl(smart.token_endpoint, "token endpoint");
   return { smart, clinicalBase: base, imagingBase };
 }
 

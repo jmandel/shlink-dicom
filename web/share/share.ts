@@ -29,6 +29,7 @@ import {
   ApiError, ShareApi, manageUrl, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor, type LinkResource,
 } from "./lib/api";
 import { callbackUrl, defaultPortal, finishPortalLaunch, loadFiles, loadLink, loadPortal, startPortalLaunch, type Progress } from "./lib/sources";
+import { secureUrl } from "./lib/smart";
 import type { Instance, SeriesModel } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, ICONS, expiryFieldset, expiryFrom, dateOnly, SERVER_MAX_DAYS } from "./lib/ui";
 
@@ -199,7 +200,17 @@ function startFiles(files: File[], handles: PickedHandles | null = null) {
 }
 
 // Portal
-$<HTMLInputElement>("in-portal").value = new URLSearchParams(location.search).get("portal") ?? defaultPortal();
+// A ?portal= address is offered only when it is one discovery would accept (https, or http on
+// this machine); the form's value goes through the same check when submitted.
+$<HTMLInputElement>("in-portal").value = (() => {
+  const asked = new URLSearchParams(location.search).get("portal");
+  if (asked) {
+    try {
+      return secureUrl(asked, "address");
+    } catch {}
+  }
+  return defaultPortal();
+})();
 $("portal-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("portal-error");
