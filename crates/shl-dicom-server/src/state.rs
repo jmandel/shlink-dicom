@@ -19,6 +19,9 @@ use tokio::sync::broadcast;
 pub struct Quotas {
     /// Total encrypted bytes one share may hold.
     pub share_bytes: Option<u64>,
+    /// Encrypted bytes all shares together may hold (each stored blob once, plus uploads in
+    /// progress at their declared length).
+    pub total_bytes: Option<u64>,
     /// Series files one share may hold.
     pub share_files: Option<usize>,
     /// Shares that may exist at once (not counting the server's own sample).
@@ -34,7 +37,7 @@ pub struct Quotas {
 
 impl Default for Quotas {
     fn default() -> Self {
-        Self { share_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS, upload_request_secs: DEFAULT_UPLOAD_REQUEST_SECS }
+        Self { share_bytes: None, total_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS, upload_request_secs: DEFAULT_UPLOAD_REQUEST_SECS }
     }
 }
 
@@ -288,6 +291,7 @@ impl AppState {
         state.run_sweep()?;
         state.sweep_orphan_files();
         state.sweep_stale_uploads();
+        state.fill_blob_sizes();
         Ok(state)
     }
 
@@ -386,12 +390,12 @@ impl AppState {
     }
 
     /// One more file row names this blob: a new blob (an upload, the seed).
-    pub fn blob_add(&self, key: &str) -> Result<(), String> {
+    pub fn blob_add(&self, key: &str, size: u64) -> Result<(), String> {
         let cat = self.catalog.lock().unwrap();
         cat.execute(
-            "INSERT INTO blobs (storage_key, ref_count) VALUES (?1, 1)
+            "INSERT INTO blobs (storage_key, ref_count, size) VALUES (?1, 1, ?2)
              ON CONFLICT(storage_key) DO UPDATE SET ref_count = ref_count + 1",
-            params![key],
+            params![key, size as i64],
         )
         .map(|_| ())
         .map_err(|e| format!("blob reference: {e}"))
@@ -424,6 +428,83 @@ impl AppState {
     pub fn trash_blob(&self, key: &str) {
         let cat = self.catalog.lock().unwrap();
         let _ = cat.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, NULL)", params![key]);
+    }
+
+    /// Bytes all shares hold or have promised: each stored blob once, and uploads in progress at
+    /// their declared length, apart from upload `except` (sid, file id).
+    pub fn total_bytes_in_use(&self, except: (&str, &str)) -> u64 {
+        let cat = self.catalog.lock().unwrap();
+        cat.query_row(
+            "SELECT (SELECT COALESCE(SUM(size), 0) FROM blobs)
+                  + (SELECT COALESCE(SUM(bytes), 0) FROM reserved WHERE NOT (sid = ?1 AND file_id = ?2))",
+            params![except.0, except.1],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n.max(0) as u64)
+        .unwrap_or(0)
+    }
+
+    /// Records an upload of `bytes` (0: not known yet) toward the server-wide limit, if it fits:
+    /// counted and recorded in one transaction, so uploads started at once can't each see room.
+    /// False when it doesn't fit.
+    pub fn reserve(&self, sid: &str, file_id: &str, bytes: u64) -> Result<bool, String> {
+        let cat = self.catalog.lock().unwrap();
+        let tx = cat.unchecked_transaction().map_err(|e| e.to_string())?;
+        if let Some(max) = self.quotas.total_bytes {
+            let used: i64 = tx
+                .query_row(
+                    "SELECT (SELECT COALESCE(SUM(size), 0) FROM blobs)
+                          + (SELECT COALESCE(SUM(bytes), 0) FROM reserved WHERE NOT (sid = ?1 AND file_id = ?2))",
+                    params![sid, file_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let used = used.max(0) as u64;
+            if used.saturating_add(bytes) > max || (bytes == 0 && used >= max) {
+                return Ok(false);
+            }
+        }
+        tx.execute(
+            "INSERT INTO reserved (sid, file_id, bytes) VALUES (?1, ?2, ?3)
+             ON CONFLICT(sid, file_id) DO UPDATE SET bytes = ?3",
+            params![sid, file_id, bytes as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    /// The upload no longer counts (finished, dropped, or its share deleted).
+    pub fn unreserve(&self, sid: &str, file_id: Option<&str>) {
+        let cat = self.catalog.lock().unwrap();
+        let _ = match file_id {
+            Some(f) => cat.execute("DELETE FROM reserved WHERE sid = ?1 AND file_id = ?2", params![sid, f]),
+            None => cat.execute("DELETE FROM reserved WHERE sid = ?1", params![sid]),
+        };
+    }
+
+    /// Startup: blobs recorded before they had a size get it from a file row that names them.
+    fn fill_blob_sizes(&self) {
+        let sids: Vec<String> = {
+            let cat = self.catalog.lock().unwrap();
+            if cat.query_row("SELECT COUNT(*) FROM blobs WHERE size = 0", [], |r| r.get::<_, i64>(0)).unwrap_or(0) == 0 {
+                return;
+            }
+            cat.prepare("SELECT sid FROM shares")
+                .and_then(|mut st| st.query_map([], |r| r.get(0)).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default()
+        };
+        for sid in sids {
+            let Ok(conn) = open_existing(&self.share_db_path(&sid)) else { continue };
+            let rows: Vec<(String, i64)> = conn
+                .prepare("SELECT storage_key, size FROM files")
+                .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()))
+                .unwrap_or_default();
+            let cat = self.catalog.lock().unwrap();
+            for (key, size) in rows {
+                let _ = cat.execute("UPDATE blobs SET size = ?2 WHERE storage_key = ?1 AND size = 0", params![key, size]);
+            }
+        }
     }
 
     /// An unfinished multipart upload to drop.
@@ -579,6 +660,7 @@ impl AppState {
                     continue;
                 }
                 self.remove_staged(&sid, &fid);
+                self.unreserve(&sid, Some(&fid));
                 if let Some(id) = upload_id {
                     self.trash_upload(&key, &id);
                     trashed = true;
@@ -809,6 +891,7 @@ impl AppState {
     fn remove_share_files(&self, sid: &str) {
         // Its files' blobs lose a reference, and unfinished uploads are dropped. (The catalog row
         // may be gone already, so the database is opened directly.) It leaves the pool now.
+        self.unreserve(sid, None);
         let db = self.pool.lock().unwrap().remove(sid).or_else(|| {
             let path = self.share_db_path(sid);
             let conn = open_existing(&path).ok()?;
@@ -1183,8 +1266,11 @@ pub fn adopt_blob(state: &AppState, sid: &str, file_id: &str, key: &str, size: u
         return orphan("share not found".into());
     }
     match record_file(&conn, file_id, key, size) {
-        Ok(entry) => match state.blob_add(key) {
-            Ok(()) => Ok(entry),
+        Ok(entry) => match state.blob_add(key, size) {
+            Ok(()) => {
+                state.unreserve(sid, Some(file_id));
+                Ok(entry)
+            }
             Err(e) => {
                 let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
                 orphan(e)
@@ -1213,6 +1299,10 @@ fn open_existing(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {
+    // Catalogs made before blobs had a size (filled in at startup, fill_blob_sizes).
+    if conn.prepare("SELECT ref_count FROM blobs LIMIT 0").is_ok() && conn.prepare("SELECT size FROM blobs LIMIT 0").is_err() {
+        conn.execute_batch("ALTER TABLE blobs ADD COLUMN size INTEGER NOT NULL DEFAULT 0;")?;
+    }
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -1242,8 +1332,18 @@ fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {
          -- How many file rows (in any share) name each blob; a clone adds references, not bytes.
          CREATE TABLE IF NOT EXISTS blobs (
            storage_key  TEXT PRIMARY KEY,
-           ref_count    INTEGER NOT NULL
+           ref_count    INTEGER NOT NULL,
+           size         INTEGER NOT NULL DEFAULT 0
          );
+
+         -- Uploads in progress, at their declared length (0 until known), for the server-wide
+         -- byte limit.
+         CREATE TABLE IF NOT EXISTS reserved (
+           sid      TEXT NOT NULL,
+           file_id  TEXT NOT NULL,
+           bytes    INTEGER NOT NULL,
+           PRIMARY KEY (sid, file_id)
+         ) WITHOUT ROWID;
 
          -- Blobs no file names any more, and unfinished multipart uploads, to remove from the store.
          CREATE TABLE IF NOT EXISTS trash (

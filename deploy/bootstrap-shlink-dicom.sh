@@ -49,6 +49,8 @@ PORT="${PORT:-8000}"
 ORIGIN="${ORIGIN:-https://shlink-dicom.exe.xyz}"
 MAX_SHARE_BYTES="${MAX_SHARE_BYTES:-20G}"  # per share; the sample is not counted
 MAX_SHARES="${MAX_SHARES:-256}"         # shares at once
+# All shares together (MAX_TOTAL_BYTES): unless given, what the local store holds now plus 80% of
+# the free space on its disk, worked out below; no limit with an S3 store.
 ENV_FILE="${ENV_FILE:-/etc/shlink-dicom.env}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 # Bun, pinned, for this architecture (the same block as in deploy/bootstrap-sandbox.sh).
@@ -222,6 +224,16 @@ if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ] || [ ! -f "$DATA/se
   echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
 fi
 
+if [ -z "${MAX_TOTAL_BYTES:-}" ]; then
+  if printf '%s\n' "$(store_env)" | grep '^[[:space:]]*SHL_S3_BUCKET=' >/dev/null; then
+    MAX_TOTAL_BYTES=0
+  else
+    held=$($SUDO du -sb "$DATA/blobs" 2>/dev/null | cut -f1); held=${held:-0}
+    free=$(df -B1 --output=avail "$DATA" | tail -1 | tr -d ' ')
+    MAX_TOTAL_BYTES=$(( held + free / 10 * 8 ))
+  fi
+fi
+echo "server-wide byte limit: $MAX_TOTAL_BYTES (0: none)"
 $SUDO tee /etc/systemd/system/shlink-dicom.service >/dev/null <<EOF
 [Unit]
 Description=shlink-dicom server and web app
@@ -238,6 +250,7 @@ Environment=SHL_PUBLIC_ORIGIN=$ORIGIN
 # Upload limits (see shl-dicom-server serve --help). 0 means no limit.
 Environment=SHL_MAX_SHARE_BYTES=$MAX_SHARE_BYTES
 Environment=SHL_MAX_SHARES=$MAX_SHARES
+Environment=SHL_MAX_TOTAL_BYTES=$MAX_TOTAL_BYTES
 # The S3 store, when $ENV_FILE exists.
 EnvironmentFile=-$ENV_FILE
 ExecStart=$ROOT/current/bin/server serve

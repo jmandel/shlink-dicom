@@ -2230,7 +2230,7 @@ async fn test_a_blob_goes_only_when_its_count_reaches_0() {
     state.blob_release(&key).unwrap();
     state.empty_trash().await;
     assert!(blob_exists(&state, &key).await, "a blob with no row was trashed");
-    state.blob_add(&key).unwrap();
+    state.blob_add(&key, 5000).unwrap();
     assert!(state.blob_ref(&key).unwrap());
     state.blob_release(&key).unwrap();
     state.empty_trash().await;
@@ -2532,5 +2532,47 @@ async fn test_a_resumable_put_body_is_held_to_the_append_limit() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The server-wide byte limit counts every stored file once (a clone adds none) and uploads in
+/// progress at their declared length; past it an upload is 507.
+#[tokio::test]
+async fn test_the_server_wide_byte_limit() {
+    let dir = temp_data_dir("total_bytes");
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas { total_bytes: Some(10 << 20), ..Default::default() }, test_store(&dir)).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let share = || async {
+        let v: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+        (v["share"]["id"].as_str().unwrap().to_string(), v["controlToken"].as_str().unwrap().to_string())
+    };
+    let put = |sid: String, token: String, k: u8, n: usize| {
+        let c = client.clone();
+        let url = format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[k; 16]));
+        async move { c.put(url).bearer_auth(token).body(vec![k; n]).send().await.unwrap().status() }
+    };
+    let (a, at) = share().await;
+    let (b, bt) = share().await;
+    assert_eq!(put(a.clone(), at.clone(), 1, 6 << 20).await, StatusCode::OK);
+    assert_eq!(put(b.clone(), bt.clone(), 2, 6 << 20).await, StatusCode::INSUFFICIENT_STORAGE);
+    // A resumable upload's declared length counts while it is in progress.
+    let r = client
+        .put(format!("{base}/api/shares/{b}/files/{}.bin", b64url_encode(&[3u8; 16])))
+        .bearer_auth(&bt)
+        .header("Upload-Complete", "?0")
+        .header("Upload-Length", (3u64 << 20).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(put(b.clone(), bt.clone(), 4, 2 << 20).await, StatusCode::INSUFFICIENT_STORAGE);
+    // A clone adds no bytes.
+    assert_eq!(client.post(format!("{base}/api/shares/{a}/clone")).bearer_auth(&at).send().await.unwrap().status(), StatusCode::CREATED);
+    assert_eq!(put(b.clone(), bt.clone(), 5, 1 << 20).await, StatusCode::OK);
+    // Deleting a share frees its bytes and its uploads' promises.
+    client.delete(format!("{base}/api/shares/{b}")).bearer_auth(&bt).send().await.unwrap();
+    let (c, ct) = share().await;
+    assert_eq!(put(c, ct, 6, 4 << 20).await, StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
 }

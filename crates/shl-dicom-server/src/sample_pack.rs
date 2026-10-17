@@ -181,7 +181,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             // Into the blob store (local files, or S3 as a multipart upload streamed from disk).
             let storage = new_storage_key();
             store_sync(state, &storage, &part)?;
-            state.blob_add(&storage)?;
+            state.blob_add(&storage, size)?;
             record_file(&conn_arc.lock().unwrap(), &file_id, &storage, size)?;
             for m in series.iter().flat_map(|(_, m)| m.iter()) {
                 let _ = std::fs::remove_file(&m.path);

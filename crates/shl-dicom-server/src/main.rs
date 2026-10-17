@@ -167,6 +167,9 @@ enum Commands {
         /// Most encrypted bytes one share may hold (for example 20G); 0 for no limit
         #[arg(long, env = "SHL_MAX_SHARE_BYTES", default_value = "0", value_parser = parse_size)]
         max_share_bytes: u64,
+        /// Most encrypted bytes all shares together may hold (for example 400G); 0 for no limit
+        #[arg(long, env = "SHL_MAX_TOTAL_BYTES", default_value = "0", value_parser = parse_size)]
+        max_total_bytes: u64,
         /// Most encrypted files one share may hold; 0 for no limit
         #[arg(long, env = "SHL_MAX_SHARE_FILES", default_value_t = 0)]
         max_share_files: usize,
@@ -269,6 +272,7 @@ async fn main() {
             data_dir,
             public_origin,
             max_share_bytes,
+            max_total_bytes,
             max_share_files,
             max_shares,
             max_chunk_bytes,
@@ -277,6 +281,7 @@ async fn main() {
         } => {
             let quotas = Quotas {
                 share_bytes: (max_share_bytes > 0).then_some(max_share_bytes),
+                total_bytes: (max_total_bytes > 0).then_some(max_total_bytes),
                 share_files: (max_share_files > 0).then_some(max_share_files),
                 shares: (max_shares > 0).then_some(max_shares),
                 request_bytes: max_chunk_bytes,

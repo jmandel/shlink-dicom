@@ -282,6 +282,7 @@ Server settings, from `serve` (and `seed`) flags or the environment.
 | Setting | Environment | Default | Meaning |
 |---|---|---|---|
 | `--max-share-bytes` | `SHL_MAX_SHARE_BYTES` | 0 (no limit) | Encrypted bytes one share may hold, counting uploads in progress (for example `20G`) |
+| `--max-total-bytes` | `SHL_MAX_TOTAL_BYTES` | 0 (no limit) | Encrypted bytes all shares together may hold: each stored file once (a clone adds none), plus uploads in progress at their declared length. Over it, an upload is refused with `507` (`QUOTA_SERVER_FULL`) |
 | `--max-share-files` | `SHL_MAX_SHARE_FILES` | 0 (no limit) | Encrypted files one share may hold |
 | `--max-shares` | `SHL_MAX_SHARES` | 256 | Shares at once, not counting the sample; 0 for no limit |
 | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` | Largest append (`Upload-Limit: max-append-size`) |

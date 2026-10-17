@@ -509,6 +509,12 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
         (None, Some(cap)) => cap.saturating_sub(share_bytes_in_use(state, sid, file_id)),
         _ => u64::MAX,
     };
+    // And the server-wide limit, for a length not known yet.
+    let server_end = match (total, state.quotas.total_bytes) {
+        // (This upload's own bytes are its offset: counted by the comparison below.)
+        (None, Some(cap)) => cap.saturating_sub(state.total_bytes_in_use((sid, file_id))),
+        _ => u64::MAX,
+    };
     let part = state.part_path(sid, file_id);
     let flushed = flushed_bytes(state, sid, file_id);
     let Some(local) = start.checked_sub(flushed) else {
@@ -553,6 +559,11 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
             let _ = file.set_len(local).await;
             drain(&mut stream, state.quotas.request_bytes).await;
             return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", max_body.unwrap_or_default())));
+        }
+        if start + got + chunk.len() as u64 > server_end {
+            let _ = file.set_len(local).await;
+            drain(&mut stream, state.quotas.request_bytes).await;
+            return Append::Fail(json_err(StatusCode::INSUFFICIENT_STORAGE, "QUOTA_SERVER_FULL"));
         }
         if start + got + chunk.len() as u64 > quota_end {
             let _ = file.set_len(local).await;
@@ -728,12 +739,21 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: Option<
     } else {
         None
     };
+    // The server-wide limit (lock order: the share, then the catalog).
+    let (over, status) = match over {
+        Some(o) => (Some(o), StatusCode::PAYLOAD_TOO_LARGE),
+        None => match state.reserve(sid, file_id, total.unwrap_or(0)) {
+            Ok(true) => (None, StatusCode::OK),
+            Ok(false) => (Some("QUOTA_SERVER_FULL"), StatusCode::INSUFFICIENT_STORAGE),
+            Err(e) => return Err(json_err(StatusCode::INTERNAL_SERVER_ERROR, e)),
+        },
+    };
     if let Some(over) = over {
         if let Some(id) = &upload_id {
             state.trash_upload(&key, id);
             state.empty_trash_soon();
         }
-        return Err(json_err(StatusCode::PAYLOAD_TOO_LARGE, over));
+        return Err(json_err(status, over));
     }
     conn.execute(
         "INSERT INTO uploads (file_id, storage_key, size, s3_upload_id, flushed_bytes, started_at) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
@@ -748,6 +768,7 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: Option<
 /// Drops an upload in progress: its staged bytes, its row and parts, and its multipart upload.
 fn forget_upload(state: &AppState, sid: &str, file_id: &str) {
     state.remove_staged(sid, file_id);
+    state.unreserve(sid, Some(file_id));
     if let Some(c) = state.open_share_db(sid) {
         let conn = c.lock().unwrap();
         let row: Option<(String, Option<String>)> =
@@ -915,6 +936,11 @@ pub async fn patch_share_file(
             }
             if state.quotas.share_bytes.is_some_and(|m| share_bytes_in_use(&state, &sid, &file_id).saturating_add(l) > m) {
                 return json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED");
+            }
+            match state.reserve(&sid, &file_id, l) {
+                Ok(true) => {}
+                Ok(false) => return json_err(StatusCode::INSUFFICIENT_STORAGE, "QUOTA_SERVER_FULL"),
+                Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
             }
             set_upload_length(&state, &sid, &file_id, l);
             length = Some(l);
