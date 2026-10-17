@@ -65,9 +65,111 @@ fn has_part10_magic(bytes: &[u8]) -> bool {
     bytes.len() >= 132 && &bytes[128..132] == b"DICM"
 }
 
+/// Whether bytes without the Part 10 preamble start like a little endian data set: a first
+/// element in groups 0x0001–0x0010 (the file meta group 0x0002 in a file that lost its preamble,
+/// the identifying group 0x0008, or a low private group as some old files have).
 fn looks_like_bare_dicom(bytes: &[u8]) -> bool {
-    // Bare little-endian DICOM datasets begin with a group 0x0008 element (bytes 08 00 .. ..)
-    bytes.len() >= 64 && bytes[0] == 0x08 && bytes[1] == 0x00
+    bytes.len() >= 64 && (0x01..=0x10).contains(&bytes[0]) && bytes[1] == 0x00
+}
+
+/// A bare data set given the Part 10 preamble and file meta header (spec §11.1 step 3). The data
+/// set's own bytes follow unchanged. A file that starts with its file meta group (only the
+/// preamble missing) gets the preamble alone, or, when that meta can't be read (some are written
+/// in implicit VR), a new meta in place of it. A data set is read as explicit VR little endian when
+/// its first element has a VR, else implicit VR little endian, then the other.
+fn wrap_bare(raw: &[u8]) -> std::result::Result<(FileDicomObject<InMemDicomObject>, Vec<u8>), String> {
+    const EXPLICIT: &str = "1.2.840.10008.1.2.1";
+    const IMPLICIT: &str = "1.2.840.10008.1.2";
+    let part10 = |meta: &[u8], ds: &[u8]| {
+        let mut b = Vec::with_capacity(132 + meta.len() + ds.len());
+        b.extend_from_slice(&[0u8; 128]);
+        b.extend_from_slice(b"DICM");
+        b.extend_from_slice(meta);
+        b.extend_from_slice(ds);
+        b
+    };
+    let read = |b: &[u8]| {
+        OpenFileOptions::new()
+            .tranfer_syntax_index(Syntaxes)
+            .read_until(Tag(0x7FE0, 0x0000))
+            .from_reader(Cursor::new(b))
+            .map_err(|e| format!("unreadable DICOM data set: {e}"))
+    };
+    let meta = |ts: &str, class: &str, inst: &str| -> std::result::Result<Vec<u8>, String> {
+        let table = FileMetaTableBuilder::new()
+            .transfer_syntax(ts)
+            .media_storage_sop_class_uid(class)
+            .media_storage_sop_instance_uid(inst)
+            .build()
+            .map_err(|e| format!("cannot build a Part 10 header: {e}"))?;
+        let mut m = Vec::new();
+        table.write(&mut m).map_err(|e| format!("cannot write a Part 10 header: {e}"))?;
+        Ok(m)
+    };
+
+    let mut ds = raw;
+    let mut order = if raw[4].is_ascii_uppercase() && raw[5].is_ascii_uppercase() { [EXPLICIT, IMPLICIT] } else { [IMPLICIT, EXPLICIT] };
+    if raw[0] == 0x02 {
+        let b = part10(&[], raw);
+        let first_err = match read(&b) {
+            Ok(o) => return Ok((o, b)),
+            Err(e) => e,
+        };
+        // Step over the meta group, noting its transfer syntax.
+        let (end, ts) = skip_meta_group(raw).ok_or(first_err)?;
+        ds = &raw[end..];
+        if ds.len() < 8 {
+            return Err("no data set after the file meta".into());
+        }
+        let has_vr = ds[4].is_ascii_uppercase() && ds[5].is_ascii_uppercase();
+        order = match ts.as_deref() {
+            Some(IMPLICIT) => [IMPLICIT, EXPLICIT],
+            Some(EXPLICIT) => [EXPLICIT, IMPLICIT],
+            _ if has_vr => [EXPLICIT, IMPLICIT],
+            _ => [IMPLICIT, EXPLICIT],
+        };
+    }
+    let mut first_err = None;
+    for ts in order {
+        // Read once with a stand-in meta for the SOP UIDs, then write the real one.
+        let attempt = meta(ts, "1.2", "1.2").and_then(|m| read(&part10(&m, ds))).and_then(|o| {
+            let inst = get_uid_tag(&o, tags::SOP_INSTANCE_UID).ok_or("no SOP Instance UID")?;
+            let class = get_uid_tag(&o, tags::SOP_CLASS_UID).unwrap_or_else(|| "1.2.840.10008.5.1.4.1.1.7".to_string());
+            let b = part10(&meta(ts, &class, &inst)?, ds);
+            read(&b).map(|o| (o, b))
+        });
+        match attempt {
+            Ok(r) if get_uid_tag(&r.0, tags::STUDY_INSTANCE_UID).is_some() => return Ok(r),
+            Ok(_) => first_err = first_err.or(Some("no Study Instance UID".to_string())),
+            Err(e) => first_err = first_err.or(Some(e)),
+        }
+    }
+    Err(first_err.unwrap_or_default())
+}
+
+/// The end of a file meta group at the start of `b` (explicit or implicit VR elements), and its
+/// Transfer Syntax UID.
+fn skip_meta_group(b: &[u8]) -> Option<(usize, Option<String>)> {
+    let (mut p, mut ts) = (0usize, None);
+    while p + 8 <= b.len() && u16::from_le_bytes([b[p], b[p + 1]]) == 0x0002 {
+        let elem = u16::from_le_bytes([b[p + 2], b[p + 3]]);
+        let vr = &b[p + 4..p + 6];
+        let (len, at) = if vr.iter().all(u8::is_ascii_uppercase) {
+            if matches!(vr, b"OB" | b"OW" | b"OF" | b"SQ" | b"UT" | b"UN") {
+                (u32::from_le_bytes(b.get(p + 8..p + 12)?.try_into().ok()?) as usize, p + 12)
+            } else {
+                (u16::from_le_bytes([b[p + 6], b[p + 7]]) as usize, p + 8)
+            }
+        } else {
+            (u32::from_le_bytes(b[p + 4..p + 8].try_into().ok()?) as usize, p + 8)
+        };
+        let value = b.get(at..at.checked_add(len)?)?;
+        if elem == 0x0010 {
+            ts = Some(clean_uid(&String::from_utf8_lossy(value)));
+        }
+        p = at + len;
+    }
+    Some((p, ts))
 }
 
 /// Why a file's name says it is not a DICOM instance, if it does.
@@ -169,28 +271,8 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::
             .map_err(|e| format!("unreadable DICOM: {e}"))?;
         (obj, raw_bytes, false)
     } else if looks_like_bare_dicom(&raw_bytes) {
-        // Attempt to parse bare dataset and wrap in Part 10 preamble + file meta header.
-        let full_obj: FileDicomObject<InMemDicomObject> = OpenFileOptions::new()
-            .from_reader(Cursor::new(&raw_bytes))
-            .map_err(|e| format!("unreadable DICOM data set: {e}"))?;
-        let sop_class = get_uid_tag(&full_obj, tags::SOP_CLASS_UID)
-            .unwrap_or_else(|| "1.2.840.10008.5.1.4.1.1.7".to_string());
-        let sop_inst = get_uid_tag(&full_obj, tags::SOP_INSTANCE_UID)
-            .unwrap_or_else(|| "2.25.1".to_string());
-        let dataset: InMemDicomObject = full_obj.into_inner();
-        let wrapped_obj = dataset
-            .with_meta(
-                FileMetaTableBuilder::new()
-                    .transfer_syntax("1.2.840.10008.1.2.1")
-                    .media_storage_sop_class_uid(sop_class)
-                    .media_storage_sop_instance_uid(sop_inst),
-            )
-            .map_err(|e| format!("cannot build a Part 10 header: {e}"))?;
-        let mut buf = Vec::new();
-        wrapped_obj
-            .write_all(&mut buf)
-            .map_err(|e| format!("cannot write Part 10: {e}"))?;
-        (wrapped_obj, buf, true)
+        let (obj, bytes) = wrap_bare(&raw_bytes)?;
+        (obj, bytes, true)
     } else {
         return Err("not a DICOM file (no DICM preamble)".into());
     };
