@@ -135,6 +135,12 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **17 Oct: one implementation of everything (Josh approved the whole de-duplication plan).** Rust core is canonical, and the browser calls it through wasm. One-per-platform pairs (WebCrypto vs Rust AES-GCM, JWE, links, Bundle index) stay as pairs, tested against fixtures/golden. Decisions: a link selects whole studies; Rust is the single Bundle builder and subsetter, called from /share via wasm; value precedence is per-frame, then shared, then top-level (the Rust decoder is fixed to match). Split:
+  - **decoder agent a4b3a594727c938f4:** Rust side plus the /share wiring (#1 frame boundaries with JPEG XL, #2, #3/#4/#5, #11–#16 Rust, C vectors, B Rust side);
+  - **JPEG XL agent a26e1d2aaf1165705:** browser side (#6, #9, #10, #14 TS, #16 TS, #17, the #12/#13 follow-ups, C and B TS side);
+  - **e2e agent a4397313d3a700665:** #7/#8 in the loader, after its scrub-back fix and the record-size rerun.
+  - **Gate:** identical outputs on the hash sets plus all checks. Land small branches.
+
 - **16 Oct, 19:20: static GitHub Pages demo** (agent acb1873c8bf73c54c, worktree ../shlink-dicom-pages, branch pages-demo). One X-ray study plus the MRI, packed in Actions from my-health-data at a pinned commit, with a stable link (key and file ids committed; the workflow fails if the inputs or plaintext change, so keys are never reused), /view copy, and a / entry page. Pages isn't enabled on the repo yet; the coordinator enables it (build type workflow) at merge. Open question for Josh: the Pages path is /shlink-dicom/ (the repo name); he wrote /shl-dicom/.
 
 - **16 Oct, about 11:00: performance phase 2 planned** ([PERF-PLAN.md](PERF-PLAN.md), 854ad43). T0 (measurement, stale PERF pages, regression check, small-HTJ2K wasm slowdown) went to the decoder agent a4b3a594727c938f4 on branch perf-t0; it does its quiet full run only once e2e-perf's timing matrices stop. T6 continues in a26e1d2aaf1165705. Next: T1/T3/T4 (decoder agent), T2 (encoder agent a5b9622823f9139f4); at most two benchmarking agents at once.
