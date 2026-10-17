@@ -116,6 +116,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
         &format!("{} (Direct Link)", meta.title),
         false,
         None,
+        false,
         &bundle_u.bundle_jwe,
         &all_allowed_files,
     )?;
@@ -138,6 +139,8 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
         &format!("{} (Passcode: 1234)", meta.title),
         true,
         Some("1234"),
+        // Its passcode is published, so wrong guesses must not lock it for everyone.
+        true,
         &bundle_p.bundle_jwe,
         &all_allowed_files,
     )?;
@@ -218,7 +221,7 @@ fn populate_demo_list(
     demos.push(DemoShareInfo {
         id: saved.sid.clone(),
         title: "Passcode Demo (1234)".into(),
-        description: "Manifest-mode link protected by passcode '1234'. Mints 1-hour /cap/{token}/ URLs.".into(),
+        description: "Manifest-mode link protected by passcode '1234'. Mints 1-hour /cap/{token}/ URLs. Wrong passcodes never lock this demo link: after the fifth, the count starts again.".into(),
         shlink_uri: shlink_p,
         passcode_hint: Some("1234".into()),
         read_only: true,
@@ -235,6 +238,7 @@ fn insert_seeded_link(
     label: &str,
     long_lived: bool,
     passcode: Option<&str>,
+    refill_attempts: bool,
     bundle_jwe: &str,
     file_ids: &[String],
 ) -> Result<(), String> {
@@ -260,8 +264,8 @@ fn insert_seeded_link(
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO links (lid, label, long_lived, online, exp, passcode_salt, passcode_hash,
-                                remaining_attempts, bundle, bundle_etag, bundle_updated_at, created_at)
-             VALUES (?1, ?2, ?3, 1, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                                remaining_attempts, refill_attempts, bundle, bundle_etag, bundle_updated_at, created_at)
+             VALUES (?1, ?2, ?3, 1, NULL, ?4, ?5, ?6, ?10, ?7, ?8, ?9, ?9)",
             params![
                 lid,
                 label,
@@ -271,7 +275,8 @@ fn insert_seeded_link(
                 rem_opt,
                 bundle_jwe.as_bytes(),
                 etag,
-                now
+                now,
+                i64::from(refill_attempts)
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -332,4 +337,27 @@ fn add_sample_reports(samples_dir: &std::path::Path, bundle_json: &str) -> Resul
         arr.extend(added);
     }
     serde_json::to_string(&bundle).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The sample's passcode link is the only one the seed makes refill.
+    #[test]
+    fn the_seed_marks_only_the_passcode_link_refill() {
+        let dir = std::env::temp_dir().join(format!("seed_refill_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::state::AppState::new(&dir).unwrap();
+        let (sid, _) = state.create_share(true, None).unwrap();
+        super::insert_seeded_link(&state, &sid, &"a".repeat(22), "u", false, None, false, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &sid, &"b".repeat(22), "p", true, Some("1234"), true, "x", &[]).unwrap();
+        let c = state.open_share_db(&sid).unwrap();
+        let conn = c.lock().unwrap();
+        let get = |lid: String| -> (i64, Option<i64>) {
+            conn.query_row("SELECT refill_attempts, remaining_attempts FROM links WHERE lid = ?1", [lid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        assert_eq!(get("a".repeat(22)), (0, None));
+        assert_eq!(get("b".repeat(22)), (1, Some(crate::state::DEFAULT_PASSCODE_ATTEMPTS)));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

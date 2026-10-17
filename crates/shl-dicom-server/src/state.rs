@@ -1171,6 +1171,9 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
            passcode_salt       BLOB,
            passcode_hash       BLOB,
            remaining_attempts  INTEGER,
+           -- 1: wrong passcodes never lock the link; the count starts again (the public sample's
+           -- passcode demo, whose passcode is published). Set only by the seed, never by the API.
+           refill_attempts     INTEGER NOT NULL DEFAULT 0,
            bundle              BLOB,
            bundle_etag         TEXT,
            bundle_updated_at   INTEGER,
@@ -1195,12 +1198,33 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE INDEX IF NOT EXISTS access_ts ON access_log(ts);
          CREATE INDEX IF NOT EXISTS access_lid ON access_log(lid);",
-    )
+    )?;
+    // Share databases made before links had refill_attempts.
+    if conn.prepare("SELECT refill_attempts FROM links LIMIT 0").is_err() {
+        conn.execute_batch("ALTER TABLE links ADD COLUMN refill_attempts INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::ct_eq;
+
+    #[test]
+    fn an_older_share_database_gains_refill_attempts() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE links (lid TEXT PRIMARY KEY, label TEXT, long_lived INTEGER NOT NULL, online INTEGER NOT NULL DEFAULT 1,
+               exp INTEGER, passcode_salt BLOB, passcode_hash BLOB, remaining_attempts INTEGER, bundle BLOB, bundle_etag TEXT,
+               bundle_updated_at INTEGER, created_at INTEGER NOT NULL);
+             INSERT INTO links (lid, long_lived, remaining_attempts, created_at) VALUES ('x', 0, 5, 0);",
+        )
+        .unwrap();
+        super::init_share_db(&conn).unwrap();
+        super::init_share_db(&conn).unwrap();
+        let v: i64 = conn.query_row("SELECT refill_attempts FROM links WHERE lid = 'x'", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 0);
+    }
 
     #[test]
     fn ct_eq_compares_bytes() {

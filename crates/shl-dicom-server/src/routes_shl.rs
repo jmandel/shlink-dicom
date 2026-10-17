@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 use crate::storage::{ReadDelivery, ReadError};
 use crate::state::{
-    ct_eq, hash_passcode, is_valid_id22, now_unix, parse_file_name, AccessEvent, AppState,
+    ct_eq, hash_passcode, is_valid_id22, DEFAULT_PASSCODE_ATTEMPTS, now_unix, parse_file_name, AccessEvent, AppState,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -137,15 +137,22 @@ pub async fn post_shl_manifest(
             let provided = req.passcode.as_deref().unwrap_or("");
             // No passcode is not a wrong one: 401 without using up an attempt. Otherwise an attempt
             // is used before the passcode is checked (atomically), and given back if it matches;
-            // wrong passcodes count over the link's whole life.
-            let sql = if provided.is_empty() {
-                "SELECT remaining_attempts FROM links WHERE lid = ?1 AND remaining_attempts > 0"
+            // wrong passcodes count over the link's whole life. A refill link (the public sample's
+            // passcode demo) starts the count again instead of reaching 0.
+            let rem_opt: Option<i64> = if provided.is_empty() {
+                tx.query_row("SELECT remaining_attempts FROM links WHERE lid = ?1 AND remaining_attempts > 0", params![lid], |r| r.get(0))
             } else {
-                "UPDATE links SET remaining_attempts = remaining_attempts - 1
-                 WHERE lid = ?1 AND remaining_attempts > 0
-                 RETURNING remaining_attempts"
-            };
-            let rem_opt: Option<i64> = tx.query_row(sql, params![lid], |r| r.get(0)).optional().unwrap_or(None);
+                tx.query_row(
+                    "UPDATE links SET remaining_attempts =
+                       CASE WHEN refill_attempts != 0 AND remaining_attempts <= 1 THEN ?2 ELSE remaining_attempts - 1 END
+                     WHERE lid = ?1 AND remaining_attempts > 0
+                     RETURNING remaining_attempts",
+                    params![lid, DEFAULT_PASSCODE_ATTEMPTS],
+                    |r| r.get(0),
+                )
+            }
+            .optional()
+            .unwrap_or(None);
 
             let Some(remaining) = rem_opt else {
                 let _ = tx.commit();
@@ -181,8 +188,10 @@ pub async fn post_shl_manifest(
 
             // Passcode matched: restore the attempt in the same transaction
             let _ = tx.execute(
-                "UPDATE links SET remaining_attempts = remaining_attempts + 1 WHERE lid = ?1",
-                params![lid],
+                "UPDATE links SET remaining_attempts =
+                   CASE WHEN refill_attempts != 0 THEN MIN(remaining_attempts + 1, ?2) ELSE remaining_attempts + 1 END
+                 WHERE lid = ?1",
+                params![lid, DEFAULT_PASSCODE_ATTEMPTS],
             );
         }
 

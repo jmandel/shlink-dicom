@@ -1883,6 +1883,87 @@ async fn test_security_headers_on_every_response() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A refill link (the seed makes the sample's passcode demo one) never locks: wrong passcodes
+/// still get 401 with the attempts left, and the count starts again instead of reaching 0. The API
+/// can't make one: an ordinary link still locks after 5.
+#[tokio::test]
+async fn test_a_refill_link_never_locks() {
+    let dir = temp_data_dir("refill_link");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let link = || {
+        let (client, base, sid, token) = (client.clone(), base.clone(), sid.clone(), token.clone());
+        async move {
+            // The API ignores a refill field: only the seed sets it.
+            let l: Value = client
+                .post(format!("{base}/api/shares/{sid}/links"))
+                .bearer_auth(&token)
+                .json(&json!({ "passcode": "1234", "allowedFiles": [], "refillAttempts": 1, "refill_attempts": 1 }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let lid = l["id"].as_str().unwrap().to_string();
+            client.put(format!("{base}/api/shares/{sid}/links/{lid}/bundle.jwe")).bearer_auth(&token).body("dummy..iv.ct.tag").send().await.unwrap();
+            lid
+        }
+    };
+    let refill_column = |lid: &str| -> i64 {
+        let c = state.open_share_db(&sid).unwrap();
+        let conn = c.lock().unwrap();
+        conn.query_row("SELECT refill_attempts FROM links WHERE lid = ?1", params![lid], |r| r.get(0)).unwrap()
+    };
+    let guess = |lid: String, pass: &'static str| {
+        let (client, base) = (client.clone(), base.clone());
+        async move {
+            let r = client.post(format!("{base}/shl/{lid}")).json(&json!({ "passcode": pass })).send().await.unwrap();
+            let status = r.status();
+            (status, r.json::<Value>().await.ok().and_then(|v| v["remainingAttempts"].as_i64()))
+        }
+    };
+
+    let ordinary = link().await;
+    assert_eq!(refill_column(&ordinary), 0, "the API set refill_attempts");
+    for k in 0..5 {
+        assert_eq!(guess(ordinary.clone(), "0000").await, (StatusCode::UNAUTHORIZED, Some(4 - k)));
+    }
+    assert_eq!(guess(ordinary.clone(), "1234").await.0, StatusCode::NOT_FOUND, "an ordinary link locks after 5");
+
+    // What the seed does for the sample's passcode link.
+    let refill = link().await;
+    {
+        let c = state.open_share_db(&sid).unwrap();
+        c.lock().unwrap().execute("UPDATE links SET refill_attempts = 1 WHERE lid = ?1", params![refill]).unwrap();
+    }
+    let mut left = Vec::new();
+    for _ in 0..20 {
+        let (s, n) = guess(refill.clone(), "0000").await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        left.push(n.unwrap());
+    }
+    assert_eq!(left[..6], [4, 3, 2, 1, 5, 4], "counts down, then starts again at 5: {left:?}");
+    assert_eq!(guess(refill.clone(), "1234").await.0, StatusCode::OK);
+    // Many at once: every one a 401 with 1–5 left, none a lock; the right passcode still opens it.
+    let all = futures_util::future::join_all((0..20).map(|_| tokio::spawn(guess(refill.clone(), "0000")))).await;
+    for r in all {
+        let (s, n) = r.unwrap();
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        assert!((1..=5).contains(&n.unwrap()), "{n:?}");
+    }
+    let (s, _) = guess(refill.clone(), "1234").await;
+    assert_eq!(s, StatusCode::OK);
+    let c = state.open_share_db(&sid).unwrap();
+    let rem: i64 = c.lock().unwrap().query_row("SELECT remaining_attempts FROM links WHERE lid = ?1", params![refill], |r| r.get(0)).unwrap();
+    assert!((1..=5).contains(&rem), "{rem}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One share's token can't delete or end the sessions of another share's link: 404, and the link
 /// still works. Its own share can.
 #[tokio::test]
