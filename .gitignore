@@ -10,3 +10,4 @@ viewer-kit/node_modules/
 perf-spikes/**/node_modules/
 docs/shots/
 __pycache__/
+/crates/shl-dicom-reader/pkg/

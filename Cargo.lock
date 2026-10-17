@@ -1922,6 +1922,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shl-dicom-reader"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "shl-dicom-core",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "shl-dicom-server"
 version = "0.1.0"
 dependencies = [

@@ -4,8 +4,19 @@ members = [
     "crates/shl-dicom-core",
     "crates/shl-dicom-server",
     "crates/shl-dicom-wasm",
+    "crates/shl-dicom-reader",
 ]
 
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+# The viewer's reader module (crates/shl-dicom-reader) is built for size: it is fetched before a
+# link opens. cargo build --profile wasm-reader --target wasm32-unknown-unknown -p shl-dicom-reader
+[profile.wasm-reader]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = 0
