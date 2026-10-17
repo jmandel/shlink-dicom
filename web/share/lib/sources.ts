@@ -1,7 +1,8 @@
 // The four ways imaging comes in: files and folders, a patient portal (SMART Imaging Access), a
 // link someone gave you, and the public sample link. Each fills a Collection.
 import type { OpenShare } from "../../core/share";
-import { planBytes } from "../../core/range";
+import { planBytes, RECORD_PLAINTEXT } from "../../core/range";
+import { parseDicomSync, T } from "../../core/dicom";
 import type { SeriesEntry } from "../../core/bundle";
 import type { DicomHeader } from "../../core/dicom-header";
 import { linkReports } from "../../core/reports";
@@ -88,12 +89,26 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
     col.patient = { name: idx.patient.name, humanName, birthDate: idx.patient.birthDate, identifier: idx.patient.id ? [{ value: idx.patient.id }] : [] };
     col.patientSource = "fhir";
   }
+  // Each series' transfer syntax, from its first instance's file meta (the first record of the
+  // series): the Bundle doesn't give it, and compression and offset tables need it.
+  const all = idx.studies.flatMap((st) => st.series);
+  const syntax = new Map<SeriesEntry, string>();
+  let read = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(6, all.length) }, async (_, w) => {
+      for (let i = w; i < all.length; i += 6) {
+        syntax.set(all[i], await seriesSyntax(share, all[i]));
+        on(col, { doing: `Reading the link's series: ${++read} of ${all.length}`, done: read, total: all.length });
+      }
+    }),
+  );
   for (const st of idx.studies) {
     for (const se of st.series) {
       const src = new LinkSeriesBytes(share, se);
       for (const [k, inst] of se.instances.entries()) {
         const h = blankHeader();
         Object.assign(h, {
+          transferSyntax: syntax.get(se) ?? "",
           sopInstanceUid: inst.uid,
           sopClassUid: inst.sopClass,
           studyInstanceUid: st.studyInstanceUid,
@@ -128,6 +143,17 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
     .filter((r: any) => r?.resourceType === "DiagnosticReport" && !linked.has(r.id))
     .map((resource: any) => ({ resource, include: false, from: "link" as const }));
   await col.finish();
+}
+
+/** The transfer syntax of a series' first instance, from its file meta ("" when it can't be read). */
+async function seriesSyntax(share: OpenShare, se: SeriesEntry): Promise<string> {
+  const inst = se.instances[0];
+  try {
+    const head = await new LinkSeriesBytes(share, se).read(inst.offset - se.offset, inst.offset - se.offset + Math.min(inst.length, RECORD_PLAINTEXT));
+    return parseDicomSync(head, { untilPixelData: true }).meta.str(T.TransferSyntaxUID) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 function blankHeader(): DicomHeader {
