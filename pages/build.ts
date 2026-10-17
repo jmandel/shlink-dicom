@@ -28,7 +28,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import { join, resolve } from "node:path";
 import qrcode from "qrcode-generator";
 import { fetchPinned } from "../deploy/lib/pinned-fetch";
-import { parseStudyIndex, type StudyIndex } from "../web/core/bundle";
+import type { StudyIndex } from "../web/core/bundle";
+import { parseIndex } from "../web/core/reader";
 import { planInstances, RECORD_PLAINTEXT } from "../web/core/range";
 
 const root = resolve(import.meta.dir, "..");
@@ -123,7 +124,7 @@ await $`${server} compress ${inputs} --out ${join(work, "plain")}`;
 // 3. Pack with the recorded keys (with --new-keys: new ones, for the studies a first pack finds).
 if (newKeys) {
   await $`${server} pack ${join(work, "plain")} --out ${join(work, "probe")} --bundle-json ${join(work, "probe-bundle.json")}`.quiet();
-  const probe = parseStudyIndex(readFileSync(join(work, "probe-bundle.json")));
+  const probe = await parseIndex(readFileSync(join(work, "probe-bundle.json")));
   cfg.studies = probe.studies.map((s) => ({
     description: s.description ?? "",
     studyInstanceUid: s.studyInstanceUid,
@@ -160,7 +161,7 @@ cfg.bundleSha256 = recorded.bundleSha256;
 for (const st of cfg.studies) st.plaintextSha256 = recorded.studies[st.studyInstanceUid].plaintextSha256;
 
 // 4. Check every study file against the recorded ciphertext hash.
-const index: StudyIndex = parseStudyIndex(readFileSync(join(work, "bundle.json")));
+const index: StudyIndex = await parseIndex(readFileSync(join(work, "bundle.json")));
 for (const st of cfg.studies) {
   const entry = index.studies.find((s) => s.studyInstanceUid === st.studyInstanceUid) ?? fail(`study ${st.studyInstanceUid} not packed`);
   const file = entry.files[0];

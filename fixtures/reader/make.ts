@@ -2,12 +2,14 @@
 // which its Rust tests and test/reader.test.ts (the wasm module) both run.
 //   bun fixtures/reader/make.ts
 // Link and manifest expectations are written out by rule (crates/shl-dicom-reader/README.md).
-// Study-index expectations were taken from the viewer's TypeScript parser (web/core/bundle.ts)
-// when this file was written, in the reader's shape (series name their file by fileId, report
-// attachments carry dataB64); where the reader is stricter they expect an error.
-import { readFileSync, writeFileSync } from "node:fs";
+// Study-index expectations were taken from the viewer's TypeScript parser when this file was
+// written, in the reader's shape (series name their file by fileId, report attachments carry
+// dataB64); where the reader is stricter they expect an error. That parser is gone (the viewer
+// uses the reader): the expectations already in cases.json are kept, and a new index case is
+// written from the reader's own answer, to be checked by hand.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { b64urlEncode, utf8 } from "../../web/core/b64";
-import { parseStudyIndex } from "../../web/core/bundle";
+import { parseIndex } from "../../web/core/reader";
 
 const dir = new URL(".", import.meta.url).pathname;
 const KEY = "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8";
@@ -64,13 +66,21 @@ function readerShape(ix: any) {
   }));
   return rest;
 }
-const I = (name: string, bundle: any, expectError = false) => {
+const kept = new Map<string, any>(
+  existsSync(`${dir}cases.json`) ? JSON.parse(readFileSync(`${dir}cases.json`, "utf8")).filter((c: any) => c.fn === "parse_index").map((c: any) => [c.name, c.expect]) : [],
+);
+const I = async (name: string, bundle: any, expectError = false) => {
   const json = JSON.stringify(bundle);
   if (expectError) return cases.push({ fn: "parse_index", name, bundle: json, expect: { error: "invalid-bundle" } });
-  cases.push({ fn: "parse_index", name, bundle: json, expect: { ok: readerShape(parseStudyIndex(json)) } });
+  let expect = kept.get(name);
+  if (!expect) {
+    expect = { ok: readerShape(await parseIndex(utf8(json))) };
+    console.error(`new index case "${name}": its expectation is the reader's answer; check it by hand`);
+  }
+  cases.push({ fn: "parse_index", name, bundle: json, expect });
 };
 const goldenBundle = JSON.parse(readFileSync(new URL("../golden/bundle.json", import.meta.url), "utf8"));
-I("the golden Bundle", goldenBundle);
+await I("the golden Bundle", goldenBundle);
 
 const EXT = "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/";
 const lf = (id: string, key: string) => ({ url: EXT + "linked-file", extension: [{ url: "id", valueString: id }, { url: "key", valueString: key }] });
@@ -99,21 +109,21 @@ const rich = {
     { resource: { resourceType: "ImagingStudy", id: "plain", series: [{ uid: "9", instance: [{ uid: "9.1" }] }] } },
   ],
 };
-I("a Bundle with reports, notes, accession, body sites and a series-level file", rich);
+await I("a Bundle with reports, notes, accession, body sites and a series-level file", rich);
 const err = (mutate: (b: any) => void) => {
   const b = structuredClone(rich);
   mutate(b);
   return b;
 };
-I("an instance length of 0", err((b) => (b.entry[1].resource.series[0].instance[0].extension[0].valueDecimal = 0)), true);
-I("an instance length as text", err((b) => (b.entry[1].resource.series[0].instance[0].extension[0].valueDecimal = "100")), true);
-I("an instance length past 2^53 - 1", err((b) => (b.entry[1].resource.series[0].instance[0].extension[0].valueDecimal = 2 ** 53)), true);
-I("a series without instances", err((b) => (b.entry[1].resource.series[2].instance = [])), true);
-I("a series with an empty uid", err((b) => (b.entry[1].resource.series[2].uid = "")), true);
-I("a file given two keys", err((b) => (b.entry[1].resource.series[1].extension = [lf(A, KB)])), true);
-I("a file linked from two studies", err((b) => b.entry.push({ resource: { ...structuredClone(b.entry[1].resource), id: "ct2" } })), true);
-I("a key of 42 characters", err((b) => (b.entry[1].resource.extension = [lf(A, KA.slice(0, 42))])), true);
-I("not a Bundle", { resourceType: "Patient" }, true);
+await I("an instance length of 0", err((b) => (b.entry[1].resource.series[0].instance[0].extension[0].valueDecimal = 0)), true);
+await I("an instance length as text", err((b) => (b.entry[1].resource.series[0].instance[0].extension[0].valueDecimal = "100")), true);
+await I("an instance length past 2^53 - 1", err((b) => (b.entry[1].resource.series[0].instance[0].extension[0].valueDecimal = 2 ** 53)), true);
+await I("a series without instances", err((b) => (b.entry[1].resource.series[2].instance = [])), true);
+await I("a series with an empty uid", err((b) => (b.entry[1].resource.series[2].uid = "")), true);
+await I("a file given two keys", err((b) => (b.entry[1].resource.series[1].extension = [lf(A, KB)])), true);
+await I("a file linked from two studies", err((b) => b.entry.push({ resource: { ...structuredClone(b.entry[1].resource), id: "ct2" } })), true);
+await I("a key of 42 characters", err((b) => (b.entry[1].resource.extension = [lf(A, KA.slice(0, 42))])), true);
+await I("not a Bundle", { resourceType: "Patient" }, true);
 
 writeFileSync(dir + "cases.json", JSON.stringify(cases, null, 1) + "\n");
 console.log(`${cases.length} cases`);
