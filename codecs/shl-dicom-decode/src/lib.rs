@@ -327,7 +327,7 @@ fn decode_range(
         }
     }
     let extended = attrs.extended_offsets.zip(attrs.extended_lengths);
-    let frames = encaps::split_frames(basic_offsets, fragments, extended, frames_n, little)?;
+    let frames = encaps::split_frames(&ts, basic_offsets, fragments, extended, frames_n, little)?;
     let hints = Hints { native_len: None, codestream: frames.first().and_then(|f| infer::peek_codestream(&ts, f)) };
     let mut img = Image::from_attributes(&attrs, little, &ts, frames_n, &hints)?;
     if let Some(n) = note {

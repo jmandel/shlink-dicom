@@ -17,8 +17,9 @@
 //! An instance is rewritten only when all of these hold: Part 10, explicit VR little endian
 //! encapsulated transfer syntax (not a video syntax), top-level Pixel Data of undefined length,
 //! Number of Frames > 1, an empty BOT, no EOT, and frame boundaries that are unambiguous
-//! (codestream start markers for JPEG/JPEG-LS/JPEG 2000/HTJ2K counting exactly Number of
-//! Frames, or exactly one fragment per frame). Anything else is left as it is.
+//! (`shl_dicom_decode::syntax::frame_starts`: codestream start markers for JPEG, JPEG-LS,
+//! JPEG 2000, HTJ2K and JPEG XL counting exactly Number of Frames, or exactly one fragment per
+//! frame; the decoder splits frames by the same rule). Anything else is left as it is.
 
 const UNDEF: u32 = 0xFFFF_FFFF;
 const ITEM: u32 = 0xFFFE_E000;
@@ -211,18 +212,6 @@ pub fn offset_table_status(bytes: &[u8]) -> OffsetTableStatus {
     }
 }
 
-fn frame_start_test(ts: &str) -> Option<fn(&[u8]) -> bool> {
-    const JPEG: &[&str] = &["1.2.840.10008.1.2.4.50", "1.2.840.10008.1.2.4.51", "1.2.840.10008.1.2.4.57", "1.2.840.10008.1.2.4.70", "1.2.840.10008.1.2.4.80", "1.2.840.10008.1.2.4.81"];
-    const J2K: &[&str] = &["1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.91", "1.2.840.10008.1.2.4.92", "1.2.840.10008.1.2.4.93", "1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.202", "1.2.840.10008.1.2.4.203"];
-    if JPEG.contains(&ts) {
-        Some(|v| v.len() >= 2 && v[0] == 0xFF && v[1] == 0xD8)
-    } else if J2K.contains(&ts) {
-        Some(|v| (v.len() >= 2 && v[0] == 0xFF && v[1] == 0x4F) || v.starts_with(&[0, 0, 0, 0x0C, 0x6A, 0x50, 0x20, 0x20]))
-    } else {
-        None
-    }
-}
-
 /// Computes the rewrite that adds an offset table, or `None` when the instance does not need one
 /// or its frames cannot be located unambiguously.
 pub fn offset_table_patch(bytes: &[u8]) -> Option<OffsetTablePatch> {
@@ -242,6 +231,75 @@ pub struct FragmentInfo<'a> {
     pub pos: u64,
     pub len: u32,
     pub head: &'a [u8],
+}
+
+/// Walks a file's fragment items from the first one, for a caller that reads the file in pieces:
+/// [`want`](Self::want) says which bytes to read next (an item header and the first bytes of its
+/// value), [`feed`](Self::feed) takes them, and [`fragments`](Self::fragments) lists the items once
+/// the sequence delimiter is reached. The CLI reads through a file handle, the Share page through
+/// its byte sources (`FragmentWalker` in shl-dicom-wasm), and both get the same items.
+pub struct FragmentWalk {
+    p: u64,
+    file_len: u64,
+    items: Vec<(u64, u32, [u8; 8], u8)>,
+    state: WalkState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalkState {
+    Reading,
+    Done,
+    Failed,
+}
+
+impl FragmentWalk {
+    /// `first`: where the first fragment item starts ([`offset_table_first_fragment`]);
+    /// `file_len`: the file's length.
+    pub fn new(first: u64, file_len: u64) -> Self {
+        FragmentWalk { p: first, file_len, items: Vec::new(), state: WalkState::Reading }
+    }
+
+    /// The bytes to read next, as (position, count), or `None` when the walk has ended.
+    pub fn want(&self) -> Option<(u64, usize)> {
+        if self.state != WalkState::Reading {
+            return None;
+        }
+        Some((self.p, self.file_len.saturating_sub(self.p).min(16) as usize))
+    }
+
+    /// The bytes at [`want`](Self::want)'s position (as many as it asked for).
+    pub fn feed(&mut self, b: &[u8]) {
+        if self.state != WalkState::Reading {
+            return;
+        }
+        if b.len() < 8 {
+            self.state = WalkState::Failed;
+            return;
+        }
+        let tag = (u32::from(u16::from_le_bytes([b[0], b[1]])) << 16) | u32::from(u16::from_le_bytes([b[2], b[3]]));
+        let len = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+        if tag == SEQ_DELIM {
+            self.state = WalkState::Done;
+            return;
+        }
+        let end = self.p + 8 + u64::from(len);
+        if tag != ITEM || len == UNDEF || end > self.file_len {
+            self.state = WalkState::Failed;
+            return;
+        }
+        let n = (len as usize).min(8).min(b.len() - 8);
+        let mut head = [0u8; 8];
+        head[..n].copy_from_slice(&b[8..8 + n]);
+        self.items.push((self.p, len, head, n as u8));
+        self.p = end;
+    }
+
+    /// The fragment items, once the walk reached the sequence delimiter; `None` if it ended any
+    /// other way (a truncated file, or something other than an item).
+    pub fn fragments(&self) -> Option<Vec<FragmentInfo<'_>>> {
+        (self.state == WalkState::Done)
+            .then(|| self.items.iter().map(|(pos, len, head, n)| FragmentInfo { pos: *pos, len: *len, head: &head[..*n as usize] }).collect())
+    }
 }
 
 /// The same rewrite as [`offset_table_patch`], from the file's first bytes (at least up to the
@@ -271,40 +329,14 @@ pub fn offset_table_patch_from_reader<R: std::io::Read + std::io::Seek>(r: &mut 
         }
     }
     let Some(first) = first else { return Ok(None) };
-    // Fragment item headers: (position, length, first bytes of the value).
-    let (mut items, mut heads): (Vec<(u64, u32)>, Vec<[u8; 8]>) = (Vec::new(), Vec::new());
-    let mut head_lens = Vec::new();
-    let mut p = first as u64;
-    loop {
-        let mut h = [0u8; 8];
-        r.seek(SeekFrom::Start(p))?;
-        if p + 8 > len {
-            return Ok(None);
-        }
-        r.read_exact(&mut h)?;
-        let tag = ((u16::from_le_bytes([h[0], h[1]]) as u32) << 16) | u16::from_le_bytes([h[2], h[3]]) as u32;
-        let flen = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
-        if tag == SEQ_DELIM {
-            break;
-        }
-        if tag != ITEM || flen == UNDEF {
-            return Ok(None);
-        }
-        let take = (flen as u64).min(8).min(len.saturating_sub(p + 8)) as usize;
-        let mut v = [0u8; 8];
-        r.read_exact(&mut v[..take])?;
-        items.push((p, flen));
-        heads.push(v);
-        head_lens.push(take);
-        p = p + 8 + flen as u64;
+    let mut walk = FragmentWalk::new(first as u64, len);
+    let mut buf = [0u8; 16];
+    while let Some((at, n)) = walk.want() {
+        r.seek(SeekFrom::Start(at))?;
+        r.read_exact(&mut buf[..n])?;
+        walk.feed(&buf[..n]);
     }
-    let frags: Vec<FragmentInfo> = items
-        .iter()
-        .zip(&heads)
-        .zip(&head_lens)
-        .map(|((&(pos, len), h), &n)| FragmentInfo { pos, len, head: &h[..n] })
-        .collect();
-    Ok(offset_table_patch_from_fragments(&prefix, &frags))
+    Ok(walk.fragments().and_then(|frags| offset_table_patch_from_fragments(&prefix, &frags)))
 }
 
 /// [`add_offset_table`] for a file on disk, without holding it: when the instance needs a table,
@@ -335,24 +367,11 @@ pub fn add_offset_table_to_file(path: &std::path::Path) -> std::io::Result<Optio
 /// `bot_limit`: the largest offset a BOT may hold (u32::MAX; tests lower it to reach the EOT path).
 fn patch_with_limit(bytes: &[u8], bot_limit: u64) -> Option<OffsetTablePatch> {
     let first_item = offset_table_first_fragment(bytes)?;
-    let mut frags: Vec<FragmentInfo> = Vec::new();
-    let mut p = first_item;
-    loop {
-        let tag = tag_at(bytes, p)?;
-        let len = u32le(bytes, p + 4)?;
-        if tag == SEQ_DELIM {
-            break;
-        }
-        if tag != ITEM || len == UNDEF {
-            return None;
-        }
-        let end = (p + 8).checked_add(len as usize)?;
-        if end > bytes.len() {
-            return None;
-        }
-        frags.push(FragmentInfo { pos: p as u64, len, head: &bytes[p + 8..p + 8 + (len as usize).min(8)] });
-        p = end;
+    let mut walk = FragmentWalk::new(first_item as u64, bytes.len() as u64);
+    while let Some((at, n)) = walk.want() {
+        walk.feed(&bytes[at as usize..at as usize + n]);
     }
+    let frags = walk.fragments()?;
     patch_parts(bytes, &frags, bot_limit)
 }
 
@@ -366,14 +385,7 @@ fn patch_parts(prefix: &[u8], frags: &[FragmentInfo], bot_limit: u64) -> Option<
         return None;
     }
     // Frame starts, as indices into frags.
-    let by_marker: Option<Vec<usize>> = frame_start_test(&h.ts).map(|test| {
-        frags.iter().enumerate().filter(|(i, f)| *i == 0 || test(f.head)).map(|(i, _)| i).collect()
-    });
-    let starts: Vec<usize> = match by_marker {
-        Some(s) if s.len() == h.frames => s,
-        _ if frags.len() == h.frames => (0..frags.len()).collect(),
-        _ => return None,
-    };
+    let starts = shl_dicom_decode::syntax::frame_starts(&h.ts, frags.iter().map(|f| f.head), h.frames)?;
     let offsets: Vec<u64> = starts.iter().map(|&i| frags[i].pos - first_item).collect();
     let fits_32 = offsets.last().is_none_or(|&o| o <= bot_limit) && h.frames * 4 <= u32::MAX as usize;
     if fits_32 {
@@ -464,7 +476,8 @@ pub(crate) mod tests {
         synthetic_ts("1.2.840.10008.1.2.4.50", frames, split, with_seq)
     }
 
-    /// [`synthetic`] under transfer syntax `ts`.
+    /// [`synthetic`] under transfer syntax `ts`; frames start with FF 0A (a JPEG XL codestream)
+    /// under the JPEG XL syntaxes, else with SOI.
     pub(crate) fn synthetic_ts(ts: &str, frames: usize, split: &[usize], with_seq: bool) -> Vec<u8> {
         use crate::test_ds::{part10_meta, Ds, Enc};
         const SM: &str = "1.2.840.10008.5.1.4.1.1.77.1.6";
@@ -480,10 +493,11 @@ pub(crate) mod tests {
         d.text(0x0010, 0x0010, b"PN", "Test^Slide");
         d.ui(0x0020, 0x000D, "1.2.3.4").ui(0x0020, 0x000E, "1.2.3.4.1").text(0x0020, 0x0013, b"IS", "1");
         d.image(1, "MONOCHROME2", None, Some(&frames.to_string()), 8, 8, 8, 8, 0);
+        let start = if ts.starts_with("1.2.840.10008.1.2.4.11") { [0xFF, 0x0A] } else { [0xFF, 0xD8] };
         let mut frags = Vec::new();
         for k in 0..frames {
             for f in 0..split[k % split.len()] {
-                let mut v = if f == 0 { vec![0xFF, 0xD8] } else { vec![0x11, 0x22] };
+                let mut v = if f == 0 { start.to_vec() } else { vec![0x11, 0x22] };
                 v.extend((0..(10 + 7 * k + 3 * f)).map(|i| (i * 31 + k) as u8));
                 if v.len() % 2 == 1 {
                     v.push(0);
@@ -565,6 +579,17 @@ pub(crate) mod tests {
             // A second pass changes nothing.
             assert!(!add_offset_table(out).1);
         }
+    }
+
+    #[test]
+    fn jpeg_xl_frames_over_several_fragments_get_a_table() {
+        let src = synthetic_ts("1.2.840.10008.1.2.4.112", 5, &[1, 2, 3], false);
+        let (out, changed) = add_offset_table(src.clone());
+        assert!(changed);
+        let frames = frames_of(&out).unwrap();
+        assert_eq!(frames.len(), 5);
+        assert!(frames.iter().all(|f| f.starts_with(&[0xFF, 0x0A])));
+        assert_eq!(frames_of(&src).unwrap(), frames);
     }
 
     #[test]

@@ -147,3 +147,36 @@ mod tests {
         assert_eq!(kind("1.2.3"), None);
     }
 }
+
+/// Whether a fragment value starting with `head` (its first 8 bytes, or all of it when shorter)
+/// starts a frame, for transfer syntaxes whose codestreams open with a marker: JPEG and JPEG-LS
+/// SOI (FF D8); JPEG 2000 and HTJ2K SOC (FF 4F) or the JP2 signature box; JPEG XL's codestream
+/// signature (FF 0A) or its container signature box. `None` for the others (RLE, deflated image
+/// frames, encapsulated uncompressed and the rest), whose frames are told apart only by counting
+/// one fragment per frame.
+pub fn frame_start_test(uid: &str) -> Option<fn(&[u8]) -> bool> {
+    const JP2: [u8; 8] = [0, 0, 0, 0x0C, b'j', b'P', b' ', b' '];
+    const JXL: [u8; 8] = [0, 0, 0, 0x0C, b'J', b'X', b'L', b' '];
+    match kind(uid)? {
+        Kind::Jpeg { .. } | Kind::JpegLs => Some(|v| v.starts_with(&[0xFF, 0xD8])),
+        Kind::Jpeg2000 { .. } | Kind::Htj2k => Some(|v| v.starts_with(&[0xFF, 0x4F]) || v.starts_with(&JP2)),
+        Kind::JpegXl => Some(|v| v.starts_with(&[0xFF, 0x0A]) || v.starts_with(&JXL)),
+        _ => None,
+    }
+}
+
+/// Which fragments start a frame, when no offset table says: the fragments whose first bytes
+/// (`heads`, see [`frame_start_test`]) open a codestream, when there are exactly `frames` of them
+/// counting the first fragment; else every fragment, when there are exactly `frames` fragments.
+/// `None` when neither holds. The packer adds offset tables by this rule and the decoder splits
+/// frames by it, so a table the packer writes always agrees with the decoder.
+pub fn frame_starts<'h>(uid: &str, heads: impl ExactSizeIterator<Item = &'h [u8]>, frames: usize) -> Option<Vec<usize>> {
+    let n = heads.len();
+    if let Some(test) = frame_start_test(uid) {
+        let starts: Vec<usize> = heads.enumerate().filter(|(i, h)| *i == 0 || test(h)).map(|(i, _)| i).collect();
+        if starts.len() == frames {
+            return Some(starts);
+        }
+    }
+    (n == frames).then(|| (0..n).collect())
+}
