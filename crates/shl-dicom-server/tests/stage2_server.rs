@@ -2218,3 +2218,36 @@ async fn test_a_blob_goes_only_when_its_count_reaches_0() {
     assert!(!blob_exists(&state, &key).await, "kept at 0");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `compress` refuses an archive member whose path leaves the output directory, and writes
+/// nothing outside it; an absolute path lands inside.
+#[test]
+fn test_compress_keeps_archive_members_inside_the_output() {
+    let dir = temp_data_dir("compress_traversal");
+    let tgz = |name: &[u8]| {
+        let mut tar = Vec::new();
+        {
+            let mut t = tar::Builder::new(&mut tar);
+            let mut h = tar::Header::new_gnu();
+            h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name);
+            h.set_size(4);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            t.append(&h, &b"evil"[..]).unwrap();
+            t.finish().unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        gz.finish().unwrap()
+    };
+    let input = dir.join("in.tgz");
+    let out = dir.join("out");
+    std::fs::write(&input, tgz(b"../../escaped.txt")).unwrap();
+    assert!(shl_dicom_server::compress::compress_tree(std::slice::from_ref(&input), &out).is_err());
+    assert!(!dir.join("escaped.txt").exists() && !out.join("../escaped.txt").exists());
+    std::fs::write(&input, tgz(b"/abs/inside.txt")).unwrap();
+    shl_dicom_server::compress::compress_tree(std::slice::from_ref(&input), &out).unwrap();
+    assert!(out.join("in.tgz/abs/inside.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

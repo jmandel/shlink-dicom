@@ -79,10 +79,12 @@ pub fn compress_tree(inputs: &[PathBuf], out: &Path) -> Result<CompressStats, St
                     continue;
                 }
                 let rel = entry.path().map_err(|e| e.to_string())?.to_path_buf();
-                let dest = base.join(rel);
-                std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
-                entry.unpack(&dest).map_err(|e| e.to_string())?;
-                compress_if_image(&dest, &mut stats)?;
+                std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+                // unpack_in refuses a member whose path leaves `base` (`..`, or absolute).
+                if !entry.unpack_in(&base).map_err(|e| e.to_string())? {
+                    return Err(format!("{}: {} is outside the archive", input.display(), rel.display()));
+                }
+                compress_if_image(&base.join(rel.strip_prefix("/").unwrap_or(&rel)), &mut stats)?;
             }
         } else {
             for f in walk(input) {
