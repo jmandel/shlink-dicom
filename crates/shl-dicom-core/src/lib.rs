@@ -53,3 +53,18 @@ pub enum Error {
 #[cfg(test)]
 #[path = "../../../codecs/shl-dicom-decode/tests/support/ds.rs"]
 pub(crate) mod test_ds;
+
+/// A failure of the link reader (link, manifest, Bundle JWE, study index), with a stable `code`
+/// the viewer maps to its own words (crates/shl-dicom-reader/README.md lists them) and English
+/// detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}

@@ -35,7 +35,42 @@ pub struct StudyIndex {
 pub struct DiagnosticReportSummary {
     pub id: String,
     pub status: String,
+    /// DiagnosticReport.code text, else its first coding's display or code.
+    pub title: Option<String>,
     pub conclusion: Option<String>,
+    pub issued: Option<String>,
+    /// effectiveDateTime, else effectivePeriod.start.
+    pub effective: Option<String>,
+    /// ImagingStudy ids it refers to: imagingStudy references resolved against the Bundle (an
+    /// entry's fullUrl, or "ImagingStudy/<id>"), only those of studies in the index.
+    pub study_ids: Vec<String>,
+    /// Study Instance UIDs it names (imagingStudy identifiers).
+    pub study_uids: Vec<String>,
+    pub identifiers: Vec<ReportIdentifier>,
+    pub category: Option<String>,
+    /// The text of its first text/* attachment (text/html with the tags taken out).
+    pub text: Option<String>,
+    pub attachments: Vec<ReportAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportIdentifier {
+    pub system: Option<String>,
+    pub value: String,
+    /// Of type ACSN (an accession number).
+    pub accession: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportAttachment {
+    pub content_type: String,
+    pub title: Option<String>,
+    pub size: Option<u64>,
+    /// Inline data, base64 as the Bundle carries it.
+    pub data_b64: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +80,14 @@ pub struct StudySummary {
     pub study_instance_uid: String,
     pub description: Option<String>,
     pub started: Option<String>,
+    /// Distinct series modalities, in series order.
+    pub modalities: Vec<String>,
+    /// ImagingStudy.note texts.
+    pub notes: Vec<String>,
+    /// Accession number (an identifier of type ACSN).
+    pub accession: Option<String>,
+    /// Sum of the series' bytes.
+    pub bytes: u64,
     pub number_of_series: usize,
     pub number_of_instances: usize,
     /// The distinct files this study's series use, in first-use order.
@@ -77,6 +120,8 @@ pub struct SeriesSummary {
     pub number: Option<i32>,
     pub modality: Option<String>,
     pub description: Option<String>,
+    /// bodySite display, else its code.
+    pub body_site: Option<String>,
     /// The file this series is in.
     pub file: FileSummary,
     /// Plaintext offset of the series' first instance in its file.
@@ -608,96 +653,161 @@ pub fn subset_bundle(owner: &Value, sel: &LinkSelection, last_updated: &str) -> 
     Ok(LinkBundle { bundle, allowed_files: files })
 }
 
-pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
-    let root: Value = serde_json::from_slice(bundle_json).map_err(|e| Error::Json(e.to_string()))?;
-    if root.get("resourceType").and_then(Value::as_str) != Some("Bundle") {
-        return Err(Error::InvalidBundle("root resourceType must be Bundle".into()));
+/// A text value: a JSON string that is not empty or blank.
+fn text(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(String::from)
+}
+
+/// A CodeableConcept's text, else its first coding's display, else its code.
+fn code_text(cc: Option<&Value>) -> Option<String> {
+    let cc = cc?;
+    let first = cc.get("coding").and_then(|c| c.get(0));
+    text(cc.get("text")).or_else(|| text(first.and_then(|c| c.get("display")))).or_else(|| text(first.and_then(|c| c.get("code"))))
+}
+
+/// Base64 as a browser's atob reads it (ASCII whitespace ignored, padding optional).
+fn base64_forgiving(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let clean: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let clean = clean.strip_suffix("==").or_else(|| clean.strip_suffix('=')).unwrap_or(&clean);
+    base64::engine::general_purpose::STANDARD_NO_PAD.decode(clean).ok()
+}
+
+/// The text of a text/* attachment carried inline (text/html with its tags taken out); None for
+/// other types or empty text.
+fn attachment_text(a: &Value) -> Option<String> {
+    let data = a.get("data").and_then(Value::as_str)?;
+    let ct = a.get("contentType").and_then(Value::as_str).unwrap_or("");
+    if !ct.starts_with("text/") {
+        return None;
     }
-
-    let last_updated = root
-        .get("meta")
-        .and_then(|m| m.get("lastUpdated"))
-        .and_then(Value::as_str)
-        .map(String::from);
-
-    let mut patient_name = None;
-    let mut patient_id = None;
-    let mut patient_birth_date = None;
-    let mut diagnostic_reports = Vec::new();
-    let mut studies = Vec::new();
-
-    let entries = root
-        .get("entry")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::InvalidBundle("Bundle missing entry array".into()))?;
-
-    for entry in entries {
-        let Some(res) = entry.get("resource") else {
-            continue;
-        };
-        let Some(res_type) = res.get("resourceType").and_then(Value::as_str) else {
-            continue;
-        };
-
-        match res_type {
-            "Patient" => {
-                if let Some(name_obj) = res
-                    .get("name")
-                    .and_then(Value::as_array)
-                    .and_then(|a| a.first())
-                {
-                    if let Some(text) = name_obj.get("text").and_then(Value::as_str) {
-                        patient_name = Some(text.to_string());
-                    } else {
-                        let family = name_obj.get("family").and_then(Value::as_str).unwrap_or("");
-                        let given = name_obj
-                            .get("given")
-                            .and_then(Value::as_array)
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(Value::as_str)
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            })
-                            .unwrap_or_default();
-                        let combined = format!("{given} {family}").trim().to_string();
-                        if !combined.is_empty() {
-                            patient_name = Some(combined);
-                        }
-                    }
+    let mut t = String::from_utf8_lossy(&base64_forgiving(data)?).to_string();
+    if ct.starts_with("text/html") {
+        // Each tag becomes a space; whitespace before a line break goes.
+        let mut out = String::with_capacity(t.len());
+        let mut rest = t.as_str();
+        while let Some(i) = rest.find('<') {
+            match rest[i + 1..].find('>') {
+                Some(j) if j > 0 => {
+                    out.push_str(&rest[..i]);
+                    out.push(' ');
+                    rest = &rest[i + 1 + j + 1..];
                 }
-                patient_id = res
-                    .get("identifier")
-                    .and_then(Value::as_array)
-                    .and_then(|a| a.first())
-                    .and_then(|id| id.get("value"))
-                    .and_then(Value::as_str)
-                    .map(String::from);
-                patient_birth_date = res.get("birthDate").and_then(Value::as_str).map(String::from);
+                _ => {
+                    out.push_str(&rest[..=i]);
+                    rest = &rest[i + 1..];
+                }
             }
-            "DiagnosticReport" => {
-                diagnostic_reports.push(DiagnosticReportSummary {
-                    id: res
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("report")
-                        .to_string(),
-                    status: res
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    conclusion: res.get("conclusion").and_then(Value::as_str).map(String::from),
+        }
+        out.push_str(rest);
+        // "\s+\n" -> "\n": in each run of whitespace, everything up to its last line break
+        // becomes one line break.
+        let mut collapsed = String::with_capacity(out.len());
+        let chars: Vec<char> = out.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if !chars[i].is_whitespace() {
+                collapsed.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            let run = &chars[start..i];
+            match run.iter().rposition(|&c| c == '\n') {
+                Some(last) if last > 0 => {
+                    collapsed.push('\n');
+                    collapsed.extend(&run[last + 1..]);
+                }
+                _ => collapsed.extend(run),
+            }
+        }
+        t = collapsed;
+    }
+    let t = t.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+fn report_of(r: &Value, n: usize) -> DiagnosticReportSummary {
+    let arr = |k: &str| r.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+    let refs = arr("imagingStudy");
+    DiagnosticReportSummary {
+        id: text(r.get("id")).unwrap_or_else(|| format!("report-{n}")),
+        status: text(r.get("status")).unwrap_or_else(|| "unknown".into()),
+        title: code_text(r.get("code")),
+        conclusion: text(r.get("conclusion")),
+        issued: text(r.get("issued")),
+        effective: text(r.get("effectiveDateTime")).or_else(|| text(r.get("effectivePeriod").and_then(|p| p.get("start")))),
+        // Raw references here; resolved once every entry is read.
+        study_ids: refs.iter().filter_map(|x| x.get("reference").and_then(Value::as_str)).filter(|s| !s.is_empty()).map(String::from).collect(),
+        study_uids: refs
+            .iter()
+            .filter_map(|x| text(x.get("identifier").and_then(|i| i.get("value"))))
+            .map(|v| v.strip_prefix("urn:oid:").unwrap_or(&v).to_string())
+            .collect(),
+        identifiers: arr("identifier")
+            .iter()
+            .filter_map(|i| {
+                let value = text(i.get("value"))?;
+                let accession = i.get("type").and_then(|t| t.get("coding")).and_then(Value::as_array).is_some_and(|c| c.iter().any(|x| x.get("code") == Some(&Value::from("ACSN"))));
+                Some(ReportIdentifier { system: text(i.get("system")), value, accession })
+            })
+            .collect(),
+        category: code_text(r.get("category").and_then(|c| c.get(0))),
+        text: arr("presentedForm").iter().find_map(attachment_text),
+        attachments: arr("presentedForm")
+            .iter()
+            .map(|a| {
+                let data = a.get("data").and_then(Value::as_str).and_then(|d| base64_forgiving(d).map(|b| (d.to_string(), b.len() as u64)));
+                ReportAttachment {
+                    content_type: a.get("contentType").and_then(Value::as_str).unwrap_or("application/octet-stream").to_string(),
+                    title: text(a.get("title")),
+                    size: a.get("size").and_then(Value::as_u64).or(data.as_ref().map(|d| d.1)),
+                    data_b64: data.map(|d| d.0),
+                    url: text(a.get("url")),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Reads a decrypted Bundle into its study index (spec/README.md §8): the Patient, the
+/// DiagnosticReports, and each shared ImagingStudy's series and instances with their files and
+/// byte offsets. The viewer reads links with this (crates/shl-dicom-reader); every failure is
+/// [`Error::InvalidBundle`].
+pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
+    let root: Value = serde_json::from_slice(bundle_json).map_err(|_| Error::InvalidBundle("the shared file is not JSON".into()))?;
+    let entries = match (root.get("resourceType").and_then(Value::as_str), root.get("entry").and_then(Value::as_array)) {
+        (Some("Bundle"), Some(e)) => e,
+        _ => return Err(Error::InvalidBundle("the shared file is not a FHIR Bundle".into())),
+    };
+    let last_updated = text(root.get("meta").and_then(|m| m.get("lastUpdated")));
+    let (mut patient_name, mut patient_id, mut patient_birth_date) = (None, None, None);
+    let mut diagnostic_reports = Vec::new();
+    let mut studies: Vec<StudySummary> = Vec::new();
+    for entry in entries {
+        let Some(res) = entry.get("resource").filter(|r| r.is_object()) else { continue };
+        match res.get("resourceType").and_then(Value::as_str) {
+            // The first Patient that gives a name.
+            Some("Patient") if patient_name.is_none() => {
+                let n = res.get("name").and_then(|n| n.get(0));
+                patient_name = text(n.and_then(|n| n.get("text"))).or_else(|| {
+                    let mut parts: Vec<String> = n.and_then(|n| n.get("given")).and_then(Value::as_array).into_iter().flatten().filter_map(|g| g.as_str()).filter(|g| !g.is_empty()).map(String::from).collect();
+                    parts.extend(n.and_then(|n| n.get("family")).and_then(Value::as_str).filter(|f| !f.is_empty()).map(String::from));
+                    let joined = parts.join(" ").trim().to_string();
+                    (!joined.is_empty()).then_some(joined)
                 });
+                patient_birth_date = text(res.get("birthDate"));
+                patient_id = text(res.get("identifier").and_then(|i| i.get(0)).and_then(|i| i.get("value")));
             }
-            "ImagingStudy" => {
-                if let Some(study) = parse_imaging_study(res)? {
+            Some("DiagnosticReport") => diagnostic_reports.push(report_of(res, diagnostic_reports.len() + 1)),
+            Some("ImagingStudy") => {
+                if let Some(study) = parse_imaging_study(res, studies.len() + 1)? {
                     for f in &study.files {
-                        if studies.iter().any(|st: &StudySummary| st.files.iter().any(|g| g.file_id == f.file_id)) {
-                            return Err(Error::InvalidBundle(format!(
-                                "file {} is linked from two ImagingStudy resources",
-                                f.file_id
-                            )));
+                        if studies.iter().any(|st| st.files.iter().any(|g| g.file_id == f.file_id)) {
+                            return Err(Error::InvalidBundle(format!("file {} is linked from two ImagingStudy resources", f.file_id)));
                         }
                     }
                     studies.push(study);
@@ -706,34 +816,36 @@ pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
             _ => {}
         }
     }
-
-    Ok(StudyIndex {
-        last_updated,
-        patient_name,
-        patient_id,
-        patient_birth_date,
-        diagnostic_reports,
-        studies,
-    })
+    // A report's imagingStudy references: an entry's fullUrl, else "ImagingStudy/<id>"; only
+    // studies in the index count.
+    let by_full_url: HashMap<&str, String> = entries
+        .iter()
+        .filter(|e| e.get("resource").and_then(|r| r.get("resourceType")).and_then(Value::as_str) == Some("ImagingStudy"))
+        .filter_map(|e| Some((e.get("fullUrl")?.as_str()?, text(e["resource"].get("id")).unwrap_or_default())))
+        .collect();
+    for rep in &mut diagnostic_reports {
+        rep.study_ids = std::mem::take(&mut rep.study_ids)
+            .into_iter()
+            .filter_map(|r| by_full_url.get(r.as_str()).cloned().or_else(|| r.strip_prefix("ImagingStudy/").filter(|id| !id.is_empty() && !id.contains('/')).map(String::from)))
+            .filter(|id| !id.is_empty() && studies.iter().any(|st| &st.id == id))
+            .collect();
+    }
+    Ok(StudyIndex { last_updated, patient_name, patient_id, patient_birth_date, diagnostic_reports, studies })
 }
 
-fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
-    let id = res
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("study")
-        .to_string();
-    let study_instance_uid = res
-        .get("identifier")
-        .and_then(Value::as_array)
-        .and_then(|arr| arr.first())
-        .and_then(|ident| ident.get("value"))
-        .and_then(Value::as_str)
-        .map(|s| s.strip_prefix("urn:oid:").unwrap_or(s).to_string())
-        .unwrap_or_else(|| id.clone());
-
-    let description = res.get("description").and_then(Value::as_str).map(String::from);
-    let started = res.get("started").and_then(Value::as_str).map(String::from);
+fn parse_imaging_study(res: &Value, n: usize) -> Result<Option<StudySummary>> {
+    let id = text(res.get("id")).unwrap_or_else(|| format!("study-{n}"));
+    let identifiers = res.get("identifier").and_then(Value::as_array).cloned().unwrap_or_default();
+    let ident = identifiers.iter().find(|i| i.get("system") == Some(&Value::from("urn:dicom:uid"))).or(identifiers.first());
+    let study_instance_uid = text(ident.and_then(|i| i.get("value"))).or_else(|| text(res.get("id"))).unwrap_or_default();
+    let study_instance_uid = study_instance_uid.strip_prefix("urn:oid:").unwrap_or(&study_instance_uid).to_string();
+    let accession = identifiers.iter().find_map(|i| {
+        let acsn = i.get("type").and_then(|t| t.get("coding")).and_then(Value::as_array).is_some_and(|c| c.iter().any(|x| x.get("code") == Some(&Value::from("ACSN"))));
+        if acsn { Some(text(i.get("value"))) } else { None }
+    }).flatten();
+    let notes: Vec<String> = res.get("note").and_then(Value::as_array).into_iter().flatten().filter_map(|n| text(n.get("text"))).collect();
+    let description = text(res.get("description"));
+    let started = text(res.get("started"));
 
     let Some(series_arr) = res.get("series").and_then(Value::as_array) else {
         return Ok(None);
@@ -761,11 +873,7 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
     let mut file_index: HashMap<String, usize> = HashMap::new();
     let mut pending = Vec::with_capacity(series_arr.len());
     for (se_val, own) in series_arr.iter().zip(own_files) {
-        let uid = se_val
-            .get("uid")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidBundle("series missing uid".into()))?
-            .to_string();
+        let uid = text(se_val.get("uid")).ok_or_else(|| Error::InvalidBundle("series without uid".into()))?;
         let (file_id, key) = own
             .or_else(|| study_file.clone())
             .ok_or_else(|| Error::InvalidBundle(format!("series {uid} has no linked-file")))?;
@@ -783,20 +891,11 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
             }
         };
         let number = se_val.get("number").and_then(Value::as_i64).map(|n| n as i32);
-        let modality = se_val
-            .get("modality")
-            .and_then(|m| m.get("code"))
-            .and_then(Value::as_str)
-            .map(String::from);
-        let se_desc = se_val
-            .get("description")
-            .and_then(Value::as_str)
-            .map(String::from);
+        let modality = text(se_val.get("modality").and_then(|m| m.get("code")));
+        let se_desc = text(se_val.get("description"));
+        let body_site = text(se_val.get("bodySite").and_then(|b| b.get("display"))).or_else(|| text(se_val.get("bodySite").and_then(|b| b.get("code"))));
 
-        let inst_arr = se_val
-            .get("instance")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Error::InvalidBundle("series missing instance array".into()))?;
+        let inst_arr = se_val.get("instance").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
         if inst_arr.is_empty() {
             return Err(Error::InvalidBundle(format!("series {uid} lists no instances")));
         }
@@ -809,17 +908,9 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
             if length == 0 || length > MAX_FILE_BYTES {
                 return Err(Error::InvalidBundle(format!("instance length {length} is not 1 to {MAX_FILE_BYTES}")));
             }
-            let inst_uid = inst_val
-                .get("uid")
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::InvalidBundle("instance missing uid".into()))?
-                .to_string();
-            let sop_class = inst_val
-                .get("sopClass")
-                .and_then(|s| s.get("code"))
-                .and_then(Value::as_str)
-                .map(|s| s.strip_prefix("urn:oid:").unwrap_or(s).to_string())
-                .unwrap_or_default();
+            let inst_uid = text(inst_val.get("uid")).ok_or_else(|| Error::InvalidBundle("instance without uid".into()))?;
+            let sop_class = text(inst_val.get("sopClass").and_then(|s| s.get("code"))).unwrap_or_default();
+            let sop_class = sop_class.strip_prefix("urn:oid:").unwrap_or(&sop_class).to_string();
             let inst_num = inst_val.get("number").and_then(Value::as_i64).map(|n| n as i32);
 
             // A file's instances end to end may not pass MAX_FILE_BYTES either.
@@ -839,7 +930,7 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
             offset = end;
         }
         files[fi].2 = offset;
-        pending.push((fi, uid, number, modality, se_desc, start, offset - start, instances));
+        pending.push((fi, uid, number, modality, se_desc, body_site, start, offset - start, instances));
     }
 
     let file_summaries: Vec<FileSummary> = files
@@ -854,11 +945,12 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
         .collect();
     let series_list: Vec<SeriesSummary> = pending
         .into_iter()
-        .map(|(fi, uid, number, modality, description, offset, bytes, instances)| SeriesSummary {
+        .map(|(fi, uid, number, modality, description, body_site, offset, bytes, instances)| SeriesSummary {
             uid,
             number,
             modality,
             description,
+            body_site,
             file: file_summaries[fi].clone(),
             offset,
             bytes,
@@ -870,12 +962,23 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
 
     let number_of_instances = series_list.iter().map(|s| s.instances.len()).sum();
     let number_of_series = series_list.len();
+    let mut modalities: Vec<String> = Vec::new();
+    for m in series_list.iter().filter_map(|s| s.modality.clone()) {
+        if !modalities.contains(&m) {
+            modalities.push(m);
+        }
+    }
+    let bytes = series_list.iter().map(|s| s.bytes).sum();
 
     Ok(Some(StudySummary {
         id,
         study_instance_uid,
         description,
         started,
+        modalities,
+        notes,
+        accession,
+        bytes,
         number_of_series,
         number_of_instances,
         files: file_summaries,
@@ -898,8 +1001,8 @@ fn extract_linked_file(el: &Value) -> Result<Option<(String, String)>> {
             let mut key = None;
             for item in sub {
                 match item.get("url").and_then(Value::as_str) {
-                    Some("id") => file_id = item.get("valueString").and_then(Value::as_str).map(String::from),
-                    Some("key") => key = item.get("valueString").and_then(Value::as_str).map(String::from),
+                    Some("id") => file_id = text(item.get("valueString")),
+                    Some("key") => key = text(item.get("valueString")),
                     _ => {}
                 }
             }
@@ -916,23 +1019,15 @@ fn extract_linked_file(el: &Value) -> Result<Option<(String, String)>> {
 }
 
 fn extract_instance_length(inst_val: &Value) -> Result<u64> {
-    let exts = inst_val
-        .get("extension")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::InvalidBundle("instance missing extension array".into()))?;
-    for ext in exts {
+    for ext in inst_val.get("extension").and_then(Value::as_array).into_iter().flatten() {
         if ext.get("url").and_then(Value::as_str) == Some(EXT_INSTANCE_LENGTH) {
+            // A JSON integer only (not "123", not 123.0).
             if let Some(n) = ext.get("valueDecimal").and_then(Value::as_u64) {
                 return Ok(n);
             }
-            if let Some(f) = ext.get("valueDecimal").and_then(Value::as_f64) {
-                if f > 0.0 && f.fract() == 0.0 {
-                    return Ok(f as u64);
-                }
-            }
         }
     }
-    Err(Error::InvalidBundle("instance missing valid instance-length extension".into()))
+    Err(Error::InvalidBundle("instance without a valid length".into()))
 }
 
 /// A random (version 4) `urn:uuid:` for Bundle.entry.fullUrl.

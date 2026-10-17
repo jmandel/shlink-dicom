@@ -123,7 +123,7 @@ Two extensions. Their URLs are under `http://hl7.org/fhir/uv/smart-health-cards-
 | ↳ `key` | `linked-file` | `valueString` | The file's encryption key: 32 random bytes, base64url-encoded without padding (43 characters). |
 | `…/instance-length` | `ImagingStudy.series.instance` | `valueDecimal` (a positive integer) | Length in bytes of this instance's DICOM file. |
 
-`valueDecimal` is used because R4 `integer` is 32-bit, and a single whole-slide image instance can exceed 2 GB.
+`valueDecimal` is used because R4 `integer` is 32-bit, and a single whole-slide image instance can exceed 2 GB. It is written as a JSON integer (not a string, not `70000.0`), at most 2^53 − 1, and a file's instances together are at most 2^53 − 1 bytes, the largest integer a JavaScript reader handles exactly. A reader refuses a Bundle that breaks these rules.
 
 Rules for `linked-file`:
 

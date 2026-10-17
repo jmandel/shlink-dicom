@@ -10,7 +10,7 @@ use flate2::{
 use serde::{Deserialize, Serialize};
 use crate::{
     crypto::{b64url_decode, b64url_encode, random_bytes},
-    Error, Result,
+    Error, ReadError, Result,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,71 +77,66 @@ pub const MAX_BUNDLE_BYTES: u64 = 64 << 20;
 /// The largest compact JWE a reader takes: a 64 MiB payload in base64url, plus the header.
 pub const MAX_JWE_CHARS: usize = (MAX_BUNDLE_BYTES as usize).div_ceil(3) * 4 + 4096;
 
-pub fn decrypt_bundle_jwe(jwe_compact: &str, shl_key: &[u8; 32]) -> Result<Vec<u8>> {
+/// Decrypts a Bundle JWE: compact form (five parts, no encrypted key), alg dir, enc A256GCM, cty
+/// application/fhir+json, a 12-byte IV and 16-byte tag, zip DEF or none, at most
+/// [`MAX_JWE_CHARS`] long and [`MAX_BUNDLE_BYTES`] inflated. The viewer's reader runs this too
+/// (crates/shl-dicom-reader), so a failure carries a stable code.
+pub fn open_bundle_jwe(jwe_compact: &str, shl_key: &[u8; 32]) -> std::result::Result<Vec<u8>, ReadError> {
+    let fail = |code: &'static str, message: String| ReadError { code, message };
     if jwe_compact.len() > MAX_JWE_CHARS {
-        return Err(Error::Jwe(format!("JWE is longer than {MAX_JWE_CHARS} characters")));
+        return Err(fail("too-large", format!("JWE is longer than {MAX_JWE_CHARS} characters")));
     }
     let parts: Vec<&str> = jwe_compact.trim().split('.').collect();
     if parts.len() != 5 || !parts[1].is_empty() {
-        return Err(Error::Jwe("invalid compact JWE format".into()));
+        return Err(fail("not-jwe", "not a compact JWE with direct encryption".into()));
     }
-
     let header_b64 = parts[0];
-    let header_bytes = b64url_decode(header_b64)?;
-    let header: JweHeader =
-        serde_json::from_slice(&header_bytes).map_err(|e| Error::Jwe(e.to_string()))?;
-
+    let header: JweHeader = b64url_decode(header_b64)
+        .ok()
+        .and_then(|h| serde_json::from_slice(&h).ok())
+        .ok_or_else(|| fail("not-jwe", "unreadable JWE header".into()))?;
     if header.alg != "dir" || header.enc != "A256GCM" {
-        return Err(Error::Jwe(format!(
-            "unsupported JWE alg/enc: {}/{}",
-            header.alg, header.enc
-        )));
+        return Err(fail("unsupported", format!("JWE alg/enc {}/{}", header.alg, header.enc)));
     }
     if header.cty.as_deref() != Some(BUNDLE_CTY) {
-        return Err(Error::Jwe(format!("JWE cty must be {BUNDLE_CTY}, not {}", header.cty.as_deref().unwrap_or("missing"))));
+        return Err(fail("unsupported", format!("JWE cty must be {BUNDLE_CTY}, not {}", header.cty.as_deref().unwrap_or("missing"))));
     }
-
-    let iv = b64url_decode(parts[2])?;
+    if !matches!(header.zip.as_deref(), None | Some("DEF")) {
+        return Err(fail("unsupported", format!("JWE zip {}", header.zip.as_deref().unwrap_or(""))));
+    }
+    let b64 = |s: &str, what: &str| b64url_decode(s).map_err(|_| fail("not-jwe", format!("JWE {what} is not base64url")));
+    let iv = b64(parts[2], "IV")?;
     if iv.len() != 12 {
-        return Err(Error::Jwe("JWE IV must be 12 bytes".into()));
+        return Err(fail("not-jwe", "JWE IV must be 12 bytes".into()));
     }
-    let ct = b64url_decode(parts[3])?;
-    let tag = b64url_decode(parts[4])?;
+    let ct = b64(parts[3], "ciphertext")?;
+    let tag = b64(parts[4], "tag")?;
     if tag.len() != 16 {
-        return Err(Error::Jwe("JWE authentication tag must be 16 bytes".into()));
+        return Err(fail("not-jwe", "JWE authentication tag must be 16 bytes".into()));
     }
-
     let mut ct_with_tag = Vec::with_capacity(ct.len() + tag.len());
     ct_with_tag.extend_from_slice(&ct);
     ct_with_tag.extend_from_slice(&tag);
-
-    let cipher = Aes256Gcm::new(shl_key.into());
-    let decrypted = cipher
-        .decrypt(
-            Nonce::from_slice(&iv),
-            Payload {
-                msg: &ct_with_tag,
-                aad: header_b64.as_bytes(),
-            },
-        )
-        .map_err(|_| Error::Jwe("JWE authentication failed".into()))?;
-
-    match header.zip.as_deref() {
-        Some("DEF") => {
-            // One byte past the cap tells a Bundle that is too large from one exactly at it.
-            let mut decoder = DeflateDecoder::new(&decrypted[..]).take(MAX_BUNDLE_BYTES + 1);
-            let mut out = Vec::new();
-            decoder
-                .read_to_end(&mut out)
-                .map_err(|e| Error::Jwe(format!("DEFLATE decompression failed: {e}")))?;
-            if out.len() as u64 > MAX_BUNDLE_BYTES {
-                return Err(Error::Jwe(format!("Bundle inflates past {MAX_BUNDLE_BYTES} bytes")));
-            }
-            Ok(out)
-        }
-        None => Ok(decrypted),
-        Some(other) => Err(Error::Jwe(format!("unsupported JWE zip: {other}"))),
+    let decrypted = Aes256Gcm::new(shl_key.into())
+        .decrypt(Nonce::from_slice(&iv), Payload { msg: &ct_with_tag, aad: header_b64.as_bytes() })
+        .map_err(|_| fail("decrypt", "the JWE does not decrypt with this key".into()))?;
+    if header.zip.is_none() {
+        return Ok(decrypted);
     }
+    // One byte past the cap tells a Bundle that is too large from one exactly at it.
+    let mut out = Vec::new();
+    DeflateDecoder::new(&decrypted[..])
+        .take(MAX_BUNDLE_BYTES + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| fail("inflate", format!("DEFLATE decompression failed: {e}")))?;
+    if out.len() as u64 > MAX_BUNDLE_BYTES {
+        return Err(fail("too-large", format!("Bundle inflates past {MAX_BUNDLE_BYTES} bytes")));
+    }
+    Ok(out)
+}
+
+pub fn decrypt_bundle_jwe(jwe_compact: &str, shl_key: &[u8; 32]) -> Result<Vec<u8>> {
+    open_bundle_jwe(jwe_compact, shl_key).map_err(|e| Error::Jwe(e.message))
 }
 
 #[cfg(test)]
