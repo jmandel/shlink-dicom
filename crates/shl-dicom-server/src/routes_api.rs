@@ -373,9 +373,11 @@ fn sf_bool(headers: &HeaderMap, name: &str) -> Option<Result<bool, ()>> {
     })
 }
 
+/// A Structured Field Integer header (RFC 8941: at most 15 digits), as u64. Anything past
+/// i64::MAX is refused: lengths are stored as SQLite integers, and sums of them must not wrap.
 fn sf_int(headers: &HeaderMap, name: &str) -> Option<Result<u64, ()>> {
     let v = headers.get(name)?.to_str().ok()?;
-    Some(v.trim().parse::<u64>().map_err(|_| ()))
+    Some(v.trim().parse::<u64>().ok().filter(|&n| n <= i64::MAX as u64).ok_or(()))
 }
 
 fn problem(status: StatusCode, kind: &str, title: &str, extra: serde_json::Value) -> Response {
@@ -683,7 +685,7 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: Option<
     // A length not known yet is checked as its bytes arrive (append_body).
     let over = if state.quotas.share_files.is_some_and(|m| files as usize >= m) {
         Some("QUOTA_FILES_EXCEEDED")
-    } else if state.quotas.share_bytes.is_some_and(|m| bytes + total.unwrap_or(0) > m || (total.is_none() && bytes >= m)) {
+    } else if state.quotas.share_bytes.is_some_and(|m| bytes.saturating_add(total.unwrap_or(0)) > m || (total.is_none() && bytes >= m)) {
         Some("QUOTA_BYTES_EXCEEDED")
     } else {
         None
@@ -862,7 +864,7 @@ pub async fn patch_share_file(
             if l < have {
                 return problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({}));
             }
-            if state.quotas.share_bytes.is_some_and(|m| share_bytes_in_use(&state, &sid, &file_id) + l > m) {
+            if state.quotas.share_bytes.is_some_and(|m| share_bytes_in_use(&state, &sid, &file_id).saturating_add(l) > m) {
                 return json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED");
             }
             set_upload_length(&state, &sid, &file_id, l);

@@ -2074,3 +2074,44 @@ async fn test_a_share_cannot_touch_another_shares_links() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND, "deleting it again");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An Upload-Length past i64::MAX is refused (400), and one that would wrap the share byte limit
+/// is over it (413), on PUT and on PATCH.
+#[tokio::test]
+async fn test_a_huge_upload_length_does_not_wrap_the_byte_limit() {
+    let dir = temp_data_dir("huge_length");
+    let state = AppState::with_store(
+        &dir,
+        shl_dicom_server::state::Quotas { share_bytes: Some(10 << 20), ..Default::default() },
+        test_store(&dir),
+    )
+    .unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = |k: u8| format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[k; 16]));
+    assert_eq!(client.put(url(1)).bearer_auth(&token).body(vec![0u8; 100]).send().await.unwrap().status(), StatusCode::OK);
+    let put = |k: u8, len: &str| client.put(url(k)).bearer_auth(&token).header("Upload-Complete", "?0").header("Upload-Length", len.to_string()).send();
+    assert_eq!(put(2, &u64::MAX.to_string()).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(put(3, &(i64::MAX as u64 + 1).to_string()).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(put(4, &i64::MAX.to_string()).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // PATCH learning the length of an upload begun without one.
+    assert_eq!(client.put(url(5)).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap().status(), StatusCode::CREATED);
+    for (len, want) in [(u64::MAX.to_string(), StatusCode::BAD_REQUEST), (i64::MAX.to_string(), StatusCode::PAYLOAD_TOO_LARGE)] {
+        let r = client
+            .patch(url(5))
+            .bearer_auth(&token)
+            .header("Content-Type", "application/partial-upload")
+            .header("Upload-Offset", "0")
+            .header("Upload-Complete", "?0")
+            .header("Upload-Length", len)
+            .body(vec![1u8; 10])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), want);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
