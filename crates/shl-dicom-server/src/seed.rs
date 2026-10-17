@@ -12,7 +12,8 @@ use crate::state::{
 };
 
 // 6: link ids of 32 random bytes.
-pub const SEED_VERSION: u32 = 6;
+// 7: the Bundle JWE carries cty application/fhir+json.
+pub const SEED_VERSION: u32 = 7;
 
 /// Title and description of the sample share, from `samples/sample.json` when present.
 #[derive(serde::Deserialize)]
