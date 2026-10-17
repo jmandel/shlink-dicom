@@ -88,6 +88,7 @@ pub fn build_app_router(state: AppState) -> Router {
             "/api/shares/{sid}/links/{lid}/bundle.jwe",
             put(routes_api::put_link_bundle),
         )
+        .route("/api/shares/{sid}/links/{lid}/bundle", get(routes_api::get_link_bundle))
         .route(
             "/api/shares/{sid}/links/{lid}",
             patch(routes_api::patch_link).delete(routes_api::delete_link),

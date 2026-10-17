@@ -1203,6 +1203,41 @@ pub async fn put_link_bundle(
     }
 }
 
+/// `GET /api/shares/{sid}/links/{lid}/bundle`: the link's stored bundle.jwe, for its owner (the
+/// Manage page reads which reports a link carries). Only a link of {sid}; 404 when it has none.
+pub async fn get_link_bundle(
+    State(state): State<AppState>,
+    Path((sid, lid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = require_auth(&state, &sid, &headers) {
+        return resp;
+    }
+    if !is_valid_lid(&lid) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(conn_arc) = state.open_share_db(&sid) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // The share's own database holds only its own links.
+    let row: Option<(Vec<u8>, Option<String>)> = conn_arc
+        .lock()
+        .unwrap()
+        .query_row("SELECT bundle, bundle_etag FROM links WHERE lid = ?1 AND bundle IS NOT NULL", params![lid], |r| Ok((r.get(0)?, r.get(1)?)))
+        .ok();
+    let Some((jwe, etag)) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut b = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/jose")
+        .header(header::CACHE_CONTROL, "no-store");
+    if let Some(e) = etag {
+        b = b.header(header::ETAG, e);
+    }
+    b.body(Body::from(jwe)).unwrap()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchLinkRequest {

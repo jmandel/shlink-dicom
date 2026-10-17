@@ -2576,3 +2576,33 @@ async fn test_the_server_wide_byte_limit() {
     assert_eq!(put(c, ct, 6, 4 << 20).await, StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A link's owner can read back its stored bundle.jwe; another share's token can't, and a link
+/// without one is 404.
+#[tokio::test]
+async fn test_the_owner_reads_a_links_bundle() {
+    let dir = temp_data_dir("get_link_bundle");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let share = || async {
+        let v: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+        (v["share"]["id"].as_str().unwrap().to_string(), v["controlToken"].as_str().unwrap().to_string())
+    };
+    let (a, a_token) = share().await;
+    let (b, b_token) = share().await;
+    let link: Value = client.post(format!("{base}/api/shares/{b}/links")).bearer_auth(&b_token).json(&json!({ "allowedFiles": [] })).send().await.unwrap().json().await.unwrap();
+    let lid = link["id"].as_str().unwrap().to_string();
+    let get = |sid: &str, token: &str| client.get(format!("{base}/api/shares/{sid}/links/{lid}/bundle")).bearer_auth(token.to_string()).send();
+    assert_eq!(get(&b, &b_token).await.unwrap().status(), StatusCode::NOT_FOUND, "no bundle yet");
+    client.put(format!("{base}/api/shares/{b}/links/{lid}/bundle.jwe")).bearer_auth(&b_token).body("hdr..iv.ct.tag").send().await.unwrap();
+    let r = get(&b, &b_token).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()[header::CONTENT_TYPE], "application/jose");
+    assert!(r.headers().contains_key(header::ETAG));
+    assert_eq!(r.text().await.unwrap(), "hdr..iv.ct.tag");
+    assert_eq!(get(&a, &a_token).await.unwrap().status(), StatusCode::NOT_FOUND, "share A has no such link");
+    assert_eq!(get(&b, &a_token).await.unwrap().status(), StatusCode::FORBIDDEN, "A's token on B");
+    assert_eq!(client.get(format!("{base}/api/shares/{b}/links/{lid}/bundle")).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&dir);
+}
