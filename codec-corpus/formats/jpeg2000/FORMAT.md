@@ -91,10 +91,10 @@ What `prep::pack` returns:
 
 | Codestream | Data set says | We return | Why |
 |---|---|---|---|
-| MCT on | anything | RGB (the decoder undoes RCT/ICT) | §8.2.4 |
+| MCT on | anything, including YBR_FULL (`gen-synth-rgb8-60x40-openjpeg-rct-ybr-full`) | RGB (the decoder undoes RCT/ICT) | §8.2.4. pydicom and GDCM convert a mislabelled YBR_FULL a second time; the seed is the oracle, so the case is marked disputed. |
 | no MCT | YBR_ICT or YBR_RCT (`ext-orthanc-jp2k91YBR-ICT`, `ext-issue-cornerstoneWADOImageLoader_367-1_1`) | RGB, samples as decoded | Coordinator ruling. The label is wrong; all three references output the samples unchanged. |
 | no MCT | RGB | RGB | §8.2.4 |
-| no MCT | YBR_FULL | as declared, so the CLI converts YBR_FULL to RGB as pydicom does | §8.2.4 says these components are YCbCr. This departs from the letter of the coordinator's "no MCT ⇒ RGB" ruling. No corpus case has this combination; the coordinator may override. |
+| no MCT | YBR_FULL (`gen-synth-rgb8-60x40-openjpeg-ybr-full-nomct`, as Aliza writes) | as declared, so the CLI converts YBR_FULL to RGB as pydicom does | §8.2.4 says these components are YCbCr. This departs from the letter of the coordinator's "no MCT ⇒ RGB" ruling. pydicom and GDCM agree; openjpeg-cli ignores the label, so the case's `oracle_ref` is pydicom. |
 | no MCT, chroma subsampled 2×1 or 2×2 | anything (YBR_FULL_422 in practice) | RGB, converted as OpenJPEG does | See [Subsampled chroma](#subsampled-chroma-leica-aperio-slides-ybr_full_422). |
 
 Unit test `colour_rule`.

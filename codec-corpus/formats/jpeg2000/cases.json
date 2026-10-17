@@ -1582,6 +1582,38 @@
       "disputed": false
     },
     {
+      "id": "gen-synth-rgb8-60x40-openjpeg-rct-ybr-full",
+      "notes": "lossless J2K with the RCT, mislabelled YBR_FULL: the codestream's transform gives RGB (FORMAT.md colour table); pydicom and GDCM convert a second time",
+      "tags": [
+        "j2k-ybr-full",
+        "colour-label",
+        "quirk"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.90",
+      "rows": 40,
+      "columns": 60,
+      "frames": 1,
+      "samples_per_pixel": 3,
+      "bits_allocated": 8,
+      "bits_stored": 8,
+      "pixel_representation": 0,
+      "photometric": "YBR_FULL",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "generated",
+        "seed": "synth-rgb8-60x40",
+        "encoder": "opj-mct1"
+      },
+      "truth": "seed",
+      "sha256": "6c92c36652f695716ae86cb0cf13e01779b339be5ff82f8ba6ffa12e857434d8",
+      "size": 5350,
+      "expect": "decode",
+      "max_abs": 0,
+      "oracle_sha256": "2bfbe4e50d765ccb0febfdc9094fe5d72992a2e0713dcbe55e89e78a203fbde3",
+      "confidence": "ground truth from seed; families agreeing: ['openjpeg']",
+      "disputed": true
+    },
+    {
       "id": "gen-synth-rgb8-60x40-openjpeg-rev",
       "notes": "",
       "tags": [],
@@ -1608,6 +1640,38 @@
       "oracle_sha256": "2bfbe4e50d765ccb0febfdc9094fe5d72992a2e0713dcbe55e89e78a203fbde3",
       "confidence": "ground truth from seed; families agreeing: ['openjpeg']",
       "disputed": false
+    },
+    {
+      "id": "gen-synth-rgb8-60x40-openjpeg-ybr-full-nomct",
+      "notes": "lossless J2K of YBR_FULL samples, no component transform, labelled YBR_FULL (Aliza writes these): converted to RGB as pydicom does; openjpeg-cli ignores the label",
+      "tags": [
+        "j2k-ybr-full",
+        "colour-label"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.90",
+      "rows": 40,
+      "columns": 60,
+      "frames": 1,
+      "samples_per_pixel": 3,
+      "bits_allocated": 8,
+      "bits_stored": 8,
+      "pixel_representation": 0,
+      "photometric": "YBR_FULL",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "generated",
+        "seed": "synth-rgb8-60x40",
+        "encoder": "opj-mct0"
+      },
+      "truth": "references",
+      "sha256": "8608c0c0c33d683b15826f92d9e28e24c5c7fb238e3d6297ceb2f42ab86505be",
+      "size": 4900,
+      "expect": "decode",
+      "max_abs": 0,
+      "oracle_sha256": "85be88eeccb516ac185bbaf4c3ec45c722af74bc7011606374ddac3dd9a2d015",
+      "confidence": "lossless consensus; families agreeing: ['openjpeg']; WEAK (fewer than two independent families)",
+      "disputed": false,
+      "oracle_ref": "pydicom:pylibjpeg"
     },
     {
       "id": "gen-synth-rgb8-60x40-opj-97-ict-cprl-cbstyle",

@@ -374,6 +374,37 @@
       "disputed": false
     },
     {
+      "id": "gen-synth-rgb8-60x40-openjph-q-ybr-ict",
+      "notes": "HTJ2K lossy with the ICT, labelled YBR_ICT as PS3.5 8.2.4 asks (Aliza writes these)",
+      "tags": [
+        "htj2k-ybr-ict",
+        "colour-label"
+      ],
+      "transfer_syntax": "1.2.840.10008.1.2.4.203",
+      "rows": 40,
+      "columns": 60,
+      "frames": 1,
+      "samples_per_pixel": 3,
+      "bits_allocated": 8,
+      "bits_stored": 8,
+      "pixel_representation": 0,
+      "photometric": "YBR_ICT",
+      "planar_configuration": 0,
+      "source": {
+        "kind": "generated",
+        "seed": "synth-rgb8-60x40",
+        "encoder": "openjph-q"
+      },
+      "truth": "references",
+      "sha256": "7aa8c32a4f873fbde921184a15ed61ccd63db436f23abd7a7d64a2b134096696",
+      "size": 3554,
+      "expect": "decode",
+      "max_abs": 1,
+      "oracle_sha256": "7328fdfd681449cd4a274835c0f709e2a561c2c0be2263c682363d14382d836d",
+      "confidence": "lossy; 2 reference(s); families agreeing exactly: ['openjpeg']",
+      "disputed": false
+    },
+    {
       "id": "gen-synth-rgb8-60x40-openjph-rev",
       "notes": "",
       "tags": [],
