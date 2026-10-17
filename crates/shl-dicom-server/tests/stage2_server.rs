@@ -2251,3 +2251,31 @@ fn test_compress_keeps_archive_members_inside_the_output() {
     assert!(out.join("in.tgz/abs/inside.txt").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The access log keeps a recipient to 256 bytes and only a share's newest 10,000 events.
+#[tokio::test]
+async fn test_the_access_log_is_bounded() {
+    use shl_dicom_server::state::{AccessEvent, ACCESS_LOG_ROWS, MAX_RECIPIENT_BYTES};
+    let dir = temp_data_dir("access_bounds");
+    let state = test_state(&dir);
+    let (sid, _) = state.create_share(false, None).unwrap();
+    let ev = |ts: i64, recipient: Option<String>| AccessEvent { ts, lid: None, method: "GET".into(), path: "/x".into(), range: None, status: 200, bytes: 1, recipient };
+    state.record_access(&sid, ev(0, Some("é".repeat(1000))));
+    for ts in 1..=ACCESS_LOG_ROWS + 50 {
+        state.record_access(&sid, ev(ts, None));
+    }
+    state.flush_access(&sid);
+    let c = state.open_share_db(&sid).unwrap();
+    let conn = c.lock().unwrap();
+    let (n, oldest): (i64, i64) = conn.query_row("SELECT COUNT(*), MIN(ts) FROM access_log", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((n, oldest), (ACCESS_LOG_ROWS, 51));
+    drop(conn);
+    // The long recipient, on its own.
+    let (sid2, _) = state.create_share(false, None).unwrap();
+    state.record_access(&sid2, ev(0, Some("é".repeat(1000))));
+    state.flush_access(&sid2);
+    let c = state.open_share_db(&sid2).unwrap();
+    let r: String = c.lock().unwrap().query_row("SELECT recipient FROM access_log", [], |r| r.get(0)).unwrap();
+    assert!(r.len() <= MAX_RECIPIENT_BYTES && r.len() >= MAX_RECIPIENT_BYTES - 1 && r.chars().all(|c| c == 'é'), "{}", r.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}

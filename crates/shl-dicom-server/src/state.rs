@@ -242,6 +242,10 @@ struct AccessQueue {
 }
 
 const ACCESS_FLUSH_MS: u64 = 25;
+/// Longest recipient name kept in the access log (bytes).
+pub const MAX_RECIPIENT_BYTES: usize = 256;
+/// Access events kept per share; older ones are dropped as new ones are written.
+pub const ACCESS_LOG_ROWS: i64 = 10_000;
 
 impl AppState {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self, String> {
@@ -957,7 +961,17 @@ impl AppState {
 
     /// Records an access: queued for the share's access_log (written within ACCESS_FLUSH_MS, off
     /// the request's path) and sent to SSE subscribers at once.
-    pub fn record_access(&self, sid: &str, ev: AccessEvent) {
+    pub fn record_access(&self, sid: &str, mut ev: AccessEvent) {
+        // The recipient is whatever the client says: kept to MAX_RECIPIENT_BYTES.
+        if let Some(r) = ev.recipient.as_mut() {
+            if r.len() > MAX_RECIPIENT_BYTES {
+                let mut end = MAX_RECIPIENT_BYTES;
+                while !r.is_char_boundary(end) {
+                    end -= 1;
+                }
+                r.truncate(end);
+            }
+        }
         if let Some(sender) = self.events.lock().unwrap().get(sid) {
             let _ = sender.send(ev.clone());
         }
@@ -997,6 +1011,11 @@ impl AppState {
                 ]);
             }
         }
+        // Only the newest ACCESS_LOG_ROWS events are kept.
+        let _ = tx.execute(
+            "DELETE FROM access_log WHERE rowid <= (SELECT MAX(rowid) FROM access_log) - ?1",
+            params![ACCESS_LOG_ROWS],
+        );
         let _ = tx.commit();
     }
 }
