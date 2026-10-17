@@ -40,7 +40,7 @@ export function parseShlink(input: string): ShlPayload {
     throw new InvalidLinkError("This link is damaged: its contents could not be read.");
   }
   const p = payload as ShlPayload;
-  if (!p || typeof p.url !== "string" || typeof p.key !== "string" || p.key.length !== 43) {
+  if (!p || typeof p.url !== "string" || typeof p.key !== "string" || !isKey32(p.key)) {
     throw new InvalidLinkError("This link is missing its address or key.");
   }
   // SMART Health Links: version 1 (or none, which is 1) is the one this reader knows, as the Rust
@@ -51,9 +51,18 @@ export function parseShlink(input: string): ShlPayload {
   return p;
 }
 
+/** A base64url key of 32 bytes (43 characters, or 44 with padding). */
+function isKey32(k: string): boolean {
+  try {
+    return b64urlDecode(k).length === 32;
+  } catch {
+    return false;
+  }
+}
+
 export function encodeShlink(payload: ShlPayload, viewerPrefix?: string): string {
   const body = "shlink:/" + b64urlEncode(utf8(JSON.stringify(payload)));
-  return viewerPrefix ? `${viewerPrefix}#${body}` : body;
+  return viewerPrefix ? `${viewerPrefix.replace(/#+$/, "")}#${body}` : body;
 }
 
 export const hasFlag = (p: ShlPayload, f: "L" | "P" | "U") => (p.flag ?? "").includes(f);

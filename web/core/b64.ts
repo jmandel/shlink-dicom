@@ -1,7 +1,10 @@
 // base64url (RFC 4648 §5, no padding) helpers used by the link, JWE and Bundle code.
 
+/** Decodes base64url; trailing "=" padding is allowed, other characters outside the alphabet throw. */
 export function b64urlDecode(s: string): Uint8Array<ArrayBuffer> {
-  const std = s.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+  const body = s.trim().replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]*$/.test(body) || body.length % 4 === 1) throw new Error("not base64url");
+  const std = body.replace(/-/g, "+").replace(/_/g, "/");
   const pad = std.length % 4 === 0 ? "" : "=".repeat(4 - (std.length % 4));
   const bin = atob(std + pad);
   const out = new Uint8Array(bin.length);
