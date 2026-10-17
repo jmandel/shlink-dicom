@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs or updates the shlink-dicom server and web app on a VM from a release that CI built
-# (.github/workflows/server-release.yml). Needs curl, unzip, tar and sudo: no git checkout, no Rust,
-# no C toolchain. Runs from a web terminal or as a first-boot setup script:
+# (.github/workflows/server-release.yml), on x86_64 or aarch64 Linux. Needs curl, unzip, tar and
+# sudo: no git checkout, no Rust, no C toolchain. Runs from a web terminal or as a first-boot
+# setup script:
 #
 #   curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-shlink-dicom.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-shlink-dicom.sh | bash -s server-1a2b3c4
@@ -11,11 +12,12 @@
 # reused).
 #
 # Steps:
-#   1. check the CPU runs x86-64-v3 code and the C library is new enough for the release's binary;
-#      install the SQLite runtime library and a pinned Bun (checked by SHA-256), which builds the
-#      sample;
-#   2. download the release, check its SHA-256 and every file against its MANIFEST.json, unpack it
-#      into $ROOT/releases/<tag>;
+#   1. pick the release build for this machine (linux-x86_64 or linux-aarch64; on x86_64 the
+#      x86-64-v3 server when the CPU has the whole set, else the baseline one; SHL_CPU=baseline
+#      forces the baseline); install the SQLite runtime library and a pinned Bun (checked by
+#      SHA-256), which builds the sample;
+#   2. download the release for this architecture, check its SHA-256, every file against its
+#      MANIFEST.json and that the C library is new enough, and unpack it into $ROOT/releases/<tag>;
 #   3. build the public sample with the release's code: the sandbox dataset (Josh Example,
 #      de-identified, plus the CC BY slide) from its pinned sources (each checked by SHA-256, kept in
 #      $ROOT/sources), checked against the release's expected digest, and its reports;
@@ -49,9 +51,15 @@ MAX_SHARE_BYTES="${MAX_SHARE_BYTES:-20G}"  # per share; the sample is not counte
 MAX_SHARES="${MAX_SHARES:-256}"         # shares at once
 ENV_FILE="${ENV_FILE:-/etc/shlink-dicom.env}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
-# The same pinned Bun as deploy/bootstrap-sandbox.sh.
+# Bun, pinned, for this architecture (the same block as in deploy/bootstrap-sandbox.sh).
 BUN_VERSION="1.4.3"
-BUN_SHA256_X64="3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18"
+case "$(uname -m)" in
+  x86_64)
+    if grep -qw avx2 /proc/cpuinfo; then BUN_BUILD=bun-linux-x64; BUN_SHA256=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
+    else BUN_BUILD=bun-linux-x64-baseline; BUN_SHA256=1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b; fi ;;
+  aarch64 | arm64) BUN_BUILD=bun-linux-aarch64; BUN_SHA256=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21 ;;
+  *) echo "no pinned Bun for $(uname -m) (x86_64 and aarch64 Linux are supported)" >&2; exit 1 ;;
+esac
 BUN="$ROOT/bun/bun-$BUN_VERSION"
 # Where releases are downloaded from (CI points it at a local file:// directory to test one before publishing).
 RELEASES="${RELEASES:-https://github.com/$REPO/releases/download}"
@@ -63,12 +71,20 @@ exec > >(tee -a /var/log/shlink-bootstrap.log) 2>&1
 echo "== bootstrap-shlink-dicom $(date -Is)"
 
 # 1. The machine, and the runtime.
-# The server is built for x86-64-v3 (AVX2 and the rest: .cargo/config.toml).
-missing=""
-for f in avx avx2 bmi1 bmi2 f16c fma abm movbe xsave; do grep -qw "$f" /proc/cpuinfo || missing="$missing $f"; done
-if [ -n "$missing" ] || [ "$(uname -m)" != x86_64 ]; then
-  echo "this CPU can't run the server: it is built for x86-64-v3 (AVX2, BMI1/2, FMA, MOVBE: Intel Haswell, AMD Excavator or newer); missing:${missing:- x86_64}" >&2
-  exit 1
+# Releases are built for linux-x86_64 (baseline x86-64, plus an x86-64-v3 build of the server) and
+# linux-aarch64.
+case "$(uname -m)" in
+  x86_64) ARCH=x86_64 ;;
+  aarch64 | arm64) ARCH=aarch64 ;;
+  *) echo "no server release is built for $(uname -m); x86_64 and aarch64 Linux are" >&2; exit 1 ;;
+esac
+# On x86_64, the x86-64-v3 server when the CPU has the whole set (LZCNT shows as abm), unless
+# SHL_CPU=baseline.
+CPU=baseline
+if [ "$ARCH" = x86_64 ] && [ "${SHL_CPU:-}" != baseline ]; then
+  CPU=x86-64-v3
+  for f in avx2 bmi1 bmi2 fma movbe f16c; do grep -qw "$f" /proc/cpuinfo || CPU=baseline; done
+  grep -qwE 'abm|lzcnt' /proc/cpuinfo || CPU=baseline
 fi
 need=""
 for c in curl unzip tar; do command -v "$c" >/dev/null || need="$need $c"; done
@@ -79,10 +95,10 @@ $SUDO mkdir -p "$ROOT/releases" "$ROOT/sources" "$ROOT/bun"
 $SUDO chown "$(id -u):$(id -g)" "$ROOT" "$ROOT/releases" "$ROOT/sources" "$ROOT/bun"
 if [ ! -x "$BUN" ]; then
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-linux-x64.zip"
-  echo "$BUN_SHA256_X64  $tmp/bun.zip" | sha256sum -c --quiet
+  curl -fsSL -o "$tmp/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$BUN_BUILD.zip"
+  echo "$BUN_SHA256  $tmp/bun.zip" | sha256sum -c --quiet
   unzip -q "$tmp/bun.zip" -d "$tmp"
-  install -m 755 "$tmp/bun-linux-x64/bun" "$BUN"
+  install -m 755 "$tmp/$BUN_BUILD/bun" "$BUN"
   rm -rf "$tmp"
 fi
 echo "bun $("$BUN" --version)"
@@ -93,13 +109,16 @@ if [ -z "$TAG" ]; then
   TAG="$(curl -fsSL "$RELEASES/server-latest/latest.json" | "$BUN" -e 'console.log(JSON.parse(await Bun.stdin.text()).tag)')"
 fi
 case "$TAG" in server-[0-9a-f]*) ;; *) echo "not a server release tag: $TAG" >&2; exit 1 ;; esac
-NAME="shlink-dicom-$TAG"
+NAME="shlink-dicom-$TAG-linux-$ARCH"
 DIR="$ROOT/releases/$TAG"
 if [ -f "$DIR/.built" ]; then
   echo "release $TAG: already unpacked and built in $DIR"
 else
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/$NAME.tar.gz" "$RELEASES/$TAG/$NAME.tar.gz"
+  if ! curl -fsSL -o "$tmp/$NAME.tar.gz" "$RELEASES/$TAG/$NAME.tar.gz"; then
+    echo "release $TAG has no $NAME.tar.gz: no build for linux-$ARCH in that release" >&2
+    exit 1
+  fi
   curl -fsSL -o "$tmp/$NAME.tar.gz.sha256" "$RELEASES/$TAG/$NAME.tar.gz.sha256"
   (cd "$tmp" && sha256sum -c --quiet "$NAME.tar.gz.sha256")
   echo "release $TAG: SHA-256 $(cut -d' ' -f1 "$tmp/$NAME.tar.gz.sha256") ok"
@@ -113,7 +132,7 @@ else
       const h = new Bun.CryptoHasher("sha256").update(await Bun.file(f.path).bytes()).digest("hex");
       if (h !== f.sha256) { console.error(`${f.path}: SHA-256 differs from MANIFEST.json`); process.exit(1); }
     }
-    console.log(`release ${m.tag}: commit ${m.commit}, ${m.files.length} files match MANIFEST.json; built for ${m.cpu}, glibc ${m.glibc}`);')
+    console.log(`release ${m.tag}: commit ${m.commit}, ${m.files.length} files match MANIFEST.json; linux-${m.arch}, glibc ${m.glibc}, ${Object.entries(m.binaries).map(([f, c]) => `${f} (${c})`).join(", ")}`);')
   want="$(manifest "$DIR.part" glibc)"
   # (sed, not head: with pipefail, a reader that stops early fails the pipeline.)
   have="$(ldd --version 2>&1 | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
@@ -153,6 +172,16 @@ EOF2
 fi
 
 # 4. The sample share, the unit, and the switch.
+# bin/server, which the seed and the unit run, links the build for this CPU.
+SERVER_BIN=shl-dicom-server
+if [ "$CPU" = x86-64-v3 ]; then
+  if [ -x "$DIR/bin/shl-dicom-server.v3" ]; then SERVER_BIN=shl-dicom-server.v3; else echo "release $TAG has no x86-64-v3 build; using the baseline one"; fi
+fi
+ln -sfn "$SERVER_BIN" "$DIR/bin/server"
+case "$SERVER_BIN" in
+  *.v3) echo "server: bin/$SERVER_BIN (x86-64-v3: this CPU has AVX2, BMI1/2, FMA, MOVBE, LZCNT and F16C)" ;;
+  *) echo "server: bin/$SERVER_BIN (linux-$ARCH baseline${SHL_CPU:+, SHL_CPU=$SHL_CPU})" ;;
+esac
 id shlink >/dev/null 2>&1 || $SUDO useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin shlink
 $SUDO mkdir -p "$DATA/samples"
 $SUDO rm -f "$DATA"/samples/*.tgz
@@ -185,7 +214,7 @@ if [ "$(cat "$DATA/samples/.sums" 2>/dev/null)" != "$sums" ] || [ ! -f "$DATA/se
       case "$v" in \"*\") v=${v#\"}; v=${v%\"} ;; \'"'"'*\'"'"') v=${v#\'"'"'}; v=${v%\'"'"'} ;; esac
       export "$k=$v"
     done
-    exec "$0" seed --data-dir "$1"' "$DIR/bin/shl-dicom-server" "$DATA"
+    exec "$0" seed --data-dir "$1"' "$DIR/bin/server" "$DATA"
   echo "$sums" | $SUDO tee "$DATA/samples/.sums" >/dev/null
 fi
 
@@ -206,7 +235,7 @@ Environment=SHL_MAX_SHARE_BYTES=$MAX_SHARE_BYTES
 Environment=SHL_MAX_SHARES=$MAX_SHARES
 # The S3 store, when $ENV_FILE exists.
 EnvironmentFile=-$ENV_FILE
-ExecStart=$ROOT/current/bin/shl-dicom-server serve
+ExecStart=$ROOT/current/bin/server serve
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -234,6 +263,7 @@ if ! healthy; then
   echo "release $TAG: the server did not come up as expected on port $PORT" >&2
   if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$DIR" ]; then
     echo "going back to $PREVIOUS" >&2
+    [ -e "$PREVIOUS/bin/server" ] || ln -sfn shl-dicom-server "$PREVIOUS/bin/server"  # a release installed before bin/server
     switch_to "$PREVIOUS"
     $SUDO systemctl restart shlink-dicom
     healthy || echo "the previous release did not come up either" >&2

@@ -1,8 +1,10 @@
 # Builds and publishes the shlink-dicom server release that deploy/bootstrap-shlink-dicom.sh installs
-# (README.md, Deploying). The release is code only: the native server (x86-64-v3), the web app, and
-# the sandbox dataset build the VM uses to make the public sample. Before publishing, this workflow
-# installs the packed release on the runner with the bootstrap script itself (from a local
-# directory, under systemd), and checks /, /view/, /sample and a Range read of the sample.
+# (README.md, Deploying): one tarball per architecture, linux-x86_64 (the server for baseline x86-64,
+# and a second build for x86-64-v3) and linux-aarch64, each with the web app and the sandbox dataset
+# build the VM uses to make the public sample. Code only. Before publishing, each build job installs
+# its tarball on its runner with the bootstrap script itself (from a local directory, under
+# systemd) and checks /, /view/, /sample and a Range read of the sample; on x86_64 it does so with
+# the v3 server the bootstrap picks for the runner's CPU, then again with SHL_CPU=baseline.
 name: Server release
 
 on:
@@ -38,8 +40,15 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
-  release:
-    runs-on: ubuntu-24.04
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      tag: ${{ steps.pack.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
 
@@ -47,20 +56,24 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           cache-key: server
-          native: "true"
       - uses: ./.github/actions/wasm
       - uses: ./.github/actions/web
 
-      - name: Server
+      - name: Server (the architecture's default target)
         run: cargo build -q --release -p shl-dicom-server
+      - name: Server for x86-64-v3
+        if: matrix.arch == 'x86_64'
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C target-cpu=x86-64-v3"
+        run: cargo build -q --release -p shl-dicom-server --target-dir target/v3
 
       - name: Pack the release
         id: pack
         run: |
           tag="server-${GITHUB_SHA::7}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          mkdir -p "$RUNNER_TEMP/releases"
-          bun deploy/pack-server-release.ts --tag "$tag" --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/releases/$tag"
+          v3=(); [ "${{ matrix.arch }}" = x86_64 ] && v3=(--v3 target/v3/release/shl-dicom-server)
+          bun deploy/pack-server-release.ts --tag "$tag" --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/releases/$tag" "${v3[@]}"
           ls -l "$RUNNER_TEMP/releases/$tag"
 
       # The sample's pinned sources, where the bootstrap keeps them.
@@ -75,18 +88,51 @@ jobs:
       - name: Install the packed release with the bootstrap, and check it
         run: |
           tag="${{ steps.pack.outputs.tag }}"
+          check() {
+            link="$(curl -s http://localhost:8000/api/demo-shares | bun -e 'const j = JSON.parse(await Bun.stdin.text()); console.log(j.shares.find((s) => !s.passcodeHint).shlinkUri)')"
+            /opt/shlink-dicom-server/current/bin/server inspect "$link" | tee "$RUNNER_TEMP/inspect.txt"
+            grep -q "HTTP 206" "$RUNNER_TEMP/inspect.txt"
+          }
           RELEASES="file://$RUNNER_TEMP/releases" ORIGIN=http://localhost:8000 bash deploy/bootstrap-shlink-dicom.sh "$tag"
           grep -E "Sample packed|Compressed .* without loss" /var/log/shlink-bootstrap.log | tail -2
-          link="$(curl -s http://localhost:8000/api/demo-shares | bun -e 'const j = JSON.parse(await Bun.stdin.text()); console.log(j.shares.find((s) => !s.passcodeHint).shlinkUri)')"
-          /opt/shlink-dicom-server/current/bin/shl-dicom-server inspect "$link" | tee "$RUNNER_TEMP/inspect.txt"
-          grep -q "HTTP 206" "$RUNNER_TEMP/inspect.txt"
+          check
+          sel="$(readlink /opt/shlink-dicom-server/current/bin/server)"
+          echo "selected: $sel"
+          if [ "${{ matrix.arch }}" = x86_64 ]; then
+            test "$sel" = shl-dicom-server.v3
+            # Once more with the baseline server forced; the built release is reused.
+            SHL_CPU=baseline RELEASES="file://$RUNNER_TEMP/releases" ORIGIN=http://localhost:8000 bash deploy/bootstrap-shlink-dicom.sh "$tag"
+            sel="$(readlink /opt/shlink-dicom-server/current/bin/server)"
+            echo "selected with SHL_CPU=baseline: $sel"
+            test "$sel" = shl-dicom-server
+            check
+          else
+            test "$sel" = shl-dicom-server
+          fi
+          file -L /opt/shlink-dicom-server/current/bin/server
 
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.arch }}
+          path: ${{ runner.temp }}/releases/${{ steps.pack.outputs.tag }}/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release
+      - run: ls -l "$RUNNER_TEMP/release"
       - uses: ./.github/actions/publish-release
         with:
           prefix: server
-          tag: ${{ steps.pack.outputs.tag }}
-          name: shlink-dicom-${{ steps.pack.outputs.tag }}
-          dir: ${{ runner.temp }}/releases/${{ steps.pack.outputs.tag }}
+          tag: ${{ needs.build.outputs.tag }}
+          names: shlink-dicom-${{ needs.build.outputs.tag }}-linux-x86_64 shlink-dicom-${{ needs.build.outputs.tag }}-linux-aarch64
+          dir: ${{ runner.temp }}/release
           product: shlink-dicom server
-          notes: "The shlink-dicom server and web app at ${{ github.sha }}: code only, native x86-64-v3. Install with deploy/bootstrap-shlink-dicom.sh ${{ steps.pack.outputs.tag }} (README.md, Deploying)."
+          notes: "The shlink-dicom server and web app at ${{ github.sha }}: code only, for linux-x86_64 (baseline, plus an x86-64-v3 server) and linux-aarch64. Install with deploy/bootstrap-shlink-dicom.sh ${{ needs.build.outputs.tag }} (README.md, Deploying)."
           keep: ${{ env.KEEP_RELEASES }}

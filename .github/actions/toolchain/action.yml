@@ -1,26 +1,14 @@
 name: Toolchain
 description: >
   Bun, Rust with the wasm32 target and wasm-bindgen at the versions the repository pins, with a
-  cargo cache. With native, first checks the runner's CPU runs x86-64-v3 builds (.cargo/config.toml).
+  cargo cache. Linux (x86_64, aarch64) and macOS runners.
 inputs:
   cache-key:
     description: Prefix for the cargo cache key (one per workflow).
     required: true
-  native:
-    description: "true when the job builds or runs native x86-64-v3 code."
-    default: "false"
 runs:
   using: composite
   steps:
-    - name: Check the CPU supports x86-64-v3
-      if: inputs.native == 'true'
-      shell: bash
-      run: |
-        for f in avx avx2 bmi1 bmi2 f16c fma abm movbe xsave; do
-          grep -qw "$f" /proc/cpuinfo || { echo "::error::this runner's CPU lacks $f (x86-64-v3)"; exit 1; }
-        done
-        grep -m1 "model name" /proc/cpuinfo
-
     - uses: oven-sh/setup-bun@v2
       with:
         bun-version: "1.4.3"
@@ -28,10 +16,20 @@ runs:
     - name: Rust and wasm-bindgen
       shell: bash
       run: |
+        if ! command -v rustup > /dev/null; then
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+        fi
         rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
         rustup default stable
         v=0.2.128
-        t="wasm-bindgen-$v-x86_64-unknown-linux-musl"
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) t="wasm-bindgen-$v-x86_64-unknown-linux-musl" ;;
+          Linux-aarch64) t="wasm-bindgen-$v-aarch64-unknown-linux-gnu" ;;
+          Darwin-arm64) t="wasm-bindgen-$v-aarch64-apple-darwin" ;;
+          Darwin-x86_64) t="wasm-bindgen-$v-x86_64-apple-darwin" ;;
+        esac
         curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/$t.tar.gz" \
           | tar -xz -C "$HOME/.cargo/bin" --strip-components=1 "$t/wasm-bindgen"
         cargo --version; wasm-bindgen --version; bun --version
@@ -44,5 +42,5 @@ runs:
           ~/.cargo/git/db
           target
           codecs/target
-        key: ${{ inputs.cache-key }}-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'codecs/Cargo.lock', '.cargo/config.toml') }}
-        restore-keys: ${{ inputs.cache-key }}-cargo-${{ runner.os }}-
+        key: ${{ inputs.cache-key }}-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'codecs/Cargo.lock', '.cargo/config.toml') }}
+        restore-keys: ${{ inputs.cache-key }}-cargo-${{ runner.os }}-${{ runner.arch }}-
