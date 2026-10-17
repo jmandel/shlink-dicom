@@ -272,6 +272,7 @@ async function main() {
   check("instance-level retrieval returns the identical instance", one.status === 200 && one.parts?.length === 1 && sameBytes(one.parts[0].bytes, sopT.bytes));
   const meta = await C.wadoGet(`${base}/wado-rs/studies/${brain}/metadata`, at, "application/dicom+json");
   check(`study metadata: DICOM JSON for ${brainN} instances`, meta.status === 200 && Array.isArray(meta.json) && meta.json.length === brainN && meta.json[0]["0020000D"]?.Value?.[0] === brain);
+  check("study metadata with application/dicom+json; q=0.0: 406", (await status(`${base}/wado-rs/studies/${brain}/metadata`, at, { headers: { accept: "application/dicom+json; q=0.0" } })) === 406);
   check("frames (not implemented): 404 after the token check", (await status(`${base}/wado-rs/studies/${wrist}/series/${sopT.seriesUID}/instances/${sopT.sopUID}/frames/1`, at)) === 404);
 
   section("Transfer syntax negotiation (smart-imaging PR #5)");

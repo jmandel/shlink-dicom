@@ -68,8 +68,7 @@ function dicomPreferences(accept: MediaRange[]): { prefs: Preference[]; missing:
   accept.forEach((m, order) => {
     if (m.type !== "multipart/related") return;
     if ((m.params.type ?? "application/dicom").toLowerCase() !== "application/dicom") return;
-    const raw = m.params.q === undefined ? 1 : Number(m.params.q);
-    const q = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1) : 1;
+    const q = qOf(m);
     // q=0 means "not acceptable": such a range asks for nothing, so it can't be missing a syntax.
     if (q === 0) return;
     const ts = m.params["transfer-syntax"];
@@ -92,7 +91,14 @@ function choose(i: Instance, prefs: Preference[]): Part | null {
 }
 
 function acceptsJson(accept: MediaRange[]): boolean {
-  return accept.some((m) => ["*/*", "application/*", "application/dicom+json", "application/json"].includes(m.type) && m.params.q !== "0");
+  return accept.some((m) => ["*/*", "application/*", "application/dicom+json", "application/json"].includes(m.type) && qOf(m) > 0);
+}
+
+// A range's q weight as a number in [0, 1] (absent or unreadable: 1), so "0", "0.0" and "0.000" all
+// mean "not acceptable".
+function qOf(m: MediaRange): number {
+  const raw = m.params.q === undefined ? 1 : Number(m.params.q);
+  return Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1) : 1;
 }
 
 function multipart(parts: Part[], locate: (i: Instance) => string): Response {
