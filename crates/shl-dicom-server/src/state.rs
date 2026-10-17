@@ -274,21 +274,20 @@ impl AppState {
             access: Arc::new(AccessQueue::default()),
         };
         {
-            // The writer holds only a weak reference, so it ends when the state is dropped (tests).
-            let weak = Arc::downgrade(&state.access);
+            // The writer keeps its own clone of the state. Once every other clone is dropped (as
+            // in tests), it writes what is queued and ends.
             let st = state.clone();
             std::thread::Builder::new()
                 .name("access-log".into())
                 .spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_millis(ACCESS_FLUSH_MS));
-                    let Some(q) = weak.upgrade() else { return };
+                    let q = &st.access;
                     let _w = q.writing.lock().unwrap();
                     let batch = std::mem::take(&mut *q.pending.lock().unwrap());
                     for (sid, evs) in batch {
                         st.write_access(&sid, &evs);
                     }
-                    if Arc::strong_count(&q) <= 2 {
-                        // Only this thread's clone of the state is left.
+                    if Arc::strong_count(q) <= 1 {
                         return;
                     }
                 })
