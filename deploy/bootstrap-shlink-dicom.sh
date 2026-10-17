@@ -37,6 +37,7 @@
 # Log: /var/log/shlink-bootstrap.log
 
 set -euo pipefail
+trap 'echo "bootstrap-shlink-dicom: failed at line $LINENO" >&2' ERR
 
 TAG="${1:-${TAG:-}}"
 REPO="${REPO:-jmandel/shlink-dicom}"
@@ -114,8 +115,9 @@ else
     }
     console.log(`release ${m.tag}: commit ${m.commit}, ${m.files.length} files match MANIFEST.json; built for ${m.cpu}, glibc ${m.glibc}`);')
   want="$(manifest "$DIR.part" glibc)"
-  have="$(ldd --version | head -1 | grep -o '[0-9]*\.[0-9]*$')"
-  if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -1)" != "$want" ]; then
+  # (sed, not head: with pipefail, a reader that stops early fails the pipeline.)
+  have="$(ldd --version 2>&1 | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"
+  if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | sed -n 1p)" != "$want" ]; then
     echo "the release's server needs glibc $want or newer; this system has $have" >&2
     exit 1
   fi
@@ -234,6 +236,7 @@ if ! healthy; then
     echo "going back to $PREVIOUS" >&2
     switch_to "$PREVIOUS"
     $SUDO systemctl restart shlink-dicom
+    healthy || echo "the previous release did not come up either" >&2
   fi
   exit 1
 fi

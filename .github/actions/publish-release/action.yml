@@ -1,8 +1,8 @@
 name: Publish a release
 description: >
-  Publishes <prefix>-<shortsha> with the packed tarball, its .sha256 and its manifest, points the
-  <prefix>-latest pre-release's latest.json at it, and keeps the last few <prefix>- releases.
-  Needs contents: write.
+  Publishes <prefix>-<shortsha> with the packed tarball, its .sha256 and its manifest. On main, also
+  points the <prefix>-latest release's latest.json at it and keeps the last few <prefix>- releases.
+  All are pre-releases, so none is labelled the repository's Latest. Needs contents: write.
 inputs:
   prefix:
     description: sandbox or server
@@ -41,17 +41,23 @@ runs:
         if gh release view "$TAG" > /dev/null 2>&1; then
           gh release upload "$TAG" "${files[@]}" --clobber
         else
-          gh release create "$TAG" "${files[@]}" --target "$GITHUB_SHA" --latest=false --title "$PRODUCT $TAG" --notes "$NOTES"
+          gh release create "$TAG" "${files[@]}" --target "$GITHUB_SHA" --latest=false --prerelease --title "$PRODUCT $TAG" --notes "$NOTES"
+        fi
+        echo "published $TAG: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+        # Only main moves the pointer that VMs install from, and prunes.
+        if [ "$GITHUB_REF" != refs/heads/main ]; then
+          echo "not main ($GITHUB_REF): $PREFIX-latest unchanged, nothing pruned"
+          exit 0
         fi
         sha="$(cut -d' ' -f1 "$DIR/$NAME.tar.gz.sha256")"
         printf '{"tag":"%s","commit":"%s","sha256":"%s"}\n' "$TAG" "$GITHUB_SHA" "$sha" > "$DIR/latest.json"
-        # The pointer is a pre-release, so GitHub doesn't label it the repository's Latest.
+        # Pre-releases, the pointer and the releases alike, so GitHub labels none of them the
+        # repository's Latest.
         if ! gh release view "$PREFIX-latest" > /dev/null 2>&1; then
           gh release create "$PREFIX-latest" --target "$GITHUB_SHA" --latest=false --prerelease --title "$PRODUCT: latest" \
             --notes "latest.json names the current $PREFIX release; its bootstrap script in deploy/ reads it."
         fi
         gh release upload "$PREFIX-latest" "$DIR/latest.json" --clobber
-        echo "published $TAG: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
         gh release list --limit 200 --json tagName,createdAt \
           --jq "[.[] | select(.tagName | test(\"^$PREFIX-[0-9a-f]+\$\"))] | sort_by(.createdAt) | reverse | .[$KEEP:] | .[].tagName" \
           | while read -r t; do echo "deleting $t"; gh release delete "$t" --yes --cleanup-tag; done
