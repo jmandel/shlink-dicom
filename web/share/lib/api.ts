@@ -166,14 +166,14 @@ export class ShareApi {
     return { offset: Number(res.headers.get("Upload-Offset") ?? 0), length: len === null ? null : Number(len), complete: res.headers.get("Upload-Complete") === "?1" };
   }
 
-  /** Creates a resumable upload of `length` bytes (no content yet). */
-  async createUpload(fileId: string, length: number): Promise<void> {
+  /** Creates a resumable upload (no content yet), of `length` bytes or of a length not known yet. */
+  async createUpload(fileId: string, length: number | null): Promise<void> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), 30000);
     try {
       const res = await fetch(this.fileUrl(fileId), {
         method: "PUT",
-        headers: { Authorization: `Bearer ${this.cred!.token}`, "Upload-Complete": "?0", "Upload-Length": String(length) },
+        headers: { Authorization: `Bearer ${this.cred!.token}`, "Upload-Complete": "?0", ...(length === null ? {} : { "Upload-Length": String(length) }) },
         body: new Uint8Array(0),
         signal: ctl.signal,
       });
@@ -195,7 +195,8 @@ export class ShareApi {
   /**
    * Appends `bytes` at `offset` (PATCH, application/partial-upload), with upload progress
    * (XMLHttpRequest: fetch has no upload progress). A request with no progress for `stallMs`
-   * is abandoned and fails as a network error. Returns the server's new offset.
+   * is abandoned and fails as a network error. Returns the server's new offset. `length` is the
+   * file's whole length, sent when known (an upload begun without one learns it this way).
    */
   appendUpload(
     fileId: string,
@@ -203,6 +204,7 @@ export class ShareApi {
     bytes: Uint8Array,
     complete: boolean,
     onProgress: (loaded: number) => void,
+    length: number | null = null,
     stallMs = 20000,
   ): Promise<{ offset: number; complete: boolean }> {
     const cred = this.cred!;
@@ -221,6 +223,7 @@ export class ShareApi {
       x.setRequestHeader("Content-Type", "application/partial-upload");
       x.setRequestHeader("Upload-Offset", String(offset));
       x.setRequestHeader("Upload-Complete", complete ? "?1" : "?0");
+      if (length !== null) x.setRequestHeader("Upload-Length", String(length));
       x.upload.onprogress = (e) => {
         arm();
         onProgress(e.loaded);

@@ -83,31 +83,45 @@ async function fragments(src: Bytes, at: number) {
  * Adds offset tables to the instances that lack one, in place. Returns how many were rewritten
  * (an instance whose frames can't be located unambiguously is left as it is).
  */
-export async function addOffsetTables(series: SeriesModel[], onProgress?: (done: number, total: number) => void): Promise<number> {
+export async function addOffsetTables(
+  series: SeriesModel[],
+  onProgress?: (done: number, total: number) => void,
+  only: (inst: Instance) => boolean = () => true,
+): Promise<number> {
   const todo: [SeriesModel, Instance, { prefix: Uint8Array; at: number }][] = [];
   for (const se of series) for (const inst of se.instances) {
+    if (!only(inst)) continue;
     const need = await needsTable(inst);
     if (need) todo.push([se, inst, need]);
   }
   if (!todo.length) return 0;
   onProgress?.(0, todo.length);
-  const m = await loadWasm();
   let rewritten = 0;
   for (let k = 0; k < todo.length; k++) {
     const [se, inst, need] = todo[k];
-    const f = await fragments(inst.src, need.at);
-    const patch = f && m.offset_table_patch_from_fragments_wasm(need.prefix, f.positions, f.lengths, f.heads, f.headLens);
-    if (patch) {
-      const head = patch.head;
-      const rest = new SubBytes(inst.src, patch.resume_at, inst.src.size - patch.resume_at);
-      const before = inst.src.size;
-      inst.src = new ConcatBytes([new MemBytes(head), rest]);
-      firstFragment.set(inst.src, null);
-      patch.free();
-      se.bytes += inst.src.size - before;
-      rewritten++;
-    }
+    if (await patchInstance(se, inst, need)) rewritten++;
     onProgress?.(k + 1, todo.length);
   }
   return rewritten;
+}
+
+/** Adds an offset table to one instance, in place, when it lacks one. Returns whether it did. */
+export async function addOffsetTable(se: SeriesModel, inst: Instance): Promise<boolean> {
+  const need = await needsTable(inst);
+  return !!need && (await patchInstance(se, inst, need));
+}
+
+async function patchInstance(se: SeriesModel, inst: Instance, need: { prefix: Uint8Array; at: number }): Promise<boolean> {
+  const m = await loadWasm();
+  const f = await fragments(inst.src, need.at);
+  const patch = f && m.offset_table_patch_from_fragments_wasm(need.prefix, f.positions, f.lengths, f.heads, f.headLens);
+  if (!patch) return false;
+  const head = patch.head;
+  const rest = new SubBytes(inst.src, patch.resume_at, inst.src.size - patch.resume_at);
+  const before = inst.src.size;
+  inst.src = new ConcatBytes([new MemBytes(head), rest]);
+  firstFragment.set(inst.src, null);
+  patch.free();
+  se.bytes += inst.src.size - before;
+  return true;
 }

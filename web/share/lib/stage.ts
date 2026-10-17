@@ -36,7 +36,10 @@ class OpfsStager implements Stager {
     readonly session: string,
     private dir: FileSystemDirectoryHandle,
   ) {}
+  /** Numbers files after those already staged, so a reopened session never overwrites one. */
+  private counted: Promise<void> | null = null;
   async stage(_name: string, chunks: AsyncIterable<Uint8Array>): Promise<Bytes> {
+    await (this.counted ??= this.count());
     const fh = await this.dir.getFileHandle(String(this.n++).padStart(8, "0"), { create: true });
     const w = await (fh as any).createWritable();
     try {
@@ -45,6 +48,9 @@ class OpfsStager implements Stager {
       await w.close();
     }
     return new BlobBytes(await fh.getFile());
+  }
+  private async count() {
+    for await (const [name, h] of (this.dir as any).entries()) if (h.kind === "file" && /^\d+$/.test(name)) this.n = Math.max(this.n, Number(name) + 1);
   }
   async list(): Promise<Bytes[]> {
     const names: string[] = [];

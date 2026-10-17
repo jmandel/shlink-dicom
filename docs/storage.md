@@ -114,7 +114,7 @@ CREATE TABLE files (
 CREATE TABLE uploads (
   file_id        TEXT PRIMARY KEY,
   storage_key    TEXT NOT NULL,            -- the blob it will become
-  size           INTEGER NOT NULL,         -- Upload-Length
+  size           INTEGER NOT NULL,         -- Upload-Length; -1 until it is given
   s3_upload_id   TEXT,                     -- the S3 multipart upload, when there is one
   flushed_bytes  INTEGER NOT NULL DEFAULT 0,
   started_at     INTEGER NOT NULL
@@ -206,11 +206,13 @@ Taking an attempt before checking means concurrent wrong guesses can never excee
 **Uploading a file.** The upload follows the IETF resumable uploads draft (PLAN.md §5.2): `PUT` with `Upload-Complete` creates it, `HEAD` reports `Upload-Offset`, `PATCH` appends. A `PUT` without `Upload-Complete` sends the whole file in one request.
 1. Authenticate: the SHA-256 of the bearer token must match `share.control_token_hash`.
 2. Allow one request at a time per file; another gets `409`.
-3. Creating: check the share's limits against `Upload-Length`, draw a storage key, and insert an `uploads` row. With the S3 store and more than 8 MiB, start a multipart upload and record its id.
+3. Creating: check the share's limits against `Upload-Length`, draw a storage key, and insert an `uploads` row. With the S3 store and more than 8 MiB, or no `Upload-Length`, start a multipart upload and record its id.
+   - Without `Upload-Length`, the row's size is -1 until an append gives it. Then the limits are checked against it, and it is fixed: a different one later gets `400`.
 4. Appending: `Upload-Offset` must equal `flushed_bytes` plus the size of `{fileId}.part`; otherwise `409` with the right `Upload-Offset`.
 5. Stream the body to the end of `{fileId}.part` (a new one, if there is none).
    - The connection drops, or no byte arrives for 30 s: keep what arrived. The client asks where to continue.
    - The body would go past `Upload-Length`, or `Upload-Complete: ?1` arrives before the last byte: truncate back to where the request started and answer `400`.
+   - No `Upload-Length` yet, and the body would take the share past its byte limit (counting other uploads of unknown length at what they have): truncate back to where the request started and answer `413`.
 6. With a multipart upload, once the staged file reaches the part size it is sent as the next part:
    1. rename `{fileId}.part` to `{fileId}.part.{n}`; from here its bytes don't count toward `Upload-Offset`;
    2. send it as part `n`;
@@ -219,8 +221,8 @@ Taking an attempt before checking means concurrent wrong guesses can never excee
 
    If sending fails, the request gets `502` and the offset is where the last recorded part ended; the client asks `HEAD` and sends the rest again. A crash anywhere in these steps leaves the same offset. A leftover `{fileId}.part.{n}` never counts, and the next send of part `n` replaces it.
 
-   The part size is `max(8 MiB, Upload-Length / 9,500)` rounded up to 64 KiB, so parts are at least S3's 5 MiB and never more than 10,000. The staged file stays under one part plus one append.
-7. When the last byte arrives with `Upload-Complete: ?1`:
+   The part size is `max(8 MiB, Upload-Length / 9,500)` rounded up to 64 KiB, so parts are at least S3's 5 MiB and never more than 10,000. Until `Upload-Length` is given, it is 16 MiB (10,000 parts: 160 GiB). The staged file stays under one part plus one append.
+7. When the last byte arrives with `Upload-Complete: ?1` (without `Upload-Length` ever given, the length is where it ends):
    - local store: sync the staged file and rename it into `blobs/`;
    - S3, multipart: send the rest as the last part, then complete the multipart upload;
    - S3, 8 MiB or less: one `PutObject` from the staged file.
@@ -261,7 +263,7 @@ On start, and before a share is created:
 - delete expired shares, as above;
 - delete any `shares/{sid}.db` file or `shares/{sid}/` directory whose `sid` has no catalog row.
 
-On start, and every 10 minutes: drop uploads that started more than 24 hours ago and have no request in progress. That removes their `uploads` row, their staged files and their multipart upload.
+On start, and every 10 minutes: drop uploads that started more than 24 hours ago (with or without a length) and have no request in progress. That removes their `uploads` row, their staged files and their multipart upload.
 
 **For S3, also add a lifecycle rule to the bucket** that aborts incomplete multipart uploads after 1 day (`AbortIncompleteMultipartUpload`, `DaysAfterInitiation: 1`). It removes parts the server lost track of, for example after its data directory was lost.
 
@@ -335,4 +337,6 @@ The data directory is resolved once at startup. The process runs as an unprivile
 12. a blob whose delete fails stays in the trash and goes on the next try;
 13. the sweep drops uploads older than 24 hours and keeps recent ones;
 14. a blob missing from the store reads as `404`;
-15. share expiry and parallel uploads.
+15. share expiry and parallel uploads;
+16. an upload begun without a length: 23 MiB in appends, parts sent as they fill, the length given with the last append; one completed without a length; a length once given is fixed;
+17. the share's byte limit while the length is unknown: an append that would pass it gets `413` and leaves nothing, other uploads of unknown length count what they have, and a length given too large gets `413`.

@@ -67,7 +67,7 @@ Each experience imports only what it needs, so it can ship as its own bundle.
    - Expiry presets: 1 day, 1 week, 1 month, or "until I revoke it".
    - "Allow updates" toggle.
    - Optional passcode.
-4. **Encrypt and upload.** Compressing comes first, with its own measured progress ("Compressing 120 of 458 images without loss · 60 MB → 24 MB so far · about 2 minutes left"). Then a short animation of the real work: "Encrypting 17 series on your device · uploading ciphertext". It shows bytes and records as they go, with the line "The server stores only scrambled data."
+4. **Encrypt and upload.** Images being compressed are uploaded as they are done, in file order, so compressing and uploading overlap. The bar measures the images' bytes done, a known total ("Compressed and uploaded 60 MB of 246 MB · compressing 120 of 458 images without loss"); without compression it measures bytes sent ("Uploaded 24 MB of 86 MB"). Below it, the real work: "Encrypting 1 file on this device: 0 done · 380 of 1320 records uploaded", with the line "The server stores only scrambled data."
 5. **Hand it over.**
    - A large QR code, Copy link, Share (Web Share API) and Email.
    - The owner link, given prominently: "Save this to manage or revoke later". Saved in this browser too.

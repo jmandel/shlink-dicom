@@ -14,12 +14,14 @@ import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
 import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
-import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
+import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import {
-  COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, workers,
-  type CompressMode, type CompressSummary, type Encoding, type SeriesEstimate,
+  COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, uncompressedImages, workers,
+  type CompressMode, type CompressProgress, type CompressSummary, type Encoding, type SeriesEstimate,
 } from "./lib/compress";
-import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadJob } from "./lib/upload";
+import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
+import { StreamPlan } from "./lib/stream";
+import { recordCount } from "../core/range";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
 import { canPickHandles, clearHandles, filesFrom, loadHandles, pathOf, permitted, pick, quickId, saveHandles, type PickedHandles } from "./lib/handles";
 import { parseStudyIndex } from "../core/bundle";
@@ -678,8 +680,12 @@ interface Pending {
   fresh?: boolean;
   job: UploadJob;
   api: ShareApi;
-  owner: any;
-  packed: PackedFile[];
+  /** The owner Bundle; null until the files are uploaded, when they were compressed on the way. */
+  owner: any | null;
+  packed: UploadFile[];
+  col: Collection;
+  /** Set while images are compressed as the files upload. */
+  stream?: { plan: StreamPlan; line: () => string; repaint?: () => void };
 }
 let pending: Pending | null = null;
 
@@ -701,53 +707,142 @@ async function upload() {
   };
   const studies = col.list().filter((s) => s.include);
   $("up-log").replaceChildren();
+  let streaming: ReturnType<typeof startStream> | null = null;
   try {
     const encoding = chosenEncoding(studies);
-    if (encoding) {
-      const zst = await openStager(`${stager?.session ?? "visit"}-z`);
-      const sum = await compress(col, studies, encoding, zst);
-      $("up-log").prepend(h("li", null, compressedLine(sum)));
-      job.compress = { mode: encoding, stage: zst.onDisk ? zst.session : undefined, records: sum.records };
-    } else closeCompressPool(); // the review's estimates are done with it
+    if (!encoding) closeCompressPool(); // the review's estimates are done with it
+    // Images to compress go to the server as they are compressed (lib/stream.ts).
+    const toCompress = new Set(encoding ? uncompressedImages(studies).map((x) => x.inst) : []);
     if (job.addOffsetTables) {
-      await addOffsetTables(studies.flatMap((s) => s.series), (done, total) => {
-        $("up-main").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
-        setBar("up-bar-wrap", done, total, $("up-main").textContent!);
-      });
+      await addOffsetTables(
+        studies.flatMap((s) => s.series),
+        (done, total) => {
+          $("up-main").textContent = `Adding frame offset tables: ${done} of ${plural(total, "file")}`;
+          setBar("up-bar-wrap", done, total, $("up-main").textContent!);
+        },
+        (inst) => !toCompress.has(inst),
+      );
     }
-    const packed = planStudyFiles(studies);
-    const owner = buildBundle(col, packed);
+    const packed: UploadFile[] = planStudyFiles(studies);
+    // Compressing starts now, while the share is made; uploads start once the job is saved.
+    const zst = encoding ? await openStager(`${stager?.session ?? "visit"}-z`) : null;
+    if (encoding && zst) {
+      job.compress = { mode: encoding, stage: zst.onDisk ? zst.session : undefined, records: {}, kept: [] };
+      job.plan = packed.map((p) => ({ fileId: p.fileId, key: p.key, uids: p.instances.map((i) => i.h.sopInstanceUid) }));
+      streaming = startStream(packed, studies, encoding, zst, toCompress, job.addOffsetTables, job.compress);
+    }
+    // Which files these are (to continue after a reload), read while the share is made.
+    const ids = job.source.kind === "files" ? Promise.all(pickedFiles.map(async (f) => ({ name: pathOf(f), size: f.size, id: await quickId(f) }))) : null;
+    ids?.catch(() => {}); // awaited below; not reported twice if making the share fails first
     const ownerKey = randomKeyB64();
     const early = (c: Connection) => ($("up-main").textContent = c.state === "ok" ? "" : "Connection lost, retrying…");
     const created = await persist(() => new ShareApi(cfg.apiBase).createShare(job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400), early);
     const api = new ShareApi(cfg.apiBase, { sid: created.share.id, token: created.controlToken });
-    // The owner Bundle first: with the manage credential it is all a reload needs to continue.
-    const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
-    await persist(() => api.putOwner(ownerJwe), early);
+    // Nothing to compress: the owner Bundle first; with the manage credential it is all a reload
+    // needs to continue. Compressing: the files' sizes come later, so the saved job's plan is.
+    let owner: any = null;
+    if (!streaming) {
+      owner = buildBundle(col, packed);
+      const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
+      await persist(() => api.putOwner(ownerJwe), early);
+    }
     if (job.source.kind === "files") {
       $("up-tech").textContent = "Noting which files these are, to continue after a reload";
-      job.source = { ...job.source, files: await Promise.all(pickedFiles.map(async (f) => ({ name: pathOf(f), size: f.size, id: await quickId(f) }))) };
+      job.source = { ...job.source, files: await ids! };
       if (pickedHandles) await saveHandles(pickedHandles);
       else await clearHandles();
     }
     const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
     const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000) };
     saveJob(full);
-    await runUpload({ job: full, api, owner, packed, fresh: true });
+    if (streaming) {
+      streaming.saved(full);
+      await runUpload({ job: full, api, owner, packed, col, fresh: true, stream: streaming.stream });
+    } else await runUpload({ job: full, api, owner, packed, col, fresh: true });
   } catch (x) {
+    streaming?.abort(x);
     uploadFailed(x);
   }
 }
 
-/** Re-encodes the studies' uncompressed images, showing measured progress and the time left. */
-async function compress(c: Collection, studies: StudyModel[], mode: Encoding, zst: Stager): Promise<CompressSummary> {
+/**
+ * Compresses the images while the files upload: each file goes as its images are done
+ * (lib/stream.ts). Each image's record is saved with the job before any of its bytes are sent, so
+ * a reload continues with the same bytes; until the job is saved (`saved`), nothing is sent.
+ */
+function startStream(
+  packed: UploadFile[],
+  studies: StudyModel[],
+  mode: Encoding,
+  zst: Stager,
+  toCompress: Set<Instance>,
+  addTables: boolean,
+  comp: NonNullable<UploadJob["compress"]>,
+) {
+  const plan = new StreamPlan(packed, (inst) => toCompress.has(inst));
+  const seriesOf = new Map<Instance, SeriesModel>();
+  for (const st of studies) for (const se of st.series) for (const inst of se.instances) seriesOf.set(inst, se);
+  let job: UploadJob | null = null;
+  const stop = new AbortController();
+  let progress: CompressProgress | null = null;
+  const stream: NonNullable<Pending["stream"]> = {
+    plan,
+    line: () => (progress && progress.done < progress.total ? `compressing ${progress.done} of ${plural(progress.total, "image")} without loss` : ""),
+  };
+  compressStudies(
+    col,
+    studies,
+    mode,
+    zst,
+    (c) => {
+      progress = c;
+      stream.repaint?.();
+    },
+    stop.signal,
+    undefined,
+    {
+      onImage: async (inst, rec) => {
+        if (addTables) await addOffsetTable(seriesOf.get(inst)!, inst);
+        if (rec) comp.records[inst.h.sopInstanceUid] = rec;
+        else comp.kept!.push(inst.h.sopInstanceUid);
+        if (job) saveJob(job);
+        plan.done(inst);
+      },
+    },
+  )
+    .finally(closeCompressPool)
+    .then(
+      (sum) => $("up-log").prepend(h("li", null, compressedLine(sum))),
+      (e) => {
+        // Nothing more will come for the files: the upload stops, and Try again starts over.
+        pending = null;
+        plan.fail(e);
+      },
+    );
+  return {
+    stream,
+    /** The job is saved: records from here on are saved as they come. */
+    saved(j: UploadJob) {
+      job = j;
+    },
+    abort(e: unknown) {
+      stop.abort(e);
+    },
+  };
+}
+
+/**
+ * Re-encodes the studies' uncompressed images (but `skip`), showing measured progress and the time
+ * left. For an upload continuing after a reload: the images not compressed before it.
+ */
+async function compress(c: Collection, studies: StudyModel[], mode: Encoding, zst: Stager, skip?: ReadonlySet<string>): Promise<CompressSummary> {
   try {
     return await compressStudies(c, studies, mode, zst, (p) => {
       // Time left, from this device's measured speed once a few images are done.
       const left = p.done >= 4 && p.seconds >= 2 && p.before > 0 ? ((p.totalBytes - p.before) * p.seconds) / p.before : 0;
       $("up-main").textContent = `Compressing ${p.done} of ${plural(p.total, "image")} without loss · ${formatBytes(p.before)} → ${formatBytes(p.after)} so far${left > 5 ? ` · ${aboutTime(left)} left` : ""}`;
       setBar("up-bar-wrap", p.done, p.total, `${p.done} of ${p.total} images compressed`);
-    });
+    }, undefined, undefined, { skip });
   } finally {
     closeCompressPool();
   }
@@ -777,23 +872,30 @@ async function runUpload(p: Pending) {
   pending = { ...p, fresh: false };
   show(4);
   setUploadError(null);
-  const { job, api, owner, packed } = p;
-  const totalRecords = packed.reduce((a, x) => a + x.records, 0);
+  const { job, api, packed, stream } = p;
+  const totalRecords = () => packed.reduce((a, x) => a + x.records, 0);
   let last = { sent: 0, total: packed.reduce((a, x) => a + ciphertextSize(x), 0), done: 0 };
+  let lastU: Pick<UploadProgress, "offsets" | "sending"> = { offsets: new Map() };
   let conn: Connection = { state: "ok" };
   const paint = () => {
     const { sent, total, done } = last;
-    const amount = `${formatBytes(sent)} of ${formatBytes(total)}`;
-    setBar("up-bar-wrap", sent, total, `${amount} sent`);
+    // Compressing on the way: the bar is the images' bytes done (their total is known; the
+    // compressed files' sizes are not yet).
+    const amount = stream ? `${formatBytes(stream.plan.inputDone(lastU))} of ${formatBytes(stream.plan.inputTotal)}` : `${formatBytes(sent)} of ${formatBytes(total)}`;
+    if (stream) setBar("up-bar-wrap", stream.plan.inputDone(lastU), stream.plan.inputTotal, `${amount} done`);
+    else setBar("up-bar-wrap", sent, total, `${amount} sent`);
+    const doing = stream ? [`Compressed and uploaded ${amount}`, stream.line()].filter(Boolean).join(" · ") : `Uploaded ${amount}`;
     $("up-main").textContent =
       conn.state === "offline"
-        ? `Connection lost. Waiting for the network… ${amount} sent`
+        ? `Connection lost. Waiting for the network… ${amount} ${stream ? "done" : "sent"}`
         : conn.state === "retrying"
-          ? `Connection lost, retrying… ${amount} sent`
-          : `Uploaded ${amount}`;
+          ? `Connection lost, retrying… ${amount} ${stream ? "done" : "sent"}`
+          : doing;
     $("up-main").classList.toggle("warn", conn.state !== "ok");
-    $("up-tech").textContent = `Encrypting ${plural(packed.length, "file")} on this device: ${done} done · ${Math.min(totalRecords, Math.floor(sent / 65536))} of ${totalRecords} records uploaded${conn.state === "retrying" ? ` · next try in ${Math.round(conn.inMs / 1000)} s (${conn.reason})` : ""}`;
+    const records = totalRecords();
+    $("up-tech").textContent = `Encrypting ${plural(packed.length, "file")} on this device: ${done} done · ${stream && packed.some((x) => !x.growing?.done) ? Math.floor(sent / 65536) : `${Math.min(records, Math.floor(sent / 65536))} of ${records}`} records uploaded${conn.state === "retrying" ? ` · next try in ${Math.round(conn.inMs / 1000)} s (${conn.reason})` : ""}`;
   };
+  if (stream) stream.repaint = paint;
   const onConn = (c: Connection) => {
     conn = c;
     document.body.dataset.connection = c.state;
@@ -805,14 +907,23 @@ async function runUpload(p: Pending) {
       packed,
       (u) => {
         // Bytes sent only go up: a retry that resends some bytes doesn't move the bar back.
-        last = { sent: Math.max(u.total === last.total ? last.sent : 0, u.sent), total: u.total, done: u.filesDone };
+        last = { sent: Math.max(u.total === last.total || stream ? last.sent : 0, u.sent), total: u.total, done: u.filesDone };
+        lastU = u;
         paint();
         if (u.finished) $("up-log").prepend(h("li", null, `${plainStudyTitle(u.finished.study.description, studyModalities(u.finished.study))} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
       },
       onConn,
       { fresh: p.fresh },
     );
-    $("up-tech").textContent = `Encrypted ${plural(packed.length, "file")} · ${totalRecords} records uploaded · making the link`;
+    $("up-tech").textContent = `Encrypted ${plural(packed.length, "file")} · ${totalRecords()} records uploaded · making the link`;
+    // Compressed on the way: the owner Bundle, now that the files' sizes are known.
+    let owner = p.owner;
+    if (!owner) {
+      owner = buildBundle(p.col, packed);
+      const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), job.ownerKey);
+      await persist(() => api.putOwner(ownerJwe), onConn);
+      if (pending) pending.owner = owner;
+    }
     const studyIds = owner.entry.filter((e: any) => e.resource.resourceType === "ImagingStudy").map((e: any) => e.resource.id);
     const { bundle, allowedFiles } = subsetBundle(owner, studyIds);
     let link = (await persist(() => api.getShare(), onConn)).links[0];
@@ -887,6 +998,22 @@ function planFromOwner(owner: any, c: Collection): PackedFile[] {
   return out;
 }
 
+/** Rebuilds the file plan of a job saved while compressing (`job.plan`) from the re-opened source. */
+function planFromJob(plan: NonNullable<UploadJob["plan"]>, c: Collection): PackedFile[] {
+  const byUid = new Map<string, { inst: Instance; study: StudyModel }>();
+  for (const st of c.list()) for (const se of st.series) for (const inst of se.instances) byUid.set(inst.h.sopInstanceUid, { inst, study: st });
+  return plan.map((f) => {
+    const hits = f.uids.map((u) => {
+      const hit = byUid.get(u);
+      if (!hit) throw new Error("Some of the files are not the ones this upload started with.");
+      return hit;
+    });
+    const instances = hits.map((x) => x.inst);
+    const P = instances.reduce((a, i) => a + i.src.size, 0);
+    return { study: hits[0].study, instances, fileId: f.fileId, key: f.key, plaintextLength: P, records: recordCount(P) };
+  });
+}
+
 async function resumeJob(job: UploadJob, files?: File[]) {
   const api = new ShareApi(job.apiBase, { sid: job.sid, token: job.token });
   show(4);
@@ -895,7 +1022,8 @@ async function resumeJob(job: UploadJob, files?: File[]) {
   $("up-main").textContent = "Reading the files again";
   setBar("up-bar-wrap", undefined, undefined);
   try {
-    const owner = await readOwnerBundle(api, job.ownerKey);
+    // Compressed on the way: no owner Bundle until the files are up; the job's plan says what they are.
+    const owner = job.plan ? null : await readOwnerBundle(api, job.ownerKey);
     const c = new Collection();
     const st = await openStager(job.source.stage);
     const on = (_c: Collection, p: Progress) => {
@@ -909,19 +1037,28 @@ async function resumeJob(job: UploadJob, files?: File[]) {
     } else await loadLink(await openShare(job.source.link!, { recipient: "Share page (re-share)" }), c, on);
     // The same bytes as before: each re-encoded image from its staged copy (or encoded again and checked).
     if (job.compress) {
-      const inBundle = new Set(parseStudyIndex(owner).studies.map((s) => s.studyInstanceUid));
+      const planned = new Set(job.plan?.flatMap((f) => f.uids));
+      const inBundle = new Set(owner ? parseStudyIndex(owner).studies.map((s) => s.studyInstanceUid) : []);
+      const studies = c.list().filter((s) => (owner ? inBundle.has(s.uid) : s.series.some((se) => se.instances.some((i) => planned.has(i.h.sopInstanceUid)))));
       const zst = await openStager(job.compress.stage ?? `${st.session}-z`);
       try {
-        await restoreCompressed(c, c.list().filter((s) => inBundle.has(s.uid)), job.compress.mode, job.compress.records, zst, (done, total) => {
+        await restoreCompressed(c, studies, job.compress.mode, job.compress.records, zst, (done, total) => {
           $("up-main").textContent = `Finding the compressed images: ${done} of ${total}`;
           setBar("up-bar-wrap", done, total, $("up-main").textContent!);
         });
       } finally {
         closeCompressPool();
       }
+      if (job.plan) {
+        // The images not compressed before the reload; those kept as they were stay so.
+        const sum = await compress(c, studies, job.compress.mode, zst, new Set(job.compress.kept ?? []));
+        Object.assign(job.compress.records, sum.records);
+        job.compress.kept = [...(job.compress.kept ?? []), ...sum.kept];
+        saveJob(job);
+      }
     }
     if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
-    await runUpload({ job, api, owner, packed: planFromOwner(owner, c) });
+    await runUpload({ job, api, owner, packed: job.plan ? planFromJob(job.plan, c) : planFromOwner(owner, c), col: c });
   } catch (x) {
     // Back to the notice, saying what was wrong, so the person can choose again.
     pending = null;

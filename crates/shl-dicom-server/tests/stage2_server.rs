@@ -85,7 +85,7 @@ impl Flaky {
         })
     }
     fn emulates_parts(&self) -> bool {
-        self.inner.part_target(1).is_none()
+        self.inner.part_target(Some(1)).is_none()
     }
 }
 
@@ -99,10 +99,10 @@ impl BlobStore for Flaky {
     fn read_range<'a>(&'a self, key: &'a str, start: u64, end: u64) -> BoxFuture<'a, Result<ReadDelivery, ReadError>> {
         self.inner.read_range(key, start, end)
     }
-    fn part_target(&self, total: u64) -> Option<u64> {
+    fn part_target(&self, total: Option<u64>) -> Option<u64> {
         self.inner.part_target(total).or(Some(8 << 20))
     }
-    fn begin_upload<'a>(&'a self, key: &'a str, total: u64) -> BoxFuture<'a, Result<Option<String>, String>> {
+    fn begin_upload<'a>(&'a self, key: &'a str, total: Option<u64>) -> BoxFuture<'a, Result<Option<String>, String>> {
         if self.emulates_parts() {
             return Box::pin(async { Ok(Some("emulated".to_string())) });
         }
@@ -1258,6 +1258,132 @@ async fn test_resumable_upload_with_parts_and_an_interrupted_append() {
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT, "range {a}-{b}");
         assert_eq!(r.bytes().await.unwrap().as_ref(), &data[a..=b], "range {a}-{b}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Appends a chunk; `length` is sent as Upload-Length when given.
+async fn append(c: &reqwest::Client, url: &str, token: &str, off: usize, body: Vec<u8>, complete: bool, length: Option<usize>) -> reqwest::Response {
+    let mut r = c
+        .patch(url)
+        .bearer_auth(token)
+        .header("Content-Type", "application/partial-upload")
+        .header("Upload-Offset", off.to_string())
+        .header("Upload-Complete", if complete { "?1" } else { "?0" });
+    if let Some(l) = length {
+        r = r.header("Upload-Length", l.to_string());
+    }
+    r.body(body).send().await.unwrap()
+}
+
+/// An upload begun without a length: parts go on as bytes arrive, the last append gives the length
+/// (or, without one, the length is where it ends), and a length once given is fixed.
+#[tokio::test]
+async fn test_an_upload_of_unknown_length() {
+    let dir = temp_data_dir("unknown_length");
+    let flaky = Flaky::new(test_store(&dir), &dir);
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas::default(), flaky.clone()).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = |fid: &str| format!("{base}/api/shares/{sid}/files/{fid}.bin");
+
+    // 23 MiB in appends of 5 MiB (parts go on as they fill), the last with the length.
+    let fid = b64url_encode(&[16u8; 16]);
+    let total = 23 << 20;
+    let data: Vec<u8> = (0..total as u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+    let r = client.put(url(&fid)).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert!(r.headers().get("upload-length").is_none());
+    let mut off = 0;
+    while off < total {
+        let end = (off + (5 << 20)).min(total);
+        let last = end == total;
+        let r = append(&client, &url(&fid), &token, off, data[off..end].to_vec(), last, last.then_some(total)).await;
+        assert!(r.status().is_success(), "append at {off}: {}", r.status());
+        if !last {
+            let h = client.head(url(&fid)).bearer_auth(&token).send().await.unwrap();
+            assert_eq!(h.headers()["upload-offset"].to_str().unwrap(), end.to_string());
+            assert!(h.headers().get("upload-length").is_none(), "no length until it is given");
+        }
+        off = end;
+    }
+    assert!(state.open_share_db(&sid).unwrap().lock().unwrap().query_row("SELECT COUNT(*) FROM files WHERE file_id = ?1", params![fid], |r| r.get::<_, i64>(0)).unwrap() == 1);
+    let link: Value = client
+        .post(format!("{base}/api/shares/{sid}/links"))
+        .bearer_auth(&token)
+        .json(&json!({ "allowedFiles": [format!("{fid}.bin")] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap();
+    for (a, b) in [(0usize, 99usize), ((8 << 20) - 50, (8 << 20) + 50), ((16 << 20) - 7, (16 << 20) + 7), (total - 100, total - 1)] {
+        let r = client.get(format!("{base}/shl/{lid}/{fid}.bin")).header("Range", format!("bytes={a}-{b}")).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT, "range {a}-{b}");
+        assert_eq!(r.bytes().await.unwrap().as_ref(), &data[a..=b], "range {a}-{b}");
+    }
+
+    // Complete without a length: the length is where the upload ends.
+    let fid = b64url_encode(&[17u8; 16]);
+    client.put(url(&fid)).bearer_auth(&token).header("Upload-Complete", "?0").body(vec![1u8; 1000]).send().await.unwrap();
+    let r = append(&client, &url(&fid), &token, 1000, vec![2u8; 500], true, None).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let h = client.head(url(&fid)).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(h.headers()["upload-complete"], "?1");
+    assert_eq!(h.headers()["upload-length"], "1500");
+
+    // A length given early is kept; a different one later, or one shorter than what has arrived, is refused.
+    let fid = b64url_encode(&[18u8; 16]);
+    client.put(url(&fid)).bearer_auth(&token).header("Upload-Complete", "?0").body(vec![1u8; 1000]).send().await.unwrap();
+    assert_eq!(append(&client, &url(&fid), &token, 1000, vec![1u8; 10], false, Some(999)).await.status(), StatusCode::BAD_REQUEST);
+    assert!(append(&client, &url(&fid), &token, 1000, vec![1u8; 1000], false, Some(3000)).await.status().is_success());
+    let h = client.head(url(&fid)).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(h.headers()["upload-length"], "3000");
+    assert_eq!(append(&client, &url(&fid), &token, 2000, vec![1u8; 1000], true, Some(4000)).await.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(append(&client, &url(&fid), &token, 2000, vec![1u8; 1000], true, None).await.status(), StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The share's byte limit holds for an upload of unknown length as its bytes arrive: an append
+/// that would go past it is refused whole, and what came before stays.
+#[tokio::test]
+async fn test_the_byte_limit_holds_while_the_length_is_unknown() {
+    let dir = temp_data_dir("unknown_length_quota");
+    let state = AppState::with_store(
+        &dir,
+        shl_dicom_server::state::Quotas { share_bytes: Some(10 << 20), share_files: Some(256), shares: Some(64), request_bytes: 64 << 20, cap_ttl_secs: 3600 },
+        test_store(&dir),
+    )
+    .unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = |fid: &str| format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    let done = b64url_encode(&[19u8; 16]);
+    assert_eq!(client.put(url(&done)).bearer_auth(&token).body(vec![0u8; 4 << 20]).send().await.unwrap().status(), StatusCode::OK);
+
+    let fid = b64url_encode(&[20u8; 16]);
+    assert_eq!(client.put(url(&fid)).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap().status(), StatusCode::CREATED);
+    assert!(append(&client, &url(&fid), &token, 0, vec![1u8; 4 << 20], false, None).await.status().is_success());
+    let r = append(&client, &url(&fid), &token, 4 << 20, vec![1u8; 3 << 20], false, None).await;
+    assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(r.text().await.unwrap().contains("QUOTA_BYTES_EXCEEDED"));
+    let h = client.head(url(&fid)).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(h.headers()["upload-offset"].to_str().unwrap(), (4 << 20).to_string(), "the refused append left nothing");
+    // Another upload of unknown length counts what has arrived of this one.
+    let other = b64url_encode(&[21u8; 16]);
+    client.put(url(&other)).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap();
+    assert_eq!(append(&client, &url(&other), &token, 0, vec![1u8; 3 << 20], false, None).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // A length that would not fit is refused when it is given.
+    assert_eq!(append(&client, &url(&fid), &token, 4 << 20, vec![1u8; 1 << 20], true, Some(7 << 20)).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // What fits completes.
+    assert_eq!(append(&client, &url(&fid), &token, 4 << 20, vec![1u8; 1 << 20], true, Some(5 << 20)).await.status(), StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

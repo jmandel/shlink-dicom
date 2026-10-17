@@ -1097,7 +1097,7 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS uploads (
            file_id        TEXT PRIMARY KEY,
            storage_key    TEXT NOT NULL,           -- the blob it will become
-           size           INTEGER NOT NULL,
+           size           INTEGER NOT NULL,        -- -1 until the length is known
            s3_upload_id   TEXT,
            flushed_bytes  INTEGER NOT NULL DEFAULT 0,
            started_at     INTEGER NOT NULL

@@ -61,10 +61,11 @@ pub trait BlobStore: Send + Sync {
 
     /// The staged file's size at which it is sent on as a part; None when parts are never sent
     /// before the end (the local store).
-    fn part_target(&self, total: u64) -> Option<u64>;
+    /// `total` is None while the upload's length is not known yet (it comes with the last append).
+    fn part_target(&self, total: Option<u64>) -> Option<u64>;
 
     /// Starts a multipart upload for a file of `total` bytes, when this store sends parts.
-    fn begin_upload<'a>(&'a self, key: &'a str, total: u64) -> BoxFuture<'a, Result<Option<String>, String>>;
+    fn begin_upload<'a>(&'a self, key: &'a str, total: Option<u64>) -> BoxFuture<'a, Result<Option<String>, String>>;
 
     /// Sends the whole staged file as part `part_num`. Returns its ETag and size.
     fn flush_part<'a>(&'a self, key: &'a str, upload_id: &'a str, part_num: u32, staged: &'a Path) -> BoxFuture<'a, Result<(String, u64), String>>;
@@ -130,10 +131,10 @@ impl BlobStore for LocalFsStore {
             Ok(ReadDelivery::Stream(Box::pin(s)))
         })
     }
-    fn part_target(&self, _: u64) -> Option<u64> {
+    fn part_target(&self, _: Option<u64>) -> Option<u64> {
         None
     }
-    fn begin_upload<'a>(&'a self, _: &'a str, _: u64) -> BoxFuture<'a, Result<Option<String>, String>> {
+    fn begin_upload<'a>(&'a self, _: &'a str, _: Option<u64>) -> BoxFuture<'a, Result<Option<String>, String>> {
         Box::pin(async { Ok(None) })
     }
     fn flush_part<'a>(&'a self, _: &'a str, _: &'a str, _: u32, _: &'a Path) -> BoxFuture<'a, Result<(String, u64), String>> {
@@ -194,6 +195,8 @@ const SIGN_TTL: Duration = Duration::from_secs(60);
 const PRESIGN_REUSE: Duration = Duration::from_secs(30);
 /// Below this, a file is sent with one PutObject at the end rather than a multipart upload.
 const SINGLE_PUT_MAX: u64 = 8 << 20;
+/// Part size for an upload whose length is not known yet.
+const UNKNOWN_LENGTH_PART: u64 = 16 << 20;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -330,15 +333,18 @@ impl BlobStore for S3Store {
         })
     }
 
-    fn part_target(&self, total: u64) -> Option<u64> {
-        // S3: parts of at least 5 MiB (but the last), at most 10,000 parts.
+    fn part_target(&self, total: Option<u64>) -> Option<u64> {
+        // S3: parts of at least 5 MiB (but the last), at most 10,000 parts. A length not known yet
+        // gets 16 MiB parts: files up to 160 GB.
+        let Some(total) = total else { return Some(UNKNOWN_LENGTH_PART) };
         let per = total.div_ceil(9500).div_ceil(64 << 10) * (64 << 10);
         Some(per.max(8 << 20))
     }
 
-    fn begin_upload<'a>(&'a self, key: &'a str, total: u64) -> BoxFuture<'a, Result<Option<String>, String>> {
+    fn begin_upload<'a>(&'a self, key: &'a str, total: Option<u64>) -> BoxFuture<'a, Result<Option<String>, String>> {
         Box::pin(async move {
-            if total <= SINGLE_PUT_MAX {
+            // A length not known yet may be large: multipart (a single small part completes fine).
+            if total.is_some_and(|t| t <= SINGLE_PUT_MAX) {
                 return Ok(None);
             }
             Ok(Some(self.create_multipart(key).await?))
@@ -401,7 +407,7 @@ impl BlobStore for S3Store {
             if total <= SINGLE_PUT_MAX {
                 self.put_object_from(key, path).await?;
             } else {
-                let target = self.part_target(total).unwrap();
+                let target = self.part_target(Some(total)).unwrap();
                 let id = self.create_multipart(key).await?;
                 let mut parts = Vec::new();
                 let mut at = 0;

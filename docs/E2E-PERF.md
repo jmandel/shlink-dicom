@@ -166,10 +166,18 @@ The rest of the 1 s is the first read of every header: about 0.45 MB, needed to 
    - Gain: reading one instance on its own would fetch 1.08× its bytes instead of 1.33× (CT), and 1.15× instead of 1.61× (MR). For a slide session it would be 1.14× instead of 1.38× (CPTAC-BRCA, 3–17 kB tiles), or 1.02× instead of 1.05× (CPTAC-LUAD).
    - Cost: tag overhead goes from 0.024% to 0.098%, and decryption makes four times as many calls.
    - With the record-level loader, sequential reads already share boundary records. So the gain is mostly random access (jumps, thumbnails, slide tiles).
-3. **Parallel or deferred-length uploads.**
-   - Upload is the long pole of sharing: on a 5 MB/s uplink, about 75–85% of the time from "Share" to the link.
-   - One file per study uploads as one stream. Two files reached 98% of the link, against 94% for one.
-   - Overlapping compression with the upload needs `Upload-Length` to be given later (the draft allows it; the server requires it up front). That would save up to the compression time (2–10 s here).
+   - In reading sessions (perf/sessions, 1,116 sessions, scratch builds at 32 and 16 KiB): opening a series on slow links is faster (Fast 4G CT 1.08 → 0.33 / 0.29 s, slide 1.13 → 0.86 / 0.77 s; Slow 4G CT 10.2 → 8.7 / 7.9 s). At home nothing changes. Slides fetch fewer bytes and make more requests (J2K: 5.2 → 3.8 MB, 70 → 124 requests). Multi-frame files, scrolling once loaded, MPR and switches are unchanged. Decryption at 4× CPU goes from 250 to 175 MB/s.
+3. **Deferred-length uploads.** *Approved (Josh, 16 Oct) and done.*
+   - The server takes an upload without `Upload-Length` and learns it from the last append. The share's byte limit is checked as the bytes arrive. While the length is unknown, S3 parts are 16 MiB.
+   - The Share page starts compressing when "Share" is pressed and uploads each file as its images are done, in file order. Its bar measures the images' bytes done, a known total.
+   - "Share" → link on a 5 MB/s uplink (home profile; medians of 6, interleaved, range in brackets, load 1.3–3.1):
+
+     | Study | Desktop: main → branch | 4× CPU: main → branch |
+     |---|---|---|
+     | MRI (Josh Example, 267 files, 44 MB raw) | 9.2 (8.0–10.0) → 8.7 (7.7–10.0) s | 10.2 (9.7–10.9) → 9.7 (9.4–10.9) s |
+     | CT (Josh Example, 458 files, 246 MB raw) | 24.0 (22.8–25.2) → 22.1 (21.9–24.4) s | 26.7 (26.5–27.2) → 24.2 (23.7–26.1) s |
+
+   - The saving is about the compression time (CT on main: 1.6–3.3 s desktop, 4.5–4.9 s at 4×). The rest is the upload itself, which already runs at the link's rate (8 MiB appends back to back, about 4.5 MB/s through the shaper).
    - Series-level files for very large studies would also allow parallel appends.
 
 ## Findings for other owners

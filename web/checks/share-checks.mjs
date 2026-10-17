@@ -155,7 +155,7 @@ async function finish(page, dev, prefix, o = {}) {
   await page.click("#who-form button[type=submit]");
   await page.waitForSelector("#s-upload:not(.hidden)");
   if (o.shots) {
-    await page.waitForFunction(() => /Uploaded [^0]/.test(document.getElementById("up-main").textContent), null, { timeout: 30000 }).catch(() => {});
+    await page.waitForFunction(() => /[Uu]ploaded [^0]/.test(document.getElementById("up-main").textContent), null, { timeout: 30000 }).catch(() => {});
     await shot(page, `${dev}-4-upload`);
   }
   await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 900000 });
@@ -390,7 +390,7 @@ async function flowJ2kResume(dev) {
   await chooseJ2k(page, P);
   await page.click("#rv-next");
   await page.click("#who-form button[type=submit]");
-  await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 30, null, { timeout: 600000, polling: 100 });
+  await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 30, null, { timeout: 600000, polling: 100 });
   const before = await page.textContent("#up-main");
   // A reload while requests are in flight can report ERR_ABORTED for the old page; the new one loads all the same.
   await page.reload().catch(() => page.goto(`${BASE}/share`));
@@ -398,7 +398,7 @@ async function flowJ2kResume(dev) {
   const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.click("#resume-continue")]);
   await chooser.setFiles(files);
   await page.waitForSelector("#s-upload:not(.hidden)");
-  const seen = await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main").textContent) && document.getElementById("up-main").textContent, null, { timeout: 300000 });
+  const seen = await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main").textContent) && document.getElementById("up-main").textContent, null, { timeout: 300000 });
   check(`${P}: after a reload the upload continues from what the server has`, parseFloat((await page.locator("#up-bar").getAttribute("style")).match(/width: ([\d.]+)/)?.[1] ?? "0") > 25, `${before} → ${await seen.jsonValue()}`);
   await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 900000 });
   if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
@@ -735,16 +735,16 @@ async function flowBigCt(dev) {
   await page.click("#rv-next");
   await page.fill("#in-recipient", "Big CT test");
   await page.click("#who-form button[type=submit]");
-  // Reload a third of the way through the upload (after compressing), then continue with the same files.
+  // Reload a third of the way through (images are compressed as the files upload), then continue with the same files.
   const tc = Date.now();
-  await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? ""), null, { timeout: 1800000, polling: 250 });
+  await page.waitForFunction(() => /[1-9][\d.]* [KMG]?B of/.test(document.getElementById("up-main")?.textContent ?? "") && /^Compressed and uploaded/.test(document.getElementById("up-main").textContent), null, { timeout: 1800000, polling: 250 });
   const tUpload = Date.now();
   const compressLine = (await page.locator("#up-log li").allTextContents()).find((t) => /^Compressed/.test(t)) ?? "";
-  console.log(`COMPRESS ${P}: ${compressLine} (page: ${((Date.now() - tc) / 1000).toFixed(0)} s to the first upload)`);
-  check(`${P}: compressed before uploading`, /^Compressed \d+ images without loss/.test(compressLine), compressLine);
+  console.log(`COMPRESS ${P}: ${((Date.now() - tc) / 1000).toFixed(0)} s to the first bytes on the server`);
+  check(`${P}: the upload starts while images are still being compressed`, !compressLine, compressLine || "(still compressing)");
   await page.waitForFunction(() => {
     const w = parseFloat(document.getElementById("up-bar")?.style.width ?? "0");
-    return /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && w > 33;
+    return /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && w > 33;
   }, null, { timeout: 900000, polling: 250 });
   const before = await page.textContent("#up-main");
   const tReload = Date.now();
@@ -757,7 +757,7 @@ async function flowBigCt(dev) {
   const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.click("#resume-continue")]);
   await chooser.setFiles(files);
   await page.waitForSelector("#s-upload:not(.hidden)");
-  const resumedAt = await page.waitForFunction(() => /Uploaded/.test(document.getElementById("up-main").textContent) && document.getElementById("up-main").textContent, null, { timeout: 300000 });
+  const resumedAt = await page.waitForFunction(() => /[Uu]ploaded/.test(document.getElementById("up-main").textContent) && document.getElementById("up-main").textContent, null, { timeout: 300000 });
   check(`${P}: the upload continues from what the server has`, parseFloat((await page.locator("#up-bar").getAttribute("style")).match(/width: ([\d.]+)/)?.[1] ?? "0") > 30, await resumedAt.jsonValue());
   const tResumed = Date.now();
   await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 1800000 });
@@ -834,7 +834,7 @@ async function startNetUpload(page, dev, files, pct, o = {}) {
   await page.click("#rv-next");
   await page.click("#who-form button[type=submit]");
   // The upload's own bar (compressing comes first, on the same bar).
-  await page.waitForFunction((p) => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= p, pct, { timeout: 300000, polling: 100 });
+  await page.waitForFunction((p) => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= p, pct, { timeout: 300000, polling: 100 });
 }
 
 async function finishNetUpload(page, P, files, timeout = 900000) {
@@ -859,14 +859,15 @@ async function flowNetwork(dev) {
   const slow = { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 4 << 20 };
   const noise = [/ERR_INTERNET_DISCONNECTED|ERR_FAILED|ERR_CONNECTION|ERR_ABORTED|ERR_EMPTY_RESPONSE|net::/i, /503|502/];
 
-  // Offline for 5 s and for 60 s, on a connection limited to 4 MB/s.
-  for (const secs of [5, 60]) {
-    const P = `offline-${secs}s/${dev}`;
+  // Offline for 5 s and for 60 s, on a connection limited to 4 MB/s; and for 5 s while the images
+  // are still being compressed (the files growing as they upload).
+  for (const [secs, exact] of [[5, true], [60, true], [5, false]]) {
+    const P = `offline-${secs}s${exact ? "" : "-compressing"}/${dev}`;
     const { context, page, errors } = await newPage(dev, { allowErrors: noise });
     const cdp = await context.newCDPSession(page);
     await cdp.send("Network.enable");
     await cdp.send("Network.emulateNetworkConditions", slow);
-    await startNetUpload(page, dev, files, 20, { exact: true });
+    await startNetUpload(page, dev, files, exact ? 20 : 1, { exact });
     await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });
     const shown = await seesTrouble(page);
     check(`${P}: the page says the connection is lost`, /Connection lost/.test(shown), shown);
@@ -880,9 +881,10 @@ async function flowNetwork(dev) {
     await context.close();
   }
 
-  // Flaky: a third of the appends fail (connection reset or a 503 from the proxy).
-  {
-    const P = `flaky/${dev}`;
+  // Flaky: a third of the appends fail (connection reset or a 503 from the proxy); as they are, and
+  // compressed on the way.
+  for (const exact of [true, false]) {
+    const P = `flaky${exact ? "" : "-compressing"}/${dev}`;
     const { context, page, errors } = await newPage(dev, { allowErrors: noise });
     // Every third append fails (alternately reset and 503), so every run rides out some.
     let failed = 0, patches = 0;
@@ -894,7 +896,7 @@ async function flowNetwork(dev) {
       }
       return route.continue();
     });
-    await startNetUpload(page, dev, files, 0, { exact: true });
+    await startNetUpload(page, dev, files, 0, { exact });
     await finishNetUpload(page, P, files);
     check(`${P}: rode out ${failed} failed requests`, failed > 0, `${failed} failed`);
     await noErrors(P, errors);
@@ -1002,7 +1004,7 @@ async function flowRemember(dev) {
     await page.waitForSelector("#s-review:not(.hidden)", { timeout: 60000 });
     await page.click("#rv-next");
     await page.click("#who-form button[type=submit]");
-    await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 20, null, { timeout: 120000, polling: 100 });
+    await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 20, null, { timeout: 120000, polling: 100 });
     await page.reload();
     await page.waitForSelector("#resume:not(.hidden)");
     const label = await page.textContent("#resume-continue");
@@ -1142,7 +1144,7 @@ async function flowDark(dev) {
   const slow = { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 512 << 10 };
   await cdp.send("Network.emulateNetworkConditions", slow);
   await page.click("#who-form button[type=submit]");
-  await page.waitForFunction(() => /^Uploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 10, null, { timeout: 120000, polling: 100 });
+  await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") >= 10, null, { timeout: 120000, polling: 100 });
   await darkAudit(page, `${P} upload`);
   await shotD(page, "4-upload");
   await cdp.send("Network.emulateNetworkConditions", { ...slow, offline: true });

@@ -178,6 +178,15 @@ export interface CompressSummary extends CompressProgress {
   declined: Map<string, number>;
   /** By SOP Instance UID: what an interrupted upload needs to continue with the same bytes. */
   records: Record<string, Reencoded>;
+  /** SOP Instance UIDs of the images kept as they were. */
+  kept: string[];
+}
+
+export interface CompressOptions {
+  /** Called as each image is handled (in the order they finish), with its record when re-encoded. */
+  onImage?: (inst: Instance, rec: Reencoded | null) => void | Promise<void>;
+  /** SOP Instance UIDs to leave alone (images kept as they were before a reload). */
+  skip?: ReadonlySet<string>;
 }
 
 const hex = async (b: Uint8Array) =>
@@ -204,8 +213,9 @@ export async function compressStudies(
   onProgress?: (p: CompressProgress) => void,
   signal?: AbortSignal,
   transcode: Transcode = poolTranscode,
+  o: CompressOptions = {},
 ): Promise<CompressSummary> {
-  const todo = uncompressedImages(studies);
+  const todo = uncompressedImages(studies).filter(({ inst }) => !o.skip?.has(inst.h.sopInstanceUid));
   const t0 = performance.now();
   const sum: CompressSummary = {
     mode,
@@ -218,6 +228,7 @@ export async function compressStudies(
     compressed: 0,
     declined: new Map(),
     records: {},
+    kept: [],
   };
   onProgress?.(sum);
   let inFlight = 0;
@@ -230,20 +241,23 @@ export async function compressStudies(
       signal?.throwIfAborted();
       const r = await transcode(await inst.src.read(0, size), mode);
       sum.before += size;
+      let rec: Reencoded | null = null;
       if ("bytes" in r) {
         const sha256 = await hex(r.bytes);
         const staged = await stager.stage(inst.name, once(r.bytes));
-        sum.records[inst.h.sopInstanceUid] = { file: stagedName(staged), sha256 };
+        rec = sum.records[inst.h.sopInstanceUid] = { file: stagedName(staged), sha256 };
         replaceBytes(col, se, inst, staged, r.transferSyntax);
         sum.after += staged.size;
         sum.compressed++;
       } else {
         sum.after += size;
         sum.declined.set(r.declined, (sum.declined.get(r.declined) ?? 0) + 1);
+        sum.kept.push(inst.h.sopInstanceUid);
       }
       sum.done++;
       sum.seconds = (performance.now() - t0) / 1000;
       onProgress?.(sum);
+      await o.onImage?.(inst, rec);
     } finally {
       inFlight -= size;
       gate.shift()?.();

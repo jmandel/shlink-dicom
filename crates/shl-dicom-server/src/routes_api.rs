@@ -344,15 +344,21 @@ fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
 // File uploads, following the IETF resumable uploads draft
 // (draft-ietf-httpbis-resumable-upload-13). The upload resource is the file's own URL,
 // /api/shares/{sid}/files/{fileId}.bin:
-//   PUT   with Upload-Complete and Upload-Length   creates the upload (the body may be its start)
+//   PUT   with Upload-Complete (and Upload-Length when known)   creates the upload (the body may be its start)
 //   HEAD                                           Upload-Offset, Upload-Complete, Upload-Length, Upload-Limit
 //   PATCH application/partial-upload, Upload-Offset, Upload-Complete   appends
 //   DELETE                                         cancels (or deletes the finished file)
 // A PUT without Upload-Complete sends a whole file in one request (not resumable).
+// The length may be left out until it is known: an append gives Upload-Length, or the final
+// append (Upload-Complete: ?1) fixes it at its end. The share's byte limit is then enforced as the
+// bytes arrive. An upload of unknown length is stored with size UNKNOWN_LENGTH.
 // The bytes of an interrupted request are kept; the client asks where to continue.
 
 /// How long an upload request may go without receiving a byte.
 const BODY_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `uploads.size` of an upload whose length is not known yet.
+const UNKNOWN_LENGTH: i64 = -1;
 
 const PROBLEM_MISMATCH: &str = "https://iana.org/assignments/http-problem-types#mismatching-upload-offset";
 const PROBLEM_LENGTH: &str = "https://iana.org/assignments/http-problem-types#inconsistent-upload-length";
@@ -404,7 +410,7 @@ fn upload_state(state: &AppState, sid: &str, file_id: &str) -> Option<(u64, Opti
         .flatten()?;
     // What has gone on to the store as parts, and what is staged locally.
     let staged = std::fs::metadata(state.part_path(sid, file_id)).map(|m| m.len()).unwrap_or(0);
-    Some((flushed as u64 + staged, Some(size as u64), false))
+    Some((flushed as u64 + staged, (size >= 0).then_some(size as u64), false))
 }
 
 fn upload_limit(state: &AppState) -> String {
@@ -474,8 +480,13 @@ fn flushed_bytes(state: &AppState, sid: &str, file_id: &str) -> u64 {
 
 /// Streams `body` onto the staged `{fileId}.part` from upload offset `start`, never past `total`.
 /// The staged file holds the bytes from `flushed_bytes` on.
-async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, total: u64, body: Body) -> Append {
+async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, total: Option<u64>, body: Body) -> Append {
     use tokio::io::AsyncWriteExt;
+    // A length not known yet: the share's byte limit is checked as the bytes arrive.
+    let quota_end = match (total, state.quotas.share_bytes) {
+        (None, Some(cap)) => cap.saturating_sub(share_bytes_in_use(state, sid, file_id)),
+        _ => u64::MAX,
+    };
     let part = state.part_path(sid, file_id);
     let flushed = flushed_bytes(state, sid, file_id);
     let Some(local) = start.checked_sub(flushed) else {
@@ -504,9 +515,13 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
             let _ = file.flush().await;
             return Append::Interrupted(start + got);
         };
-        if start + got + chunk.len() as u64 > total {
+        if total.is_some_and(|t| start + got + chunk.len() as u64 > t) {
             let _ = file.set_len(local).await;
             return Append::Fail(problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({})));
+        }
+        if start + got + chunk.len() as u64 > quota_end {
+            let _ = file.set_len(local).await;
+            return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED"));
         }
         if file.write_all(&chunk).await.is_err() {
             let _ = file.set_len(local).await;
@@ -516,6 +531,29 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
     }
     let _ = file.flush().await;
     Append::Ok(start + got)
+}
+
+/// Encrypted bytes a share holds or has on the way, apart from upload `except`: finished files,
+/// uploads of known length at their length, and uploads of unknown length at what has arrived.
+fn share_bytes_in_use(state: &AppState, sid: &str, except: &str) -> u64 {
+    let Some(c) = state.open_share_db(sid) else { return 0 };
+    let (files, known, unknown): (i64, i64, Vec<(String, i64)>) = {
+        let conn = c.lock().unwrap();
+        let files = conn.query_row("SELECT COALESCE(SUM(size), 0) FROM files", [], |r| r.get(0)).unwrap_or(0);
+        let known = conn
+            .query_row("SELECT COALESCE(SUM(size), 0) FROM uploads WHERE size >= 0 AND file_id != ?1", params![except], |r| r.get(0))
+            .unwrap_or(0);
+        let unknown = conn
+            .prepare("SELECT file_id, flushed_bytes FROM uploads WHERE size < 0 AND file_id != ?1")
+            .and_then(|mut st| st.query_map(params![except], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()))
+            .unwrap_or_default();
+        (files, known, unknown)
+    };
+    let arrived: u64 = unknown
+        .iter()
+        .map(|(f, flushed)| *flushed as u64 + std::fs::metadata(state.part_path(sid, f)).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    files as u64 + known as u64 + arrived
 }
 
 /// An upload's storage key, its multipart id, and the parts sent so far, in order.
@@ -539,7 +577,7 @@ fn upload_row(state: &AppState, sid: &str, file_id: &str) -> Option<(String, Opt
 /// count toward the upload's offset; they count again only once the part is recorded. A failure or
 /// a crash in between leaves the offset at the last recorded part, and the client sends the rest
 /// again. Appends always start a fresh `{fileId}.part`.
-async fn flush_staged(state: &AppState, sid: &str, file_id: &str, total: u64, force: bool) -> Result<(), String> {
+async fn flush_staged(state: &AppState, sid: &str, file_id: &str, total: Option<u64>, force: bool) -> Result<(), String> {
     let Some((key, Some(upload_id), parts)) = upload_row(state, sid, file_id) else { return Ok(()) };
     let Some(target) = state.store.part_target(total) else { return Ok(()) };
     let part = state.part_path(sid, file_id);
@@ -569,10 +607,17 @@ async fn flush_staged(state: &AppState, sid: &str, file_id: &str, total: u64, fo
     sent
 }
 
+/// Records the length of an upload begun without one.
+fn set_upload_length(state: &AppState, sid: &str, file_id: &str, length: u64) {
+    if let Some(c) = state.open_share_db(sid) {
+        let _ = c.lock().unwrap().execute("UPDATE uploads SET size = ?1 WHERE file_id = ?2", params![length as i64, file_id]);
+    }
+}
+
 /// Publishes a finished upload through the store and records the file.
 async fn publish_file(state: &AppState, sid: &str, file_id: &str, size: u64) -> Result<ShareFileEntry, String> {
     let part = state.part_path(sid, file_id);
-    flush_staged(state, sid, file_id, size, true).await?;
+    flush_staged(state, sid, file_id, Some(size), true).await?;
     let (key, upload_id, parts) = upload_row(state, sid, file_id).ok_or("the upload is gone")?;
     match upload_id {
         Some(id) => state.store.complete_upload(&key, Some(&id), &parts, &part).await?,
@@ -596,7 +641,7 @@ fn finished(state: &AppState, status: StatusCode, entry: ShareFileEntry) -> Resp
 
 /// Checks the share's limits for a new upload of `total` bytes and records it. A resumable upload
 /// to a store that takes parts starts a multipart upload there.
-async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64, resumable: bool) -> Result<(), Response> {
+async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: Option<u64>, resumable: bool) -> Result<(), Response> {
     forget_upload(state, sid, file_id);
     let key = new_storage_key();
     let upload_id = if resumable {
@@ -604,19 +649,16 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64, re
     } else {
         None
     };
+    let bytes = share_bytes_in_use(state, sid, file_id);
     let conn_arc = state.open_share_db(sid).ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
     let conn = conn_arc.lock().unwrap();
-    let (files, bytes): (i64, i64) = conn
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM files) + (SELECT COUNT(*) FROM uploads),
-                    (SELECT COALESCE(SUM(size), 0) FROM files) + (SELECT COALESCE(SUM(size), 0) FROM uploads)",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap_or((0, 0));
+    let files: i64 = conn
+        .query_row("SELECT (SELECT COUNT(*) FROM files) + (SELECT COUNT(*) FROM uploads)", [], |r| r.get(0))
+        .unwrap_or(0);
+    // A length not known yet is checked as its bytes arrive (append_body).
     let over = if state.quotas.share_files.is_some_and(|m| files as usize >= m) {
         Some("QUOTA_FILES_EXCEEDED")
-    } else if state.quotas.share_bytes.is_some_and(|m| bytes as u64 + total > m) {
+    } else if state.quotas.share_bytes.is_some_and(|m| bytes + total.unwrap_or(0) > m || (total.is_none() && bytes >= m)) {
         Some("QUOTA_BYTES_EXCEEDED")
     } else {
         None
@@ -630,7 +672,7 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: u64, re
     }
     conn.execute(
         "INSERT INTO uploads (file_id, storage_key, size, s3_upload_id, flushed_bytes, started_at) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-        params![file_id, key, total as i64, upload_id, now_unix()],
+        params![file_id, key, total.map_or(UNKNOWN_LENGTH, |t| t as i64), upload_id, now_unix()],
     )
     .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = std::fs::create_dir_all(state.staging_dir(sid));
@@ -654,9 +696,9 @@ fn forget_upload(state: &AppState, sid: &str, file_id: &str) {
 
 /// `PUT /api/shares/{sid}/files/{name}`
 ///
-/// With `Upload-Complete` (and `Upload-Length`): creates a resumable upload whose body is the
-/// file's first bytes. Without: the whole file in one request (`Content-Length` or
-/// `X-Expected-Size`), which is not resumable.
+/// With `Upload-Complete`: creates a resumable upload whose body is the file's first bytes, with
+/// `Upload-Length` when the length is known. Without: the whole file in one request
+/// (`Content-Length` or `X-Expected-Size`), which is not resumable.
 pub async fn put_share_file(
     State(state): State<AppState>,
     Path((sid, name)): Path<(String, String)>,
@@ -672,12 +714,12 @@ pub async fn put_share_file(
     let resumable = sf_bool(&headers, "upload-complete");
     let total = match resumable {
         Some(_) => match sf_int(&headers, "upload-length") {
-            Some(Ok(n)) => n,
+            Some(Ok(n)) => Some(n),
             Some(Err(_)) => return json_err(StatusCode::BAD_REQUEST, "invalid Upload-Length"),
-            None => return json_err(StatusCode::LENGTH_REQUIRED, "a resumable upload needs Upload-Length"),
+            None => None,
         },
         None => match sf_int(&headers, "x-expected-size").or_else(|| sf_int(&headers, "content-length")) {
-            Some(Ok(n)) => n,
+            Some(Ok(n)) => Some(n),
             Some(Err(_)) => return json_err(StatusCode::BAD_REQUEST, "invalid X-Expected-Size header"),
             None => return json_err(StatusCode::LENGTH_REQUIRED, "send Content-Length, X-Expected-Size, or Upload-Complete with Upload-Length"),
         },
@@ -687,15 +729,15 @@ pub async fn put_share_file(
         Some(Err(_)) => return json_err(StatusCode::BAD_REQUEST, "invalid Upload-Complete"),
         None => true,
     };
-    if total == 0 {
+    if total == Some(0) {
         return json_err(StatusCode::BAD_REQUEST, "file body must not be empty");
     }
     let Some(_guard) = state.claim_upload(&sid, &file_id) else {
         return json_err(StatusCode::CONFLICT, "another upload of this file is in progress");
     };
-    if let Some((_, length, true)) = upload_state(&state, &sid, &file_id) {
-        return if length == Some(total) {
-            with_upload_headers(Response::builder().status(StatusCode::OK), &state, total, Some(total), true).body(Body::empty()).unwrap()
+    if let Some((have, length, true)) = upload_state(&state, &sid, &file_id) {
+        return if total.is_none() || length == total {
+            with_upload_headers(Response::builder().status(StatusCode::OK), &state, have, Some(have), true).body(Body::empty()).unwrap()
         } else {
             json_err(StatusCode::CONFLICT, "fileId already exists with different content size")
         };
@@ -719,7 +761,9 @@ pub async fn put_share_file(
         }
     };
     if complete_flag {
-        if end != total {
+        // Complete without a length: the body was the whole file.
+        let total = total.unwrap_or(end);
+        if end != total || end == 0 {
             forget_upload(&state, &sid, &file_id);
             if resumable.is_none() {
                 return json_err(StatusCode::BAD_REQUEST, format!("size mismatch: expected {total} bytes, got {end}"));
@@ -736,7 +780,7 @@ pub async fn put_share_file(
     if let Err(e) = flush_staged(&state, &sid, &file_id, total, false).await {
         return store_failed("send part", e);
     }
-    with_upload_headers(Response::builder().status(StatusCode::CREATED), &state, end, Some(total), false)
+    with_upload_headers(Response::builder().status(StatusCode::CREATED), &state, end, total, false)
         .header(header::LOCATION, format!("/api/shares/{sid}/files/{file_id}.bin"))
         .body(Body::empty())
         .unwrap()
@@ -768,7 +812,6 @@ pub async fn patch_share_file(
     let Some((have, length, complete)) = upload_state(&state, &sid, &file_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let total = length.unwrap_or(u64::MAX);
     if complete {
         return problem(StatusCode::BAD_REQUEST, "about:blank", "the upload is already complete", json!({}));
     }
@@ -784,23 +827,39 @@ pub async fn patch_share_file(
         parts.headers.insert("Upload-Complete", "?0".parse().unwrap());
         return Response::from_parts(parts, b);
     }
-    if let Some(Ok(l)) = sf_int(&headers, "upload-length") {
-        if Some(l) != length {
+    // The length, once given, is fixed; an upload begun without one learns it from an append.
+    let mut length = length;
+    match (sf_int(&headers, "upload-length"), length) {
+        (Some(Ok(l)), Some(known)) if l != known => {
             return problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({}));
         }
+        (Some(Ok(l)), None) => {
+            if l < have {
+                return problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({}));
+            }
+            if state.quotas.share_bytes.is_some_and(|m| share_bytes_in_use(&state, &sid, &file_id) + l > m) {
+                return json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED");
+            }
+            set_upload_length(&state, &sid, &file_id, l);
+            length = Some(l);
+        }
+        (Some(Err(_)), _) => return json_err(StatusCode::BAD_REQUEST, "invalid Upload-Length"),
+        _ => {}
     }
     if let Some(Ok(cl)) = sf_int(&headers, "content-length") {
         if cl > state.quotas.request_bytes {
             return json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", state.quotas.request_bytes));
         }
     }
-    let end = match append_body(&state, &sid, &file_id, offset, total, body).await {
+    let end = match append_body(&state, &sid, &file_id, offset, length, body).await {
         Append::Ok(n) => n,
         Append::Fail(resp) => return resp,
         Append::Interrupted(n) => return json_err(StatusCode::BAD_REQUEST, format!("the request was interrupted at offset {n}")),
     };
     if complete_flag {
-        if end != total {
+        // The last append of an upload whose length was never given: the length is where it ends.
+        let total = length.unwrap_or(end);
+        if end != total || end == 0 {
             if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(state.part_path(&sid, &file_id)).await {
                 let _ = f.set_len(offset - flushed_bytes(&state, &sid, &file_id)).await;
             }
@@ -811,7 +870,7 @@ pub async fn patch_share_file(
             Err(e) => store_failed("publish upload", e),
         };
     }
-    if let Err(e) = flush_staged(&state, &sid, &file_id, total, false).await {
+    if let Err(e) = flush_staged(&state, &sid, &file_id, length, false).await {
         return store_failed("send part", e);
     }
     with_upload_headers(Response::builder().status(StatusCode::NO_CONTENT), &state, end, length, false).body(Body::empty()).unwrap()
