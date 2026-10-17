@@ -39,6 +39,10 @@ describe("discover", () => {
     await expect(discover("http://portal.example/fhir")).rejects.toThrow("https");
     expect(asked).toBe(false);
   });
+  test("an authorization endpoint with a javascript: URL is refused", async () => {
+    portal({ authorization_endpoint: "javascript:alert(document.domain)//" });
+    await expect(discover("https://portal.example/fhir")).rejects.toThrow("https");
+  });
   for (const [what, conf] of [
     ["authorization endpoint", { authorization_endpoint: "http://evil.example/auth" }],
     ["token endpoint", { token_endpoint: "http://evil.example/token" }],
