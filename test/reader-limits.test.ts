@@ -70,7 +70,7 @@ describe("the Bundle and the manifest are read up to a limit", () => {
     const f = async (url: string) => {
       seen.push(String(url));
       if (String(url) === "https://host.example/m") {
-        return Response.json({ files: [{ contentType: "application/smart-health-card", location: "https://elsewhere.example/card" }, { contentType: "application/fhir+json", location: "https://host.example/cap/x/bundle.jwe" }] });
+        return Response.json({ files: [{ contentType: "application/smart-health-card", location: "https://elsewhere.example/card" }, { contentType: "application/fhir+json;fhirVersion=4.0.1", location: "https://host.example/cap/x/bundle.jwe" }] });
       }
       return new Response(jwe);
     };

@@ -247,7 +247,8 @@ export class LinkResolver {
       if (e instanceof LinkError) throw e;
     }
     // The Bundle's entry: FHIR JSON with a location (another entry first in the list is not it).
-    const loc = manifest?.files?.find((f: any) => f?.contentType === "application/fhir+json" && typeof f?.location === "string")?.location;
+    const isFhir = (t: unknown) => typeof t === "string" && t.split(";")[0].trim().toLowerCase() === "application/fhir+json";
+    const loc = manifest?.files?.find((f: any) => isFhir(f?.contentType) && typeof f?.location === "string")?.location;
     if (!loc) throw new LinkError("invalid", "The host's answer did not say where the file is.");
     this.baseUrl = loc;
     return manifest;
