@@ -537,7 +537,7 @@ export class FrameLocator {
           const read = this.bytes.read(inst.offset + a, inst.offset + b, { priority: 0, purpose: "walk", signal: this.signal });
           // Read ahead: the next item header is almost always in the next chunk.
           if (b < inst.length) void this.bytes.read(inst.offset + b, inst.offset + Math.min(inst.length, b + chunk), { priority: 0, purpose: "walk", signal: this.signal }).catch(() => {});
-          wk.w.feed(await read, a);
+          await wk.w.feed(await read, a);
           if (b >= inst.length) wk.w.done = true;
           if (wk.w.done) {
             const w = wk.w;

@@ -6,6 +6,7 @@
 import type { SeriesEntry } from "./bundle";
 import { NeedMoreBytes, parseDicomSync, T as dicomT, UNDEF, type DataSet } from "./dicom";
 import { TS } from "./transfer-syntax";
+import { areFrameStarts, hasFrameStartMarker } from "./reader";
 
 const WSI_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.77.1.6";
 
@@ -562,23 +563,11 @@ export function levelForScale(p: Pyramid, scale: number): number {
 
 // ------------------------------------------------------------------------------------- fragments
 
-/** The transfer syntax marks each frame's first fragment with a codestream start marker. */
-function frameStartTest(ts: string): ((b0: number, b1: number, b2: number, b3: number) => boolean) | null {
-  if (/^1\.2\.840\.10008\.1\.2\.4\.(50|51|57|70|80|81)$/.test(ts)) return (a, b) => a === 0xff && b === 0xd8;
-  if (/^1\.2\.840\.10008\.1\.2\.4\.(90|91|92|93|201|202|203)$/.test(ts)) {
-    return (a, b, c, d) => (a === 0xff && b === 0x4f) || (a === 0 && b === 0 && c === 0 && d === 0x0c);
-  }
-  // JPEG XL: a bare codestream starts FF 0A; the container with its 12-byte signature box.
-  if (/^1\.2\.840\.10008\.1\.2\.4\.(110|111|112)$/.test(ts)) {
-    return (a, b, c, d) => (a === 0xff && b === 0x0a) || (a === 0 && b === 0 && c === 0 && d === 0x0c);
-  }
-  return null; // one fragment per frame (RLE, deflate image frames, and others)
-}
-
 /**
  * Progressive fragment-item walker for one encapsulated instance. Feed it consecutive plaintext
  * chunks; it records where each frame starts. Frames are found by their codestream start marker
- * where the transfer syntax has one, so frames split over several fragments are handled.
+ * where the transfer syntax has one (the reader module's rule: reader.ts areFrameStarts), so frames
+ * split over several fragments are handled.
  */
 export class FragmentWalker {
   /** Instance-relative offset of each frame's first item header. */
@@ -588,7 +577,7 @@ export class FragmentWalker {
   /** End of the last complete item seen. */
   lastItemEnd: number;
   done = false;
-  private isStart: ReturnType<typeof frameStartTest>;
+  private markers: Promise<boolean>;
 
   constructor(
     readonly header: SlideHeader,
@@ -597,7 +586,7 @@ export class FragmentWalker {
     if (!header.encapsulated || header.firstFragmentOffset < 0) throw new SlideHeaderError("not encapsulated");
     this.pos = header.firstFragmentOffset;
     this.lastItemEnd = this.pos;
-    this.isStart = frameStartTest(header.transferSyntax);
+    this.markers = hasFrameStartMarker(header.transferSyntax);
   }
 
   /** Frames whose start is known and whose end is known too (the next start, or the end). */
@@ -609,27 +598,36 @@ export class FragmentWalker {
    * Consumes plaintext `buf` covering instance bytes [bufStart, bufStart + buf.length). Returns
    * the instance offset to read from next (this.pos), or -1 when the sequence delimiter was seen.
    */
-  feed(buf: Uint8Array, bufStart: number): number {
+  async feed(buf: Uint8Array, bufStart: number): Promise<number> {
     if (this.done) return -1;
+    const markers = await this.markers;
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     const bufEnd = bufStart + buf.byteLength;
+    // The items in this chunk, with their first value bytes; classified together below.
+    const items: { at: number; head: Uint8Array }[] = [];
+    let end = false;
     while (this.pos >= bufStart && this.pos + 8 <= bufEnd) {
       const p = this.pos - bufStart;
       const g = dv.getUint16(p, true), e = dv.getUint16(p + 2, true), len = dv.getUint32(p + 4, true);
       if (g !== 0xfffe || (e !== 0xe000 && e !== 0xe0dd)) throw new SlideHeaderError(`no fragment item at byte ${this.pos}`);
       if (e === 0xe0dd || len === UNDEF) {
-        this.done = true;
-        this.lastItemEnd = this.pos;
-        return -1;
+        end = true;
+        break;
       }
-      let start: boolean;
-      if (this.isStart) {
-        if (this.pos + 12 > bufEnd) break; // need the first value bytes to classify the fragment
-        start = this.starts.length === 0 || this.isStart(buf[p + 8], buf[p + 9], buf[p + 10], buf[p + 11]);
-      } else start = true;
-      if (start) this.starts.push(this.pos);
+      const n = Math.min(8, len);
+      // The fragment's first value bytes are needed to classify it.
+      if (markers && this.pos + 8 + n > bufEnd) break;
+      items.push({ at: this.pos, head: buf.slice(p + 8, p + 8 + n) });
       this.pos += 8 + len;
-      this.lastItemEnd = this.pos;
+    }
+    const starts = markers && items.length ? await areFrameStarts(this.header.transferSyntax, items.map((i) => i.head)) : null;
+    items.forEach((it, k) => {
+      if (!starts || this.starts.length === 0 || starts[k]) this.starts.push(it.at);
+    });
+    this.lastItemEnd = this.pos;
+    if (end) {
+      this.done = true;
+      return -1;
     }
     if (this.pos >= this.instanceLength) this.done = true;
     return this.done ? -1 : this.pos;

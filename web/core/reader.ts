@@ -125,6 +125,19 @@ export async function parseIndex(bundle: Uint8Array | object): Promise<StudyInde
   return studyIndex(index, bytes, bundle instanceof Uint8Array ? undefined : bundle);
 }
 
+/** Whether frames of transfer syntax `ts` are found by codestream start markers (else one fragment is one frame). */
+export function hasFrameStartMarker(ts: string): Promise<boolean> {
+  return use().call({ fn: "has_frame_start_marker", args: [ts] });
+}
+
+/**
+ * For each fragment head (its first 8 bytes, or all of it when shorter), whether it starts a frame:
+ * the rule the packer's offset tables and the decoder use (shl_dicom_decode::syntax).
+ */
+export function areFrameStarts(ts: string, heads: Uint8Array[]): Promise<boolean[]> {
+  return use().call({ fn: "is_frame_start", args: [ts, heads] });
+}
+
 const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 /**
