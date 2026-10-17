@@ -514,7 +514,7 @@ impl AppState {
     /// writes the share's row first and the catalog's last, so while the server runs such a row may
     /// be a link being created; only a crash leaves one behind.
     fn sweep_orphan_links(&self, sid: &str) {
-        let Ok(conn) = Connection::open_with_flags(self.share_db_path(sid), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) else { return };
+        let Ok(conn) = open_existing(&self.share_db_path(sid)) else { return };
         let _ = conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
         let valid: std::collections::HashSet<String> = {
             let cat = self.catalog.lock().unwrap();
@@ -545,7 +545,7 @@ impl AppState {
         for sid in sids {
             // Opened directly, so the sweep doesn't churn the pool of open databases.
             let path = self.share_db_path(&sid);
-            let Ok(conn) = Connection::open(&path) else { continue };
+            let Ok(conn) = open_existing(&path) else { continue };
             let _ = conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
             let stale: Vec<(String, String, Option<String>)> = conn
                 .prepare("SELECT file_id, storage_key, s3_upload_id FROM uploads WHERE started_at < ?1")
@@ -678,7 +678,7 @@ impl AppState {
         if !path.exists() {
             return None;
         }
-        let conn = Connection::open(&path).ok()?;
+        let conn = open_existing(&path).ok()?;
         init_share_db(&conn).ok()?;
 
         let arc = Arc::new(Mutex::new(conn));
@@ -773,7 +773,7 @@ impl AppState {
         // may be gone already, so the database is opened directly.) It leaves the pool now.
         let db = self.pool.lock().unwrap().remove(sid).or_else(|| {
             let path = self.share_db_path(sid);
-            let conn = path.exists().then(|| Connection::open(&path).ok()).flatten()?;
+            let conn = open_existing(&path).ok()?;
             let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
             Some(Arc::new(Mutex::new(conn)))
         });
@@ -1164,6 +1164,13 @@ pub async fn store_file(state: &AppState, sid: &str, file_id: &str, ciphertext: 
     adopt_blob(state, sid, file_id, &key, ciphertext.len() as u64)
 }
 
+/// Opens a share's database that must already exist: never creates one (a share deleted
+/// meanwhile stays deleted).
+fn open_existing(path: &Path) -> rusqlite::Result<Connection> {
+    use rusqlite::OpenFlags;
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+}
+
 fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -1296,6 +1303,22 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::ct_eq;
+
+    #[test]
+    fn the_upload_sweep_recreates_no_deleted_share() {
+        let dir = std::env::temp_dir().join(format!("no_recreate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = super::AppState::new(&dir).unwrap();
+        let (sid, _) = state.create_share(false, None).unwrap();
+        // The file goes while the catalog row stays (a delete part way through).
+        state.pool.lock().unwrap().remove(&sid);
+        std::fs::remove_file(state.share_db_path(&sid)).unwrap();
+        state.sweep_stale_uploads();
+        assert!(!state.share_db_path(&sid).exists());
+        assert!(state.open_share_db(&sid).is_none());
+        assert!(!state.share_db_path(&sid).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_cap_lives_at_most_an_hour() {
