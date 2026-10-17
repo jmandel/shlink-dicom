@@ -638,11 +638,19 @@ function layoutOf(i: number, h: SlideHeader): InstanceLayout {
   return { i, h, pathIds, planeKeys };
 }
 
+/** The most tiles one level of a slide may have (2^22: a 4096 × 4096 grid). */
+export const MAX_LEVEL_TILES = 1 << 22;
+
 function makeLevel(insts: InstanceLayout[], pathIndex: Map<string, number>, planeIndex: Map<number, number>, nPaths: number, nPlanes: number): SlideLevel {
   const h = insts[0].h;
   const across = Math.ceil(h.totalColumns / h.columns);
   const down = Math.ceil(h.totalRows / h.rows);
   const tiles = across * down;
+  // Each (plane, path) map is two Int32Arrays of this many tiles: a damaged or hostile header
+  // could ask for gigabytes.
+  if (!(Number.isSafeInteger(tiles) && tiles > 0 && tiles <= MAX_LEVEL_TILES)) {
+    throw new Error(`A slide level of ${h.totalColumns} × ${h.totalRows} pixels in ${h.columns} × ${h.rows} tiles is more than this viewer reads.`);
+  }
   // One map per (plane, path): tile → instance and frame (-1 when absent).
   const maps = new Map<number, { inst: Int32Array; frame: Int32Array }>();
   const mapFor = (plane: number, path: number) => {

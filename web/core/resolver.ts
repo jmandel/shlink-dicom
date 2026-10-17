@@ -1,6 +1,6 @@
 // Link resolution (SMART Health Links + spec/README.md §10): U mode and manifest mode, passcodes,
 // fresh /cap/ locations when a capability prefix expires, and Range reads of the encrypted files.
-import { decryptJwe, JweError } from "./jwe";
+import { decryptJwe, JweError, MAX_JWE_CHARS } from "./jwe";
 import { hasFlag, parseShlink, type ShlPayload } from "./shlink";
 import type { RangePlan } from "./range";
 
@@ -150,7 +150,7 @@ export class LinkResolver {
     const early = this.isDirect ? takeEarlyBundle(bundleUrl) : null;
     const res = (early && (await this.earlyFetch(bundleUrl, early))) || (await this.timedFetch(bundleUrl, { purpose: "bundle" }));
     if (!res.ok) throw this.httpError(res.status);
-    const jwe = await res.text();
+    const jwe = new TextDecoder().decode(await readCapped(res, MAX_JWE_CHARS, "Bundle"));
     let bundleBytes: Uint8Array;
     try {
       bundleBytes = await decryptJwe(jwe, this.payload.key);
@@ -193,8 +193,10 @@ export class LinkResolver {
       res = await attempt();
     }
     if (res.status !== 206 && res.status !== 200) throw this.httpError(res.status);
-    let bytes = onProgress && res.status === 206 && res.body ? await readCounting(res.body, want, onProgress) : new Uint8Array(await res.arrayBuffer());
-    if (res.status === 200) bytes = bytes.subarray(plan.ciphertextStart, plan.ciphertextEnd);
+    // 206: the plan's bytes; 200 (the whole file): the plan's bytes are cut from it, and the read
+    // stops once they are in. Either way no more than the plan is kept.
+    const skip = res.status === 200 ? plan.ciphertextStart : 0;
+    const bytes = await readRange(res, skip, want, onProgress);
     if (bytes.byteLength !== want) {
       throw new LinkError("server", `The host sent ${bytes.byteLength} bytes where ${want} were expected.`);
     }
@@ -238,8 +240,14 @@ export class LinkResolver {
       throw new LinkError("locked", "Too many wrong passcodes. This link no longer opens.");
     }
     if (!res.ok) throw this.httpError(res.status);
-    const manifest = await res.json().catch(() => null);
-    const loc = manifest?.files?.find((f: any) => typeof f?.location === "string")?.location;
+    let manifest: any = null;
+    try {
+      manifest = JSON.parse(new TextDecoder().decode(await readCapped(res, MAX_JWE_CHARS, "manifest")));
+    } catch (e) {
+      if (e instanceof LinkError) throw e;
+    }
+    // The Bundle's entry: FHIR JSON with a location (another entry first in the list is not it).
+    const loc = manifest?.files?.find((f: any) => f?.contentType === "application/fhir+json" && typeof f?.location === "string")?.location;
     if (!loc) throw new LinkError("invalid", "The host's answer did not say where the file is.");
     this.baseUrl = loc;
     return manifest;
@@ -318,18 +326,74 @@ export class LinkResolver {
   }
 }
 
-/** Reads a response body of `total` bytes, reporting what has arrived. */
-async function readCounting(body: ReadableStream<Uint8Array>, total: number, onProgress: (received: number, total: number, buffer: Uint8Array) => void): Promise<Uint8Array> {
-  const out = new Uint8Array(total);
+/** A response body of at most `limit` bytes; a longer one is refused as it arrives. */
+async function readCapped(res: Response, limit: number, what: string): Promise<Uint8Array> {
+  const declared = Number(res.headers.get("content-length") ?? NaN);
+  const tooLong = () => new LinkError("invalid", `The host's ${what} is too large.`);
+  if (declared > limit) {
+    await res.body?.cancel().catch(() => {});
+    throw tooLong();
+  }
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const parts: Uint8Array[] = [];
   let n = 0;
-  const reader = body.getReader();
+  const reader = res.body.getReader();
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (n + value.byteLength > total) throw new LinkError("server", `The host sent more than the ${total} bytes expected.`);
-    out.set(value, n);
     n += value.byteLength;
-    onProgress(n, total, out);
+    if (n > limit) {
+      await reader.cancel().catch(() => {});
+      throw tooLong();
+    }
+    parts.push(value);
   }
-  return n === total ? out : out.subarray(0, n);
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) out.set(p, (o += p.length) - p.length);
+  return out;
+}
+
+/**
+ * Bytes [skip, skip + want) of a response body, reporting what has arrived (bytes [0, received) of
+ * the buffer are final). The bytes before are dropped as they come; once the range is in, the rest
+ * of the body is not read. A 206 body (skip 0) longer than `want` is refused.
+ */
+async function readRange(res: Response, skip: number, want: number, onProgress?: (received: number, total: number, buffer: Uint8Array) => void): Promise<Uint8Array> {
+  const out = new Uint8Array(want);
+  if (!res.body) {
+    const all = new Uint8Array(await res.arrayBuffer());
+    return all.subarray(skip, skip + want);
+  }
+  let at = 0; // body bytes read
+  let n = 0; // bytes kept
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const a = Math.max(0, skip - at), end = at + value.byteLength;
+    at = end;
+    if (a >= value.byteLength) continue;
+    if (skip === 0 && n + value.byteLength - a > want) {
+      await reader.cancel().catch(() => {});
+      throw new LinkError("server", `The host sent more than the ${want} bytes expected.`);
+    }
+    const take = value.subarray(a, a + Math.min(value.byteLength - a, want - n));
+    out.set(take, n);
+    n += take.byteLength;
+    onProgress?.(n, want, out);
+    if (n === want) {
+      if (skip) await reader.cancel().catch(() => {});
+      else {
+        // A 206 body ends here: anything more is refused.
+        const rest = await reader.read();
+        if (!rest.done && rest.value.byteLength) {
+          await reader.cancel().catch(() => {});
+          throw new LinkError("server", `The host sent more than the ${want} bytes expected.`);
+        }
+      }
+      break;
+    }
+  }
+  return n === want ? out : out.subarray(0, n);
 }

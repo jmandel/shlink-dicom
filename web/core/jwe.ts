@@ -2,6 +2,9 @@
 // WebCrypto + (De)CompressionStream("deflate-raw"); runs in browsers, workers, Bun and Node 20+.
 import { b64urlDecode, b64urlEncode, fromUtf8, utf8 } from "./b64";
 
+/** The longest compact JWE (a link's Bundle) a reader accepts. */
+export const MAX_JWE_CHARS = 64 * 1024 * 1024;
+
 async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());

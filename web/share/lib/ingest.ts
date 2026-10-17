@@ -397,6 +397,21 @@ function streamOf(src: Bytes): ReadableStream<Uint8Array> {
   });
 }
 
+/** The most bytes one gzip stream or ZIP member is decompressed to (64 GiB). */
+export const MAX_EXPANDED_BYTES = 2 ** 36;
+
+/** Passes at most `limit` bytes; a stream that goes on fails with `message`. */
+function capped(limit: number, message: string): TransformStream<Uint8Array, Uint8Array> {
+  let n = 0;
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(c, ctl) {
+      n += c.length;
+      if (n > limit) ctl.error(new Error(message));
+      else ctl.enqueue(c);
+    },
+  });
+}
+
 /**
  * Expands one file: ZIP and TAR members are read in place where they can be (stored entries, plain
  * TAR); gzip streams and deflated entries are decompressed into the stager. Anything else is itself.
@@ -415,7 +430,9 @@ export async function* expand(name: string, src: Bytes, stager: Stager, depth = 
         },
       }),
     );
-    const stream = counted.pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
+    const stream = counted
+      .pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>)
+      .pipeThrough(capped(MAX_EXPANDED_BYTES, `${name} decompresses to more than ${MAX_EXPANDED_BYTES / 2 ** 30} GiB.`));
     yield* tarStream(name.replace(/\.(t?gz)$/i, ""), stream, stager);
   } else if (depth < 3 && isZip(sniff)) {
     for await (const e of zipEntries(src, stager)) {
@@ -617,7 +634,10 @@ export async function* zipEntries(src: Bytes, stager: Stager): AsyncGenerator<Fi
     const raw = new SubBytes(src, start, csize);
     if (method === 0) yield { name, src: raw };
     else if (method === 8) {
-      const inflated = streamOf(raw).pipeThrough(new DecompressionStream("deflate-raw") as unknown as TransformStream<Uint8Array, Uint8Array>);
+      // No more than the size the ZIP gives for it.
+      const inflated = streamOf(raw)
+        .pipeThrough(new DecompressionStream("deflate-raw") as unknown as TransformStream<Uint8Array, Uint8Array>)
+        .pipeThrough(capped(Math.min(usize, MAX_EXPANDED_BYTES), `${name}: the ZIP member is larger than the ZIP says.`));
       const it = async function* () {
         const rd = inflated.getReader();
         for (;;) {
