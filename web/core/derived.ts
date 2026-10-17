@@ -5,6 +5,7 @@ import { codeOf, T, tag, type Code, type DataSet } from "./dicom";
 import { realWorldOf, type RealWorld } from "./display";
 import { geometryOf, type Geometry, type Vec3 } from "./geometry";
 import { dicomLabToSrgb } from "./icc";
+import type { PaletteLut } from "../../viewer-kit/src/index";
 
 export interface ImageRef {
   sopInstance: string;
@@ -123,8 +124,6 @@ export interface ParametricMap {
   realWorld: RealWorld | null;
   /** The file's window (first Window Center/Width), real values. */
   window: { center: number; width: number } | null;
-  /** Palette Color Lookup Table (256 RGBA entries) when the file carries one. */
-  palette: Uint8Array | null;
 }
 
 export function readParametricMap(ds: DataSet): ParametricMap {
@@ -145,29 +144,21 @@ export function readParametricMap(ds: DataSet): ParametricMap {
     referenced: referencedSeries(ds),
     realWorld: realWorldOf(ds, 0),
     window: c != null && w != null && w > 0 ? { center: c, width: w } : null,
-    palette: readPalette(ds),
   };
 }
 
-/** Palette Color Lookup Table (0028,1101–1103 descriptors, 1201–1203 data), resampled to 256 RGBA entries. */
-function readPalette(ds: DataSet): Uint8Array | null {
-  const chans = [0x1201, 0x1202, 0x1203].map((e, i) => {
-    const desc = ds.nums(tag(0x0028, 0x1101 + i));
-    const raw = ds.raw(tag(0x0028, e));
-    if (desc.length < 3 || !raw) return null;
-    const count = desc[0] || 65536, bits = desc[2];
-    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-    const v = new Float64Array(count);
-    for (let k = 0; k < count; k++) v[k] = bits === 8 && raw.length === count ? raw[k] : (2 * k + 1 < raw.length ? dv.getUint16(2 * k, ds.le) : 0) / (bits > 8 ? 257 : 1);
-    return v;
-  });
-  if (chans.some((c) => !c)) return null;
+/**
+ * A decoded image's Palette Color Lookup Table (the decoder reads it: viewer-kit PaletteLut, RGBA
+ * per entry) resampled to the 256 entries a colour scale uses.
+ */
+export function palette256(p: PaletteLut | null): Uint8Array | null {
+  if (!p) return null;
+  const count = p.rgba.length / 4;
+  if (!count) return null;
   const out = new Uint8Array(256 * 4);
   for (let k = 0; k < 256; k++) {
-    for (let ch = 0; ch < 3; ch++) {
-      const c = chans[ch]!;
-      out[k * 4 + ch] = Math.round(c[Math.round((k * (c.length - 1)) / 255)]);
-    }
+    const e = Math.round((k * (count - 1)) / 255) * 4;
+    out.set(p.rgba.subarray(e, e + 3), k * 4);
     out[k * 4 + 3] = 255;
   }
   return out;

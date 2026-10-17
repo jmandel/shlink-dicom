@@ -6,6 +6,7 @@ import { frameOf, type DecoderPool, type DecodedImage } from "../../viewer-kit/s
 import type { SeriesEntry, StudyEntry } from "../core/bundle";
 import { parseDicom, T, type DataSet } from "../core/dicom";
 import {
+  palette256,
   readParametricMap,
   readPresentationState,
   readSegmentation,
@@ -322,7 +323,7 @@ export class Layers {
     const n = geom ? normal(geom) : null;
     const half = Math.max(POS_TOLERANCE_MM, (geom?.sliceThickness ?? 0) / 2);
     const { lo, hi } = mapScale(l);
-    const lut = pm.palette ?? DEFAULT_SCALE;
+    const lut = mapColours(l);
     let count = 0;
     pm.frames.forEach((f, k) => {
       const fg = f.geometry;
@@ -491,10 +492,16 @@ const DEFAULT_SCALE = (() => {
   return out;
 })();
 
-/** Colours of a parametric map layer (its palette, else the default scale), for legends. */
+/** Colours of a parametric map layer (its palette once its pixels are decoded, else the default scale). */
 export function mapColours(l: Layer): Uint8Array {
-  return l.pmap?.palette ?? DEFAULT_SCALE;
+  const px = l.segPixels;
+  if (!px) return DEFAULT_SCALE;
+  let c = mapLuts.get(px);
+  if (!c) mapLuts.set(px, (c = palette256(px.palette) ?? DEFAULT_SCALE));
+  return c;
 }
+/** A decoded map's palette as 256 colours (its Palette Color LUT, read by the decoder), once each. */
+const mapLuts = new WeakMap<DecodedImage, Uint8Array>();
 
 /**
  * The real-value range a parametric map's colours span: the range its Real World Value Mapping
