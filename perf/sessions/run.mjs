@@ -237,6 +237,7 @@ async function session(browser, kind, run) {
     requests++;
   });
   await page.addInitScript(() => performance.setResourceTimingBufferSize(100000));
+  if (reqlog) await page.addInitScript(() => (window.__loaderSpans = []));
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const ops = [];
@@ -342,8 +343,9 @@ async function session(browser, kind, run) {
   };
   if (reqlog) {
     const draws = await page.evaluate(() => window.__view?.drawLog ?? []).catch(() => []);
+    const spans = await page.evaluate(() => window.__loaderSpans ?? []).catch(() => []);
     const nav = await page.evaluate(() => performance.timeOrigin).catch(() => 0);
-    appendFileSync(reqlog, JSON.stringify({ build, net, device, kind, run, timeOrigin: nav, requests: binLog, draws, ops }) + "\n");
+    appendFileSync(reqlog, JSON.stringify({ build, net, device, kind, run, timeOrigin: nav, requests: binLog, spans, draws, ops }) + "\n");
   }
   await context.close();
   return res;

@@ -17,7 +17,7 @@
 // ImageStore (images.ts) instead takes `ciphertext()` and decrypts and decodes in one worker job.
 import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
-import { planInstances, RECORD_CIPHERTEXT, type RangePlan } from "./range";
+import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, type RangePlan } from "./range";
 import type { LinkResolver } from "./resolver";
 
 /** Same values as viewer-kit's Priority: lower runs first. */
@@ -422,6 +422,11 @@ export class InstanceLoader {
     };
     this.opts.onRecords?.(s.fileId, s.first, s.last, "fetching");
     s.abort = new AbortController();
+    // For scripted checks that set it (perf/sessions --reqlog): each request's span, priority and instances.
+    const log = (globalThis as any).__loaderSpans as unknown[] | undefined;
+    const entry = log && log.length < 20000 ? { series: s.seriesId, start, end, priority: s.priority, t0: Math.round(performance.now()), t1: 0,
+      instances: series.instances.flatMap((x, k) => (x.offset < (s.last + 1) * RECORD_PLAINTEXT && x.offset + x.length > s.first * RECORD_PLAINTEXT ? [k] : [])) } : null;
+    if (entry) log!.push(entry);
     let next = s.first;
     // Hands on every record that has fully arrived.
     const deliver = (buf: Uint8Array, received: number) => {
@@ -447,6 +452,7 @@ export class InstanceLoader {
         if (this.bulkSpans.has(s) && this.queue.length) this.pump();
       });
       s.received = ct.byteLength;
+      if (entry) entry.t1 = Math.round(performance.now());
       deliver(ct, ct.byteLength);
       this.bytesFetched += ct.byteLength;
       this.opts.onBytes?.(ct.byteLength);

@@ -67,7 +67,7 @@ An operation that waits longer than the cap counts as "over cap": 30 s at home, 
    Options:
    - `--device=phone` is 390×844 at DPR 3 with 4× CPU throttling.
    - `--kinds=ct,mri` runs only those sessions.
-   - `--reqlog=FILE` also writes each session's encrypted-file requests (Range, start, end, bytes) and the pictures drawn, to see why a step waited.
+   - `--reqlog=FILE` also writes each session's encrypted-file requests (Range, start, end, bytes), the loader's requests with their priority and the instances they carry, and the pictures drawn, to see why a step waited.
    - Each session runs in a fresh browser context, with an empty cache.
 4. **Comparing builds.** Interleave them run by run: one run of each build, the order rotating. Keep each build's blobs in the page cache before its run: a cold disk adds seconds to whichever build runs first.
 5. **Tables.** `python3 perf/sessions/aggregate.py results.jsonl` gives, per profile and kind, every operation's p50 and p95 per build with its sample count, then the session medians.
