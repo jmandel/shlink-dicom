@@ -345,7 +345,13 @@
       "identifiers": [],
       "category": null,
       "text": null,
-      "attachments": []
+      "attachments": [],
+      "links": [
+       {
+        "studyId": "ct1",
+        "basis": "reference"
+       }
+      ]
      }
     ],
     "studies": [
@@ -513,6 +519,12 @@
         "url": "https://ehr.example/b/1",
         "dataB64": null
        }
+      ],
+      "links": [
+       {
+        "studyId": "ct1",
+        "basis": "reference"
+       }
       ]
      },
      {
@@ -539,6 +551,12 @@
         "url": null,
         "dataB64": "ICBwbGFpbiB0ZXh0ICA="
        }
+      ],
+      "links": [
+       {
+        "studyId": "ct1",
+        "basis": "reference"
+       }
       ]
      },
      {
@@ -553,7 +571,8 @@
       "identifiers": [],
       "category": null,
       "text": null,
-      "attachments": []
+      "attachments": [],
+      "links": []
      }
     ],
     "studies": [

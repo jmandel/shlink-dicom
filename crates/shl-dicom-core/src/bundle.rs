@@ -51,6 +51,9 @@ pub struct DiagnosticReportSummary {
     /// The text of its first text/* attachment (text/html with the tags taken out).
     pub text: Option<String>,
     pub attachments: Vec<ReportAttachment>,
+    /// The studies it belongs to and why (`report_links::link_reports`).
+    #[serde(default)]
+    pub links: Vec<crate::report_links::ReportLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,7 +368,8 @@ fn report_entry(source: &Value, id: String, study: Option<(&str, &str)>) -> Valu
 
 /// The owner Bundle: Patient, then for each study its ImagingStudy (id `study-{n}`), a
 /// Provenance when images were re-encoded, and its reports (ids `report-{n}`); then the reports
-/// that name no study.
+/// that name no study. A report given with several studies (a combined report) is one
+/// DiagnosticReport whose imagingStudy names each of them.
 /// Refuses an instance of length 0: it names no bytes, so a Bundle listing it is wrong (a byte
 /// source that was lost before packing, for example).
 pub fn build_fhir_bundle(input: &BundleBuildInput) -> Result<Value> {
@@ -399,6 +403,7 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Result<Value> {
     }));
 
     let mut report_n = 0;
+    let mut combined: Vec<(&Value, usize)> = Vec::new();
     for (study_n, study) in input.studies.iter().enumerate() {
         let total_instances: usize = study.series.iter().map(|se| se.instances.len()).sum();
         let series_json: Vec<Value> = study
@@ -515,7 +520,16 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Result<Value> {
         }
         let uid = study.study_instance_uid.trim_start_matches("urn:oid:");
         for r in &study.reports {
+            // A combined report given with several studies is one DiagnosticReport naming each.
+            if let Some(&(_, at)) = combined.iter().find(|(k, _)| *k == r) {
+                let named = &mut entries[at]["resource"]["imagingStudy"];
+                if let Some(list) = named.as_array_mut() {
+                    list.push(json!({ "reference": study_url, "identifier": { "system": "urn:dicom:uid", "value": format!("urn:oid:{uid}") } }));
+                }
+                continue;
+            }
             report_n += 1;
+            combined.push((r, entries.len()));
             entries.push(report_entry(r, format!("report-{report_n}"), Some((&study_url, uid))));
         }
     }
@@ -654,12 +668,12 @@ pub fn subset_bundle(owner: &Value, sel: &LinkSelection, last_updated: &str) -> 
 }
 
 /// A text value: a JSON string that is not empty or blank.
-fn text(v: Option<&Value>) -> Option<String> {
+pub(crate) fn text(v: Option<&Value>) -> Option<String> {
     v.and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(String::from)
 }
 
 /// A CodeableConcept's text, else its first coding's display, else its code.
-fn code_text(cc: Option<&Value>) -> Option<String> {
+pub(crate) fn code_text(cc: Option<&Value>) -> Option<String> {
     let cc = cc?;
     let first = cc.get("coding").and_then(|c| c.get(0));
     text(cc.get("text")).or_else(|| text(first.and_then(|c| c.get("display")))).or_else(|| text(first.and_then(|c| c.get("code"))))
@@ -730,7 +744,7 @@ fn attachment_text(a: &Value) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-fn report_of(r: &Value, n: usize) -> DiagnosticReportSummary {
+pub(crate) fn report_of(r: &Value, n: usize) -> DiagnosticReportSummary {
     let arr = |k: &str| r.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
     let refs = arr("imagingStudy");
     DiagnosticReportSummary {
@@ -770,6 +784,7 @@ fn report_of(r: &Value, n: usize) -> DiagnosticReportSummary {
                 }
             })
             .collect(),
+        links: Vec::new(),
     }
 }
 
@@ -823,6 +838,12 @@ pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
         .filter(|e| e.get("resource").and_then(|r| r.get("resourceType")).and_then(Value::as_str) == Some("ImagingStudy"))
         .filter_map(|e| Some((e.get("fullUrl")?.as_str()?, text(e["resource"].get("id")).unwrap_or_default())))
         .collect();
+    let full_url_of = |id: &str| by_full_url.iter().find(|(_, v)| v.as_str() == id).map(|(k, _)| k.to_string());
+    let link_studies: Vec<_> = studies.iter().map(|st| crate::report_links::LinkStudy::of_summary(st, full_url_of(&st.id))).collect();
+    let link_reports: Vec<_> = diagnostic_reports.iter().map(crate::report_links::LinkReport::of_summary).collect();
+    for (rep, links) in diagnostic_reports.iter_mut().zip(crate::report_links::link_reports(&link_studies, &link_reports)) {
+        rep.links = links;
+    }
     for rep in &mut diagnostic_reports {
         rep.study_ids = std::mem::take(&mut rep.study_ids)
             .into_iter()
@@ -833,16 +854,23 @@ pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
     Ok(StudyIndex { last_updated, patient_name, patient_id, patient_birth_date, diagnostic_reports, studies })
 }
 
-fn parse_imaging_study(res: &Value, n: usize) -> Result<Option<StudySummary>> {
-    let id = text(res.get("id")).unwrap_or_else(|| format!("study-{n}"));
+/// An ImagingStudy's Study Instance UID (its urn:dicom:uid identifier, else its first, else its
+/// id; "urn:oid:" taken off) and accession number (an identifier of type ACSN).
+pub(crate) fn study_uid_and_accession(res: &Value) -> (String, Option<String>) {
     let identifiers = res.get("identifier").and_then(Value::as_array).cloned().unwrap_or_default();
     let ident = identifiers.iter().find(|i| i.get("system") == Some(&Value::from("urn:dicom:uid"))).or(identifiers.first());
-    let study_instance_uid = text(ident.and_then(|i| i.get("value"))).or_else(|| text(res.get("id"))).unwrap_or_default();
-    let study_instance_uid = study_instance_uid.strip_prefix("urn:oid:").unwrap_or(&study_instance_uid).to_string();
+    let uid = text(ident.and_then(|i| i.get("value"))).or_else(|| text(res.get("id"))).unwrap_or_default();
+    let uid = uid.strip_prefix("urn:oid:").unwrap_or(&uid).to_string();
     let accession = identifiers.iter().find_map(|i| {
         let acsn = i.get("type").and_then(|t| t.get("coding")).and_then(Value::as_array).is_some_and(|c| c.iter().any(|x| x.get("code") == Some(&Value::from("ACSN"))));
         if acsn { Some(text(i.get("value"))) } else { None }
     }).flatten();
+    (uid, accession)
+}
+
+fn parse_imaging_study(res: &Value, n: usize) -> Result<Option<StudySummary>> {
+    let id = text(res.get("id")).unwrap_or_else(|| format!("study-{n}"));
+    let (study_instance_uid, accession) = study_uid_and_accession(res);
     let notes: Vec<String> = res.get("note").and_then(Value::as_array).into_iter().flatten().filter_map(|n| text(n.get("text"))).collect();
     let description = text(res.get("description"));
     let started = text(res.get("started"));

@@ -11,7 +11,7 @@ export class ReaderError extends Error {
   }
 }
 
-export type Call = { fn: "parse_link"; args: [string, number] } | { fn: "manifest_location"; args: [string] } | { fn: "open_bundle"; args: [string, string] } | { fn: "parse_index"; args: [Uint8Array] } | { fn: "decrypt_bundle"; args: [string, string] } | { fn: "has_frame_start_marker"; args: [string] } | { fn: "is_frame_start"; args: [string, Uint8Array[]] };
+export type Call = { fn: "parse_link"; args: [string, number] } | { fn: "manifest_location"; args: [string] } | { fn: "open_bundle"; args: [string, string] } | { fn: "parse_index"; args: [Uint8Array] } | { fn: "decrypt_bundle"; args: [string, string] } | { fn: "has_frame_start_marker"; args: [string] } | { fn: "is_frame_start"; args: [string, Uint8Array[]] } | { fn: "link_reports"; args: [string] };
 
 export type ReaderModule = typeof import("../../crates/shl-dicom-reader/pkg/shl_dicom_reader.js");
 
@@ -24,6 +24,8 @@ export function runCall(m: ReaderModule, c: Call): { value: any; transfer?: Arra
       return { value: m.manifest_location(c.args[0]) };
     case "parse_index":
       return { value: m.parse_index(c.args[0]) };
+    case "link_reports":
+      return { value: m.link_reports(c.args[0]) };
     case "has_frame_start_marker":
       return { value: m.has_frame_start_marker(c.args[0]) };
     case "is_frame_start":

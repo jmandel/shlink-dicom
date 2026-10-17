@@ -39,7 +39,7 @@ export function renderReports(box: HTMLElement, links: ReportLink[], signal?: Ab
     const sec = el("section", "report-doc");
     sec.dataset.report = r.id;
     sec.append(el("h2", "report-title", reportHeading(r)));
-    sec.append(el("p", "report-source", `From the clinical record. ${linkBasisText(l.basis)}`));
+    sec.append(el("p", "report-source", `From the clinical record. ${linkBasisText(l.basis)}`.trim()));
     if (l.basis === "date") sec.querySelector(".report-source")!.classList.add("report-guess");
     if (r.conclusion) {
       sec.append(el("h3", "report-h", "Conclusion"));

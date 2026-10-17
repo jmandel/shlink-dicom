@@ -172,7 +172,7 @@ An enhanced CT or MR, an ultrasound cine or a tomosynthesis is one instance of t
 
 **What an instance is.** `sopInfo(sopClass)` gives a plain name and a kind (`image`, `slide`, `video`, `sr`, `pdf`, `cda`, `seg`, `rtstruct`, `pmap`, `pr`, `ko`, `waveform`, `model`, `other`); `seriesKind` for a series; `KIND_LABEL` for counts.
 
-**Reports from the clinical record.** `linkReports(index)` links each FHIR DiagnosticReport to a study: by its `imagingStudy` reference (an entry's `fullUrl` or `ImagingStudy/<id>`), by a Study Instance UID it names, by accession number (from the Bundle, or from an image header via `noteAccession`), or by date and exam type (a guess, said so by `linkBasisText`). `ReportEntry.attachments` holds presentedForm data or URLs.
+**Reports from the clinical record.** Each report's `links` come from the reader's index, worked out by the Rust rule (`crates/shl-dicom-core/src/report_links.rs`): by its `imagingStudy` references (an entry's `fullUrl` or `ImagingStudy/<id>`; a combined report keeps every study it names), else by the Study Instance UIDs it names, else by accession number when exactly one study has it, else by date and exam type when exactly one study fits (a guess, said so by `linkBasisText`). `linkReports(index)` lists them, one entry per report and study; `relinkWithAccessions` runs the rule again with accession numbers read from image headers. `ReportEntry.attachments` holds presentedForm data or URLs.
 
 **Object readers.**
 - `readSr(ds)`: the SR content tree (TEXT, CODE, NUM with units, dates, PNAME, UIDREF, IMAGE/COMPOSITE/WAVEFORM references, SCOORD), for text, enhanced, comprehensive, measurement (TID 1500) and dose (TID 10011) reports.

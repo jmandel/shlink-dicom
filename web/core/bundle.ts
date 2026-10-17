@@ -100,6 +100,8 @@ export interface ReportEntry {
   text: string | null;
   /** presentedForm attachments: inline bytes when the Bundle carries them, else a URL. */
   attachments: ReportAttachment[];
+  /** The studies it belongs to and why (shl_dicom_core::report_links; web/core/reports.ts). */
+  links: { studyId: string; basis: "reference" | "uid" | "accession" | "date" }[];
 }
 
 export interface ReportAttachment {

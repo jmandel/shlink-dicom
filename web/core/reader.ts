@@ -125,6 +125,15 @@ export async function parseIndex(bundle: Uint8Array | object): Promise<StudyInde
   return studyIndex(index, bytes, bundle instanceof Uint8Array ? undefined : bundle);
 }
 
+/**
+ * The report-to-study rule (shl_dicom_core::report_links) run again: for each report, its
+ * `{studyId, basis}` links. `input` is `{studies, reports}` as crates/shl-dicom-reader/README.md
+ * describes.
+ */
+export async function relinkReports(input: object): Promise<StudyIndex["reports"][number]["links"][]> {
+  return JSON.parse(await use().call({ fn: "link_reports", args: [JSON.stringify(input)] }));
+}
+
 /** Whether frames of transfer syntax `ts` are found by codestream start markers (else one fragment is one frame). */
 export function hasFrameStartMarker(ts: string): Promise<boolean> {
   return use().call({ fn: "has_frame_start_marker", args: [ts] });

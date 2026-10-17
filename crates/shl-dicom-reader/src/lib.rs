@@ -111,6 +111,26 @@ pub fn is_frame_start(transfer_syntax: &str, head: &[u8]) -> bool {
     shl_dicom_decode::syntax::frame_start_test(transfer_syntax).is_none_or(|test| test(head))
 }
 
+/// Links reports to studies again (`shl_dicom_core::report_links::link_reports`), for when the
+/// viewer has learnt accession numbers from image headers. `input_json`: `{studies: [{id,
+/// studyInstanceUid, accession, started, modalities}], reports: [{references, studyUids,
+/// identifiers, date, words}]}`; returns JSON `[[{studyId, basis}]]`, one list per report.
+#[wasm_bindgen]
+pub fn link_reports(input_json: &str) -> Result<String, JsError> {
+    use shl_dicom_core::report_links::{link_reports, LinkReport, LinkStudy};
+    let v: Value = serde_json::from_str(input_json).map_err(|e| thrown(ReadError { code: "bad-input", message: e.to_string() }))?;
+    let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+    let studies: Vec<LinkStudy> = list("studies").iter().map(LinkStudy::of_json).collect();
+    let reports: Vec<LinkReport> = list("reports").iter().map(LinkReport::of_json).collect();
+    let mut o = Out(String::new());
+    o.list(&link_reports(&studies, &reports), |o, links| {
+        o.list(links, |o, l| {
+            o.raw("{").key("studyId").str(&l.study_id).key("basis").str(l.basis.as_str()).raw("}");
+        });
+    });
+    Ok(o.0)
+}
+
 /// Writes JSON without building a value tree first (the index of a large study has thousands of
 /// instances).
 struct Out(String);
@@ -194,6 +214,9 @@ pub fn index_json(ix: &StudyIndex) -> String {
         o.key("attachments").list(&r.attachments, |o, a| {
             o.raw("{").key("contentType").str(&a.content_type).key("title").opt(&a.title).key("size").opt_num(a.size);
             o.key("dataB64").opt(&a.data_b64).key("url").opt(&a.url).raw("}");
+        });
+        o.key("links").list(&r.links, |o, l| {
+            o.raw("{").key("studyId").str(&l.study_id).key("basis").str(l.basis.as_str()).raw("}");
         });
         o.raw("}");
     });

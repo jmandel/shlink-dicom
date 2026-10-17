@@ -162,3 +162,28 @@ pub fn share_patient(records_json: &str, same_patient: bool) -> Result<String, J
     let records: Vec<shl_dicom_core::patient::PatientMeta> = serde_json::from_str(records_json).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(shl_dicom_core::patient::patient_json(&records, same_patient).to_string())
 }
+
+/// Links a portal's DiagnosticReports to its ImagingStudies (`shl_dicom_core::report_links`), for
+/// the Share page's portal path. `studies_json` and `reports_json` are JSON arrays of the FHIR
+/// resources as the portal returned them; `accessions_json` is `{studyId: accession}` for accession
+/// numbers read from image headers (used when the ImagingStudy has none). Returns JSON
+/// `[[{studyId, basis}]]`, one list per report. The caller leaves out `date` links.
+#[wasm_bindgen]
+pub fn link_portal_reports(studies_json: &str, reports_json: &str, accessions_json: &str) -> Result<String, JsError> {
+    use shl_dicom_core::report_links::{link_reports, LinkReport, LinkStudy};
+    let studies: Vec<serde_json::Value> = serde_json::from_str(studies_json).map_err(|e| JsError::new(&e.to_string()))?;
+    let reports: Vec<serde_json::Value> = serde_json::from_str(reports_json).map_err(|e| JsError::new(&e.to_string()))?;
+    let accessions: serde_json::Value = serde_json::from_str(accessions_json).map_err(|e| JsError::new(&e.to_string()))?;
+    let studies: Vec<LinkStudy> = studies
+        .iter()
+        .map(|s| {
+            let mut st = LinkStudy::of_fhir(s, None);
+            if st.accession.as_deref().is_none_or(|a| a.trim().is_empty()) {
+                st.accession = accessions.get(&st.id).and_then(serde_json::Value::as_str).map(String::from);
+            }
+            st
+        })
+        .collect();
+    let reports: Vec<LinkReport> = reports.iter().map(LinkReport::of_fhir).collect();
+    serde_json::to_string(&link_reports(&studies, &reports)).map_err(|e| JsError::new(&e.to_string()))
+}

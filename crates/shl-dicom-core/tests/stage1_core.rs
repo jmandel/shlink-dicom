@@ -566,6 +566,35 @@ fn test_subset_reports_follow_studies() {
     assert_eq!(ids(&all.bundle), ids(&bundle));
 }
 
+/// A combined report given with two studies is one DiagnosticReport that names both, and the
+/// index links it to both.
+#[test]
+fn test_combined_report_names_both_studies() {
+    let mut input = build_input(None);
+    let mut second = input.studies[0].clone();
+    second.study_instance_uid = "2.25.10".into();
+    second.file = LinkedFileInput { file_id: "CCCCCCCCCCCCCCCCCCCCCC".into(), key_b64: format!("{}A", "C".repeat(42)) };
+    for se in second.series.iter_mut() {
+        se.file = None;
+        for inst in se.instances.iter_mut() {
+            inst.uid = format!("2.25.10.{}", inst.uid);
+        }
+        se.uid = format!("2.25.10.{}", se.uid);
+    }
+    let combined = serde_json::json!({ "resourceType": "DiagnosticReport", "status": "final", "conclusion": "both" });
+    input.studies[0].reports = vec![combined.clone()];
+    second.reports = vec![combined];
+    input.studies.push(second);
+    let bundle = build_fhir_bundle(&input).unwrap();
+    let reports: Vec<&serde_json::Value> = bundle["entry"].as_array().unwrap().iter().filter(|e| e["resource"]["resourceType"] == "DiagnosticReport").collect();
+    assert_eq!(reports.len(), 1, "one DiagnosticReport");
+    let named: Vec<&str> = reports[0]["resource"]["imagingStudy"].as_array().unwrap().iter().map(|r| r["identifier"]["value"].as_str().unwrap()).collect();
+    assert_eq!(named, ["urn:oid:2.25.9", "urn:oid:2.25.10"]);
+    let ix = parse_study_index(bundle.to_string().as_bytes()).unwrap();
+    let links: Vec<(&str, &str)> = ix.diagnostic_reports[0].links.iter().map(|l| (l.study_id.as_str(), l.basis.as_str())).collect();
+    assert_eq!(links, [("study-1", "reference"), ("study-2", "reference")]);
+}
+
 /// The owner Bundle's Provenance (a note of lossless re-encoding) never goes into a link's Bundle.
 #[test]
 fn test_subset_leaves_out_provenance() {

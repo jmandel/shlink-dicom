@@ -20,8 +20,9 @@ All are synchronous once the module is instantiated. On failure each throws an e
 | `parse_link(text, nowSecs)` | JSON `{url, key, exp, flag, label, v, direct, passcode, longLived, expired}` for the link in `text` (a bare `shlink:/…`, a viewer URL with `#shlink:/…`, or text around one). |
 | `manifest_location(manifestJson)` | The Bundle's `location`: the first file whose `contentType` is `application/fhir+json` (parameters and case aside) with a location. |
 | `decrypt_bundle(jwe, key)` | The Bundle's UTF-8 JSON bytes. |
-| `parse_index(bundleBytes)` | JSON: the study index in the viewer's shape (web/core/bundle.ts `StudyIndex` without `bundle`; series name their file by `fileId`; report attachments carry `dataB64`). |
+| `parse_index(bundleBytes)` | JSON: the study index in the viewer's shape (web/core/bundle.ts `StudyIndex` without `bundle`; series name their file by `fileId`; report attachments carry `dataB64`; each report's `links` are `[{studyId, basis}]` with basis `reference`, `uid`, `accession` or `date`, from `shl_dicom_core::report_links`). |
 | `open_bundle(jwe, key)` | `{index, bundle}`: `decrypt_bundle` then `parse_index` in one call, for a worker. |
+| `link_reports(inputJson)` | JSON `[[{studyId, basis}]]`, one list per report: the report-to-study rule (`shl_dicom_core::report_links`) run again, for when the viewer has learnt accession numbers from image headers. Input `{studies: [{id, studyInstanceUid, accession, started, modalities}], reports: [{references, studyUids, identifiers, date, words}]}`. Throws `bad-input`. |
 | `has_frame_start_marker(transferSyntax)` | Whether frames of this syntax are found by codestream start markers (JPEG, JPEG-LS, JPEG 2000, HTJ2K, JPEG XL); when false, each fragment is a frame. Never throws. |
 | `is_frame_start(transferSyntax, head)` | Whether a fragment whose value starts with `head` (its first 8 bytes) starts a frame: the rule the packer's offset tables and the decoder use. Never throws. |
 
@@ -44,6 +45,7 @@ All are synchronous once the module is instantiated. On failure each throws an e
 | `too-large` | `decrypt_bundle` | Longer than the JWE limit, or inflating past 64 MiB. |
 | `decrypt` | `decrypt_bundle` | The key does not open it (or it was altered). |
 | `inflate` | `decrypt_bundle` | The DEFLATE data is damaged. |
+| `bad-input` | `link_reports` | The input is not JSON of the shape above. |
 | `invalid-bundle` | `parse_index` | Not a FHIR Bundle, or it breaks a rule of spec/README.md §8 (instance lengths, files, keys, uids). |
 
 A long `label` is accepted: it is only shown.

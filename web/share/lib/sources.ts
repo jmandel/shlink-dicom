@@ -5,12 +5,13 @@ import { planBytes, RECORD_PLAINTEXT } from "../../core/range";
 import { parseDicomSync, T } from "../../core/dicom";
 import type { SeriesEntry } from "../../core/bundle";
 import type { DicomHeader } from "../../core/dicom-header";
-import { linkReports } from "../../core/reports";
+import { linksTakenWhenSharing } from "../../core/reports";
 import { BlobBytes, SubBytes, type Bytes } from "./bytes";
 import { formatBytes, plural } from "../../core/format";
 import { Collection, expand } from "./ingest";
 import type { Stager } from "./stage";
 import * as S from "./smart";
+import { loadShlWasm } from "./shl-wasm";
 
 export interface Progress {
   /** What is happening now, in plain words (including the measured amounts). */
@@ -129,7 +130,7 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
     if (m) {
       if (st.started) m.started = st.started;
       if (st.description) m.description = st.description;
-      const reportIds = new Set(linkReports(idx).filter((l) => l.studyId === st.id && l.basis !== "date").map((l) => l.report.id));
+      const reportIds = new Set(linksTakenWhenSharing(idx).filter((l) => l.studyId === st.id).map((l) => l.report.id));
       m.reports = (idx.bundle.entry ?? [])
         .map((e: any) => e.resource)
         .filter((r: any) => r?.resourceType === "DiagnosticReport" && reportIds.has(r.id))
@@ -137,7 +138,7 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
     }
   }
   // Reports in the link that name none of its studies (or only match by date): kept, left out until chosen.
-  const linked = new Set(linkReports(idx).filter((l) => l.studyId && l.basis !== "date").map((l) => l.report.id));
+  const linked = new Set(linksTakenWhenSharing(idx).map((l) => l.report.id));
   col.looseReports = (idx.bundle.entry ?? [])
     .map((e: any) => e.resource)
     .filter((r: any) => r?.resourceType === "DiagnosticReport" && !linked.has(r.id))
@@ -236,6 +237,8 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
     const rp = await S.fhirSearchAll(`${d.clinicalBase}/DiagnosticReport?patient=${encodeURIComponent(pid)}`, tok);
     reports = rp.flatMap((b) => (b.entry ?? []).map((e: any) => e.resource).filter((r: any) => r?.resourceType === "DiagnosticReport"));
   } catch {}
+  // Accession numbers read from image headers, by ImagingStudy id, for studies whose search result has none.
+  const headerAccessions: Record<string, string> = {};
   // The search results say how many series and images there are before anything is downloaded.
   const total = found.reduce((a, f) => a + Math.max(1, f.study.series?.length ?? 0), 0);
   const images = found.reduce(
@@ -287,14 +290,13 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
       if (f.study.description) m.description = f.study.description;
       const acsn = (f.study.identifier ?? []).find((i: any) => (i.type?.coding ?? []).some((c: any) => c.code === "ACSN"))?.value;
       if (!m.accession && acsn) m.accession = acsn;
-      // Reports that name this study: by Study Instance UID, by the portal's ImagingStudy, or by accession.
-      const mine = reports.filter(
-        (r) =>
-          (r.imagingStudy ?? []).some(
-            (ref: any) =>
-              ref.identifier?.value === `urn:oid:${f.studyUID}` || String(ref.reference ?? "").replace(/^.*ImagingStudy\//, "") === f.study.id,
-          ) || (!!m.accession && (r.identifier ?? []).some((i: any) => i.value === m.accession)),
+      // Reports that belong to this study by the viewer's rule (shl_dicom_core::report_links),
+      // except by date alone; a combined report goes with each study it names.
+      if (m.accession && !acsn) headerAccessions[f.study.id] = m.accession;
+      const links: { studyId: string; basis: string }[][] = JSON.parse(
+        (await loadShlWasm()).link_portal_reports(JSON.stringify(found.map((g) => g.study)), JSON.stringify(reports), JSON.stringify(headerAccessions)),
       );
+      const mine = reports.filter((_, i) => links[i].some((l) => l.studyId === f.study.id && l.basis !== "date"));
       on(col, { doing: `Downloading the reports · ${images ? Math.min(got, images) : got} of ${images || got} images downloaded`, ...(images ? { done: Math.min(got, images), total: images } : {}), expected });
       m.reports = (await Promise.all(mine.map((r) => S.inlineAttachments(r, tok)))).map((resource) => ({ resource, include: true, from: "portal" as const }));
       for (const r of mine) used.add(r);

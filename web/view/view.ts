@@ -38,7 +38,7 @@ import { openSaveTarget, saveBlob } from "../core/save";
 import { isSlideSeries } from "../core/wsi";
 import { drawSlideThumbnail, slideHooks, slideSession, SlideView, type SlideSession } from "./wsi-view";
 import { mayHoldMedia, MediaController } from "../core/video-view";
-import { linkReports, noteAccession, type ReportLink } from "../core/reports";
+import { linkReports, relinkWithAccessions, type ReportLink } from "../core/reports";
 import { parseDicom, parseDicomSync, parseHeader, T, tag, type DataSet } from "../core/dicom";
 import { mayStreamFrames } from "../core/frames";
 import { readInstanceBytes, probeInstance, cineTiming } from "../core/video";
@@ -1125,8 +1125,7 @@ function renderOverview() {
 async function learnAccessions() {
   const idx = share!.index;
   if (!reportLinks().some((l) => l.basis !== "reference" && l.basis !== "uid")) return;
-  const sig = () => reportLinks().map((l) => `${l.studyId}:${l.basis}`).join();
-  const before = sig();
+  const accessions = new Map<string, string>();
   await Promise.all(
     idx.studies.map(async (st) => {
       // One header: the first 64 KiB of the study's first instance (no pixels, whatever it holds).
@@ -1134,11 +1133,13 @@ async function learnAccessions() {
       if (!se) return;
       try {
         const bytes = await readInstanceBytes(share!, se, 0, 0, RECORD_PLAINTEXT, { priority: FetchPriority.Prefetch });
-        noteAccession(idx, st.id, parseDicomSync(bytes, { untilPixelData: true }).ds.str(T.AccessionNumber));
+        const acc = parseDicomSync(bytes, { untilPixelData: true }).ds.str(T.AccessionNumber);
+        if (acc) accessions.set(st.id, acc);
       } catch {}
     }),
   );
-  if (sig() !== before && !$("screen-overview").classList.contains("hidden")) renderOverview();
+  const changed = accessions.size > 0 && (await relinkWithAccessions(idx, accessions).catch(() => false));
+  if (changed && !$("screen-overview").classList.contains("hidden")) renderOverview();
 }
 
 /** Study Time (HH:MM) read from an image header, for studies the Bundle dates without a time. */

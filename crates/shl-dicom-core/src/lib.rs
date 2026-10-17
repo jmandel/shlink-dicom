@@ -7,6 +7,7 @@ pub mod order;
 pub mod packer;
 pub mod patient;
 pub mod range;
+pub mod report_links;
 pub mod shl;
 
 use thiserror::Error;
