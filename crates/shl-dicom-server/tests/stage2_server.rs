@@ -1801,3 +1801,47 @@ async fn test_deleting_a_file_mid_upload_is_a_conflict() {
     assert_eq!(client.delete(&url).bearer_auth(&token).send().await.unwrap().status(), StatusCode::NO_CONTENT);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The largest append holds for a body sent without Content-Length (chunked): 413, and none of
+/// that append is kept.
+#[tokio::test]
+async fn test_the_append_limit_holds_for_a_chunked_body() {
+    let dir = temp_data_dir("chunked_append_limit");
+    let state = AppState::with_store(
+        &dir,
+        shl_dicom_server::state::Quotas { request_bytes: 1 << 20, ..Default::default() },
+        test_store(&dir),
+    )
+    .unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[23u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    assert_eq!(client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap().status(), StatusCode::CREATED);
+    assert!(append(&client, &url, &token, 0, vec![1u8; 1000], false, None).await.status().is_success());
+
+    let chunked = |n: usize| {
+        let chunks: Vec<Result<Vec<u8>, std::io::Error>> = (0..n).map(|_| Ok(vec![2u8; 256 << 10])).collect();
+        client
+            .patch(&url)
+            .bearer_auth(&token)
+            .header("Content-Type", "application/partial-upload")
+            .header("Upload-Offset", "1000")
+            .header("Upload-Complete", "?0")
+            .body(reqwest::Body::wrap_stream(futures_util::stream::iter(chunks)))
+            .send()
+    };
+    // 1.25 MiB in 256 KiB chunks, over the 1 MiB limit.
+    let r = chunked(5).await.unwrap();
+    assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let h = client.head(&url).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(h.headers()["upload-offset"].to_str().unwrap(), "1000", "the refused append left nothing");
+    // 1 MiB fits.
+    assert!(chunked(4).await.unwrap().status().is_success());
+    let h = client.head(&url).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(h.headers()["upload-offset"].to_str().unwrap(), (1000 + (1 << 20)).to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+}

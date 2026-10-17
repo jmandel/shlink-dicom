@@ -478,9 +478,10 @@ fn flushed_bytes(state: &AppState, sid: &str, file_id: &str) -> u64 {
         .unwrap_or(0) as u64
 }
 
-/// Streams `body` onto the staged `{fileId}.part` from upload offset `start`, never past `total`.
+/// Streams `body` onto the staged `{fileId}.part` from upload offset `start`, never past `total`
+/// and taking at most `max_body` bytes (else 413, keeping none of this body).
 /// The staged file holds the bytes from `flushed_bytes` on.
-async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, total: Option<u64>, body: Body) -> Append {
+async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, total: Option<u64>, max_body: Option<u64>, body: Body) -> Append {
     use tokio::io::AsyncWriteExt;
     // A length not known yet: the share's byte limit is checked as the bytes arrive.
     let quota_end = match (total, state.quotas.share_bytes) {
@@ -518,6 +519,10 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
         if total.is_some_and(|t| start + got + chunk.len() as u64 > t) {
             let _ = file.set_len(local).await;
             return Append::Fail(problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({})));
+        }
+        if max_body.is_some_and(|m| got + chunk.len() as u64 > m) {
+            let _ = file.set_len(local).await;
+            return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", max_body.unwrap_or_default())));
         }
         if start + got + chunk.len() as u64 > quota_end {
             let _ = file.set_len(local).await;
@@ -745,7 +750,7 @@ pub async fn put_share_file(
     if let Err(resp) = start_upload(&state, &sid, &file_id, total, resumable.is_some()).await {
         return resp;
     }
-    let end = match append_body(&state, &sid, &file_id, 0, total, body).await {
+    let end = match append_body(&state, &sid, &file_id, 0, total, None, body).await {
         Append::Ok(n) => n,
         Append::Fail(resp) => {
             if resumable.is_none() {
@@ -846,12 +851,13 @@ pub async fn patch_share_file(
         (Some(Err(_)), _) => return json_err(StatusCode::BAD_REQUEST, "invalid Upload-Length"),
         _ => {}
     }
+    // Refused up front when Content-Length says so; a body without one is counted as it arrives.
     if let Some(Ok(cl)) = sf_int(&headers, "content-length") {
         if cl > state.quotas.request_bytes {
             return json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", state.quotas.request_bytes));
         }
     }
-    let end = match append_body(&state, &sid, &file_id, offset, length, body).await {
+    let end = match append_body(&state, &sid, &file_id, offset, length, Some(state.quotas.request_bytes), body).await {
         Append::Ok(n) => n,
         Append::Fail(resp) => return resp,
         Append::Interrupted(n) => return json_err(StatusCode::BAD_REQUEST, format!("the request was interrupted at offset {n}")),
