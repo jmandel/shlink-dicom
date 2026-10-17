@@ -41,11 +41,12 @@ Each run writes `results/<date>-<label>.json` (and a copy in `results/latest.jso
 
 ## What gets measured
 
-**Builds.** All four builds use the workspace release profile (opt-level 3, debug = 1) with `lto = "fat"` and `codegen-units = 1`, set through `CARGO_PROFILE_RELEASE_*` environment variables:
+**Builds.** Every build uses the workspace release profile (opt-level 3, debug = 1) with `lto = "fat"` and `codegen-units = 1`, set through `CARGO_PROFILE_RELEASE_*` environment variables:
 
 | Build | Target and flags |
 |---|---|
-| `native` | x86_64, x86-64-v3 from the repository's `.cargo/config.toml` ([CPU requirement](../README.md#cpu-requirement)); the build sets no `RUSTFLAGS`, which would replace it |
+| `native` | the host's native target; on x86_64 `RUSTFLAGS="-C target-cpu=x86-64-v3"`, as the speed records were measured ([CPU targets](../README.md#cpu-targets)) |
+| `native-base` | the host's default target (baseline x86-64 on x86_64), as ordinary builds use; runner `native-base`, not run by default |
 | `wasm-base` | wasm32-unknown-unknown |
 | `wasm-simd` | wasm32 with `-C target-feature=+simd128` |
 | `wasm-relaxed` | wasm32 with `+simd128,+relaxed-simd` |

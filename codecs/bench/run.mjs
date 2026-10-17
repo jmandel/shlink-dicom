@@ -24,7 +24,9 @@ const HELP = `node codecs/bench/run.mjs [options]
   --format F        only this corpus format (repeatable): uncompressed rle jpeg-dct jpeg-lossless jpeg-ls jpeg2000 htj2k jpeg-xl
   --case S          only manifest ids containing S
   --tag T           only cases with this tag (repeatable): small medium large synthetic real colour multiframe ...
-  --runners LIST    comma list of native,node,chromium-worker,chromium-cwasm,chromium-main,ref (default: all)
+  --runners LIST    comma list of native,native-base,node,chromium-worker,chromium-cwasm,chromium-main,ref
+                    (default: all but native-base). native is x86-64-v3 on x86_64, as the speed records
+                    are; native-base is the default target ordinary builds use
                     chromium-cwasm = C/C++ codecs compiled to wasm (Cornerstone packages), same worker as ours;
                     chromium-main runs wasm-simd only; ref = native C/C++ libraries from Python
   --builds LIST     wasm builds: base,simd,relaxed,base-opt,simd-opt (default all five; -opt = after wasm-opt)
@@ -59,7 +61,7 @@ for (const c of all.filter((c) => c.missing)) log(`SKIP ${c.id}: ${c.missing}`);
 for (const c of cases) for (const w of c.warnings) log(`WARN ${c.id}: ${w}`);
 if (!cases.length) { log("no cases selected"); process.exit(2); }
 
-const needBuilds = [...(runners.includes("native") ? ["native"] : []), ...(runners.some((r) => r === "node" || r.startsWith("chromium")) ? [...new Set([...wasmBuilds, ...(runners.includes("chromium-cwasm") ? ["wasm-simd"] : [])])] : [])];
+const needBuilds = [...["native", "native-base"].filter((n) => runners.includes(n)), ...(runners.some((r) => r === "node" || r.startsWith("chromium")) ? [...new Set([...wasmBuilds, ...(runners.includes("chromium-cwasm") ? ["wasm-simd"] : [])])] : [])];
 const builds = snapshotBuilds(needBuilds, { noBuild: a["no-build"], log });
 process.on("exit", removeSnapshot);
 process.on("SIGINT", () => process.exit(130));
@@ -88,7 +90,7 @@ if (a.throttle && runners.some((r) => r === "chromium-worker" || r === "chromium
 const b0 = busy();
 env.load_avg = { start: b0.load };
 env.other_bench_runs = { start: b0.other_runs };
-if (runners.includes("native")) { log("native"); records.push(...(await runNative(cases, opts, log))); }
+for (const n of ["native", "native-base"]) if (runners.includes(n)) { log(n); records.push(...(await runNative(cases, opts, log, n))); }
 if (runners.includes("node")) { log("node"); records.push(...(await runNode(cases, wasmBuilds, opts, log))); }
 const jobs = [
   ...(runners.includes("chromium-worker") || runners.includes("chromium-cwasm")

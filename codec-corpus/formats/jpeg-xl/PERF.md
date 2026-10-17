@@ -53,7 +53,7 @@ Times in ms, fastest of 9 (wasm) or 7 (native) decodes. "main" is the code befor
 
 ### Native builds for x86-64-v3
 
-Native builds now target x86-64-v3 (AVX2, FMA; [codecs/README.md, CPU requirement](../../../codecs/README.md#cpu-requirement)), so LLVM vectorises the same loops with AVX2. User-mode cycles per decode in the bench's codec path (`bench-native` under `perf stat`, one core, minimum of 3 alternating rounds, identical output), with the ratio to libjxl (one thread) from the timing table above where the file is in it. That ratio was timed on the baseline build and has not been re-timed; the cycle change suggests it shrinks by about the same fraction.
+The bench's native build now targets x86-64-v3 (AVX2, FMA; [codecs/README.md, CPU targets](../../../codecs/README.md#cpu-targets)), so LLVM vectorises the same loops with AVX2. User-mode cycles per decode in the bench's codec path (`bench-native` under `perf stat`, one core, minimum of 3 alternating rounds, identical output), with the ratio to libjxl (one thread) from the timing table above where the file is in it. That ratio was timed on the baseline build and has not been re-timed; the cycle change suggests it shrinks by about the same fraction.
 
 | Case | x86-64 | x86-64-v3 | change | now ÷ libjxl, baseline build |
 |---|---|---|---|---|

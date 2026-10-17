@@ -10,7 +10,7 @@
 // Pages reference assets relatively, so the static parts can be served from any path.
 // Run: bun web/build.ts   (package.json: build:web)
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 
 const root = new URL("..", import.meta.url).pathname;
 // Built into a private folder, then swapped into place, so a server reading dist/web
@@ -183,5 +183,6 @@ if (existsSync(site)) renameSync(site, old);
 renameSync(out, site);
 rmSync(old, { recursive: true, force: true });
 
-const sizes = await $`cd ${site} && find . -type f \( -name '*.js' -o -name '*.wasm' -o -name '*.html' -o -name '*.css' \) -not -name '*.map' -printf '%s\t%p\n' | sort -k2`.text();
-console.log(sizes);
+// The shipped files and their sizes (in JavaScript, not find -printf, so it runs on macOS too).
+const shipped = [...new Bun.Glob("**/*.{js,wasm,html,css}").scanSync({ cwd: site })].sort();
+console.log(shipped.map((f) => `${statSync(`${site}/${f}`).size}\t./${f}`).join("\n"));

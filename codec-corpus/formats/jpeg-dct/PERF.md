@@ -16,7 +16,7 @@ This page records the speed work on `shl-codec-jpeg` (October 2026). The decoder
 ## Method
 
 - **Machine:** AMD Ryzen 5 3600 (Zen 2, AVX2), Linux.
-- **Native builds:** release profile. AVX2 kernels are chosen at run time. The tables below were measured on builds for the baseline x86-64 target; native builds now target x86-64-v3 ([CPU requirement](../../../codecs/README.md#cpu-requirement)).
+- **Native builds:** release profile. AVX2 kernels are chosen at run time. The tables below were measured on builds for the baseline x86-64 target; the bench's native build now targets x86-64-v3 ([CPU targets](../../../codecs/README.md#cpu-targets)).
 - **Timing:** codec only. Frames are read into memory first, then decoded repeatedly (`cargo run --release --example bench -- <frames dir> <passes>`), and the minimum time per frame is reported.
 - **Load:** other agents' fuzzers shared the machine during this work, so wall time was noisy.
   - Steps were judged by user-mode instruction and cycle counts (`perf stat`) and by A/B runs that alternate binaries.

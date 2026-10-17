@@ -20,9 +20,15 @@ const CARGO = [`${process.env.HOME}/.cargo/bin/cargo`, "+stable"];
 export const PROFILE = { "opt-level": 3, lto: "fat", "codegen-units": 1, debug: 1, panic: "unwind" };
 const PROFILE_ENV = { CARGO_PROFILE_RELEASE_LTO: "fat", CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1" };
 
+// Native builds: on x86_64 the benchmark's `native` is x86-64-v3 (AVX2), as the speed records have
+// always been measured, and `native-base` is the baseline target that ordinary builds use
+// (codecs/README.md, "CPU targets"). On other hosts both are the default target.
+const X86 = process.arch === "x64";
+/** The file a native build is written to. */
+export const nativeBinary = (name) => (name === "native" ? "bench-native" : `bench-${name}`);
 export const BUILDS = {
-  // null: no RUSTFLAGS, so the target-cpu from the repository's .cargo/config.toml applies.
-  native: { rustflags: null, target: null, about: "x86_64 release binary, x86-64-v3 (AVX2) from .cargo/config.toml" },
+  native: { rustflags: X86 ? "-C target-cpu=x86-64-v3" : "", target: null, about: X86 ? "native release binary, x86-64-v3 (AVX2)" : `native release binary (${process.arch})` },
+  "native-base": { rustflags: "", target: null, about: X86 ? "native release binary, baseline x86-64 (the default)" : `native release binary (${process.arch})` },
   "wasm-base": { rustflags: "", target: "wasm32-unknown-unknown", about: "wasm32, Rust's default wasm features, no SIMD" },
   "wasm-simd": { rustflags: "-C target-feature=+simd128", target: "wasm32-unknown-unknown", about: "wasm32 + simd128" },
   "wasm-relaxed": { rustflags: "-C target-feature=+simd128,+relaxed-simd", target: "wasm32-unknown-unknown", about: "wasm32 + simd128 + relaxed-simd" },
@@ -201,19 +207,18 @@ export function build(names, log = console.error) {
     const args = ["build", "--release", "-p", "shl-dicom-wasm-bench"];
     if (b.target) args.push("--target", b.target, "--lib");
     else args.push("--bin", "bench-native");
-    log(`build ${name}: cargo ${args.join(" ")}  ${b.rustflags === null ? "(.cargo/config.toml)" : `RUSTFLAGS="${b.rustflags}"`}`);
-    // A RUSTFLAGS variable, even an empty one, replaces the config file's flags, so it is removed
-    // for builds that take theirs from the config.
-    const env = { ...process.env, ...PROFILE_ENV, CARGO_TARGET_DIR: targetDir };
+    log(`build ${name}: cargo ${args.join(" ")}  RUSTFLAGS="${b.rustflags}"`);
+    // Every build sets RUSTFLAGS (even empty), so nothing from the caller's environment leaks in.
+    const env = { ...process.env, ...PROFILE_ENV, CARGO_TARGET_DIR: targetDir, RUSTFLAGS: b.rustflags };
     delete env.CARGO_ENCODED_RUSTFLAGS;
-    if (b.rustflags === null) delete env.RUSTFLAGS;
-    else env.RUSTFLAGS = b.rustflags;
+    for (const k of Object.keys(env)) if (/^CARGO_TARGET_.*_RUSTFLAGS$/.test(k)) delete env[k];
     const t0 = Date.now();
     execFileSync(CARGO[0], [CARGO[1], ...args], {
       cwd: CODECS, stdio: ["ignore", "ignore", "inherit"],
       env,
     });
-    const rec = { about: b.about, rustflags: b.rustflags ?? "-C target-cpu=x86-64-v3 (.cargo/config.toml)", target: b.target ?? "x86_64-unknown-linux-gnu", profile: PROFILE, build_s: (Date.now() - t0) / 1000 };
+    const host = execFileSync(CARGO[0], [CARGO[1], "-vV"]).toString().match(/^host: (.+)$/m)?.[1] ?? "unknown";
+    const rec = { about: b.about, rustflags: b.rustflags, target: b.target ?? host, profile: PROFILE, build_s: (Date.now() - t0) / 1000 };
     if (b.target) {
       const src = join(targetDir, b.target, "release", "shl_dicom_wasm_bench.wasm");
       const dst = join(OUT, `${name}.wasm`);
@@ -228,7 +233,7 @@ export function build(names, log = console.error) {
         bytes_gzip: gzipSync(stripped, { level: 9 }).length,
       });
     } else {
-      const dst = join(OUT, "bench-native");
+      const dst = join(OUT, nativeBinary(name));
       copyFileSync(join(targetDir, "release", "bench-native"), dst);
       rec.path = dst;
     }
@@ -272,7 +277,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const info = noBuild ? buildInfo() : build(names);
   mkdirSync(dir, { recursive: true });
   for (const n of names) {
-    const f = n === "native" ? "bench-native" : `${n}.wasm`;
+    const f = BUILDS[n].target === null ? nativeBinary(n) : `${n}.wasm`;
     copyFileSync(join(OUT, f), join(dir, f));
     if (info[n]) info[n].path = join(dir, f);
   }
