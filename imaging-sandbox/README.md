@@ -19,7 +19,12 @@ Deployed (private for now) at **https://smart-imaging-sandbox.exe.xyz**: see [De
 
 Requires Bun 1.4.3. The server has no runtime dependencies. The tests use `playwright-core` and `pdfjs-dist`, pinned in `package.json` (`bun install`).
 
-The data build also needs dcmtk (`dcmcjpeg`) and `uv`, for the compressed copies; `--no-variants` builds without them.
+The data build also needs dcmtk (`dcmcjpeg`) and `uv`, for the compressed copies; `--no-variants` builds without them. It adds the slide's frame offset tables with the packer's Rust code through `crates/shl-dicom-wasm`, so build that module first, from the repository root (Rust with the wasm32 target, and wasm-bindgen 0.2.128):
+
+```sh
+cargo build --release --target wasm32-unknown-unknown -p shl-dicom-wasm
+wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
+```
 
 ```sh
 cd imaging-sandbox
@@ -81,7 +86,7 @@ The build rewrites the slide's DICOM headers:
 | Patient Identity Removed (0012,0062) | removed, since the headers now carry an identity |
 | Series, acquisition and timezone dates and times, Study ID, Container Identifier, and the specimen identifiers in the Specimen Description Sequence | values from the study's `header` block in `data/studies.json` |
 | Clinical Trial attributes (0012,0010–0040), Image Comments (Aperio scan description with the original file name), private groups 0009 (PixelMed) and 0013 (CTP) | removed |
-| The empty Basic Offset Table of each multi-frame (tiled) level | filled with 32-bit offsets, one per frame, pointing at each frame's first fragment item. The source has no Extended Offset Table, and none is added. |
+| The empty Basic Offset Table of each multi-frame (tiled) level | filled with 32-bit offsets, one per frame, pointing at each frame's first fragment item, by the packer's code (`crates/shl-dicom-core/src/offset_tables.rs`, through shl-dicom-wasm; `scripts/lib/offset-table.ts`). The source has no Extended Offset Table, and none is added. |
 
 What is left alone:
 - **Pixel Data.** It is byte-identical in the overview and thumbnail. In the three tiled levels, only the empty Basic Offset Table is filled in; every fragment (item header and bytes) stays identical and in order, so each frame's compressed data is unchanged.

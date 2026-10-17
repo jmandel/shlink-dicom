@@ -57,7 +57,7 @@ Keep every Study, Series, SOP Instance, Frame of Reference and Pyramid UID consi
 
 None of the slide's instances has a frame offset table: each Basic Offset Table is empty and there is no Extended Offset Table. Without one, a viewer has to download every tile before the one it wants ([web/view/WSI.md, Offset tables](../web/view/WSI.md#offset-tables)). So the sample should carry a Basic Offset Table in each of the three tiled levels.
 
-The sandbox build writes them (`imaging-sandbox/scripts/build-data.ts`, through `fillBasicOffsetTable` in `scripts/lib/dicom-rewrite.ts`). The packer's Rust code (`crates/shl-dicom-core/src/offset_tables.rs`) writes the same bytes: with the slide's three tables stripped, `shl-dicom-server pack --add-offset-tables` gives packed files identical to packing the built sample. The server seed also adds a table to any sample file that lacks one ([web/view/WSI.md, Offset tables](../web/view/WSI.md#offset-tables)).
+The sandbox build writes them with the packer's Rust code (`crates/shl-dicom-core/src/offset_tables.rs`, through shl-dicom-wasm; `imaging-sandbox/scripts/lib/offset-table.ts`), the code every packer uses. The server seed also adds a table to any sample file that lacks one ([web/view/WSI.md, Offset tables](../web/view/WSI.md#offset-tables)).
 
 The tables add 4 bytes per frame: 16 KB for the 3,773 + 260 + 70 tiles kept here. Fragment bytes are unchanged.
 

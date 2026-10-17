@@ -11,7 +11,8 @@
 // 2. Studies marked "rewrite": false (the my-health-data studies) are
 //    served unchanged, after checking they carry the patient in
 //    data/patient.json. The slide's headers are rewritten to that patient,
-//    with new deterministic UIDs and a filled Basic Offset Table; the
+//    with new deterministic UIDs and a filled frame offset table (the
+//    packer's Rust code, through shl-dicom-wasm); the
 //    build fails if any frame's data or transfer syntax differs from the
 //    source.
 // 3. Generates a sample report per study (PDF and plain text).
@@ -30,6 +31,7 @@ import { join, resolve, relative, dirname } from "node:path";
 import { readTgz } from "../src/tar.ts";
 import { parseDicom, str, int } from "../src/dicom.ts";
 import { rewriteDicom, samePixelFrames, mintUid, type HeaderSet } from "./lib/dicom-rewrite.ts";
+import { addOffsetTable } from "./lib/offset-table.ts";
 import { buildReport, conclusion, type ReportInput } from "./lib/report.ts";
 import { renderText } from "./lib/doc.ts";
 import { buildPdf } from "./lib/pdf.ts";
@@ -158,7 +160,7 @@ for (const st of cfg.studies) {
   let studyUID = "", originalStudyUID = "", manufacturer = "", model = "", field = "";
   for (const e of entries) {
     const before = parseDicom(e.bytes, { stopAtPixelData: false });
-    const out = rewrite ? rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid, fillBasicOffsetTable: true }) : e.bytes;
+    const out = rewrite ? addOffsetTable(rewriteDicom(e.bytes, { set, remove, removeGroups, replaceStrings, mapUid })) : e.bytes;
     const after = parseDicom(out, { stopAtPixelData: false });
     // Checks: pixel data and transfer syntax untouched, values applied.
     if (!samePixelFrames(e.bytes, out)) throw new Error(`${e.path}: Pixel Data frames changed`);

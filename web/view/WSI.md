@@ -260,7 +260,7 @@ The worst case, the bottom-right tile, reads the whole base level: 1.05 GB for l
 
 **Adding them when packing.** Josh decided that offsets go in the files, not the Bundle. The packer fills in the table for each encapsulated multi-frame instance that has an empty BOT and no EOT. Every packer uses the same code, `crates/shl-dicom-core/src/offset_tables.rs`; whether it runs depends on the packer:
 - **/share:** a box in the review step, shown only when an included study has such files, and ticked by default. The browser runs the code through shl-dicom-wasm (`offset_table_patch_from_fragments_wasm`), one file at a time, without holding the file.
-- **The server seed** (`shl-dicom-server seed`, which packs the public sample): always, for every sample file that lacks a table (`add_offset_table_to_file`). The sample slide's files already carry a Basic Offset Table, written when the sandbox dataset is built (`imaging-sandbox/scripts/lib/dicom-rewrite.ts`, `fillBasicOffsetTable`), so today the seed adds none. Those tables are the bytes the Rust code writes: stripping the slide's three tables and adding them again with `pack --add-offset-tables` gives the same packed files.
+- **The server seed** (`shl-dicom-server seed`, which packs the public sample): always, for every sample file that lacks a table (`add_offset_table_to_file`). The sample slide's files already carry a Basic Offset Table, added by the same Rust code (through shl-dicom-wasm) when the sandbox dataset is built (`imaging-sandbox/scripts/lib/offset-table.ts`), so today the seed adds none.
 - **The CLI:** only with `shl-dicom-server pack --add-offset-tables` (`IngestSession::set_add_offset_tables`). Without it, the CLI says how many instances lack a table.
 
 How it works:

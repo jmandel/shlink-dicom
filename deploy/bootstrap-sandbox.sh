@@ -5,9 +5,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-sandbox.sh | bash
 #
-# Steps: clone or update the repo in /opt/shlink-dicom, install a pinned Bun,
-# rebuild the dataset from its pinned sources, check its SHA256SUMS digest,
-# write /etc/imaging-sandbox.env, install and start the systemd unit.
+# Steps: clone or update the repo in /opt/shlink-dicom, install Rust (with the
+# wasm32 target), wasm-bindgen and a pinned Bun, build shl-dicom-wasm (the
+# packer's frame offset table code, which the dataset build uses), rebuild the
+# dataset from its pinned sources, check its SHA256SUMS digest, write
+# /etc/imaging-sandbox.env, install and start the systemd unit.
 # Log: /var/log/shlink-bootstrap-sandbox.log
 
 set -euo pipefail
@@ -19,9 +21,12 @@ PORT="${PORT:-8000}"
 BASE_URL="${BASE_URL:-https://smart-imaging-sandbox.exe.xyz}"
 SHARE_ORIGIN="${SHARE_ORIGIN:-https://shlink-dicom.exe.xyz}"
 BUN_VERSION="1.4.3"
+WASM_BINDGEN_VERSION="0.2.128"
 EXPECTED_SUMS="${EXPECTED_SUMS:-3f1018ff483b501f0a2dab1c2a756ea1a0a1311fd529816ba4dd5fa9837ff093}"
 export BUN_INSTALL=/opt/bun
 BUN="$BUN_INSTALL/bin/bun"
+export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo
+export PATH="$CARGO_HOME/bin:$PATH"
 
 SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
 $SUDO touch /var/log/shlink-bootstrap-sandbox.log
@@ -34,6 +39,7 @@ echo "== bootstrap-sandbox $(date -Is)"
 # (pydicom, OpenJPEG for JPEG 2000).
 need=""
 for c in git curl unzip openssl; do command -v "$c" >/dev/null || need="$need $c"; done
+command -v cc >/dev/null || need="$need build-essential"
 command -v dcmcjpeg >/dev/null || need="$need dcmtk"
 if [ -n "$need" ]; then $SUDO apt-get update -qq && $SUDO apt-get install -y -qq $need; fi
 UV_VERSION="0.13.1"
@@ -45,8 +51,8 @@ fi
 export PATH="/opt/uv:$PATH"
 echo "uv $(uv --version | cut -d' ' -f2), $(dcmcjpeg --version | head -1)"
 
-$SUDO mkdir -p "$DIR" "$BUN_INSTALL"
-$SUDO chown "$(id -u):$(id -g)" "$DIR" "$BUN_INSTALL"
+$SUDO mkdir -p "$DIR" "$BUN_INSTALL" /opt/rust
+$SUDO chown "$(id -u):$(id -g)" "$DIR" "$BUN_INSTALL" /opt/rust
 if [ -d "$DIR/.git" ]; then
   git -C "$DIR" fetch -q origin "$REF" && git -C "$DIR" checkout -q --detach FETCH_HEAD
 else
@@ -58,6 +64,21 @@ if [ ! -x "$BUN" ] || [ "$("$BUN" --version)" != "$BUN_VERSION" ]; then
   curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_VERSION" >/dev/null
 fi
 echo "bun $("$BUN" --version)"
+if ! command -v rustup >/dev/null; then
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain stable --no-modify-path
+fi
+rustup target add wasm32-unknown-unknown >/dev/null
+if [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $WASM_BINDGEN_VERSION" ]; then
+  t="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
+  curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$t.tar.gz" \
+    | tar -xz -C "$CARGO_HOME/bin" --strip-components=1 "$t/wasm-bindgen"
+fi
+echo "$(cargo --version); $(wasm-bindgen --version)"
+
+# The dataset build adds frame offset tables with the packer's Rust code, through this module.
+cd "$DIR"
+cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-wasm
+wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
 
 cd "$DIR/imaging-sandbox"
 # Also makes build/variants (lossless SV1 and J2K copies), each checked to

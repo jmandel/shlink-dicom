@@ -20,7 +20,6 @@ export interface RewriteOptions {
   removeGroups?: Set<number>; // top-level groups to drop entirely (e.g. private groups)
   replaceStrings?: Map<string, string>; // exact string values replaced at any depth
   mapUid: (uid: string) => string; // applied to the instance-identifying UID attributes below
-  fillBasicOffsetTable?: boolean; // fill an empty Basic Offset Table in multi-frame encapsulated Pixel Data
 }
 
 // ---- Encapsulated Pixel Data ----
@@ -59,25 +58,6 @@ export function frameStarts(src: Uint8Array, enc: Encapsulated, frames: number):
   const starts = enc.fragments.flatMap((f, i) => (src[f.valueStart] === 0xff && src[f.valueStart + 1] === 0xd8 ? [i] : []));
   if (starts.length !== frames || starts[0] !== 0) throw new Error(`cannot map ${enc.fragments.length} fragments to ${frames} frames`);
   return starts;
-}
-
-// Pixel Data element with a filled Basic Offset Table, or null to leave
-// it as it is (native data, a single frame, or a table already present).
-function withBasicOffsetTable(src: Uint8Array, e: DicomElement, frames: number): Uint8Array | null {
-  if (!e.undefinedLength || frames < 2) return null;
-  const enc = readEncapsulated(src, e);
-  if (enc.bot.end > enc.bot.valueStart) return null;
-  const firstItem = enc.fragments[0].start;
-  const offsets = frameStarts(src, enc, frames).map((i) => enc.fragments[i].start - firstItem);
-  if (offsets[offsets.length - 1] > 0xffffffff) throw new Error("offsets exceed 32 bits");
-  const table = new Uint8Array(4 * frames);
-  const tv = new DataView(table.buffer);
-  offsets.forEach((o, i) => tv.setUint32(4 * i, o, true));
-  return concat([
-    src.subarray(e.start, enc.headerEnd),
-    tagBytes(0xfffee000), u32(table.byteLength), table,
-    src.subarray(firstItem, e.end), // fragments and the delimiter, verbatim
-  ]);
 }
 
 // UID attributes that identify this data (and so are remapped). Coding
@@ -155,12 +135,6 @@ function encodeLevel(src: Uint8Array, els: DicomElement[], explicit: boolean, to
         const m = v.split("\\").map((u) => (u.startsWith(REGISTRY) ? u : o.mapUid(u))).join("\\");
         if (m !== v) { out.push({ tag: e.tag, bytes: element(e.tag, "UI", padded("UI", m), explicit), dirty: true }); continue; }
       }
-    }
-    if (top && o.fillBasicOffsetTable && e.tag === 0x7fe00010) {
-      const frames = Number(str(els, 0x00280008) ?? "1");
-      if (els.some((x) => x.tag === 0x7fe00001)) throw new Error("Extended Offset Table present; not adding a Basic Offset Table");
-      const filled = withBasicOffsetTable(src, e, frames);
-      if (filled) { out.push({ tag: e.tag, bytes: filled, dirty: true }); continue; }
     }
     if (e.items) {
       const itemExplicit = explicit && !e.fromUN;
