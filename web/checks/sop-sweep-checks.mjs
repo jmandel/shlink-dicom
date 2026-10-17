@@ -1,6 +1,6 @@
 // Object-type sweep (codec-corpus/prevalence/SOPCLASS_SWEEP.md): every kind of DICOM object in IDC,
 // opened in the real viewer from a share, checked for what fits its type. Expected values come
-// from pydicom (sop-sweep/expect.py) and reformats from SimpleITK (sop-sweep/mpr-oracle.py).
+// from pydicom (sop-sweep/expect.py) and reformats from SimpleITK (objects/mpr-ref.py).
 //   uv run --project codec-corpus python -I web/checks/sop-sweep/expect.py /media/barracuda/sop-sweep
 //   bun web/checks/sop-sweep-fixtures.ts http://localhost:3471
 //   BASE=http://localhost:3471 node web/checks/sop-sweep-checks.mjs [--only=case,case]
@@ -399,7 +399,7 @@ async function reformats(page, c, r, e, check) {
       const tag = `${c.id}-${plane}-${opts.turn ?? 0}`;
       const job = { files, spec: m.spec, window: { center: st.wc, width: st.ww }, out: `${REFS}${tag}.png` };
       writeFileSync(`${REFS}${tag}.json`, JSON.stringify(job));
-      const info = JSON.parse(execFileSync("uv", ["run", "-q", "--project", `${REPO}codec-corpus`, "--with", "simpleitk", "--with", "pillow", "python", "-I", `${REPO}web/checks/sop-sweep/mpr-oracle.py`, `${REFS}${tag}.json`], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 1 << 24 }).trim().split("\n").pop());
+      const info = JSON.parse(execFileSync("uv", ["run", "-q", "--project", `${REPO}codec-corpus`, "--with", "simpleitk", "--with", "pillow", "python", "-I", `${REPO}web/checks/objects/mpr-ref.py`, `${REFS}${tag}.json`], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 1 << 24 }).trim().split("\n").pop());
       const url = `data:image/png;base64,${readFileSync(job.out).toString("base64")}`;
       const cmp = await page.evaluate((u) => window.__viewHooks.compareWith(u), url);
       // One stored unit in grey levels: with a narrow window a rounding tie (x.5) is several levels.

@@ -5,29 +5,16 @@ compressed side) and compares every frame exactly, then compares every data elem
 Pixel Data and Planar Configuration. Prints JSON: { checked, identical, transferSyntaxes,
 implementations, differ: [...] }."""
 import json, sys
-import struct
+from pathlib import Path
 import numpy as np
 import pydicom
-from pydicom.sequence import Sequence
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dicomlib import PIXEL_TAGS as SKIP, norm  # noqa: E402
 
-def norm(e):
-    """An element's value as comparable data: sequences item by item, and numbers or bytes as their
-    little-endian bytes (implicit VR files read OW/US-ambiguous data such as LUT Data as bytes)."""
-    v = e.value
-    if isinstance(v, Sequence):
-        return [{int(x.tag): norm(x) for x in item if int(x.tag) not in SKIP} for item in v]
-    if isinstance(v, (bytes, bytearray)):
-        return bytes(v)
-    if e.VR in ("US", "SS", "OW", "US or SS", "US or OW", "US or SS or OW") and v is not None:
-        vals = list(v) if hasattr(v, "__iter__") else [v]
-        if all(isinstance(x, int) for x in vals):
-            return b"".join(struct.pack("<H" if x >= 0 else "<h", x) for x in vals)
-    return v
 
 
 pairs = json.load(open(sys.argv[1]))
 out = {"checked": 0, "identical": 0, "transferSyntaxes": {}, "implementations": {}, "differ": []}
-SKIP = {0x7FE00010, 0x00280006}
 for p in pairs:
     out["checked"] += 1
     a = pydicom.dcmread(p["source"])

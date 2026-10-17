@@ -51,7 +51,7 @@ All seven regression fixtures pass.
 | Classes IDC lacks | [sopclass_extra.py](../scripts/sources/sopclass_extra.py), [sopclass_derive.py](../scripts/sources/sopclass_derive.py) (highdicom 0.28.2) | `extra/`, `cases-extra.json` |
 | Expected values | [web/checks/sop-sweep/expect.py](../../web/checks/sop-sweep/expect.py) (pydicom) | `expect.json` |
 | Shares | [web/checks/sop-sweep-fixtures.ts](../../web/checks/sop-sweep-fixtures.ts) (`pack-share.ts`, as the Share page packs) | `shares.json` |
-| Viewer checks | [web/checks/sop-sweep-checks.mjs](../../web/checks/sop-sweep-checks.mjs), with the reformat oracle [mpr-oracle.py](../../web/checks/sop-sweep/mpr-oracle.py) (SimpleITK) | `results.json`, `shots/` |
+| Viewer checks | [web/checks/sop-sweep-checks.mjs](../../web/checks/sop-sweep-checks.mjs), with the reformat oracle [mpr-ref.py](../../web/checks/objects/mpr-ref.py) (SimpleITK) | `results.json`, `shots/` |
 | Tables below | [sopclass_report.py](../scripts/sources/sopclass_report.py) | |
 
 ### Selection
@@ -449,4 +449,4 @@ bun web/checks/sop-sweep-fixtures.ts http://localhost:3471 /media/barracuda/sop-
 SWEEP=/media/barracuda/sop-sweep-fixtures BASE=http://localhost:3471 node web/checks/sop-sweep-checks.mjs
 ```
 
-Decoding JPEG and JPEG 2000 files with pydicom in `expect.py` and `mpr-oracle.py` needs `--with pylibjpeg --with pylibjpeg-libjpeg --with pylibjpeg-openjpeg`.
+Decoding JPEG and JPEG 2000 files with pydicom in `expect.py` and `mpr-ref.py` needs `--with pylibjpeg --with pylibjpeg-libjpeg --with pylibjpeg-openjpeg`.

@@ -25,6 +25,9 @@ from pathlib import Path
 import numpy as np
 import pydicom
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dicomlib import fg, seq0, sr_counts  # noqa: E402
+
 warnings.filterwarnings("ignore")
 P = "1.2.840.10008.5.1.4.1.1."
 CATEGORY = {
@@ -47,22 +50,6 @@ def category(sop: str, ds) -> str:
     if sop.startswith(P + "88."):
         return "sr"
     return "other"
-
-
-def seq0(ds, kw):
-    s = ds.get(kw)
-    return s[0] if s else None
-
-
-def fg(ds, frame, kw):
-    """Functional group item `kw` for a frame: per-frame first, then shared (PS3.3 C.7.6.16)."""
-    per = ds.get("PerFrameFunctionalGroupsSequence")
-    if per is not None and frame < len(per):
-        it = seq0(per[frame], kw)
-        if it is not None:
-            return it
-    sh = ds.get("SharedFunctionalGroupsSequence")
-    return seq0(sh[0], kw) if sh else None
 
 
 def first_num(v):
@@ -178,19 +165,6 @@ def regular(slices):
     if np.any(np.abs(gaps - dz) > max(0.01, dz * 0.05)):
         return False, "slices are not evenly spaced"
     return True, ""
-
-
-def sr_counts(items, sops):
-    n = refs = 0
-    for it in items or []:
-        n += 1
-        if it.get("ValueType") in ("IMAGE", "COMPOSITE", "WAVEFORM") and "ReferencedSOPSequence" in it:
-            refs += 1
-            sops.append(str(it.ReferencedSOPSequence[0].ReferencedSOPInstanceUID))
-        a, b = sr_counts(it.get("ContentSequence"), sops)
-        n += a
-        refs += b
-    return n, refs
 
 
 def main():

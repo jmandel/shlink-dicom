@@ -11,15 +11,14 @@ Output: { sop: { path, size, series, study, source?, reencoded? } }, where `sour
 was re-encoded from."""
 import hashlib, json, subprocess, sys, tarfile
 from pathlib import Path
-import struct
 import numpy as np
 import pydicom
-from pydicom.sequence import Sequence
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dicomlib import PIXEL_TAGS as SKIP, norm  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 CACHE = Path("/media/barracuda/shlink-sample-orig")
 SERVER = ROOT / "target" / "release" / "shl-dicom-server"
-SKIP = {0x7FE00010, 0x00280006}
 
 
 def digest(p: Path) -> str:
@@ -38,21 +37,6 @@ def extracted(tgz: Path) -> Path:
             t.extractall(d, filter="data")
         (d / ".done").write_text(str(tgz))
     return d
-
-
-def norm(e):
-    """An element's value as comparable data: sequences item by item, and numbers or bytes as their
-    little-endian bytes (implicit VR files read OW/US-ambiguous data such as LUT Data as bytes)."""
-    v = e.value
-    if isinstance(v, Sequence):
-        return [{int(x.tag): norm(x) for x in item if int(x.tag) not in SKIP} for item in v]
-    if isinstance(v, (bytes, bytearray)):
-        return bytes(v)
-    if e.VR in ("US", "SS", "OW", "US or SS", "US or OW", "US or SS or OW") and v is not None:
-        vals = list(v) if hasattr(v, "__iter__") else [v]
-        if all(isinstance(x, int) for x in vals):
-            return b"".join(struct.pack("<H" if x >= 0 else "<h", x) for x in vals)
-    return v
 
 
 def same_except_pixels(a, b) -> str | None:

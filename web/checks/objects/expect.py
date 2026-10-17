@@ -8,23 +8,12 @@ from pathlib import Path
 import pydicom
 import numpy as np
 from floatref import float_real, float_window, rw_item
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dicomlib import sr_counts  # noqa: E402
 
 HERE = Path(__file__).parent
 man = json.loads((HERE / "samples.json").read_text())
 root = Path(man["dataRoot"])
-
-
-def sr_counts(items, sops):
-    n = refs = 0
-    for it in items or []:
-        n += 1
-        if it.get("ValueType") in ("IMAGE", "COMPOSITE", "WAVEFORM") and "ReferencedSOPSequence" in it:
-            refs += 1
-            sops.append(str(it.ReferencedSOPSequence[0].ReferencedSOPInstanceUID))
-        a, b = sr_counts(it.get("ContentSequence"), sops)
-        n += a
-        refs += b
-    return n, refs
 
 
 out = {}
