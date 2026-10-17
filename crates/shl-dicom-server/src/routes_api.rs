@@ -519,14 +519,17 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
         };
         if total.is_some_and(|t| start + got + chunk.len() as u64 > t) {
             let _ = file.set_len(local).await;
+            drain(&mut stream, state.quotas.request_bytes).await;
             return Append::Fail(problem(StatusCode::BAD_REQUEST, PROBLEM_LENGTH, "inconsistent length values for upload", json!({})));
         }
         if max_body.is_some_and(|m| got + chunk.len() as u64 > m) {
             let _ = file.set_len(local).await;
+            drain(&mut stream, state.quotas.request_bytes).await;
             return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("appends may be at most {} bytes", max_body.unwrap_or_default())));
         }
         if start + got + chunk.len() as u64 > quota_end {
             let _ = file.set_len(local).await;
+            drain(&mut stream, state.quotas.request_bytes).await;
             return Append::Fail(json_err(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_BYTES_EXCEEDED"));
         }
         if file.write_all(&chunk).await.is_err() {
@@ -537,6 +540,20 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
     }
     let _ = file.flush().await;
     Append::Ok(start + got)
+}
+
+/// Reads and drops what is left of a refused request body, up to `limit` bytes (or until it stops
+/// arriving), so the client finishes sending and reads the refusal. A server that answers and
+/// closes while the client is still writing leaves it a broken pipe instead of the response on
+/// some systems (macOS).
+async fn drain(stream: &mut (impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin), limit: u64) {
+    let mut n = 0u64;
+    while n < limit {
+        match tokio::time::timeout(BODY_IDLE, stream.next()).await {
+            Ok(Some(Ok(c))) => n += c.len() as u64,
+            _ => break,
+        }
+    }
 }
 
 /// Encrypted bytes a share holds or has on the way, apart from upload `except`: finished files,
