@@ -155,10 +155,11 @@ fn scan_header(b: &[u8]) -> Option<Header> {
         if len == UNDEF {
             return None;
         }
+        let end = vo.checked_add(len as usize)?;
         if tag == 0x0002_0010 {
-            ts = String::from_utf8_lossy(b.get(vo..vo + len as usize)?).trim_end_matches(['\0', ' ']).to_string();
+            ts = String::from_utf8_lossy(b.get(vo..end)?).trim_end_matches(['\0', ' ']).to_string();
         }
-        p = vo + len as usize;
+        p = end;
     }
     // Implicit VR, big endian and deflated data sets are never encapsulated-and-rewritable here.
     if matches!(ts.as_str(), "1.2.840.10008.1.2" | "1.2.840.10008.1.2.1" | "1.2.840.10008.1.2.2" | "1.2.840.10008.1.2.1.99" | "")
@@ -187,7 +188,7 @@ fn scan_header(b: &[u8]) -> Option<Header> {
         }
         match tag {
             NUMBER_OF_FRAMES if len != UNDEF => {
-                let s = String::from_utf8_lossy(b.get(vo..vo + len as usize)?).to_string();
+                let s = String::from_utf8_lossy(b.get(vo..vo.checked_add(len as usize)?)?).to_string();
                 frames = s.trim_matches(['\0', ' ']).split('\\').next()?.trim().parse::<usize>().unwrap_or(1).max(1);
             }
             EOT_TAG | EOT_LENGTHS_TAG => has_eot = true,
