@@ -112,7 +112,9 @@ export class CompressPool {
     while (!this.idle.length) await new Promise<void>((r) => this.waiting.push(r));
     const w = this.idle.pop()!;
     const id = ++this.seq;
-    const copy = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+    // Always a copy: the buffer goes to the worker (transferred), and `bytes` may be a view of the
+    // image's own source (an in-memory staged file), which a transfer would empty.
+    const copy = bytes.slice();
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
       w.postMessage({ id, bytes: copy.buffer, mode }, [copy.buffer as ArrayBuffer]);
