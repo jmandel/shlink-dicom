@@ -87,6 +87,7 @@ struct Flaky {
     parts_dir: std::path::PathBuf,
     fail_flush: std::sync::atomic::AtomicBool,
     fail_delete: std::sync::atomic::AtomicBool,
+    fail_put: std::sync::atomic::AtomicBool,
 }
 
 impl Flaky {
@@ -96,6 +97,7 @@ impl Flaky {
             parts_dir: dir.join("flaky-parts"),
             fail_flush: false.into(),
             fail_delete: false.into(),
+            fail_put: false.into(),
         })
     }
     fn emulates_parts(&self) -> bool {
@@ -164,6 +166,9 @@ impl BlobStore for Flaky {
         })
     }
     fn put_file<'a>(&'a self, key: &'a str, path: &'a std::path::Path) -> BoxFuture<'a, Result<(), String>> {
+        if self.fail_put.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Box::pin(async { Err("put failed (test)".to_string()) });
+        }
         self.inner.put_file(key, path)
     }
 }
@@ -2444,5 +2449,25 @@ async fn test_cloning_needs_the_source_token_except_for_the_sample() {
     let (sample, _) = state.create_share(true, None).unwrap();
     as_sample(&state, &sample);
     assert_eq!(client.post(format!("{base}/api/shares/{sample}/clone")).send().await.unwrap().status(), StatusCode::CREATED);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A whole-file PUT whose last step fails leaves no upload behind (it can't be resumed): HEAD finds
+/// nothing, and the same PUT again succeeds.
+#[tokio::test]
+async fn test_a_failed_whole_file_put_leaves_no_upload() {
+    let dir = temp_data_dir("failed_put");
+    let flaky = Flaky::new(test_store(&dir), &dir);
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas::default(), flaky.clone()).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let url = format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[47u8; 16]));
+    flaky.fail_put.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(client.put(&url).bearer_auth(&token).body(vec![1u8; 5000]).send().await.unwrap().status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(client.head(&url).bearer_auth(&token).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(client.put(&url).bearer_auth(&token).body(vec![1u8; 5000]).send().await.unwrap().status(), StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
 }

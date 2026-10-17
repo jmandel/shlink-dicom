@@ -828,7 +828,13 @@ pub async fn put_share_file(
         }
         return match publish_file(&state, &sid, &file_id, total).await {
             Ok(entry) => finished(&state, if resumable.is_some() { StatusCode::CREATED } else { StatusCode::OK }, entry),
-            Err(e) => store_failed("publish upload", e),
+            Err(e) => {
+                // A whole-file PUT can't be resumed: its upload goes with the failure.
+                if resumable.is_none() {
+                    forget_upload(&state, &sid, &file_id);
+                }
+                store_failed("publish upload", e)
+            }
         };
     }
     // Staged bytes of a part's size go on to the store. If that fails, the offset falls back to the
