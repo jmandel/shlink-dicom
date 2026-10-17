@@ -289,6 +289,10 @@ async fn main() {
                     if round % 10 == 9 {
                         gc.sweep_stale_uploads();
                     }
+                    // Every minute: expired capability URLs, and expired shares with their files.
+                    if let Err(e) = gc.run_sweep() {
+                        eprintln!("sweep: {e}");
+                    }
                     gc.empty_trash().await;
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
