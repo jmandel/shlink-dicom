@@ -1,0 +1,59 @@
+# Builds and tests the code on the platforms people develop and run it on besides x86_64 Linux,
+# which the release and Pages workflows cover: macOS on Apple Silicon and Linux on aarch64.
+# Native Rust (both workspaces: build and test; tests that need sample files outside git skip
+# themselves), the wasm modules and the web app, and a smoke run of the packer and the reference
+# receiver's test vector.
+name: Portability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portability-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          cache-key: portability
+      - uses: ./.github/actions/wasm
+      - uses: ./.github/actions/web
+
+      - name: Rust tests (crates)
+        run: cargo test -q --release --workspace
+
+      - name: Rust tests (codecs)
+        working-directory: codecs
+        run: cargo test -q --release --workspace
+
+      - name: Pack and compress smoke run
+        run: |
+          cargo build -q --release -p shl-dicom-server
+          out="$RUNNER_TEMP/pack"
+          ./target/release/shl-dicom-server compress web/how/data/bench --out "$RUNNER_TEMP/compressed"
+          ./target/release/shl-dicom-server pack web/how/data/bench --out "$out" --base-url https://host.example/s/
+          ls -l "$out"
+          test "$(ls "$out"/*.bin | wc -l)" -ge 1 && test -s "$out/bundle.jwe"
+
+      - name: Test vector (reference receiver): regenerates fixtures/golden, which must not change
+        run: |
+          bun reference/test-vector.ts
+          git diff --exit-code -- fixtures/
