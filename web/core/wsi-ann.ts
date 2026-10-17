@@ -1,6 +1,7 @@
 // Microscopy Bulk Simple Annotations (SOP Class 1.2.840.10008.5.1.4.1.1.91.1, modality ANN):
 // parsing, conversion to base-level pixel coordinates, and a grid index for drawing what is on
 // screen. Pure TypeScript, no DOM.
+import { parseDicomSync, type DataSet } from "./dicom";
 import { dicomLabToSrgb } from "./icc";
 
 export const ANN_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.91.1";
@@ -38,70 +39,6 @@ export interface SlideGeometry {
   orientation: number[] | null;
 }
 
-const UNDEF = 0xffffffff;
-const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
-
-interface El {
-  tag: number;
-  vr: string;
-  vo: number;
-  len: number;
-}
-
-/** A small explicit-VR-little-endian walker (annotation objects are always explicit VR LE). */
-function reader(bytes: Uint8Array) {
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const read = (p: number): El => {
-    const tag = ((dv.getUint16(p, true) << 16) | dv.getUint16(p + 2, true)) >>> 0;
-    if (tag >>> 16 === 0xfffe) return { tag, vr: "", vo: p + 8, len: dv.getUint32(p + 4, true) };
-    const vr = String.fromCharCode(bytes[p + 4], bytes[p + 5]);
-    if (LONG_VR.has(vr)) return { tag, vr, vo: p + 12, len: dv.getUint32(p + 8, true) };
-    return { tag, vr, vo: p + 8, len: dv.getUint16(p + 6, true) };
-  };
-  const skipUndefined = (p: number): number => {
-    for (;;) {
-      const e = read(p);
-      if (e.tag === 0xfffee0dd || e.tag === 0xfffee00d) return e.vo;
-      p = e.len === UNDEF ? skipUndefined(e.vo) : e.vo + e.len;
-    }
-  };
-  /** Elements of [a, b) (or to an item delimiter); calls fn with each. */
-  const elements = (a: number, b: number, fn: (e: El) => void): number => {
-    let p = a;
-    while (p < b) {
-      const e = read(p);
-      if (e.tag === 0xfffee00d) return e.vo;
-      fn(e);
-      p = e.len === UNDEF ? skipUndefined(e.vo) : e.vo + e.len;
-    }
-    return p;
-  };
-  /** Items of a sequence element. */
-  const items = (e: El, fn: (a: number, b: number) => void) => {
-    let p = e.vo;
-    const stop = e.len === UNDEF ? bytes.length : e.vo + e.len;
-    while (p < stop) {
-      const it = read(p);
-      if (it.tag === 0xfffee0dd) return;
-      if (it.len === UNDEF) {
-        const end = elements(it.vo, bytes.length, () => {});
-        fn(it.vo, end);
-        p = end;
-      } else {
-        fn(it.vo, it.vo + it.len);
-        p = it.vo + it.len;
-      }
-    }
-  };
-  const text = (e: El) => {
-    let s = "";
-    for (let i = 0; i < e.len; i++) s += String.fromCharCode(bytes[e.vo + i]);
-    return s.replace(/[\0 ]+$/, "").trim();
-  };
-  const copy = (e: El) => bytes.slice(e.vo, e.vo + e.len).buffer;
-  return { dv, read, elements, items, text, copy };
-}
-
 /** Points per annotation for the graphic types that have no index list. */
 const FIXED_POINTS: Record<string, number> = { POINT: 1, ELLIPSE: 4, RECTANGLE: 4 };
 
@@ -111,39 +48,26 @@ const FIXED_POINTS: Record<string, number> = { POINT: 1, ELLIPSE: 4, RECTANGLE: 
  */
 export function parseBulkAnnotations(bytes: Uint8Array, slide: SlideGeometry): BulkAnnotations {
   if (bytes.length < 132 || bytes[128] !== 0x44 || bytes[131] !== 0x4d) throw new Error("not a DICOM Part 10 file");
-  const r = reader(bytes);
-  let p = 132;
-  while (r.dv.getUint16(p, true) === 0x0002) {
-    const e = r.read(p);
-    p = e.vo + e.len;
+  const { ds } = parseDicomSync(bytes);
+  const out: BulkAnnotations = { coordinateType: ds.str(0x006a0001) ?? "", referencedSeries: [], groups: [] };
+  for (const it of ds.seq(0x00081115)) {
+    const uid = it.str(0x0020000e);
+    if (uid) out.referencedSeries.push(uid);
   }
-  const out: BulkAnnotations = { coordinateType: "", referencedSeries: [], groups: [] };
-  const raw: { number: number; label: string; type: string; count: number; f32?: ArrayBuffer; f64?: ArrayBuffer; index?: ArrayBuffer; lab: [number, number, number] | null; dims: number }[] = [];
-  r.elements(p, bytes.length, (e) => {
-    switch (e.tag) {
-      case 0x006a0001: out.coordinateType = r.text(e); break;
-      case 0x00081115:
-        r.items(e, (a, b) => r.elements(a, b, (x) => { if (x.tag === 0x0020000e) out.referencedSeries.push(r.text(x)); }));
-        break;
-      case 0x006a0002:
-        r.items(e, (a, b) => {
-          const g = { number: 0, label: "", type: "", count: 0, lab: null as [number, number, number] | null, dims: 2 } as (typeof raw)[number];
-          r.elements(a, b, (x) => {
-            switch (x.tag) {
-              case 0x0040a180: g.number = r.dv.getUint16(x.vo, true); break;
-              case 0x006a0005: g.label = r.text(x); break;
-              case 0x00700023: g.type = r.text(x); break;
-              case 0x006a000c: g.count = r.dv.getUint32(x.vo, true); break;
-              case 0x00660016: g.f32 = r.copy(x); break;
-              case 0x00660022: g.f64 = r.copy(x); break;
-              case 0x00660040: g.index = r.copy(x); break;
-              case 0x0062000d: g.lab = [0, 2, 4].map((k) => r.dv.getUint16(x.vo + k, true)) as [number, number, number]; break;
-            }
-          });
-          raw.push(g);
-        });
-        break;
-    }
+  /** A value's bytes in a buffer of their own (aligned for typed arrays). */
+  const copy = (it: DataSet, t: number) => it.raw(t)?.slice().buffer;
+  const raw = ds.seq(0x006a0002).map((it) => {
+    const lab = it.nums(0x0062000d);
+    return {
+      number: it.num(0x0040a180) ?? 0,
+      label: it.str(0x006a0005) ?? "",
+      type: it.str(0x00700023) ?? "",
+      count: it.num(0x006a000c) ?? 0,
+      f32: copy(it, 0x00660016),
+      f64: copy(it, 0x00660022),
+      index: copy(it, 0x00660040),
+      lab: lab.length >= 3 ? ([lab[0], lab[1], lab[2]] as [number, number, number]) : null,
+    };
   });
   const dims = out.coordinateType === "3D" ? 3 : 2;
   const toPixel = dims === 3 ? slideToPixel(slide) : null;

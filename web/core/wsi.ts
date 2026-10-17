@@ -4,6 +4,7 @@
 // Pure TypeScript with no DOM: runs in browsers, workers and Bun. The network side (record cache,
 // walking fragment headers) is in wsi-source.ts.
 import type { SeriesEntry } from "./bundle";
+import { NeedMoreBytes, parseDicomSync, T as dicomT, UNDEF, type DataSet } from "./dicom";
 
 const WSI_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.77.1.6";
 
@@ -103,13 +104,7 @@ export interface SegmentInfo {
   lab: [number, number, number] | null;
 }
 
-/** The header was cut short: read at least `needBytes` from the instance start and parse again. */
-export class NeedMoreBytes extends Error {
-  constructor(readonly needBytes: number) {
-    super(`DICOM header continues past the bytes read (need ${needBytes})`);
-    this.name = "NeedMoreBytes";
-  }
-}
+export { NeedMoreBytes };
 
 export class SlideHeaderError extends Error {
   constructor(msg: string) {
@@ -118,94 +113,93 @@ export class SlideHeaderError extends Error {
   }
 }
 
-const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
-const UNDEF = 0xffffffff;
-const T = (g: number, e: number) => ((g << 16) | e) >>> 0;
-
+const t = (g: number, e: number) => ((g << 16) | e) >>> 0;
 const TAG = {
-  ImageType: T(0x0008, 0x0008),
-  SOPClass: T(0x0008, 0x0016),
-  SOPInstance: T(0x0008, 0x0018),
-  Modality: T(0x0008, 0x0060),
-  DimOrgType: T(0x0020, 0x9311),
-  Spp: T(0x0028, 0x0002),
-  Photometric: T(0x0028, 0x0004),
-  Planar: T(0x0028, 0x0006),
-  Frames: T(0x0028, 0x0008),
-  Rows: T(0x0028, 0x0010),
-  Columns: T(0x0028, 0x0011),
-  PixelSpacing: T(0x0028, 0x0030),
-  BitsAllocated: T(0x0028, 0x0100),
-  BitsStored: T(0x0028, 0x0101),
-  HighBit: T(0x0028, 0x0102),
-  PixelRep: T(0x0028, 0x0103),
-  PixelMeasuresSeq: T(0x0028, 0x9110),
-  ICCProfile: T(0x0028, 0x2000),
-  ReferencedSeriesSeq: T(0x0008, 0x1115),
-  SeriesInstance: T(0x0020, 0x000e),
-  FrameOfReference: T(0x0020, 0x0052),
-  Wavelength: T(0x0022, 0x0055),
-  XOffset: T(0x0040, 0x072a),
-  YOffset: T(0x0040, 0x073a),
-  ZOffset: T(0x0040, 0x074a),
-  ImagedVolumeWidth: T(0x0048, 0x0001),
-  OriginSeq: T(0x0048, 0x0008),
-  OrientationSlide: T(0x0048, 0x0102),
-  OpticalPathSeq: T(0x0048, 0x0105),
-  OpticalPathId: T(0x0048, 0x0106),
-  OpticalPathDesc: T(0x0048, 0x0107),
-  OpticalPathIdSeq: T(0x0048, 0x0207),
-  SegmentationType: T(0x0062, 0x0001),
-  SegmentSeq: T(0x0062, 0x0002),
-  SegmentNumber: T(0x0062, 0x0004),
-  SegmentLabel: T(0x0062, 0x0005),
-  SegmentIdSeq: T(0x0062, 0x000a),
-  RefSegmentNumber: T(0x0062, 0x000b),
-  SegmentLab: T(0x0062, 0x000d),
-  MaxFractional: T(0x0062, 0x000e),
-  TotalCols: T(0x0048, 0x0006),
-  TotalRows: T(0x0048, 0x0007),
-  PlanePosSlideSeq: T(0x0048, 0x021a),
-  ColPos: T(0x0048, 0x021e),
-  RowPos: T(0x0048, 0x021f),
-  OpticalPaths: T(0x0048, 0x0302),
-  FocalPlanes: T(0x0048, 0x0303),
-  SharedFG: T(0x5200, 0x9229),
-  PerFrameFG: T(0x5200, 0x9230),
-  EOT: T(0x7fe0, 0x0001),
-  EOTLengths: T(0x7fe0, 0x0002),
-  PixelData: T(0x7fe0, 0x0010),
+  ImageType: t(0x0008, 0x0008),
+  SOPClass: t(0x0008, 0x0016),
+  SOPInstance: t(0x0008, 0x0018),
+  Modality: t(0x0008, 0x0060),
+  DimOrgType: t(0x0020, 0x9311),
+  Spp: t(0x0028, 0x0002),
+  Photometric: t(0x0028, 0x0004),
+  Planar: t(0x0028, 0x0006),
+  Frames: t(0x0028, 0x0008),
+  Rows: t(0x0028, 0x0010),
+  Columns: t(0x0028, 0x0011),
+  PixelSpacing: t(0x0028, 0x0030),
+  BitsAllocated: t(0x0028, 0x0100),
+  BitsStored: t(0x0028, 0x0101),
+  HighBit: t(0x0028, 0x0102),
+  PixelRep: t(0x0028, 0x0103),
+  PixelMeasuresSeq: t(0x0028, 0x9110),
+  ICCProfile: t(0x0028, 0x2000),
+  ReferencedSeriesSeq: t(0x0008, 0x1115),
+  SeriesInstance: t(0x0020, 0x000e),
+  FrameOfReference: t(0x0020, 0x0052),
+  Wavelength: t(0x0022, 0x0055),
+  XOffset: t(0x0040, 0x072a),
+  YOffset: t(0x0040, 0x073a),
+  ZOffset: t(0x0040, 0x074a),
+  ImagedVolumeWidth: t(0x0048, 0x0001),
+  OriginSeq: t(0x0048, 0x0008),
+  OrientationSlide: t(0x0048, 0x0102),
+  OpticalPathSeq: t(0x0048, 0x0105),
+  OpticalPathId: t(0x0048, 0x0106),
+  OpticalPathDesc: t(0x0048, 0x0107),
+  OpticalPathIdSeq: t(0x0048, 0x0207),
+  SegmentationType: t(0x0062, 0x0001),
+  SegmentSeq: t(0x0062, 0x0002),
+  SegmentNumber: t(0x0062, 0x0004),
+  SegmentLabel: t(0x0062, 0x0005),
+  SegmentIdSeq: t(0x0062, 0x000a),
+  RefSegmentNumber: t(0x0062, 0x000b),
+  SegmentLab: t(0x0062, 0x000d),
+  MaxFractional: t(0x0062, 0x000e),
+  TotalCols: t(0x0048, 0x0006),
+  TotalRows: t(0x0048, 0x0007),
+  PlanePosSlideSeq: t(0x0048, 0x021a),
+  ColPos: t(0x0048, 0x021e),
+  RowPos: t(0x0048, 0x021f),
+  OpticalPaths: t(0x0048, 0x0302),
+  FocalPlanes: t(0x0048, 0x0303),
+  SharedFG: t(0x5200, 0x9229),
+  PerFrameFG: t(0x5200, 0x9230),
+  EOT: t(0x7fe0, 0x0001),
+  EOTLengths: t(0x7fe0, 0x0002),
+  PixelData: t(0x7fe0, 0x0010),
 } as const;
 
-/** VRs for implicit VR little endian, for the elements this reader interprets. */
-const IMPLICIT_VR: Record<number, string> = {
-  [TAG.ImageType]: "CS", [TAG.SOPClass]: "UI", [TAG.SOPInstance]: "UI", [TAG.Modality]: "CS",
-  [TAG.DimOrgType]: "CS", [TAG.Spp]: "US", [TAG.Photometric]: "CS", [TAG.Planar]: "US", [TAG.Frames]: "IS",
-  [TAG.Rows]: "US", [TAG.Columns]: "US", [TAG.PixelSpacing]: "DS", [TAG.BitsAllocated]: "US", [TAG.BitsStored]: "US",
-  [TAG.HighBit]: "US", [TAG.PixelRep]: "US", [TAG.PixelMeasuresSeq]: "SQ", [TAG.TotalCols]: "UL", [TAG.TotalRows]: "UL",
-  [TAG.PlanePosSlideSeq]: "SQ", [TAG.ColPos]: "SL", [TAG.RowPos]: "SL", [TAG.OpticalPaths]: "UL", [TAG.FocalPlanes]: "UL",
-  [TAG.SharedFG]: "SQ", [TAG.PerFrameFG]: "SQ", [TAG.EOT]: "OV", [TAG.EOTLengths]: "OV", [TAG.PixelData]: "OB",
-  [TAG.ICCProfile]: "OB", [TAG.ReferencedSeriesSeq]: "SQ", [TAG.SeriesInstance]: "UI", [TAG.FrameOfReference]: "UI",
-  [TAG.Wavelength]: "FL", [TAG.XOffset]: "DS", [TAG.YOffset]: "DS", [TAG.ZOffset]: "DS", [TAG.ImagedVolumeWidth]: "FL",
-  [TAG.OriginSeq]: "SQ", [TAG.OrientationSlide]: "DS", [TAG.OpticalPathSeq]: "SQ", [TAG.OpticalPathId]: "SH",
-  [TAG.OpticalPathDesc]: "ST", [TAG.OpticalPathIdSeq]: "SQ", [TAG.SegmentationType]: "CS", [TAG.SegmentSeq]: "SQ",
-  [TAG.SegmentNumber]: "US", [TAG.SegmentLabel]: "LO", [TAG.SegmentIdSeq]: "SQ", [TAG.RefSegmentNumber]: "US",
-  [TAG.SegmentLab]: "US", [TAG.MaxFractional]: "US",
-};
+/** Little-endian 64-bit values (Extended Offset Table). */
+function u64s(raw: Uint8Array | null): number[] | null {
+  if (!raw) return null;
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const out: number[] = [];
+  for (let i = 0; i + 8 <= raw.length; i += 8) out.push(dv.getUint32(i, true) + dv.getUint32(i + 4, true) * 2 ** 32);
+  return out;
+}
 
-interface El {
-  tag: number;
-  vr: string;
-  /** Value offset (absolute within the buffer). */
-  vo: number;
-  /** Value length (UNDEF for undefined). */
-  len: number;
+/** The functional group macros this reader uses, from one Shared or Per-frame item. */
+function functionalGroups(item: DataSet) {
+  const fg = { spacing: null as [number, number] | null, col: 0, row: 0, z: null as number | null, path: null as string | null, segment: null as number | null };
+  for (const m of item.seq(TAG.PixelMeasuresSeq)) {
+    const v = m.strs(TAG.PixelSpacing).map(Number);
+    if (v.length === 2 && v.every((x) => x > 0)) fg.spacing = [v[0], v[1]];
+  }
+  for (const m of item.seq(TAG.PlanePosSlideSeq)) {
+    if (m.get(TAG.ColPos)) fg.col = m.num(TAG.ColPos) ?? 0;
+    if (m.get(TAG.RowPos)) fg.row = m.num(TAG.RowPos) ?? 0;
+    if (m.get(TAG.ZOffset)) fg.z = Number(m.str(TAG.ZOffset) ?? "");
+  }
+  for (const m of item.seq(TAG.OpticalPathIdSeq)) if (m.get(TAG.OpticalPathId)) fg.path = m.str(TAG.OpticalPathId) ?? "";
+  for (const m of item.seq(TAG.SegmentIdSeq)) if (m.get(TAG.RefSegmentNumber)) fg.segment = m.num(TAG.RefSegmentNumber);
+  return fg;
 }
 
 /**
  * Reads a whole-slide instance's header from the first bytes of its Part 10 file, up to and
- * including the Basic Offset Table item. Throws NeedMoreBytes when `bytes` stops short;
- * with `partial: true` it instead returns what it found, with `complete: false`.
+ * including the Basic Offset Table item, with the data set reader (dicom.ts). Throws
+ * NeedMoreBytes when `bytes` stops short; with `partial: true` it instead returns what it found,
+ * with `complete: false`.
  */
 export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {}): SlideHeader {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -223,281 +217,121 @@ export function parseSlideHeader(bytes: Uint8Array, o: { partial?: boolean } = {
     pixelDataValueOffset: -1, encapsulated: false, pixelDataLength: -1, basicOffsets: null, firstFragmentOffset: -1,
     complete: false, needBytes: 0,
   };
-  const str = (vo: number, len: number) => {
-    let s = "";
-    for (let i = 0; i < len; i++) s += String.fromCharCode(bytes[vo + i]);
-    return s.replace(/[\0 ]+$/, "").replace(/^ +/, "");
-  };
-  const ascii2 = (p: number) => String.fromCharCode(bytes[p], bytes[p + 1]);
-  const need = (n: number) => {
-    if (n > end) throw new NeedMoreBytes(n);
-  };
-
-  let explicit = true;
-  const readEl = (p: number, isExplicit: boolean): El => {
-    need(p + 8);
-    const tag = ((dv.getUint16(p, true) << 16) | dv.getUint16(p + 2, true)) >>> 0;
-    if (tag >>> 16 === 0xfffe) return { tag, vr: "", vo: p + 8, len: dv.getUint32(p + 4, true) };
-    if (isExplicit && /^[A-Z]{2}$/.test(ascii2(p + 4))) {
-      const vr = ascii2(p + 4);
-      if (LONG_VR.has(vr)) {
-        need(p + 12);
-        return { tag, vr, vo: p + 12, len: dv.getUint32(p + 8, true) };
-      }
-      return { tag, vr, vo: p + 8, len: dv.getUint16(p + 6, true) };
-    }
-    const len = dv.getUint32(p + 4, true);
-    return { tag, vr: IMPLICIT_VR[tag] ?? (len === UNDEF ? "SQ" : "UN"), vo: p + 8, len };
-  };
-
-  /** Skips an undefined-length value (sequence or item) at p; returns the position after its delimiter. */
-  const skipUndefined = (p: number, isExplicit: boolean): number => {
-    for (;;) {
-      const el = readEl(p, isExplicit);
-      if (el.tag === 0xfffee0dd || el.tag === 0xfffee00d) return el.vo;
-      if (el.tag === 0xfffee000) {
-        p = el.len === UNDEF ? skipUndefined(el.vo, isExplicit) : el.vo + el.len;
-        continue;
-      }
-      p = el.len === UNDEF ? skipUndefined(el.vo, isExplicit) : el.vo + el.len;
-    }
-  };
-
-  /** Calls `fn(itemStart, itemEnd)` for each item of a sequence; returns the position after it. */
-  const eachItem = (el: El, isExplicit: boolean, fn: (a: number, b: number) => void): number => {
-    let p = el.vo;
-    const stop = el.len === UNDEF ? Infinity : el.vo + el.len;
-    while (p < stop) {
-      const it = readEl(p, isExplicit);
-      if (it.tag === 0xfffee0dd) return it.vo;
-      if (it.tag !== 0xfffee000) throw new SlideHeaderError("malformed sequence");
-      if (it.len === UNDEF) {
-        const after = skipUndefined(it.vo, isExplicit);
-        fn(it.vo, after - 8);
-        p = after;
-      } else {
-        need(it.vo + it.len);
-        fn(it.vo, it.vo + it.len);
-        p = it.vo + it.len;
-      }
-    }
-    return stop;
-  };
-
-  /** Walks the elements of a data set in [a, b), calling fn; nested sequences are skipped unless fn handles them. */
-  const walk = (a: number, b: number, isExplicit: boolean, fn: (el: El) => number | boolean | void) => {
-    let p = a;
-    while (p < b) {
-      const el = readEl(p, isExplicit);
-      if (el.tag === 0xfffee00d) return;
-      const handled = fn(el);
-      if (handled) {
-        p = el.len === UNDEF ? (handled as any as number) : el.vo + el.len;
-        continue;
-      }
-      p = el.len === UNDEF ? skipUndefined(el.vo, isExplicit) : el.vo + el.len;
-    }
-  };
-
-  const u16 = (el: El) => dv.getUint16(el.vo, true);
-  const u32 = (el: El) => dv.getUint32(el.vo, true);
-  const num = (el: El) => {
-    if (el.vr === "US") return u16(el);
-    if (el.vr === "UL") return u32(el);
-    if (el.vr === "SL") return dv.getInt32(el.vo, true);
-    if (el.vr === "SS") return dv.getInt16(el.vo, true);
-    return Number(str(el.vo, el.len).split("\\")[0]);
-  };
-  const u64s = (el: El) => {
-    const out: number[] = [];
-    for (let i = 0; i + 8 <= el.len; i += 8) out.push(dv.getUint32(el.vo + i, true) + dv.getUint32(el.vo + i + 4, true) * 2 ** 32);
-    return out;
-  };
-
-  /** A short value's text (needs its bytes). */
-  const val = (e: El) => (e.len === UNDEF ? "" : (need(e.vo + e.len), str(e.vo, e.len)));
-  const firstItemWalk = (e: El, fn: (x: El) => void) => eachItem(e, explicit, (a, b) => walk(a, b, explicit, fn)) as any as number;
-
-  /** The functional group macros this reader uses, from one Shared or Per-frame item. */
-  const functionalGroups = (a: number, b: number) => {
-    const fg = { spacing: null as [number, number] | null, col: 0, row: 0, z: null as number | null, path: null as string | null, segment: null as number | null };
-    walk(a, b, explicit, (e) => {
-      if (e.tag === TAG.PixelMeasuresSeq) {
-        return firstItemWalk(e, (e2) => {
-          if (e2.tag !== TAG.PixelSpacing) return;
-          const v = val(e2).split("\\").map(Number);
-          if (v.length === 2 && v.every((x) => x > 0)) fg.spacing = [v[0], v[1]];
-        });
-      }
-      if (e.tag === TAG.PlanePosSlideSeq) {
-        return firstItemWalk(e, (e2) => {
-          if (e2.tag === TAG.ColPos) (need(e2.vo + e2.len), (fg.col = num(e2)));
-          else if (e2.tag === TAG.RowPos) (need(e2.vo + e2.len), (fg.row = num(e2)));
-          else if (e2.tag === TAG.ZOffset) fg.z = Number(val(e2));
-        });
-      }
-      if (e.tag === TAG.OpticalPathIdSeq) {
-        return firstItemWalk(e, (e2) => {
-          if (e2.tag === TAG.OpticalPathId) fg.path = val(e2);
-        });
-      }
-      if (e.tag === TAG.SegmentIdSeq) {
-        return firstItemWalk(e, (e2) => {
-          if (e2.tag === TAG.RefSegmentNumber) (need(e2.vo + 2), (fg.segment = dv.getUint16(e2.vo, true)));
-        });
-      }
-    });
-    return fg;
-  };
-
-  // File meta (always explicit VR LE).
-  let pos = 132;
-  for (;;) {
-    need(pos + 8);
-    if (dv.getUint16(pos, true) !== 0x0002) break;
-    const el = readEl(pos, true);
-    need(el.vo + el.len);
-    if (el.tag === T(0x0002, 0x0010)) h.transferSyntax = str(el.vo, el.len);
-    pos = el.vo + el.len;
-  }
+  const r = parseDicomSync(bytes, { untilPixelData: true, need: true });
+  h.transferSyntax = r.meta.str(dicomT.TransferSyntaxUID) ?? "";
   if (h.transferSyntax === "1.2.840.10008.1.2.1.99" || h.transferSyntax === "1.2.840.10008.1.2.2") {
     throw new SlideHeaderError(`transfer syntax ${h.transferSyntax} is not supported for slides`);
   }
-  explicit = h.transferSyntax !== "1.2.840.10008.1.2";
-
-  const top = (el: El): number | boolean | void => {
-    const t = el.tag;
-    if (t === TAG.PixelData) return;
-    if (el.vr === "SQ" || el.len === UNDEF) {
-      const items = (fn: (a: number, b: number) => void) => eachItem(el, explicit, fn) as any as number;
-      switch (t) {
-        case TAG.SharedFG:
-          return items((a, b) => {
-            const fg = functionalGroups(a, b);
-            if (fg.spacing) h.pixelSpacing = fg.spacing;
-            if (fg.z !== null) h.sharedZ = fg.z;
-            if (fg.path !== null) h.sharedPath = fg.path;
-          });
-        case TAG.PerFrameFG: {
-          const pp: number[] = [], zs: number[] = [], ids: string[] = [], segs: number[] = [];
-          let anyZ = false, anyPath = false, anySeg = false;
-          const after = items((a, b) => {
-            const fg = functionalGroups(a, b);
-            pp.push(fg.col, fg.row);
-            zs.push(fg.z ?? 0);
-            ids.push(fg.path ?? "");
-            segs.push(fg.segment ?? 0);
-            anyZ ||= fg.z !== null;
-            anyPath ||= fg.path !== null;
-            anySeg ||= fg.segment !== null;
-          });
-          if (pp.some((x) => x !== 0)) h.planePositions = Int32Array.from(pp);
-          if (anyZ) h.frameZ = Float64Array.from(zs);
-          if (anyPath) h.framePath = ids;
-          if (anySeg) h.frameSegment = Int32Array.from(segs);
-          return after;
-        }
-        case TAG.OpticalPathSeq:
-          return items((a, b) => {
-            const p: OpticalPathInfo = { id: "", description: "", wavelength: null, icc: null };
-            walk(a, b, explicit, (e) => {
-              if (e.tag === TAG.OpticalPathId) p.id = val(e);
-              else if (e.tag === TAG.OpticalPathDesc) p.description = val(e);
-              else if (e.tag === TAG.Wavelength && e.len >= 4) (need(e.vo + 4), (p.wavelength = dv.getFloat32(e.vo, true)));
-              else if (e.tag === TAG.ICCProfile && e.len !== UNDEF) (need(e.vo + e.len), (p.icc = bytes.slice(e.vo, e.vo + e.len)));
-            });
-            h.paths.push(p);
-          });
-        case TAG.OriginSeq:
-          return items((a, b) => {
-            let x = 0, y = 0;
-            walk(a, b, explicit, (e) => {
-              if (e.tag === TAG.XOffset) x = Number(val(e));
-              else if (e.tag === TAG.YOffset) y = Number(val(e));
-            });
-            h.origin = [x, y];
-          });
-        case TAG.SegmentSeq:
-          return items((a, b) => {
-            const g: SegmentInfo = { number: 0, label: "", lab: null };
-            walk(a, b, explicit, (e) => {
-              if (e.tag === TAG.SegmentNumber) (need(e.vo + 2), (g.number = dv.getUint16(e.vo, true)));
-              else if (e.tag === TAG.SegmentLabel) g.label = val(e);
-              else if (e.tag === TAG.SegmentLab && e.len >= 6) (need(e.vo + 6), (g.lab = [0, 2, 4].map((k) => dv.getUint16(e.vo + k, true)) as [number, number, number]));
-            });
-            h.segments.push(g);
-          });
-        case TAG.ReferencedSeriesSeq:
-          return items((a, b) =>
-            walk(a, b, explicit, (e) => {
-              if (e.tag === TAG.SeriesInstance) h.referencedSeries.push(val(e));
-            }),
-          );
-      }
-      return;
+  const ds = r.ds;
+  const str = (tg: number) => ds.str(tg) ?? "";
+  const num = (tg: number, d: number) => ds.num(tg) ?? d;
+  h.imageType = ds.strs(TAG.ImageType);
+  if (!h.imageType.length && ds.get(TAG.ImageType)) h.imageType = [""];
+  h.sopClassUid = str(TAG.SOPClass);
+  h.sopInstanceUid = str(TAG.SOPInstance);
+  h.modality = str(TAG.Modality);
+  h.dimensionOrganization = str(TAG.DimOrgType);
+  h.samplesPerPixel = num(TAG.Spp, 1);
+  h.photometric = str(TAG.Photometric);
+  h.planarConfiguration = num(TAG.Planar, 0);
+  h.numberOfFrames = num(TAG.Frames, 1) || 1;
+  h.rows = num(TAG.Rows, 0);
+  h.columns = num(TAG.Columns, 0);
+  h.bitsAllocated = num(TAG.BitsAllocated, 8);
+  h.bitsStored = num(TAG.BitsStored, 8);
+  h.highBit = num(TAG.HighBit, 7);
+  h.pixelRepresentation = num(TAG.PixelRep, 0);
+  h.totalColumns = num(TAG.TotalCols, 0);
+  h.totalRows = num(TAG.TotalRows, 0);
+  h.opticalPaths = num(TAG.OpticalPaths, 1) || 1;
+  h.focalPlanes = num(TAG.FocalPlanes, 1) || 1;
+  h.extendedOffsets = u64s(ds.raw(TAG.EOT));
+  h.extendedLengths = u64s(ds.raw(TAG.EOTLengths));
+  h.seriesInstanceUid = str(TAG.SeriesInstance);
+  h.frameOfReferenceUid = str(TAG.FrameOfReference);
+  if (ds.get(TAG.OrientationSlide)) h.orientation = ds.strs(TAG.OrientationSlide).map(Number);
+  if (ds.get(TAG.ImagedVolumeWidth)) h.imagedVolumeWidth = ds.num(TAG.ImagedVolumeWidth);
+  h.segmentationType = str(TAG.SegmentationType);
+  h.maxFractional = num(TAG.MaxFractional, 0);
+  for (const it of ds.seq(TAG.SharedFG)) {
+    const fg = functionalGroups(it);
+    if (fg.spacing) h.pixelSpacing = fg.spacing;
+    if (fg.z !== null) h.sharedZ = fg.z;
+    if (fg.path !== null) h.sharedPath = fg.path;
+  }
+  const perFrame = ds.seq(TAG.PerFrameFG);
+  if (perFrame.length) {
+    const pp: number[] = [], zs: number[] = [], ids: string[] = [], segs: number[] = [];
+    let anyZ = false, anyPath = false, anySeg = false;
+    for (const it of perFrame) {
+      const fg = functionalGroups(it);
+      pp.push(fg.col, fg.row);
+      zs.push(fg.z ?? 0);
+      ids.push(fg.path ?? "");
+      segs.push(fg.segment ?? 0);
+      anyZ ||= fg.z !== null;
+      anyPath ||= fg.path !== null;
+      anySeg ||= fg.segment !== null;
     }
-    need(el.vo + el.len);
-    switch (t) {
-      case TAG.ImageType: h.imageType = str(el.vo, el.len).split("\\").map((s) => s.trim()); break;
-      case TAG.SOPClass: h.sopClassUid = str(el.vo, el.len); break;
-      case TAG.SOPInstance: h.sopInstanceUid = str(el.vo, el.len); break;
-      case TAG.Modality: h.modality = str(el.vo, el.len); break;
-      case TAG.DimOrgType: h.dimensionOrganization = str(el.vo, el.len); break;
-      case TAG.Spp: h.samplesPerPixel = num(el); break;
-      case TAG.Photometric: h.photometric = str(el.vo, el.len); break;
-      case TAG.Planar: h.planarConfiguration = num(el); break;
-      case TAG.Frames: h.numberOfFrames = num(el) || 1; break;
-      case TAG.Rows: h.rows = num(el); break;
-      case TAG.Columns: h.columns = num(el); break;
-      case TAG.BitsAllocated: h.bitsAllocated = num(el); break;
-      case TAG.BitsStored: h.bitsStored = num(el); break;
-      case TAG.HighBit: h.highBit = num(el); break;
-      case TAG.PixelRep: h.pixelRepresentation = num(el); break;
-      case TAG.TotalCols: h.totalColumns = num(el); break;
-      case TAG.TotalRows: h.totalRows = num(el); break;
-      case TAG.OpticalPaths: h.opticalPaths = num(el) || 1; break;
-      case TAG.FocalPlanes: h.focalPlanes = num(el) || 1; break;
-      case TAG.EOT: h.extendedOffsets = u64s(el); break;
-      case TAG.SeriesInstance: h.seriesInstanceUid = str(el.vo, el.len); break;
-      case TAG.FrameOfReference: h.frameOfReferenceUid = str(el.vo, el.len); break;
-      case TAG.OrientationSlide: h.orientation = str(el.vo, el.len).split("\\").map(Number); break;
-      case TAG.ImagedVolumeWidth: if (el.len >= 4) h.imagedVolumeWidth = dv.getFloat32(el.vo, true); break;
-      case TAG.SegmentationType: h.segmentationType = str(el.vo, el.len); break;
-      case TAG.MaxFractional: h.maxFractional = num(el); break;
-      case TAG.EOTLengths: h.extendedLengths = u64s(el); break;
-    }
-  };
-
-  try {
-    for (;;) {
-      need(pos + 8);
-      const el = readEl(pos, explicit);
-      if (el.tag === TAG.PixelData) {
-        h.pixelDataValueOffset = el.vo;
-        if (el.len === UNDEF) {
+    if (pp.some((x) => x !== 0)) h.planePositions = Int32Array.from(pp);
+    if (anyZ) h.frameZ = Float64Array.from(zs);
+    if (anyPath) h.framePath = ids;
+    if (anySeg) h.frameSegment = Int32Array.from(segs);
+  }
+  for (const it of ds.seq(TAG.OpticalPathSeq)) {
+    const icc = it.get(TAG.ICCProfile);
+    h.paths.push({
+      id: it.str(TAG.OpticalPathId) ?? "",
+      description: it.str(TAG.OpticalPathDesc) ?? "",
+      wavelength: it.get(TAG.Wavelength) ? it.num(TAG.Wavelength) : null,
+      icc: icc ? it.raw(TAG.ICCProfile)!.slice() : null,
+    });
+  }
+  for (const it of ds.seq(TAG.OriginSeq)) h.origin = [Number(it.str(TAG.XOffset) ?? ""), Number(it.str(TAG.YOffset) ?? "")];
+  for (const it of ds.seq(TAG.SegmentSeq)) {
+    const lab = it.nums(TAG.SegmentLab);
+    h.segments.push({ number: it.num(TAG.SegmentNumber) ?? 0, label: it.str(TAG.SegmentLabel) ?? "", lab: lab.length >= 3 ? [lab[0], lab[1], lab[2]] : null });
+  }
+  for (const it of ds.seq(TAG.ReferencedSeriesSeq)) {
+    const uid = it.str(TAG.SeriesInstance);
+    if (uid) h.referencedSeries.push(uid);
+  }
+  let need = r.needBytes;
+  if (!need && r.dataEnd >= 0) {
+    // The Pixel Data element and, for encapsulated data, its Basic Offset Table item.
+    const p = r.dataEnd;
+    if (((dv.getUint16(p, true) << 16) | dv.getUint16(p + 2, true)) >>> 0 === TAG.PixelData) {
+      const explicit = h.transferSyntax !== "1.2.840.10008.1.2";
+      const long = explicit && /^[A-Z]{2}$/.test(String.fromCharCode(bytes[p + 4], bytes[p + 5]));
+      const vo = p + (long ? 12 : 8);
+      if (vo > end) need = vo;
+      else {
+        const len = dv.getUint32(vo - 4, true);
+        h.pixelDataValueOffset = vo;
+        if (len === UNDEF) {
           h.encapsulated = true;
-          const bot = readEl(el.vo, explicit);
-          if (bot.tag !== 0xfffee000) throw new SlideHeaderError("encapsulated Pixel Data without a Basic Offset Table item");
-          h.firstFragmentOffset = bot.vo + bot.len;
-          if (bot.len > 0) {
-            need(bot.vo + bot.len);
-            const offs: number[] = [];
-            for (let i = 0; i < bot.len; i += 4) offs.push(dv.getUint32(bot.vo + i, true));
-            h.basicOffsets = offs;
+          if (vo + 8 > end) need = vo + 8;
+          else {
+            if (dv.getUint16(vo, true) !== 0xfffe || dv.getUint16(vo + 2, true) !== 0xe000) throw new SlideHeaderError("encapsulated Pixel Data without a Basic Offset Table item");
+            const botLen = dv.getUint32(vo + 4, true);
+            h.firstFragmentOffset = vo + 8 + botLen;
+            if (botLen > 0) {
+              if (vo + 8 + botLen > end) need = vo + 8 + botLen;
+              else {
+                const offs: number[] = [];
+                for (let i = 0; i < botLen; i += 4) offs.push(dv.getUint32(vo + 8 + i, true));
+                h.basicOffsets = offs;
+              }
+            }
           }
-        } else {
-          h.pixelDataLength = el.len;
-        }
-        h.complete = true;
-        break;
+        } else h.pixelDataLength = len;
+        if (!need) h.complete = true;
       }
-      if (el.tag > TAG.PixelData) break;
-      const r = top(el);
-      pos = typeof r === "number" ? r : el.len === UNDEF ? skipUndefined(el.vo, explicit) : el.vo + el.len;
     }
-  } catch (e) {
-    if (!(e instanceof NeedMoreBytes) || !o.partial) throw e;
-    h.needBytes = e.needBytes;
+  }
+  if (need) {
+    if (!o.partial) throw new NeedMoreBytes(need);
+    h.needBytes = need;
   }
   h.flavor = h.imageType[2] ?? "";
   if (!h.totalColumns) h.totalColumns = h.columns;

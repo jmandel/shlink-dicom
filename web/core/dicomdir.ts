@@ -1,6 +1,7 @@
 // DICOMDIR writer (PS3.10 Basic Directory, PS3.3 F.5): PATIENT → STUDY → SERIES → IMAGE records
 // for files stored under IDs such as DICOM/ST000001/SE000001/IM000001.
 import type { DicomHeader } from "./dicom-header";
+import { LONG_VR } from "./dicom";
 
 export interface DicomdirEntry {
   /** Path components of the file inside the file set, e.g. ["DICOM","ST000001","SE000001","IM000001"]. */
@@ -8,7 +9,6 @@ export interface DicomdirEntry {
   header: DicomHeader;
 }
 
-const LONG_VR = new Set(["OB", "OW", "SQ", "UN", "UT"]);
 
 class W {
   parts: number[] = [];

@@ -1,7 +1,7 @@
 // Step 8: the DICOM header and Pixel Data. A few header attributes as stored, the Pixel Data's
 // structure (native bytes, or the encapsulated items with the Basic Offset Table and the first
 // fragment's JPEG markers), then the pixels, decoded in a worker, with brightness and contrast.
-import { decryptParams, parseDicomSync, T, tag, tagHex, type DataSet, type Element } from "../core/index";
+import { decryptParams, LONG_VR, parseDicomSync, T, tag, tagHex, type DataSet, type Element } from "../core/index";
 import type { DecodedImage } from "../core/images";
 import { displayPlan } from "../core/display";
 import { showImage, Viewport } from "../core/render";
@@ -57,7 +57,6 @@ const J2K_NAMES: Record<number, [string, string]> = {
   0x93: ["SOD", "start of data: the coded wavelet data follow"],
   0xd9: ["EOC", "end of codestream"],
 };
-const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
 const TAG_NAMES: Record<number, string> = {
   [tag(0x0002, 0x0010)]: "Transfer Syntax UID",
   [tag(0x0002, 0x0012)]: "Implementation Class UID",

@@ -9,10 +9,9 @@
 // Groups Sequence, and no Extended Offset Table. ICC profiles (the top-level one and those in the
 // Optical Path Sequence) are left out: the decoder does not read them, and on a slide they are
 // most of a tile's header.
+import { parseDicomSync, T, UNDEF } from "./dicom";
 import type { SlideHeader } from "./wsi";
 
-const UNDEF = 0xffffffff;
-const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
 const ITEM = new Uint8Array([0xfe, 0xff, 0x00, 0xe0, 0, 0, 0, 0]);
 const SEQ_END = new Uint8Array([0xfe, 0xff, 0xdd, 0xe0, 0, 0, 0, 0]);
 
@@ -53,94 +52,36 @@ export class FrameFiles {
    * deflated, no Number of Frames) or one that does not parse.
    */
   static of(header: Uint8Array, pixelElement: Uint8Array, h: SlideHeader): FrameFiles | null {
-    const dv = new DataView(header.buffer, header.byteOffset, header.byteLength);
-    const n = header.byteLength;
-    if (n < 132 || dv.getUint32(128) !== 0x4449434d) return null;
-    let p = 132;
-    let ts = "";
-    while (p + 8 <= n && dv.getUint16(p, true) === 0x0002) {
-      const vr = String.fromCharCode(header[p + 4], header[p + 5]);
-      const long = LONG_VR.has(vr);
-      const len = long ? dv.getUint32(p + 8, true) : dv.getUint16(p + 6, true);
-      const vo = p + (long ? 12 : 8);
-      if (dv.getUint16(p + 2, true) === 0x0010) ts = String.fromCharCode(...header.subarray(vo, vo + len)).replace(/[\0 ]+$/, "");
-      p = vo + len;
+    if (header.byteLength < 132 || header[128] !== 0x44 || header[131] !== 0x4d) return null;
+    let r;
+    try {
+      r = parseDicomSync(header, { untilPixelData: true });
+    } catch {
+      return null;
     }
-    if (ts === "1.2.840.10008.1.2.1.99" || ts === "1.2.840.10008.1.2.2" || !ts) return null;
-    const explicit = ts !== "1.2.840.10008.1.2";
-
-    const readEl = (q: number) => {
-      if (q + 8 > n) return null;
-      const tag = ((dv.getUint16(q, true) << 16) | dv.getUint16(q + 2, true)) >>> 0;
-      let len: number, vo: number;
-      const vr = String.fromCharCode(header[q + 4], header[q + 5]);
-      if (tag >>> 16 !== 0xfffe && explicit && /^[A-Z]{2}$/.test(vr)) {
-        if (LONG_VR.has(vr)) {
-          if (q + 12 > n) return null;
-          len = dv.getUint32(q + 8, true);
-          vo = q + 12;
-        } else {
-          len = dv.getUint16(q + 6, true);
-          vo = q + 8;
-        }
-      } else {
-        len = dv.getUint32(q + 4, true);
-        vo = q + 8;
-      }
-      const end = len === UNDEF ? skipUndefined(vo) : vo + len;
-      return end < 0 || end > n ? null : { tag, start: q, vo, len, end };
-    };
-    /** Position after the delimiter closing an undefined-length value at q, or -1. */
-    const skipUndefined = (q: number): number => {
-      while (q + 8 <= n) {
-        if (dv.getUint16(q, true) === 0xfffe) {
-          const e = dv.getUint16(q + 2, true), len = dv.getUint32(q + 4, true);
-          if (e === 0xe0dd || e === 0xe00d) return q + 8;
-          const end = len === UNDEF ? skipUndefined(q + 8) : q + 8 + len;
-          if (end < 0) return -1;
-          q = end;
-          continue;
-        }
-        const el = readEl(q);
-        if (!el) return -1;
-        q = el.end;
-      }
-      return -1;
-    };
-
-    const pre: Uint8Array[] = [header.subarray(0, p)];
+    if (r.transferSyntax === "1.2.840.10008.1.2.1.99" || r.transferSyntax === "1.2.840.10008.1.2.2" || !r.meta.get(T.TransferSyntaxUID)) return null;
+    const pre: Uint8Array[] = [header.subarray(0, r.metaEnd)];
     const post: Uint8Array[] = [];
     let perFrame: { head: Uint8Array; items: [number, number][]; undefined: boolean } | null = null;
     let frames = false;
-    while (p < n) {
-      const el = readEl(p);
-      if (!el) return null;
+    for (const el of r.ds.elements.values()) {
+      const start = el.start!, end = el.offset + el.length;
       const out = perFrame ? post : pre;
-      if (el.tag === 0x00280008) {
+      if (el.tag === T.NumberOfFrames) {
         // Number of Frames (IS): "1" padded to the value's length.
-        const v = header.slice(el.start, el.end);
-        const off = el.vo - el.start;
+        const v = header.slice(start, end);
+        const off = el.offset - start;
         v.fill(0x20, off);
         v[off] = 0x31;
         out.push(v);
         frames = true;
-      } else if (el.tag === 0x52009230) {
-        const items: [number, number][] = [];
-        let q = el.vo;
-        const stop = el.len === UNDEF ? el.end - 8 : el.end;
-        while (q < stop) {
-          if (dv.getUint16(q, true) !== 0xfffe || dv.getUint16(q + 2, true) !== 0xe000) return null;
-          const len = dv.getUint32(q + 4, true);
-          const end = len === UNDEF ? skipUndefined(q + 8) : q + 8 + len;
-          if (end < 0 || end > stop) return null;
-          items.push([q, end]);
-          q = end;
-        }
-        perFrame = { head: header.slice(el.start, el.vo), items, undefined: el.len === UNDEF };
+      } else if (el.tag === T.PerFrameFunctionalGroupsSequence) {
+        const head = header.slice(start, el.offset);
+        const undef = new DataView(head.buffer).getUint32(head.byteLength - 4, true) === UNDEF;
+        perFrame = { head, items: r.ds.seq(el.tag).map((it) => [it.start, it.end] as [number, number]), undefined: undef };
       } else if (!DROP.has(el.tag)) {
-        out.push(header.subarray(el.start, el.end));
+        out.push(header.subarray(start, end));
       }
-      p = el.end;
     }
     if (!frames) return null;
     return new FrameFiles(concatBytes(pre), perFrame, concatBytes(post), header, pixelElement, h);

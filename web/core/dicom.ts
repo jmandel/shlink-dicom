@@ -221,6 +221,13 @@ const IMPLICIT_VR: Record<number, string> = (() => {
   set("FD", T.RealWorldValueSlope, T.RealWorldValueIntercept, T.DoubleFloatRealWorldValueFirstValueMapped, T.DoubleFloatRealWorldValueLastValueMapped);
   set("OF", T.FloatPixelData);
   set("OD", T.DoubleFloatPixelData);
+  // Whole-slide images (wsi.ts): Total Pixel Matrix Columns and Rows, Column and Row Position In
+  // Total Image Pixel Matrix, Number of Optical Paths and Focal Planes, Illumination Wave Length,
+  // Imaged Volume Width, Extended Offset Table and its lengths.
+  set("UL", tag(0x0048, 0x0006), tag(0x0048, 0x0007), tag(0x0048, 0x0302), tag(0x0048, 0x0303));
+  set("SL", tag(0x0048, 0x021e), tag(0x0048, 0x021f));
+  set("FL", tag(0x0022, 0x0055), tag(0x0048, 0x0001));
+  set("OV", tag(0x7fe0, 0x0001), tag(0x7fe0, 0x0002));
   return m;
 })();
 
@@ -230,12 +237,29 @@ function overlayVr(g: number, e: number): string | undefined {
   return ({ 0x0010: "US", 0x0011: "US", 0x0015: "IS", 0x0050: "SS", 0x0100: "US", 0x0102: "US", 0x3000: "OW" } as Record<number, string>)[e];
 }
 
-const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
-const UNDEF = 0xffffffff;
+/** Explicit VRs with a 4-byte length (PS3.5 Table 7.1-1). */
+export const LONG_VR = new Set(["OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV"]);
+/** Undefined length. */
+export const UNDEF = 0xffffffff;
+/** Deepest nesting of sequences read (deeper is refused as malformed). */
+export const MAX_DEPTH = 32;
+
+/**
+ * The bytes given stop inside the data set (a header read from the start of a file): read at
+ * least `needBytes` bytes and parse again.
+ */
+export class NeedMoreBytes extends Error {
+  constructor(readonly needBytes: number) {
+    super(`need ${needBytes} bytes`);
+    this.name = "NeedMoreBytes";
+  }
+}
 
 export interface Element {
   tag: number;
   vr: string;
+  /** Offset of the element's tag. */
+  start?: number;
   /** Offset of the value in the bytes, and its length (undefined-length values: up to the delimiter). */
   offset: number;
   length: number;
@@ -248,6 +272,11 @@ export class DicomParseError extends Error {}
 
 export class DataSet {
   readonly elements = new Map<number, Element>();
+  /** For an item of a sequence: its bytes [start, end), from the item tag to after its end (or delimiter). */
+  start = -1;
+  end = -1;
+  /** Sequences this data set is nested in. */
+  depth = 0;
   constructor(
     readonly bytes: Uint8Array,
     readonly le: boolean,
@@ -314,7 +343,7 @@ export class DataSet {
   seq(t: number): DataSet[] {
     const e = this.elements.get(t);
     if (!e) return [];
-    if (!e.items) e.items = readItems(this.bytes, e.offset, e.offset + e.length, this.le, this.explicit, this.decoder, 1);
+    if (!e.items) e.items = readItems(this.bytes, e.offset, e.offset + e.length, this.le, this.explicit, this.decoder, this.depth + 1);
     return e.items;
   }
   /** First item of a code sequence as { value, scheme, meaning }. */
@@ -375,8 +404,14 @@ function readElements(
   dec: TextDecoder,
   depth: number,
   stopAt?: number,
+  need = false,
 ): number {
+  if (depth > MAX_DEPTH) throw new DicomParseError("sequences nested too deeply");
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  /** End of the bytes reached inside a value: with `need`, ask for more instead of stopping. */
+  const short = (n: number) => {
+    if (need) throw new NeedMoreBytes(n);
+  };
   let p = start;
   while (p + 8 <= end) {
     const g = dv.getUint16(p, le), el = dv.getUint16(p + 2, le);
@@ -388,6 +423,10 @@ function readElements(
     if (explicit && /^[A-Z]{2}$/.test(vrc)) {
       vr = vrc;
       if (LONG_VR.has(vr)) {
+        if (p + 12 > end) {
+          short(p + 12);
+          return p;
+        }
         len = dv.getUint32(p + 8, le);
         vo = p + 12;
       } else {
@@ -399,43 +438,62 @@ function readElements(
       len = dv.getUint32(p + 4, le);
       vo = p + 8;
     }
-    const e: Element = { tag: t, vr, offset: vo, length: len };
+    const e: Element = { tag: t, vr, start: p, offset: vo, length: len };
     if (len === UNDEF) {
       if (t === T.PixelData || t === T.FloatPixelData || vr === "OB" || vr === "OW") {
         // Encapsulated pixel data: fragments up to the sequence delimiter.
         e.fragments = [];
         let q = vo;
+        let closed = false;
         while (q + 8 <= end) {
           const ig = dv.getUint16(q, le), ie = dv.getUint16(q + 2, le), il = dv.getUint32(q + 4, le);
           if (ig !== 0xfffe) throw new DicomParseError(`bad fragment at ${q}`);
-          if (ie === 0xe0dd) { q += 8; break; }
+          if (ie === 0xe0dd) {
+            q += 8;
+            closed = true;
+            break;
+          }
           e.fragments.push({ offset: q + 8, length: il });
           q += 8 + il;
         }
+        if (!closed) short(q + 8);
         e.length = q - vo;
         e.vr = vr === "UN?" ? "OB" : vr;
         ds.elements.set(t, e);
         p = q;
         continue;
       }
-      // A sequence of undefined length.
+      // A sequence of undefined length. An undefined-length UN holds implicit VR little endian
+      // (PS3.5 6.2.2), as the decoder reads it.
+      const itemsExplicit = explicit && vr !== "UN";
       e.vr = "SQ";
       const items: DataSet[] = [];
       let q = vo;
+      let closed = false;
       while (q + 8 <= end) {
         const ig = dv.getUint16(q, le), ie = dv.getUint16(q + 2, le), il = dv.getUint32(q + 4, le);
         if (ig !== 0xfffe) throw new DicomParseError(`bad item in ${tagHex(t)}`);
-        if (ie === 0xe0dd) { q += 8; break; }
-        const item = new DataSet(b, le, explicit, dec);
+        if (ie === 0xe0dd) {
+          q += 8;
+          closed = true;
+          break;
+        }
+        const item = new DataSet(b, le, itemsExplicit, dec);
+        item.start = q;
+        item.depth = depth + 1;
         if (il === UNDEF) {
-          const r = readElements(item, b, q + 8, end, le, explicit, dec, depth + 1);
+          const r = readElements(item, b, q + 8, end, le, itemsExplicit, dec, depth + 1, undefined, need);
+          if (r + 8 > end) short(r + 8);
           q = r + 8; // past the item delimiter
         } else {
-          readElements(item, b, q + 8, q + 8 + il, le, explicit, dec, depth + 1);
+          if (q + 8 + il > end) short(q + 8 + il);
+          readElements(item, b, q + 8, q + 8 + il, le, itemsExplicit, dec, depth + 1);
           q += 8 + il;
         }
+        item.end = q;
         items.push(item);
       }
+      if (!closed) short(q + 8);
       e.items = items;
       e.length = q - vo;
       ds.elements.set(t, e);
@@ -443,6 +501,7 @@ function readElements(
       continue;
     }
     if (vo + len > end) {
+      short(vo + len);
       // Truncated or mislabelled length: keep what is there and stop, as lenient readers do.
       e.length = Math.max(0, end - vo);
       ds.elements.set(t, e);
@@ -453,14 +512,15 @@ function readElements(
       const looksSeq = len >= 8 && dv.getUint16(vo, le) === 0xfffe && dv.getUint16(vo + 2, le) === 0xe000;
       e.vr = looksSeq ? "SQ" : "UN";
     }
-    if (vr === "SQ" && depth > 32) throw new DicomParseError("sequences nested too deeply");
     ds.elements.set(t, e);
     p = vo + len;
   }
+  if (p < end) short(p + 8);
   return p;
 }
 
 function readItems(b: Uint8Array, start: number, end: number, le: boolean, explicit: boolean, dec: TextDecoder, depth: number): DataSet[] {
+  if (depth > MAX_DEPTH) throw new DicomParseError("sequences nested too deeply");
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const items: DataSet[] = [];
   let q = start;
@@ -468,11 +528,14 @@ function readItems(b: Uint8Array, start: number, end: number, le: boolean, expli
     const ig = dv.getUint16(q, le), ie = dv.getUint16(q + 2, le), il = dv.getUint32(q + 4, le);
     if (ig !== 0xfffe || ie !== 0xe000) break;
     const item = new DataSet(b, le, explicit, dec);
-    if (il === UNDEF) q = readElements(item, b, q + 8, end, le, explicit, dec, depth + 1) + 8;
+    item.start = q;
+    item.depth = depth;
+    if (il === UNDEF) q = readElements(item, b, q + 8, end, le, explicit, dec, depth) + 8;
     else {
-      readElements(item, b, q + 8, Math.min(end, q + 8 + il), le, explicit, dec, depth + 1);
+      readElements(item, b, q + 8, Math.min(end, q + 8 + il), le, explicit, dec, depth);
       q += 8 + il;
     }
+    item.end = Math.min(q, end);
     items.push(item);
   }
   return items;
@@ -524,11 +587,25 @@ export async function parseDicom(bytes: Uint8Array, o: { untilPixelData?: boolea
 
 const DEFLATED = "1.2.840.10008.1.2.1.99";
 
+export interface ParseOptions {
+  /** Stop before Pixel Data (or Float / Double Float Pixel Data), for header-only parsing. */
+  untilPixelData?: boolean;
+  /** A deflated data set's inflated bytes (after the file meta). */
+  inflated?: Uint8Array;
+  /**
+   * `bytes` are the first bytes of a file: where an element runs past them, stop and say how
+   * many bytes are needed (`needBytes`) instead of keeping a truncated value. The elements before
+   * it are in the result. With `untilPixelData`, the data set must reach Pixel Data.
+   */
+  need?: boolean;
+}
+
 /**
  * The synchronous parser. A deflated data set needs `inflated` (the inflated bytes after the
- * file meta); without it only the file meta is read.
+ * file meta); without it only the file meta is read. `dataEnd` is where the top-level reading
+ * stopped (Pixel Data's tag with `untilPixelData`), in the data set's bytes.
  */
-export function parseDicomSync(bytes: Uint8Array, o: { untilPixelData?: boolean; inflated?: Uint8Array } = {}): ParsedDicom & { metaEnd: number } {
+export function parseDicomSync(bytes: Uint8Array, o: ParseOptions = {}): ParsedDicom & { metaEnd: number; dataEnd: number; needBytes: number } {
   const stopAt = o.untilPixelData ? tag(0x7fe0, 0x0008) : undefined;
   const latin = new TextDecoder("windows-1252");
   const meta = new DataSet(bytes, true, true, latin);
@@ -555,7 +632,10 @@ export function parseDicomSync(bytes: Uint8Array, o: { untilPixelData?: boolean;
         len = dv.getUint32(p + 4, true);
         vo = p + 8;
       }
-      if (vo + len > bytes.length) break;
+      if (vo + len > bytes.length) {
+        if (o.need) return { meta, ds: new DataSet(bytes, true, true, latin), transferSyntax: meta.str(T.TransferSyntaxUID) ?? ts, metaEnd: p, dataEnd: -1, needBytes: vo + len };
+        break;
+      }
       meta.elements.set(tag(0x0002, dv.getUint16(p + 2, true)), { tag: tag(0x0002, dv.getUint16(p + 2, true)), vr, offset: vo, length: len });
       p = vo + len;
     }
@@ -565,7 +645,7 @@ export function parseDicomSync(bytes: Uint8Array, o: { untilPixelData?: boolean;
   const metaEnd = start;
   let body = bytes;
   if (ts === DEFLATED) {
-    if (!o.inflated) return { meta, ds: new DataSet(bytes, true, true, latin), transferSyntax: ts, metaEnd };
+    if (!o.inflated) return { meta, ds: new DataSet(bytes, true, true, latin), transferSyntax: ts, metaEnd, dataEnd: -1, needBytes: 0 };
     body = o.inflated;
     start = 0;
   }
@@ -576,8 +656,16 @@ export function parseDicomSync(bytes: Uint8Array, o: { untilPixelData?: boolean;
   readElements(probe, body, start, body.length, le, explicit, latin, 0, tag(0x0008, 0x0006));
   const dec = decoderFor(probe.strs(T.SpecificCharacterSet));
   const ds = new DataSet(body, le, explicit, dec);
-  readElements(ds, body, start, body.length, le, explicit, dec, 0, stopAt);
-  return { meta, ds, transferSyntax: ts, metaEnd };
+  let dataEnd = -1, needBytes = 0;
+  try {
+    dataEnd = readElements(ds, body, start, body.length, le, explicit, dec, 0, stopAt, o.need);
+    // Stopped at the end of the bytes, not at Pixel Data.
+    if (o.need && stopAt !== undefined && dataEnd + 8 > body.length) needBytes = dataEnd + 8;
+  } catch (e) {
+    if (!(e instanceof NeedMoreBytes)) throw e;
+    needBytes = e.needBytes;
+  }
+  return { meta, ds, transferSyntax: ts, metaEnd, dataEnd, needBytes };
 }
 
 /** Parses a header returned by a decode (`img.header`: the bytes before Pixel Data). */
