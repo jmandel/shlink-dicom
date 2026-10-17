@@ -113,7 +113,9 @@ manifest() { "$BUN" -e "console.log(JSON.parse(await Bun.file('$1/MANIFEST.json'
 if [ -z "$TAG" ]; then
   TAG="$(curl -fsSL "$RELEASES/server-latest/latest.json" | "$BUN" -e 'console.log(JSON.parse(await Bun.stdin.text()).tag)')"
 fi
-case "$TAG" in server-[0-9a-f]*) ;; *) echo "not a server release tag: $TAG" >&2; exit 1 ;; esac
+# The whole tag, as deploy/lib/pack-release.ts makes it: it becomes part of paths and URLs.
+valid_tag() { [[ "$1" =~ ^server-[0-9a-f]{7,40}$ ]]; }
+valid_tag "$TAG" || { echo "not a server release tag: $TAG" >&2; exit 1; }
 NAME="shlink-dicom-$TAG-linux-$ARCH"
 DIR="$ROOT/releases/$TAG"
 if [ -f "$DIR/.built" ]; then

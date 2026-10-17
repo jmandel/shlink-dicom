@@ -85,6 +85,9 @@ jobs:
           key: server-sample-sources-${{ hashFiles('imaging-sandbox/data/studies.json') }}
           restore-keys: server-sample-sources-
 
+      - name: The bootstraps accept only whole release tags
+        run: bash deploy/test/tag-pattern.sh
+
       - name: Install the packed release with the bootstrap, and check it
         run: |
           tag="${{ steps.pack.outputs.tag }}"

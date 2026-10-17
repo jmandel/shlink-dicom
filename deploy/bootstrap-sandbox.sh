@@ -76,7 +76,9 @@ echo "bun $("$BUN" --version)"
 if [ -z "$TAG" ]; then
   TAG="$(curl -fsSL "$RELEASES/sandbox-latest/latest.json" | "$BUN" -e 'console.log(JSON.parse(await Bun.stdin.text()).tag)')"
 fi
-case "$TAG" in sandbox-[0-9a-f]*) ;; *) echo "not a sandbox release tag: $TAG" >&2; exit 1 ;; esac
+# The whole tag, as deploy/lib/pack-release.ts makes it: it becomes part of paths and URLs.
+valid_tag() { [[ "$1" =~ ^sandbox-[0-9a-f]{7,40}$ ]]; }
+valid_tag "$TAG" || { echo "not a sandbox release tag: $TAG" >&2; exit 1; }
 NAME="imaging-sandbox-$TAG"
 DIR="$ROOT/releases/$TAG"
 if [ -f "$DIR/.built" ]; then
