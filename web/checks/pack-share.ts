@@ -69,6 +69,9 @@ export async function packAndShare(
 ): Promise<SharedFixture> {
   await useShlWasm();
   const col = new Collection();
+  // Check fixtures gather sample files from many sources and people; they are shared as one
+  // person's, as a sharer would say they are (the one-patient rule is test/patient.test.ts's).
+  col.samePatient = true;
   for (const f of files) await col.add(f.name, f.bytes);
   await col.finish();
   const studies = col.list();
