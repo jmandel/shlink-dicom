@@ -335,6 +335,7 @@ async function session(browser, kind, run) {
     build, net, device, cpu, kind, run,
     load: Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]),
     totalMs: Date.now() - t0,
+    endedAt: Date.now(),
     bytes, requests, binRequests,
     stalls: stalled.length,
     stallMs: stalled.reduce((a, o) => a + (o.ms ?? CAP), 0),
