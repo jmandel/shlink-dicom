@@ -39,6 +39,10 @@ struct PersistedSeed {
     key_u: String,
     lid_p: String,
     key_p: String,
+    /// Earlier samples, deleted by the server once it has loaded this one. The seed runs while the
+    /// server still serves the previous sample, so it must not delete that one itself.
+    #[serde(default)]
+    retired: Vec<String>,
 }
 
 /// Loads the sample made by `shl-dicom-server seed` (`seeded_demos.json`). Never packs anything,
@@ -47,10 +51,24 @@ pub fn load_sample(state: &AppState, origin: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(state.data_dir.join("seeded_demos.json")) else {
         return false;
     };
-    let Ok(saved) = serde_json::from_str::<PersistedSeed>(&text) else {
+    let path = state.data_dir.join("seeded_demos.json");
+    let Ok(mut saved) = serde_json::from_str::<PersistedSeed>(&text) else {
         return false;
     };
-    saved.version == SEED_VERSION && state.catalog_has_share(&saved.sid) && populate_demo_list(state, origin, &saved).is_ok()
+    if !(saved.version == SEED_VERSION && state.catalog_has_share(&saved.sid) && populate_demo_list(state, origin, &saved).is_ok()) {
+        return false;
+    }
+    // This sample is served now: the ones it replaced go.
+    if !saved.retired.is_empty() {
+        for sid in std::mem::take(&mut saved.retired) {
+            if sid != saved.sid {
+                let _ = state.delete_share(&sid);
+            }
+        }
+        let _ = std::fs::write(&path, serde_json::to_string_pretty(&saved).unwrap_or_default());
+        state.empty_trash_soon();
+    }
+    true
 }
 
 /// What `seed_sample` did, for the CLI's report.
@@ -153,14 +171,13 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
         key_u: bundle_u.shl_key_b64,
         lid_p,
         key_p: bundle_p.shl_key_b64,
+        // The earlier sample stays until the server has loaded this one (load_sample), so /sample
+        // never points at a deleted share while the server still serves the earlier one.
+        retired: previous
+            .map(|p| p.retired.into_iter().chain(std::iter::once(p.sid)).collect())
+            .unwrap_or_default(),
     };
     std::fs::write(&seed_meta_path, serde_json::to_string_pretty(&saved).unwrap_or_default()).map_err(|e| e.to_string())?;
-    // The earlier sample goes once the new one is in place.
-    if let Some(prev) = previous {
-        if prev.sid != saved.sid {
-            let _ = state.delete_share(&prev.sid);
-        }
-    }
     Ok(SeedReport {
         sid: saved.sid,
         files: packed.file_ids.len(),
@@ -342,6 +359,28 @@ fn add_sample_reports(samples_dir: &std::path::Path, bundle_json: &str) -> Resul
 
 #[cfg(test)]
 mod tests {
+    /// The server deletes the samples a new one replaced only once it has loaded the new one.
+    #[test]
+    fn the_server_retires_the_previous_sample_after_loading_the_new_one() {
+        let dir = std::env::temp_dir().join(format!("seed_retire_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::state::AppState::new(&dir).unwrap();
+        let (old, _) = state.create_share(true, None).unwrap();
+        let (new, _) = state.create_share(true, None).unwrap();
+        let (lu, lp) = ("u".repeat(43), "p".repeat(43));
+        super::insert_seeded_link(&state, &new, &lu, "u", false, None, false, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &new, &lp, "p", true, Some("1234"), true, "x", &[]).unwrap();
+        let saved = super::PersistedSeed { version: super::SEED_VERSION, sid: new.clone(), lid_u: lu, key_u: "k".repeat(43), lid_p: lp, key_p: "k".repeat(43), retired: vec![old.clone()] };
+        std::fs::write(dir.join("seeded_demos.json"), serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(state.catalog_has_share(&old), "the seed leaves the previous sample in place");
+        assert!(super::load_sample(&state, "http://localhost"));
+        assert!(!state.catalog_has_share(&old));
+        assert!(state.catalog_has_share(&new));
+        let again: super::PersistedSeed = serde_json::from_str(&std::fs::read_to_string(dir.join("seeded_demos.json")).unwrap()).unwrap();
+        assert!(again.retired.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The sample's passcode link is the only one the seed makes refill.
     #[test]
     fn the_seed_marks_only_the_passcode_link_refill() {
