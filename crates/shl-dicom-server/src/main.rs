@@ -104,7 +104,9 @@ enum Commands {
         /// Output directory
         #[arg(long, default_value = "dist/pack")]
         out: PathBuf,
-        /// Base URL where output files will be hosted
+        /// URL of the folder under which the output is hosted. The files go in a new folder with a
+        /// random 256-bit name beneath it (OUT/<name>/, served as BASE_URL<name>/), since the SHL
+        /// specification requires the link's url to carry at least 256 bits of entropy
         #[arg(long)]
         base_url: Option<String>,
         /// SHL label
@@ -116,8 +118,10 @@ enum Commands {
         add_offset_tables: bool,
         /// Pack with given keys instead of random ones, so the same input gives the same files: a
         /// JSON file {"shlKey", "bundleIv", "lastUpdated", "studies": {"<StudyInstanceUID>":
-        /// {"fileId", "key"}}}. Every study packed must be listed, and every listed study packed.
-        /// Never give a file id and key to different content (spec/README.md §13).
+        /// {"fileId", "key"}}}, and optionally "segment" (the folder name of an earlier pack, 32
+        /// bytes as base64url, to update that link in place). Every study packed must be listed,
+        /// and every listed study packed. Never give a file id and key to different content
+        /// (spec/README.md §13).
         #[arg(long)]
         keys: Option<PathBuf>,
     },

@@ -17,6 +17,9 @@ struct PackKeys {
     bundle_iv: String,
     last_updated: String,
     studies: std::collections::BTreeMap<String, PackKeyFile>,
+    /// The link's folder name (32 random bytes); a new one when absent.
+    #[serde(default)]
+    segment: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -39,7 +42,26 @@ fn read_pack_keys(path: &Path) -> Result<PackKeys, String> {
     if b64url_decode(&keys.bundle_iv).ok().map(|b| b.len()) != Some(12) {
         return Err("bundleIv must be 12 bytes, base64url without padding".into());
     }
+    if let Some(s) = &keys.segment {
+        if !is_segment(s) {
+            return Err("segment must be 32 bytes, base64url without padding (43 characters)".into());
+        }
+    }
     Ok(keys)
+}
+
+/// A link folder name: 32 bytes as base64url, so the link's url carries 256 bits of entropy.
+fn is_segment(s: &str) -> bool {
+    s.len() == 43 && b64url_decode(s).ok().map(|b| b.len()) == Some(32)
+}
+
+/// The link's url: `bundle.jwe` in folder `segment` under `base` (a folder URL).
+pub fn pack_link_url(base: &str, segment: &str) -> Result<String, String> {
+    if base.ends_with(".jwe") {
+        return Err("--base-url is the folder the output is hosted under, not a file".into());
+    }
+    let base = if base.ends_with('/') { base.to_string() } else { format!("{base}/") };
+    Ok(format!("{base}{segment}/bundle.jwe"))
 }
 
 pub fn run_pack_cli(
@@ -83,9 +105,18 @@ pub fn run_pack_cli(
         }
     }
 
-    std::fs::create_dir_all(out_dir).map_err(|e| format!("create {:?}: {e}", out_dir))?;
+    // What gets hosted goes in OUT/<segment>/; the plaintext Bundle (it holds the file keys) stays
+    // beside that folder, not in it.
+    let segment = match keys.as_ref().and_then(|k| k.segment.clone()) {
+        Some(s) => s,
+        None => shl_dicom_core::crypto::b64url_encode(&random_bytes::<32>().map_err(|e| e.to_string())?),
+    };
+    let base = base_url.unwrap_or("https://host.example/share/");
+    let url = pack_link_url(base, &segment)?;
+    let host_dir = out_dir.join(&segment);
+    std::fs::create_dir_all(&host_dir).map_err(|e| format!("create {:?}: {e}", host_dir))?;
     for sf in &packed.files {
-        let bin_path = out_dir.join(format!("{}.bin", sf.file_id));
+        let bin_path = host_dir.join(format!("{}.bin", sf.file_id));
         std::fs::write(&bin_path, &sf.ciphertext)
             .map_err(|e| format!("write {:?}: {e}", bin_path))?;
     }
@@ -103,25 +134,16 @@ pub fn run_pack_cli(
         link_out.bundle_jwe = encrypt_bundle_jwe_with_iv(link_out.bundle_json.as_bytes(), &shl_key, &iv).map_err(|e| e.to_string())?;
     }
 
-    let jwe_path = out_dir.join("bundle.jwe");
+    let jwe_path = host_dir.join("bundle.jwe");
     std::fs::write(&jwe_path, &link_out.bundle_jwe)
         .map_err(|e| format!("write {:?}: {e}", jwe_path))?;
     let json_path = out_dir.join("bundle.json");
     std::fs::write(&json_path, &link_out.bundle_json)
         .map_err(|e| format!("write {:?}: {e}", json_path))?;
 
-    let base = base_url.unwrap_or("https://host.example/share/");
-    let url = if base.ends_with('/') {
-        format!("{base}bundle.jwe")
-    } else if base.ends_with(".jwe") {
-        base.to_string()
-    } else {
-        format!("{base}/bundle.jwe")
-    };
-
     let shlink = encode_shlink_uri(
         &ShlPayload {
-            url,
+            url: url.clone(),
             key: link_out.shl_key_b64,
             exp: None,
             flag: compute_shl_flag(false, false),
@@ -147,6 +169,8 @@ pub fn run_pack_cli(
             st.number_of_instances
         );
     }
+    println!("\nHost the folder {:?} as {}", host_dir, url.trim_end_matches("bundle.jwe"));
+    println!("Folder name (\"segment\" in --keys keeps it for an update): {segment}");
     println!("\nSHL URI:\n{shlink}");
     Ok(())
 }
