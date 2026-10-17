@@ -19,7 +19,7 @@ use crate::{
     routes_shl::request_origin,
     state::{
         build_link_resource_from_row, hash_passcode, is_valid_id22, now_unix,
-        new_storage_key, parse_file_name, record_file, sha256_bytes, AccessEvent, AppState, ShareFileEntry,
+        adopt_blob, new_storage_key, parse_file_name, record_file, sha256_bytes, AccessEvent, AppState, ShareFileEntry,
         DEFAULT_PASSCODE_ATTEMPTS, DEFAULT_SANDBOX_TTL_SECS, MAX_SHARE_TTL_SECS,
     },
 };
@@ -655,11 +655,8 @@ async fn publish_file(state: &AppState, sid: &str, file_id: &str, size: u64) -> 
         Some(id) => state.store.complete_upload(&key, Some(&id), &parts, &part).await?,
         None => state.store.put_file(&key, &part).await?,
     }
-    state.blob_add(&key);
     state.remove_staged(sid, file_id);
-    let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
-    let conn = conn_arc.lock().unwrap();
-    record_file(&conn, file_id, &key, size)
+    adopt_blob(state, sid, file_id, &key, size)
 }
 
 fn finished(state: &AppState, status: StatusCode, entry: ShareFileEntry) -> Response {

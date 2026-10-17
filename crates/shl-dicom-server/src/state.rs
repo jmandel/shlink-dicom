@@ -383,6 +383,12 @@ impl AppState {
         }
     }
 
+    /// A blob no file names, to delete from the store.
+    pub fn trash_blob(&self, key: &str) {
+        let cat = self.catalog.lock().unwrap();
+        let _ = cat.execute("INSERT INTO trash (storage_key, upload_id) VALUES (?1, NULL)", params![key]);
+    }
+
     /// An unfinished multipart upload to drop.
     pub fn trash_upload(&self, key: &str, upload_id: &str) {
         let cat = self.catalog.lock().unwrap();
@@ -1084,6 +1090,31 @@ pub fn record_file(conn: &Connection, file_id: &str, storage_key: &str, size: u6
     Ok(ShareFileEntry { name: format!("{file_id}.bin"), size, uploaded_at })
 }
 
+/// Records a blob just put in the store as share `sid`'s file, under the share's lock: the file
+/// row first, then its reference. If the share has gone meanwhile (deleted, or expired), the blob
+/// goes to the trash instead. A delete takes the catalog row away before it takes the share's
+/// lock, so with the lock held and the row still there, the delete will see this file and release
+/// it; with the row gone, nothing would, so nothing keeps the blob.
+pub fn adopt_blob(state: &AppState, sid: &str, file_id: &str, key: &str, size: u64) -> Result<ShareFileEntry, String> {
+    let orphan = |why: String| {
+        state.trash_blob(key);
+        state.empty_trash_soon();
+        Err(why)
+    };
+    let Some(conn_arc) = state.open_share_db(sid) else { return orphan("share not found".into()) };
+    let conn = conn_arc.lock().unwrap();
+    if !state.catalog_has_share(sid) {
+        return orphan("share not found".into());
+    }
+    match record_file(&conn, file_id, key, size) {
+        Ok(entry) => {
+            state.blob_add(key);
+            Ok(entry)
+        }
+        Err(e) => orphan(e),
+    }
+}
+
 /// Stores a whole file and records it, with no quota check (tests). Uploads go through
 /// `PUT /api/shares/{sid}/files/{name}`; the sample through `seed`.
 pub async fn store_file(state: &AppState, sid: &str, file_id: &str, ciphertext: &[u8]) -> Result<ShareFileEntry, String> {
@@ -1092,10 +1123,7 @@ pub async fn store_file(state: &AppState, sid: &str, file_id: &str, ciphertext: 
     std::fs::write(&part, ciphertext).map_err(|e| e.to_string())?;
     let key = new_storage_key();
     state.store.put_file(&key, &part).await?;
-    state.blob_add(&key);
-    let conn_arc = state.open_share_db(sid).ok_or("share not found")?;
-    let conn = conn_arc.lock().unwrap();
-    record_file(&conn, file_id, &key, ciphertext.len() as u64)
+    adopt_blob(state, sid, file_id, &key, ciphertext.len() as u64)
 }
 
 fn init_catalog_db(conn: &Connection) -> rusqlite::Result<()> {

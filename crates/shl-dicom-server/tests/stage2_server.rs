@@ -2159,3 +2159,38 @@ async fn test_the_seeds_state_runs_no_startup_sweep() {
     assert!(state.share_db_path(&pending).exists(), "the seed's state swept a share being created");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file finished after its share was deleted or expired is not recorded, and its blob leaves
+/// the store (nothing would ever release it).
+#[tokio::test]
+async fn test_a_file_finished_after_its_share_went_is_trashed() {
+    let dir = temp_data_dir("publish_after_delete");
+    let state = test_state(&dir);
+    let scratch = dir.join("part.bin");
+    std::fs::write(&scratch, [3u8; 5000]).unwrap();
+    let fid = b64url_encode(&[45u8; 16]);
+    for expire in [false, true] {
+        let (sid, _) = state.create_share(false, None).unwrap();
+        if expire {
+            state.set_share_expiry(&sid, 1).unwrap();
+        } else {
+            state.delete_share(&sid).unwrap();
+        }
+        let key = shl_dicom_server::state::new_storage_key();
+        std::fs::write(&scratch, [3u8; 5000]).unwrap(); // the local store moves the file in
+        state.store.put_file(&key, &scratch).await.unwrap();
+        assert!(shl_dicom_server::state::adopt_blob(&state, &sid, &fid, &key, 5000).is_err());
+        state.empty_trash().await;
+        assert!(!blob_exists(&state, &key).await, "expire={expire}: blob left behind");
+    }
+    // A live share records it and keeps the blob.
+    let (sid, _) = state.create_share(false, None).unwrap();
+    let key = shl_dicom_server::state::new_storage_key();
+    std::fs::write(&scratch, [3u8; 5000]).unwrap();
+    state.store.put_file(&key, &scratch).await.unwrap();
+    shl_dicom_server::state::adopt_blob(&state, &sid, &fid, &key, 5000).unwrap();
+    state.empty_trash().await;
+    assert!(blob_exists(&state, &key).await);
+    assert_eq!(file_key(&state, &sid, &fid), key);
+    let _ = std::fs::remove_dir_all(&dir);
+}
