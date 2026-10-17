@@ -11,12 +11,12 @@
   ],
   "siteUrl": "https://joshuamandel.com/shlink-dicom/",
   "label": "Josh Example: brain MRI and left wrist X-rays",
-  "link": "shlink:/eyJ1cmwiOiJodHRwczovL2pvc2h1YW1hbmRlbC5jb20vc2hsaW5rLWRpY29tL2RlbW8tbGlua3MvYnVuZGxlLmp3ZSIsImtleSI6IkNoa3duempLT20ycmFvUTUzdm1tc25XbnZpX1BtZUdnSWJxNG9tYzM2ajgiLCJmbGFnIjoiVSIsImxhYmVsIjoiSm9zaCBFeGFtcGxlOiBicmFpbiBNUkkgYW5kIGxlZnQgd3Jpc3QgWC1yYXlzIiwidiI6MX0",
-  "shlKey": "ChkwnzjKOm2raoQ53vmmsnWnvi_PmeGgIbq4omc36j8",
-  "bundleIv": "5MW7gKQgOLwfbDKT",
-  "segment": "",
-  "lastUpdated": "2026-10-17T00:27:59Z",
-  "bundleSha256": "c8b7723cda24b511d1b88396a48d53338cabf84ff0a228caca935d5f4145a75c",
+  "link": "shlink:/eyJ1cmwiOiJodHRwczovL2pvc2h1YW1hbmRlbC5jb20vc2hsaW5rLWRpY29tL2RlbW8tbGlua3MvMGQxRnd5LUc3LXNqRnNFcW1RYXhaRHNJdkNOd3lQN3Q1SXhMbmw5OURnOC9idW5kbGUuandlIiwia2V5Ijoiak9Zd1V6NDVfem1FUktpN3RYdVNIYUlvOVZQRDZvRkZzeDIxZkVKVVN6ayIsImZsYWciOiJVIiwibGFiZWwiOiJKb3NoIEV4YW1wbGU6IGJyYWluIE1SSSBhbmQgbGVmdCB3cmlzdCBYLXJheXMiLCJ2IjoxfQ",
+  "shlKey": "jOYwUz45_zmERKi7tXuSHaIo9VPD6oFFsx21fEJUSzk",
+  "bundleIv": "jB9FCw11QoAeWcHj",
+  "segment": "0d1Fwy-G7-sjFsEqmQaxZDsIvCNwyP7t5IxLnl99Dg8",
+  "lastUpdated": "2026-10-17T17:27:11Z",
+  "bundleSha256": "a9b85307822ffb7cf5e3b7223d9cb11d07488d76a9450d2c9b9b8bc5029ba988",
   "source": {
     "repo": "jmandel/my-health-data",
     "commit": "2fcaa95f9169c66bc4726e02bd08f01bd50c994b",
@@ -111,18 +111,18 @@
     {
       "description": "BRAIN 7/29/20",
       "studyInstanceUid": "2.25.9484970591660716368284805196532855149",
-      "fileId": "lLbc1RwyjEqoFX8U97pyMA",
-      "key": "Xqau2kxPJMNAyH781_BhGkzgLz9qwrL8FPKp-WGeh24",
+      "fileId": "N5hIha9K2jcYgbNOu2kw-w",
+      "key": "Yk4_UrEpuBymde8FS6VdkE9J4m6l4Fz5muKzgEmQ7l4",
       "plaintextSha256": "3710c046a3f66bd16517ddced7cca211f2167a216e95f753c9cd86760ba2e4ec",
-      "ciphertextSha256": "d59a4b1c98a5b6741ab11b96a5cff45fda1df02e4b306ed425fecb0f1246c063"
+      "ciphertextSha256": "58a2a5785d447b5873fa02491e315819d0b829f126c0528d0cde9a7c80b18bcd"
     },
     {
       "description": "WRIST LEFT AP LAT & OBL",
       "studyInstanceUid": "2.25.47343776404338541155855685162606855084",
-      "fileId": "FzDRgm12zrB9IpdEKztvmg",
-      "key": "PTtCN0wkveVDQGS0ob9ihrbvQAkxNr65cR2uFamcw80",
+      "fileId": "DIMG9auy-uv3qb1gh7L2uQ",
+      "key": "wfPaw9DhmJMkrkF-1R61R7CoR7vedvcjY6-j79eFIoE",
       "plaintextSha256": "1ae191752c7af05c4cde92d1b5a6cfbc0ca6c6cb667a398c3be460d24024735f",
-      "ciphertextSha256": "7524e2ef2d998b4989a9ff9384f5e8e17dee583b1468e533f858a1b9195502fb"
+      "ciphertextSha256": "641573dd91ee6f109614df0d4b9c4e9b45bebed705173536b6e9da9c8899b0fa"
     }
   ]
 }
