@@ -466,6 +466,7 @@ impl AppState {
 
         for sid in expired_sids {
             self.remove_share_files(&sid);
+            self.events.lock().unwrap().remove(&sid);
         }
         Ok(())
     }
@@ -1292,6 +1293,19 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::ct_eq;
+
+    #[test]
+    fn an_expired_share_loses_its_event_channel() {
+        let dir = std::env::temp_dir().join(format!("expired_events_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = super::AppState::new(&dir).unwrap();
+        let (sid, _) = state.create_share(false, None).unwrap();
+        let _rx = state.subscribe_events(&sid);
+        state.set_share_expiry(&sid, 1).unwrap();
+        state.run_sweep().unwrap();
+        assert!(!state.events.lock().unwrap().contains_key(&sid));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_older_share_database_gains_refill_attempts() {
