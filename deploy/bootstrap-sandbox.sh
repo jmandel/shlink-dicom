@@ -21,6 +21,7 @@
 # Log: /var/log/shlink-bootstrap-sandbox.log
 
 set -euo pipefail
+trap 'echo "bootstrap-sandbox: failed at line $LINENO" >&2' ERR
 
 TAG="${1:-${TAG:-}}"
 REPO="${REPO:-jmandel/shlink-dicom}"
@@ -145,7 +146,7 @@ PREVIOUS="$(readlink "$ROOT/current" 2>/dev/null || true)"
 switch_to() { ln -sfn "$1" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"; }
 healthy() {
   for _ in $(seq 1 30); do
-    curl -sf "http://localhost:$PORT/fhir/.well-known/smart-configuration" | grep -q '"token_endpoint"' && return 0
+    [[ "$(curl -sf "http://localhost:$PORT/fhir/.well-known/smart-configuration")" == *'"token_endpoint"'* ]] && return 0
     sleep 1
   done
   return 1
@@ -160,11 +161,12 @@ if ! healthy; then
     echo "going back to $PREVIOUS" >&2
     switch_to "$PREVIOUS"
     $SUDO systemctl restart imaging-sandbox
+    healthy || echo "the previous release did not come up either" >&2
   fi
   exit 1
 fi
 systemctl is-active imaging-sandbox
-curl -s "http://localhost:$PORT/fhir/.well-known/smart-configuration" | head -c 160; echo
+printf '%.160s\n' "$(curl -s "http://localhost:$PORT/fhir/.well-known/smart-configuration")"
 echo "$TAG" > "$ROOT/current-tag"
 
 # Releases other than the current one and the $KEEP_RELEASES - 1 most recent are removed.
