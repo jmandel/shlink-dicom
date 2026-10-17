@@ -94,6 +94,7 @@ pub fn run_pack_cli(
     label: Option<&str>,
     add_offset_tables: bool,
     keys_path: Option<&Path>,
+    same_patient: bool,
 ) -> Result<(), String> {
     let keys = keys_path.map(read_pack_keys).transpose()?;
     let mut session = IngestSession::new();
@@ -108,6 +109,7 @@ pub fn run_pack_cli(
     }
     let missing = session.instances_missing_offset_tables();
     session.set_add_offset_tables(add_offset_tables);
+    session.set_same_patient(same_patient);
     if let Some(k) = &keys {
         let mut files = std::collections::BTreeMap::new();
         for (uid, f) in &k.studies {

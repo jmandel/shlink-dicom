@@ -1,4 +1,4 @@
-//! How a share's instances are grouped and ordered (spec/README.md §11.1 step 4), the one rule the
+//! How a share's instances are grouped and ordered (spec/README.md §11.1 step 5), the one rule the
 //! CLI's pack, the server's seed and the Share page (through shl-dicom-wasm) use:
 //!
 //! - instances are grouped by Study Instance UID, then Series Instance UID;

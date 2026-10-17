@@ -1,13 +1,13 @@
 // Reading imaging on the device: archives (ZIP, TAR, TGZ), loose DICOM files and folders, and
 // instances handed over by the portal and link sources. Everything ends up as Part 10 files grouped
-// into studies and series (spec/README.md §11.1 steps 1–4).
+// into studies and series (spec/README.md §11.1 steps 1–5).
 //
 // Nothing here holds a whole file: an instance is a byte source (lib/bytes.ts) read on demand, and
 // only its header is read while collecting. Archive members that can't be read in place (deflated
 // ZIP entries, anything inside a gzip stream, portal downloads) are staged to the origin-private
 // file system (lib/stage.ts).
 import { readDicomHeader, type DicomHeader } from "../../core/dicom-header";
-import { formatPersonName, modalityName } from "../../core/format";
+import { modalityName } from "../../core/format";
 import { BlobBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
 import { shlWasm } from "./shl-wasm";
 import type { Stager } from "./stage";
@@ -39,8 +39,7 @@ export interface PatientInfo {
   name: string | null;
   birthDate: string | null;
   identifier: { system?: string; value: string }[];
-  /** For the Bundle: the DICOM Patient's Name (PN, family^given^…) or a FHIR source's HumanName. */
-  pn?: string | null;
+  /** A FHIR source's HumanName, for the Bundle. */
   humanName?: any;
 }
 
@@ -103,6 +102,8 @@ export class Collection {
   patient: PatientInfo = { name: null, birthDate: null, identifier: [] };
   /** Portal downloads: images received per transfer syntax, as each part declared it. */
   received = new Map<string, number>();
+  /** The sharer said files naming different people are one person's (sharePatient). */
+  samePatient = false;
   /** Where the patient details came from: "dicom" until a FHIR source sets them. */
   patientSource: "dicom" | "fhir" = "dicom";
 
@@ -197,10 +198,11 @@ export class Collection {
 
   /**
    * Groups and orders the instances with the packer's rule (shl_dicom_core::order through
-   * shl-dicom-wasm; spec/README.md §11.1 step 4): studies newest first, series by number, instances
+   * shl-dicom-wasm; spec/README.md §11.1 step 5): studies newest first, series by number, instances
    * by Instance Number, one copy per SOP Instance UID (the others are skipped, with the reason).
-   * Study-level values a source did not give and, for DICOM, the patient come from the first
-   * instance in that order that has them. Needs loadShlWasm first.
+   * Study-level values a source did not give come from the first instance in that order that has
+   * them; the patient of DICOM files comes from the included studies (sharePatient). Needs
+   * loadShlWasm first.
    */
   async finish() {
     const all: Instance[] = [];
@@ -244,17 +246,29 @@ export class Collection {
       st.description ??= first((h) => h.studyDescription) || null;
       st.started ??= dicomDate(first((h) => h.studyDate), "");
       st.accession ??= first((h) => h.accessionNumber) || null;
-      if (this.patientSource === "dicom" && !this.patient.pn) {
-        const pn = first((h) => h.patientName);
-        if (pn) {
-          const id = first((h) => h.patientId);
-          this.patient = { name: formatPersonName(pn) || null, pn, birthDate: dicomDate(first((h) => h.patientBirthDate), ""), identifier: id ? [{ value: id }] : [] };
-        }
-      }
       studies.set(gs.uid, st);
     }
     this.studies = studies;
   }
+}
+
+/** The included studies' patient, or the two records that name different people. */
+export type SharePatient =
+  | { patient: { dicomName: string | null; birthDate: string | null; identifiers: { value: string }[] } }
+  | { conflict: { first: [string | null, string | null]; other: [string | null, string | null] }; message: string };
+
+/**
+ * The patient of these studies by the packer's one-patient rule (shl_dicom_core::patient through
+ * shl-dicom-wasm): family names or birth dates that differ name different people, unless the
+ * sharer said they are the same person. Needs loadShlWasm first.
+ */
+export function sharePatient(studies: StudyModel[], samePatient: boolean): SharePatient {
+  const records = studies.flatMap((st) =>
+    st.series.flatMap((se) =>
+      se.instances.map((i) => ({ name: i.h.patientName || null, birthDate: i.h.patientBirthDate || null, id: i.h.patientId || null, issuer: null })),
+    ),
+  );
+  return JSON.parse(shlWasm().share_patient(JSON.stringify(records), samePatient));
 }
 
 interface Grouped {

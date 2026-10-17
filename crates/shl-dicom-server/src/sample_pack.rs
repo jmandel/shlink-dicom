@@ -80,7 +80,7 @@ fn may_lack_offset_table(ts: &str) -> bool {
 }
 
 /// Packs every `*.tgz` in `samples_dir` into share `sid`. `scratch` is removed afterwards.
-pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &Path, last_updated: &str) -> Result<PackedSample, String> {
+pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &Path, last_updated: &str, same_patient: bool) -> Result<PackedSample, String> {
     std::fs::create_dir_all(scratch).map_err(|e| e.to_string())?;
     let result = (|| {
         let mut tgzs: Vec<PathBuf> = std::fs::read_dir(samples_dir)
@@ -142,7 +142,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
 
         // 2. Group and order as the packer does (spec/README.md §11.1), with the sample's reports.
         let headers: Vec<ParsedDicomInstance> = members.iter().map(|m| m.h.clone()).collect();
-        let plan = plan_share(&headers, |i| members[i].len, |i| file_sha256(&members[i].path));
+        let plan = plan_share(&headers, |i| members[i].len, |i| file_sha256(&members[i].path), same_patient).map_err(|c| c.to_string())?;
         for &i in &plan.duplicates {
             skipped.push(Skipped { name: members[i].h.source_name.clone(), reason: DUPLICATE_REASON.into() });
         }

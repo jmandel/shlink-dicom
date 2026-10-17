@@ -127,3 +127,13 @@ pub fn wrap_bare_data_set(raw: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
 pub fn looks_like_bare_data_set(prefix: &[u8]) -> bool {
     shl_dicom_core::dicom_io::looks_like_bare_data_set(prefix)
 }
+
+/// The Bundle's Patient from the included instances' patient fields, in Bundle order
+/// (`shl_dicom_core::patient`): a JSON array of `{name?, birthDate?, id?, issuer?}`, and whether
+/// the sharer said they are the same person. JSON `{patient: {dicomName, birthDate, identifiers}}`
+/// or `{conflict: {first: [name, birthDate], other: [name, birthDate]}, message}`.
+#[wasm_bindgen]
+pub fn share_patient(records_json: &str, same_patient: bool) -> Result<String, JsError> {
+    let records: Vec<shl_dicom_core::patient::PatientMeta> = serde_json::from_str(records_json).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(shl_dicom_core::patient::patient_json(&records, same_patient).to_string())
+}

@@ -235,6 +235,8 @@ export interface UploadJob {
   ownerKey: string;
   source: { kind: "files" | "portal" | "link" | "sample"; link?: string; stage?: string; files?: { name: string; size: number; id?: string }[] };
   addOffsetTables: boolean;
+  /** The sharer said files naming different people are one person's (lib/ingest.ts sharePatient). */
+  samePatient?: boolean;
   /**
    * Uncompressed images re-encoded without loss before packing (lib/compress.ts): the encoding, the
    * staging session holding the re-encoded files, and each one's staged file and SHA-256.

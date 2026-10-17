@@ -18,7 +18,7 @@ fn pack_hosts_its_files_under_a_256_bit_folder() {
     std::fs::write(&input, part10("2.25.88.1.1")).unwrap();
 
     let out1 = dir.join("out1");
-    run_pack_cli(std::slice::from_ref(&input), &out1, Some("https://host.example/x/"), None, false, None).unwrap();
+    run_pack_cli(std::slice::from_ref(&input), &out1, Some("https://host.example/x/"), None, false, None, false).unwrap();
     let f1 = folders(&out1);
     assert_eq!(f1.len(), 1);
     assert_eq!(b64url_decode(&f1[0]).unwrap().len(), 32, "{}", f1[0]);
@@ -29,7 +29,7 @@ fn pack_hosts_its_files_under_a_256_bit_folder() {
 
     // Another pack, another folder.
     let out2 = dir.join("out2");
-    run_pack_cli(std::slice::from_ref(&input), &out2, None, None, false, None).unwrap();
+    run_pack_cli(std::slice::from_ref(&input), &out2, None, None, false, None, false).unwrap();
     assert_ne!(folders(&out2)[0], f1[0]);
 
     // --keys with a segment keeps it (an update in place).
@@ -46,11 +46,11 @@ fn pack_hosts_its_files_under_a_256_bit_folder() {
     )
     .unwrap();
     let out3 = dir.join("out3");
-    run_pack_cli(std::slice::from_ref(&input), &out3, None, None, false, Some(&keys)).unwrap();
+    run_pack_cli(std::slice::from_ref(&input), &out3, None, None, false, Some(&keys), false).unwrap();
     assert_eq!(folders(&out3), vec![segment.clone()]);
     // A short segment is refused.
     std::fs::write(&keys, std::fs::read_to_string(&keys).unwrap().replace(&segment, &b64url_encode(&[9u8; 16]))).unwrap();
-    assert!(run_pack_cli(&[input], &dir.join("out4"), None, None, false, Some(&keys)).is_err());
+    assert!(run_pack_cli(&[input], &dir.join("out4"), None, None, false, Some(&keys), false).is_err());
 
     assert_eq!(pack_link_url("https://h.example/x", &segment).unwrap(), format!("https://h.example/x/{segment}/bundle.jwe"));
     assert!(pack_link_url("https://h.example/x/bundle.jwe", &segment).is_err());

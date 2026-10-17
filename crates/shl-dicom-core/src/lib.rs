@@ -5,6 +5,7 @@ pub mod jwe;
 pub mod offset_tables;
 pub mod order;
 pub mod packer;
+pub mod patient;
 pub mod range;
 pub mod shl;
 

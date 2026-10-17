@@ -89,14 +89,15 @@ pub struct SeedReport {
 
 /// Packs `samples/*.tgz` (with `samples/reports.json`) into a new read-only sample share, streaming
 /// one record at a time into the share's files, and makes its two links. Replaces an earlier sample.
-pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
+/// `same_patient`: pack the sample's files as one patient's even when they name different people.
+pub fn seed_sample(state: &AppState, same_patient: bool) -> Result<SeedReport, String> {
     let samples_dir = state.data_dir.join("samples");
     let seed_meta_path = state.data_dir.join("seeded_demos.json");
     let previous = std::fs::read_to_string(&seed_meta_path).ok().and_then(|t| serde_json::from_str::<PersistedSeed>(&t).ok());
 
     let (sid, _ctrl) = state.create_share(true, None)?;
     let scratch = state.data_dir.join(format!("seed-scratch-{sid}"));
-    let packed = match pack_samples(state, &sid, &samples_dir, &scratch, "2026-10-14T16:00:00Z") {
+    let packed = match pack_samples(state, &sid, &samples_dir, &scratch, "2026-10-14T16:00:00Z", same_patient) {
         Ok(p) => p,
         Err(e) => {
             let _ = state.delete_share(&sid);

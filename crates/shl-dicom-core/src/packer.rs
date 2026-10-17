@@ -7,6 +7,7 @@ use crate::{
         LinkedFileInput, PatientInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
     },
     order::{group, InstanceMeta, DUPLICATE_REASON},
+    patient::{patient_from, PatientConflict, PatientMeta},
     crypto::{b64url_encode, encrypt_file_stream, random_bytes, ReadChain},
     range::ciphertext_length,
     dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance, Skipped},
@@ -59,6 +60,7 @@ pub struct IngestSession {
     skipped: Vec<Skipped>,
     add_offset_tables: bool,
     study_files: Option<BTreeMap<String, StudyFile>>,
+    same_patient: bool,
 }
 
 impl Default for IngestSession {
@@ -74,6 +76,7 @@ impl IngestSession {
             skipped: Vec::new(),
             add_offset_tables: false,
             study_files: None,
+            same_patient: false,
         }
     }
 
@@ -83,6 +86,12 @@ impl IngestSession {
     /// id and key to different content (spec/README.md §13, nonce safety).
     pub fn set_study_files(&mut self, files: BTreeMap<String, StudyFile>) {
         self.study_files = Some(files);
+    }
+
+    /// Packs instances that name different people (`patient`) as one patient's, which `pack`
+    /// otherwise refuses: the sharer said they are the same person.
+    pub fn set_same_patient(&mut self, on: bool) {
+        self.same_patient = on;
     }
 
     /// When on, `pack` gives each encapsulated multi-frame instance that has an empty Basic Offset
@@ -161,7 +170,8 @@ impl IngestSession {
             }
         }
         let insts = &self.instances;
-        let plan = plan_share(insts, |i| insts[i].bytes.len() as u64, |i| sha256_hex(&insts[i].bytes));
+        let plan = plan_share(insts, |i| insts[i].bytes.len() as u64, |i| sha256_hex(&insts[i].bytes), self.same_patient)
+            .map_err(|c| Error::Dicom(c.to_string()))?;
         for &i in &plan.duplicates {
             self.skipped.push(Skipped { name: insts[i].source_name.clone(), reason: DUPLICATE_REASON.into() });
         }
@@ -212,9 +222,14 @@ pub struct SharePlan {
 
 /// Plans a share from `headers`; `len(i)` is instance i's length as packed, and `sha256(i)` the
 /// SHA-256 (hex) of its bytes, asked for only to choose between two copies of one SOP Instance
-/// UID at the same place. The patient and each study-level value come from the first instance,
-/// in order, that has it.
-pub fn plan_share(headers: &[ParsedDicomInstance], len: impl Fn(usize) -> u64, mut sha256: impl FnMut(usize) -> String) -> SharePlan {
+/// UID at the same place. The patient comes from `patient::patient_from` (refusing two people
+/// unless `same_patient`); each study-level value from the first instance, in order, that has it.
+pub fn plan_share(
+    headers: &[ParsedDicomInstance],
+    len: impl Fn(usize) -> u64,
+    mut sha256: impl FnMut(usize) -> String,
+    same_patient: bool,
+) -> std::result::Result<SharePlan, PatientConflict> {
     let mut metas: Vec<InstanceMeta> = headers.iter().map(instance_meta).collect();
     let mut grouped = group(&metas);
     if !grouped.need_sha256.is_empty() {
@@ -224,22 +239,10 @@ pub fn plan_share(headers: &[ParsedDicomInstance], len: impl Fn(usize) -> u64, m
         grouped = group(&metas);
     }
     let text = |v: &Option<String>| v.clone().filter(|v| !v.trim().is_empty());
-    let mut patient = PatientInput::default();
     let mut studies = Vec::new();
     for gs in grouped.studies {
         let order: Vec<usize> = gs.series.iter().flat_map(|se| se.instances.iter().copied()).collect();
         let first = |f: fn(&ParsedDicomInstance) -> &Option<String>| order.iter().find_map(|&i| text(f(&headers[i])));
-        if patient.dicom_name.is_none() {
-            patient.dicom_name = first(|h| &h.patient_name);
-        }
-        if patient.identifiers.is_empty() {
-            if let Some(id) = first(|h| &h.patient_id) {
-                patient.identifiers.push(serde_json::json!({ "value": id }));
-            }
-        }
-        if patient.birth_date.is_none() {
-            patient.birth_date = first(|h| &h.patient_birth_date);
-        }
         let series = gs
             .series
             .iter()
@@ -272,7 +275,16 @@ pub fn plan_share(headers: &[ParsedDicomInstance], len: impl Fn(usize) -> u64, m
         };
         studies.push((study, order));
     }
-    SharePlan { patient, studies, duplicates: grouped.duplicates.iter().map(|&(i, _)| i).collect() }
+    let records: Vec<PatientMeta> = studies
+        .iter()
+        .flat_map(|(_, order): &(StudyBuildInput, Vec<usize>)| order.iter())
+        .map(|&i| {
+            let h = &headers[i];
+            PatientMeta { name: h.patient_name.clone(), birth_date: h.patient_birth_date.clone(), id: h.patient_id.clone(), issuer: h.patient_id_issuer.clone() }
+        })
+        .collect();
+    let patient = patient_from(&records, same_patient)?;
+    Ok(SharePlan { patient, studies, duplicates: grouped.duplicates.iter().map(|&(i, _)| i).collect() })
 }
 
 /// What `order::group` reads from an ingested instance.
@@ -330,6 +342,41 @@ mod tests {
         assert_eq!(s.instances_missing_offset_tables(), 1);
         s.set_add_offset_tables(add);
         (src, s.pack("2026-10-15T00:00:00Z").unwrap())
+    }
+
+    /// A one-instance CT of `name`, born `birth`, in its own study.
+    fn ct_of(name: &str, birth: &str, id: &str, study: &str) -> Vec<u8> {
+        use crate::test_ds::{part10_meta, Ds, Enc};
+        let class = "1.2.840.10008.5.1.4.1.1.2";
+        let sop = format!("{study}.1.1");
+        let mut d = Ds::new(Enc::ExplicitLe);
+        d.ui(0x0008, 0x0016, class).ui(0x0008, 0x0018, &sop).text(0x0008, 0x0020, b"DA", "20240101").text(0x0008, 0x0060, b"CS", "CT");
+        d.text(0x0010, 0x0010, b"PN", name).text(0x0010, 0x0020, b"LO", id).text(0x0010, 0x0030, b"DA", birth);
+        d.ui(0x0020, 0x000D, study).ui(0x0020, 0x000E, &format!("{study}.1")).text(0x0020, 0x0013, b"IS", "1");
+        d.image(1, "MONOCHROME2", None, None, 2, 2, 8, 8, 0);
+        d.elem(0x7FE0, 0x0010, b"OW", &[7; 4]);
+        part10_meta("1.2.840.10008.1.2.1", &[(0x0002, class), (0x0003, &sop)], &d.out, true)
+    }
+
+    #[test]
+    fn pack_refuses_two_people_unless_told_they_are_one() {
+        let session = |same: bool| {
+            let mut s = IngestSession::new();
+            s.ingest_dicom_bytes("ann.dcm", ct_of("ALPHA^ANN", "19700101", "A-1", "2.25.1")).unwrap();
+            s.ingest_dicom_bytes("bob.dcm", ct_of("BETA^BOB", "19800202", "B-2", "2.25.2")).unwrap();
+            s.set_same_patient(same);
+            s
+        };
+        let err = session(false).pack("2026-10-17T00:00:00Z").unwrap_err().to_string();
+        assert!(err.contains("more than one patient") && err.contains("ALPHA^ANN") && err.contains("BETA^BOB"), "{err}");
+        let packed = session(true).pack("2026-10-17T00:00:00Z").unwrap();
+        assert_eq!(packed.index.patient_name.as_deref(), Some("Ann Alpha"));
+        // One person under two given names and two record numbers: packed without being told.
+        let mut s = IngestSession::new();
+        s.ingest_dicom_bytes("a.dcm", ct_of("EXAMPLE^JOSH", "19800202", "MRN-1", "2.25.1")).unwrap();
+        s.ingest_dicom_bytes("b.dcm", ct_of("EXAMPLE^JOSHUA", "19800202", "MRN-2", "2.25.2")).unwrap();
+        let v: Value = serde_json::from_str(&s.pack("2026-10-17T00:00:00Z").unwrap().owner_bundle_json).unwrap();
+        assert_eq!(v["entry"][0]["resource"]["identifier"], serde_json::json!([{ "value": "MRN-1" }, { "value": "MRN-2" }]));
     }
 
     #[test]

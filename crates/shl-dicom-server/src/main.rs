@@ -124,6 +124,10 @@ enum Commands {
         /// (spec/README.md §13).
         #[arg(long)]
         keys: Option<PathBuf>,
+        /// Pack files that name different people (family name or birth date differ) as one
+        /// patient's: the sharer knows they are the same person. Without it, pack refuses them.
+        #[arg(long)]
+        same_patient: bool,
     },
     /// Re-encode the uncompressed images in DICOM files and .tgz archives without loss, as the seed
     /// and the Share page do (JPEG Lossless SV1, checked bit for bit), writing every file (re-encoded
@@ -150,6 +154,10 @@ enum Commands {
         data_dir: PathBuf,
         #[command(flatten)]
         store: StoreArgs,
+        /// Pack the sample's files as one patient's even when they name different people
+        /// (family name or birth date differ); without it, the seed refuses them
+        #[arg(long)]
+        same_patient: bool,
         /// Print the version of the sample's layout this server loads, and exit (the bootstrap
         /// seeds again when it changes)
         #[arg(long)]
@@ -202,8 +210,9 @@ async fn main() {
             label,
             add_offset_tables,
             keys,
+            same_patient,
         } => {
-            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref(), add_offset_tables, keys.as_deref()) {
+            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref(), add_offset_tables, keys.as_deref(), same_patient) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
@@ -228,12 +237,12 @@ async fn main() {
             }
         }
         Commands::Seed { print_version: true, .. } => println!("{}", shl_dicom_server::seed::SEED_VERSION),
-        Commands::Seed { data_dir, store, .. } => {
+        Commands::Seed { data_dir, store, same_patient, .. } => {
             let t0 = std::time::Instant::now();
             // The service keeps running on this data directory while the seed works (the bootstrap
             // restarts it afterwards), so the seed runs none of the startup sweeps.
             let state = AppState::alongside_server(&data_dir, Quotas::default(), store.store(&data_dir)).expect("failed to initialize AppState");
-            let result = seed_sample(&state);
+            let result = seed_sample(&state, same_patient);
             // The earlier sample's files, if any, leave the store now.
             state.empty_trash().await;
             match result {

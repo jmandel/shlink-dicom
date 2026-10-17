@@ -6,7 +6,7 @@ import { b64urlDecode, b64urlEncode } from "../../core/b64";
 import { ConcatBytes } from "./bytes";
 import { randomKeyB64 } from "../../core/jwe";
 import { RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
-import type { Collection, Instance, StudyModel } from "./ingest";
+import { sharePatient, type Collection, type Instance, type StudyModel } from "./ingest";
 import { shlWasm } from "./shl-wasm";
 
 /** One study's encrypted file. */
@@ -81,20 +81,25 @@ const TS_LOSSLESS: Record<string, string> = { "1.2.840.10008.1.2.4.70": "JPEG Lo
 
 /**
  * The owner Bundle, built by the packer's one builder (shl_dicom_core::bundle::build_fhir_bundle,
- * through shl-dicom-wasm): Patient, then for each packed study its ImagingStudy (study-1…), a
+ * through shl-dicom-wasm): Patient (refusing studies of two people unless the sharer said they are
+ * one, lib/ingest.ts sharePatient), then for each packed study its ImagingStudy (study-1…), a
  * Provenance when this device re-encoded some of its images, and its included reports; then the
  * included reports that name no study. Needs loadShlWasm first.
  */
 export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated = new Date().toISOString()): any {
   const p = col.patient;
+  // From a FHIR source, its Patient; from DICOM, the packed studies' patient (one person, §11.1).
+  let patient: any;
+  if (col.patientSource === "fhir") {
+    patient = { fhirName: p.humanName ?? (p.name ? { text: p.name } : null), birthDate: p.birthDate, identifiers: p.identifier };
+  } else {
+    const sp = sharePatient(packed.map((f) => f.study), col.samePatient);
+    if ("conflict" in sp) throw new Error(sp.message);
+    patient = sp.patient;
+  }
   const input = {
     lastUpdated,
-    patient: {
-      dicomName: p.pn ?? null,
-      fhirName: p.humanName ?? (p.pn ? null : p.name ? { text: p.name } : null),
-      birthDate: p.birthDate,
-      identifiers: p.identifier,
-    },
+    patient,
     // Same order as each file's instances, so offsets in the file follow the Bundle (§8.1).
     studies: packed.map(({ study: st, instances, fileId, key }) => {
       const reencoded = instances.filter((i) => i.reencoded);

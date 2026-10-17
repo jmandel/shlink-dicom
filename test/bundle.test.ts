@@ -1,9 +1,12 @@
 // bun test test/bundle.test.ts: the viewer's Bundle parser (web/core/bundle.ts) and the Share page's
 // link subsetting (web/share/lib/pack.ts) on the golden Bundle of spec/README.md Appendix A.
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { EXT_LINKED_FILE, parseStudyIndex } from "../web/core/bundle";
 import { subsetBundle } from "../web/share/lib/pack";
+import { useShlWasm } from "../web/checks/shl-wasm-bun";
+
+beforeAll(() => useShlWasm());
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/golden/bundle.json", import.meta.url), "utf8"));
 const copy = () => structuredClone(golden);

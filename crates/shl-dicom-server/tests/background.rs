@@ -53,12 +53,12 @@ async fn seeding_again_keeps_the_served_sample_until_the_server_loads_the_new_on
     std::fs::write(samples.join("a.tgz"), tar.into_inner().unwrap().finish().unwrap()).unwrap();
 
     let server = AppState::new(&dir).unwrap();
-    let first = shl_dicom_server::seed::seed_sample(&server).unwrap().sid;
+    let first = shl_dicom_server::seed::seed_sample(&server, false).unwrap().sid;
     assert!(shl_dicom_server::seed::load_sample(&server, "http://localhost"));
 
     // The seed runs in its own process, alongside the server.
     let seed = AppState::alongside_server(&dir, Default::default(), server.store.clone()).unwrap();
-    let second = shl_dicom_server::seed::seed_sample(&seed).unwrap().sid;
+    let second = shl_dicom_server::seed::seed_sample(&seed, false).unwrap().sid;
     assert_ne!(first, second);
     assert!(server.catalog_has_share(&first), "the seed deleted the sample the server still serves");
 

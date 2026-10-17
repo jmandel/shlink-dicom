@@ -3,7 +3,7 @@
 import { utf8 } from "../core/b64";
 import { encryptJwe, randomKeyB64 } from "../core/jwe";
 import { extractShlink, parseShlink, hasFlag } from "../core/shlink";
-import { formatBytes, formatDate, plural } from "../core/format";
+import { formatBytes, formatDate, formatPersonName, plural } from "../core/format";
 import { loadConfig, siteUrl, type SiteConfig } from "../core/config";
 import { fetchSampleLinks } from "../core/samples";
 import { openShare } from "../core/share";
@@ -11,7 +11,7 @@ import { PasscodeError, LinkError, LinkResolver } from "../core/resolver";
 import { getDecoderPool } from "../core/images";
 import { drawThumbnail } from "../core/render";
 import {
-  Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
+  Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, sharePatient, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
 import { buildBundle, ciphertextSize, looseReports, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
@@ -393,9 +393,6 @@ let thumbGen = 0;
 
 function renderReview() {
   const studies = col.list();
-  $("rv-patient").textContent = col.patient.name
-    ? `${col.patientSource === "fhir" ? "Patient" : "Name in the files"}: ${col.patient.name}${col.patient.birthDate ? `, born ${formatDate(col.patient.birthDate)}` : ""}`
-    : "";
   const box = $("rv-studies");
   reportBoxes.clear();
   box.replaceChildren(...studies.map(studyCard), ...[looseReportsCard()].filter(Boolean) as HTMLElement[]);
@@ -575,12 +572,58 @@ function looseReportsCard(): HTMLElement | null {
   );
 }
 
+/** "DOE^JANE" and "19700101" as the review shows them. */
+const personLine = (name: string | null, birth: string | null) =>
+  [name ? formatPersonName(name) : "No name", birth ? `born ${formatDate(birth)}` : "no birth date"].join(", ");
+
+/**
+ * The patient line of the review step, from the included studies (one patient per share,
+ * spec/README.md §11.1). When they name two people, both are shown with a "These are the same
+ * person" box; returns true while that blocks Continue.
+ */
+function renderPatient(inc: StudyModel[]): boolean {
+  const line = $("rv-patient");
+  let box = document.getElementById("rv-same");
+  if (!box) {
+    box = h("div", { id: "rv-same", class: "field hidden", role: "group" });
+    line.after(box);
+  }
+  if (col.patientSource === "fhir") {
+    const p = col.patient;
+    line.textContent = p.name ? `Patient: ${p.name}${p.birthDate ? `, born ${formatDate(p.birthDate)}` : ""}` : "";
+    box.classList.add("hidden");
+    return false;
+  }
+  const strict = sharePatient(inc, false);
+  if ("patient" in strict) {
+    col.samePatient = false;
+    const { dicomName, birthDate } = strict.patient;
+    line.textContent = dicomName ? `Name in the files: ${personLine(dicomName, birthDate)}` : "";
+    box.classList.add("hidden");
+    return false;
+  }
+  const { first, other } = strict.conflict;
+  line.textContent = "These files name more than one person.";
+  const tick = h("input", { type: "checkbox", id: "rv-same-tick", checked: col.samePatient, onchange: () => {
+    col.samePatient = tick.checked;
+    updateTotal();
+  } }) as HTMLInputElement;
+  box.replaceChildren(
+    h("ul", { class: "people" }, h("li", null, personLine(first[0], first[1])), h("li", null, personLine(other[0], other[1]))),
+    h("label", { class: "check-row" }, tick, h("span", { class: "box", "aria-hidden": "true" }), h("span", null, "These are the same person")),
+    h("p", { class: "hint" }, "Otherwise, leave out one person's studies: a share holds one patient's imaging."),
+  );
+  box.classList.remove("hidden");
+  return !col.samePatient;
+}
+
 function updateTotal() {
   const inc = col.list().filter((s) => s.include);
   const bytes = inc.reduce((a, s) => a + studyCounts(s).bytes, 0);
   // What goes into the Bundle: included studies, their included reports, and included loose reports.
   const reports = inc.reduce((a, s) => a + s.reports.filter((r) => r.include).length, 0) + col.looseReports.filter((r) => r.include).length;
-  $<HTMLButtonElement>("rv-next").disabled = !inc.length;
+  const twoPeople = renderPatient(inc);
+  $<HTMLButtonElement>("rv-next").disabled = !inc.length || twoPeople;
   $("rv-total").textContent = inc.length
     ? [`Sharing ${plural(inc.length, "study", "studies")}`, reports ? plural(reports, "report") : null, formatBytes(bytes)].filter(Boolean).join(" · ")
     : "Include at least one study to continue.";
@@ -713,6 +756,7 @@ async function upload() {
     apiBase: cfg.apiBase,
     source: sourceInfo,
     addOffsetTables: !$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked,
+    samePatient: col.samePatient,
     compress: null,
     recipient: $<HTMLInputElement>("in-recipient").value.trim() || null,
     passcode: $<HTMLInputElement>("in-pass").value,
@@ -1041,6 +1085,7 @@ async function resumeJob(job: UploadJob, files?: File[]) {
     const owner = job.plan ? null : await readOwnerBundle(api, job.ownerKey);
     await loadShlWasm();
     const c = new Collection();
+    c.samePatient = !!job.samePatient;
     const st = await openStager(job.source.stage);
     const on = (_c: Collection, p: Progress) => {
       $("up-main").textContent = p.doing;
