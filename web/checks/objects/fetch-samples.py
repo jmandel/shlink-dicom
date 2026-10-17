@@ -52,6 +52,7 @@ LIC = {
     "orthanc": "GPL-3.0 (orthanc-tests repository Database/; file from a public issue report)",
     "clunie": "David Clunie public test images (dclunie.com, freely distributed, no explicit licence)",
     "dcm2bq": "Apache-2.0 (GoogleCloudPlatform/dcm2bq test data); embedded PDF is NationalRad's public sample report",
+    "pylinac": "MIT (jrkerns/pylinac repository LICENSE); a synthetic image from pylinac's image generator, header from a Varian service-mode template, no patient",
 }
 
 URL = {
@@ -63,6 +64,7 @@ URL = {
     "itk": "https://gin.g-node.org/InsightSoftwareConsortium/itk-wasm-testing-data/raw/main/test/Input/{p}",
     "dcm2bq": "https://media.githubusercontent.com/media/GoogleCloudPlatform/dcm2bq/main/test/files/dcm/{p}",
     "clunie": "https://www.dclunie.com/images/compressed/deflate_tests_release.tar.gz#{p}",
+    "pylinac": "https://raw.githubusercontent.com/jrkerns/pylinac/master/{p}",
 }
 LOCAL = {
     "gdcm": QUIRKS / "gdcmData",
@@ -168,6 +170,19 @@ CASES = [
                "PET series that is not included).",
          files=[S("pydicom", "rtplan.dcm", "rtplan_pydicom.dcm"), S("pydicom", "rtdose.dcm", "rtdose_pydicom.dcm"),
                 S("gdcm", "MR_Spectroscopy_SIEMENS_OF.dcm", "mrs_gdcm-MR_Spectroscopy_SIEMENS_OF.dcm")]),
+    dict(id="pet-rwvm-seg", feature="PET with a Real World Value Mapping (SUV factors), and PET with a SEG",
+         notes="Two studies; no IDC study has both an RWVM and a SEG. IDC CT-vs-PET-Ventilation-Imaging CT-PET-VI-15: the "
+               "Real World Value Mapping (Slicer SUVFactorCalculator, SUVbw {SUVbw}g/ml) and 20 contiguous slices of the 102-slice "
+               "PT series it maps (Units BQML); the RWVM still lists all 102. IDC PSMA-PET-CT-Lesions: the SEG 'Tumor lesions' "
+               "(BINARY, 41 frames) and the 41 PT slices it references. The viewer lists the RWVM and does not apply it; "
+               "the SEG is drawn on its PET slices. TCIA de-identified (Patient Identity Removed YES).",
+         files=[]),
+    dict(id="rt-plan-set", feature="RT Plan alongside an RT Structure Set and an RT Image",
+         notes="IDC Vestibular-Schwannoma-SEG VS-SEG-131: an Elekta Gamma Knife RT Plan (no Referenced Structure Set; it only "
+               "shares the study), the 'ROIs in MR T2' RT Structure Set and the MR T2 series it references. IDC has no RT Image, "
+               "so pylinac's perfect_up_down.dcm (synthetic RT Image, 1280x1280, no patient) is a separate study. The doses are "
+               "left out (pydicom rtdose.dcm in other-nonimage covers RT Dose). TCIA de-identified (Patient Identity Removed YES).",
+         files=[S("pylinac", "docs/source/files/perfect_up_down.dcm", "pylinac-perfect_up_down-rtimage.dcm")]),
     dict(id="modality-lut-seq", feature="Modality LUT Sequence",
          notes="pydicom mlut_18.dcm (IHE MESA display test image): Modality LUT Sequence with signed descriptor "
                "4096\\-2048\\16 and no Rescale. fo-dicom CR-ModalitySequenceLUT.dcm: CR with a Modality LUT Sequence "
@@ -382,7 +397,7 @@ def main():
     cache = a.out / "_cache"
     idc = json.loads(IDC_SELECTION.read_text())
     old = {c["id"]: c for c in json.loads(MANIFEST.read_text())["cases"]} if MANIFEST.exists() else {}
-    pinned = {(c["id"], fd["path"]): fd["sha256"] for c in old.values() for fd in c.get("fileDetails", [])}
+    pinned = {(c["id"], fd["path"]): fd["sha256"] for c in old.values() for fd in c.get("fileDetails", []) if "path" in fd}
     out_cases = []
     for case in CASES:
         cid = case["id"]
@@ -429,6 +444,9 @@ def main():
         entry["references"] = [{k: v for k, v in r.items() if k != "ok"} | ({} if r["ok"] else {"failed": True}) for r in refs]
         entry["fileDetails"] = [{k: v for k, v in d.items() if k not in ("hasPixels", "nWindows", "nVoiLuts", "hasOverlay", "refImage")} for d in details]
         out_cases.append(entry)
+    # Cases other scripts add (make-derived.py and the like) are kept as they are.
+    listed = {c["id"] for c in CASES}
+    out_cases += [c for cid, c in old.items() if cid not in listed]
     doc = dict(
         description="Real public DICOM samples for viewer object-type and display-fidelity work. Data lives outside git "
                     "under dataRoot/<id>/; rebuild with fetch-samples.py. references[] are DCMTK outputs (commands run "
@@ -436,7 +454,7 @@ def main():
         dataRoot=str(a.out), dcmtk=subprocess.run(["dcm2img", "--version"], capture_output=True, text=True).stdout.splitlines()[0].strip(" $"),
         cases=out_cases)
     MANIFEST.write_text(json.dumps(doc, indent=1) + "\n")
-    print(f"wrote {MANIFEST}: {len(out_cases)} cases, {sum(c['sizeBytes'] for c in out_cases) / 1e6:.1f} MB")
+    print(f"wrote {MANIFEST}: {len(out_cases)} cases, {sum(c.get('sizeBytes', 0) for c in out_cases) / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
