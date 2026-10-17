@@ -20,7 +20,9 @@ pub enum Error {
         plaintext_len: u64,
     },
     #[error("unexpected ciphertext length: expected {expected}, got {got}")]
-    UnexpectedCiphertextLength { expected: usize, got: usize },
+    UnexpectedCiphertextLength { expected: u64, got: u64 },
+    #[error("a range of {0} bytes is too large to hold on this platform")]
+    RangeTooLarge(u64),
     #[error("record {record_index} failed AES-GCM authentication")]
     AuthenticationFailed { record_index: u64 },
     #[error("file key or SHL key must be 32 bytes")]

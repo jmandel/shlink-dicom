@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use crate::{
-    range::{ciphertext_length, ciphertext_range, record_count, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG_LEN},
+    range::{ciphertext_length, ciphertext_range, record_count, to_usize, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG_LEN},
     Error, Result,
 };
 
@@ -68,12 +68,14 @@ pub fn decrypt_range(
     file_key: &[u8; 32],
 ) -> Result<Vec<u8>> {
     let r = ciphertext_range(start, end, plaintext_len)?;
-    if ciphertext_slice.len() != r.expected_ciphertext_len() {
+    if ciphertext_slice.len() as u64 != r.expected_ciphertext_len() {
         return Err(Error::UnexpectedCiphertextLength {
             expected: r.expected_ciphertext_len(),
-            got: ciphertext_slice.len(),
+            got: ciphertext_slice.len() as u64,
         });
     }
+    // The slice is in memory, so the range fits in usize from here on.
+    let length = to_usize(r.length)?;
 
     let cipher = Aes256Gcm::new(file_key.into());
     let total_records = record_count(plaintext_len);
@@ -103,7 +105,7 @@ pub fn decrypt_range(
         joined.extend_from_slice(&pt);
     }
 
-    Ok(joined[r.skip_prefix..r.skip_prefix + r.length].to_vec())
+    Ok(joined[r.skip_prefix..r.skip_prefix + length].to_vec())
 }
 
 /// Encrypts a file as it is read (§9.2), one record at a time: reads plaintext from `reader`
