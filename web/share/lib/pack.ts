@@ -81,6 +81,20 @@ export async function encryptFile(p: PackedFile): Promise<Uint8Array> {
 const DR_KEEP = ["status", "category", "code", "effectiveDateTime", "effectivePeriod", "issued", "conclusion", "conclusionCode", "presentedForm", "text", "identifier"];
 
 /**
+ * Copies the kept DiagnosticReport elements into `dr`. Attachments keep their inline data only:
+ * a `url` would point recipients at the portal (or wherever the source said), so it is dropped,
+ * and an attachment with no data left is left out.
+ */
+function keepReport(r: any, dr: any) {
+  for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
+  if (Array.isArray(dr.presentedForm)) {
+    const forms = dr.presentedForm.filter((a: any) => a?.data).map(({ url: _url, ...a }: any) => a);
+    if (forms.length) dr.presentedForm = forms;
+    else delete dr.presentedForm;
+  }
+}
+
+/**
  * The owner Bundle: Patient, one ImagingStudy per included study (ids study-1…), and the studies'
  * DiagnosticReports. Each report's imagingStudy points at its packed ImagingStudy in this Bundle
  * (by fullUrl) and names the study by UID; each ImagingStudy carries the Study Instance UID and the
@@ -140,7 +154,7 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
     }
     for (const { resource: r } of st.reports.filter((x) => x.include)) {
       const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
-      for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
+      keepReport(r, dr);
       dr.subject = { reference: "Patient/p1" };
       dr.imagingStudy = [{ reference: studyUrl, identifier: { system: "urn:dicom:uid", value: `urn:oid:${st.uid}` } }];
       entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
@@ -149,7 +163,7 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
   // Reports that name no study, when the person included them: no imagingStudy.
   for (const { resource: r } of col.looseReports.filter((x) => x.include)) {
     const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
-    for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
+    keepReport(r, dr);
     dr.subject = { reference: "Patient/p1" };
     entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
   }

@@ -99,18 +99,41 @@ async function getWithRetry(url: string, headers: Record<string, string>, tries 
   }
 }
 
-export async function fhirGet(url: string, token: string): Promise<any> {
-  const res = await getWithRetry(url, { authorization: `Bearer ${token}`, accept: "application/fhir+json" });
-  if (!res.ok) throw new Error(`GET ${url}: HTTP ${res.status}`);
+/** The portal's token and the two servers it may go to. */
+export interface PortalAuth {
+  token: string;
+  clinicalBase: string;
+  imagingBase: string;
+}
+
+export function portalAuth(d: Discovery, token: string): PortalAuth {
+  return { token, clinicalBase: d.clinicalBase, imagingBase: d.imagingBase };
+}
+
+/**
+ * An address the portal gave (a page link, an attachment, an Endpoint), resolved against the
+ * clinical base (relative ones), when it is on the clinical or the imaging server; otherwise an
+ * Error, so the token never goes anywhere else.
+ */
+export function portalUrl(a: Pick<PortalAuth, "clinicalBase" | "imagingBase">, url: string): string {
+  const u = new URL(url, a.clinicalBase + "/");
+  if (![a.clinicalBase, a.imagingBase].some((b) => new URL(b).origin === u.origin)) throw new Error(`The portal pointed to another server (${u.origin}); its token is not sent there.`);
+  return u.toString();
+}
+
+export async function fhirGet(url: string, auth: PortalAuth): Promise<any> {
+  const at = portalUrl(auth, url);
+  const res = await getWithRetry(at, { authorization: `Bearer ${auth.token}`, accept: "application/fhir+json" });
+  if (!res.ok) throw new Error(`GET ${at}: HTTP ${res.status}`);
   return res.json();
 }
 
-/** Follows Bundle.link[next] pages. */
-export async function fhirSearchAll(url: string, token: string): Promise<any[]> {
+/** Follows Bundle.link[next] pages (on the portal's servers only). */
+export async function fhirSearchAll(url: string, auth: PortalAuth): Promise<any[]> {
   const out: any[] = [];
   let next: string | undefined = url;
   for (let page = 0; next && page < 20; page++) {
-    const b = await fhirGet(next, token);
+    const b = await fhirGet(next, auth);
     out.push(b);
     next = b.link?.find((l: any) => l.relation === "next")?.url;
   }
@@ -136,7 +159,8 @@ export interface FoundStudy {
   wadoBase: string;
 }
 
-export function studiesFromBundle(bundle: any): FoundStudy[] {
+/** The studies a search Bundle lists, with their WADO-RS bases (resolved against the clinical base). */
+export function studiesFromBundle(bundle: any, auth: Pick<PortalAuth, "clinicalBase" | "imagingBase">): FoundStudy[] {
   const out: FoundStudy[] = [];
   for (const entry of bundle.entry ?? []) {
     const st = entry.resource;
@@ -147,7 +171,11 @@ export function studiesFromBundle(bundle: any): FoundStudy[] {
     for (const ref of st.endpoint ?? []) {
       const ep = resolveInBundle(bundle, entry, ref.reference);
       if (ep?.resourceType === "Endpoint" && ep.connectionType?.code === "dicom-wado-rs" && ep.status === "active") {
-        wadoBase = String(ep.address).replace(/\/+$/, "");
+        try {
+          wadoBase = portalUrl(auth, String(ep.address)).replace(/\/+$/, "");
+        } catch {
+          continue; // an Endpoint on another server: the token can't go there
+        }
         break;
       }
     }
@@ -189,8 +217,11 @@ function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
   return -1;
 }
 
-/** Fetches attachment URLs with the token and puts the bytes inline (recipients can't reach the portal). */
-export async function inlineAttachments(report: any, token: string): Promise<any> {
+/**
+ * Fetches attachment URLs with the token and puts the bytes inline (recipients can't reach the
+ * portal). Only attachments on the portal's servers are fetched; the others are left out.
+ */
+export async function inlineAttachments(report: any, auth: PortalAuth): Promise<any> {
   const forms: any[] = [];
   for (const a of report.presentedForm ?? []) {
     if (a.data || !a.url) {
@@ -198,7 +229,7 @@ export async function inlineAttachments(report: any, token: string): Promise<any
       continue;
     }
     try {
-      const res = await fetch(a.url, { headers: { authorization: `Bearer ${token}`, accept: a.contentType ?? "*/*" } });
+      const res = await fetch(portalUrl(auth, a.url), { headers: { authorization: `Bearer ${auth.token}`, accept: a.contentType ?? "*/*" } });
       if (!res.ok) continue;
       const bytes = new Uint8Array(await res.arrayBuffer());
       let s = "";
@@ -214,8 +245,8 @@ export async function inlineAttachments(report: any, token: string): Promise<any
  * WADO-RS retrieve, streamed: yields each part's bytes as chunks while the response arrives, so a
  * series is never held whole. Consume each part before asking for the next.
  */
-export async function* wadoRetrieveParts(url: string, token: string, signal?: AbortSignal): AsyncGenerator<WadoPart> {
-  const res = await getWithRetry(url, { authorization: `Bearer ${token}`, accept: DICOM_ACCEPT });
+export async function* wadoRetrieveParts(url: string, auth: PortalAuth, signal?: AbortSignal): AsyncGenerator<WadoPart> {
+  const res = await getWithRetry(portalUrl(auth, url), { authorization: `Bearer ${auth.token}`, accept: DICOM_ACCEPT });
   if (!res.ok || !res.body) throw new Error(`WADO-RS ${res.status} for ${url}`);
   const ct = res.headers.get("content-type") ?? "";
   const m = ct.match(/boundary=("?)([^";]+)\1/i);

@@ -188,7 +188,7 @@ export async function finishPortalLaunch(search: string): Promise<PortalSession 
 /** Searches the patient's imaging and reports, then retrieves every series over WADO-RS. */
 export async function loadPortal(sess: PortalSession, col: Collection, stager: Stager, on: OnProgress, signal?: AbortSignal) {
   const { d } = sess;
-  const tok = sess.token.access_token as string;
+  const tok = S.portalAuth(d, sess.token.access_token as string);
   const pid = sess.token.patient as string;
   on(col, { doing: "Reading your record at the portal" });
   try {
@@ -202,7 +202,7 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
     col.patientSource = "fhir";
   } catch {}
   const pages = await S.fhirSearchAll(`${d.imagingBase}/ImagingStudy?patient=${encodeURIComponent(pid)}&_include=ImagingStudy:endpoint`, tok);
-  const found = pages.flatMap(S.studiesFromBundle);
+  const found = pages.flatMap((b) => S.studiesFromBundle(b, tok));
   let reports: any[] = [];
   try {
     const rp = await S.fhirSearchAll(`${d.clinicalBase}/DiagnosticReport?patient=${encodeURIComponent(pid)}`, tok);
