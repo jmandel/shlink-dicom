@@ -175,6 +175,15 @@ export class ShareApi {
     return { offset: Number(res.headers.get("Upload-Offset") ?? 0), length: len === null ? null : Number(len), complete: res.headers.get("Upload-Complete") === "?1" };
   }
 
+  /** Deletes an uploaded file, whole or in part (404: there was none). */
+  async deleteFile(fileId: string): Promise<void> {
+    try {
+      await this.req("DELETE", `${this.s}/files/${fileId}.bin`);
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e;
+    }
+  }
+
   /** Creates a resumable upload (no content yet), of `length` bytes or of a length not known yet. */
   async createUpload(fileId: string, length: number | null): Promise<void> {
     const ctl = new AbortController();

@@ -13,14 +13,14 @@ import { drawThumbnail } from "../core/render";
 import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, sharePatient, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
-import { buildBundle, ciphertextSize, looseReports, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
+import { buildBundle, ciphertextSize, looseReports, planStudyFiles, relinkFile, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import { loadShlWasm } from "./lib/shl-wasm";
 import {
   COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, uncompressedImages, workers,
   type CompressMode, type CompressProgress, type CompressSummary, type Encoding, type SeriesEstimate,
 } from "./lib/compress";
-import { clearJob, loadJob, openShare, persist, saveJob, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
+import { clearJob, loadJob, persist, saveJob, SentLedger, startShare, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
 import { StreamPlan } from "./lib/stream";
 import { recordCount } from "../core/range";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
@@ -797,7 +797,7 @@ async function upload() {
     const early = (c: Connection) => ($("up-main").textContent = c.state === "ok" ? "" : "Connection lost, retrying…");
     const expiresAt = job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400;
     // With a passcode, the link is made now, so the passcode is never saved for a reload.
-    const { api, full, owner } = await openShare(
+    const { api, full, owner } = await startShare(
       new ShareApi(cfg.apiBase),
       (sid, token) => new ShareApi(cfg.apiBase, { sid, token }),
       { expiresAt, passcode, link: { label: job.recipient, exp: job.exp, longLived: job.longLived } },
@@ -984,7 +984,22 @@ async function runUpload(p: Pending) {
         if (u.finished) $("up-log").prepend(h("li", null, `${plainStudyTitle(u.finished.study.description, studyModalities(u.finished.study))} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
       },
       onConn,
-      { fresh: p.fresh },
+      {
+        fresh: p.fresh,
+        ledger: new SentLedger((job.sent ??= {}), () => saveJob(job) || (clearJob(), false)),
+        // A file starting again under a new id and key: saved (with the job, and in the owner
+        // Bundle when it is stored already) before any of it is sent.
+        rekeyed: async (f, oldId) => {
+          const e = job.plan?.find((x) => x.fileId === oldId);
+          if (e) Object.assign(e, { fileId: f.fileId, key: f.key });
+          if (p.owner) {
+            relinkFile(p.owner, oldId, f.fileId, f.key);
+            const ownerJwe = await encryptJwe(utf8(JSON.stringify(p.owner)), job.ownerKey);
+            await persist(() => api.putOwner(ownerJwe), onConn);
+          }
+          if (!saveJob(job)) clearJob();
+        },
+      },
     );
     $("up-tech").textContent = `Encrypted ${plural(packed.length, "file")} · ${totalRecords()} records uploaded · making the link`;
     // Compressed on the way: the owner Bundle, now that the files' sizes are known.

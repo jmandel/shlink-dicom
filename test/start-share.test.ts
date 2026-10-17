@@ -1,9 +1,9 @@
 // bun test test/open-share.test.ts: making a share for an upload (web/share/lib/upload.ts
-// openShare). Run against a stand-in server that, like the real one, refuses a link to files it
+// startShare). Run against a stand-in server that, like the real one, refuses a link to files it
 // does not hold.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ShareApi } from "../web/share/lib/api";
-import { openShare } from "../web/share/lib/upload";
+import { startShare } from "../web/share/lib/upload";
 
 const realFetch = globalThis.fetch;
 let shares: Map<string, { links: any[] }>;
@@ -41,7 +41,7 @@ beforeEach(() => {
 afterEach(() => (globalThis.fetch = realFetch));
 
 const open = <T>(passcode: string, start: (api: ShareApi) => Promise<T>) =>
-  openShare(
+  startShare(
     new ShareApi("https://share.example"),
     (sid, token) => new ShareApi("https://share.example", { sid, token }),
     { expiresAt: 2e9, passcode, link: { label: null, exp: null, longLived: false } },

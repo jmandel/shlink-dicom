@@ -5,6 +5,7 @@
 import { b64urlDecode, b64urlEncode } from "../../core/b64";
 import { ConcatBytes } from "./bytes";
 import { randomKeyB64 } from "../../core/jwe";
+import { EXT_LINKED_FILE } from "../../core/bundle";
 import { RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
 import { sharePatient, type Collection, type Instance, type StudyModel } from "./ingest";
 import { shlWasm } from "./shl-wasm";
@@ -74,6 +75,24 @@ export async function encryptFile(p: PackedFile): Promise<Uint8Array> {
     out.set(await encryptRecords(p, key, r, Math.min(p.records, r + CHUNK_RECORDS)), r * (RECORD_PLAINTEXT + TAG));
   }
   return out;
+}
+
+/** Points the owner Bundle's studies and series that link file `oldId` at file `fileId` with `key` instead. */
+export function relinkFile(owner: any, oldId: string, fileId: string, key: string) {
+  const relink = (el: any) => {
+    for (const x of el?.extension ?? []) {
+      if (x.url !== EXT_LINKED_FILE) continue;
+      const id = x.extension?.find((y: any) => y.url === "id");
+      if (id?.valueString !== oldId) continue;
+      id.valueString = fileId;
+      x.extension.find((y: any) => y.url === "key").valueString = key;
+    }
+  };
+  for (const e of owner.entry ?? []) {
+    if (e.resource?.resourceType !== "ImagingStudy") continue;
+    relink(e.resource);
+    for (const se of e.resource.series ?? []) relink(se);
+  }
 }
 
 /** Names of the lossless transfer syntaxes the Share page writes. */

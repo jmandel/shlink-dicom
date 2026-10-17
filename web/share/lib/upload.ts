@@ -6,6 +6,9 @@ import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "../../core/range";
 import { ApiError, type ShareApi } from "./api";
 import { LinkError } from "../../core/resolver";
 import { CHUNK_RECORDS, ciphertextSize, encryptRecords, fileKey, type PackedFile } from "./pack";
+import { ConcatBytes } from "./bytes";
+import { b64urlEncode } from "../../core/b64";
+import { randomKeyB64 } from "../../core/jwe";
 
 export type Connection =
   | { state: "ok" }
@@ -34,7 +37,7 @@ export interface UploadProgress {
  * once uploaded. If anything fails before `start` returns, the share is deleted, so no share is
  * left that no saved job can continue.
  */
-export async function openShare<T>(
+export async function startShare<T>(
   root: Pick<ShareApi, "createShare">,
   connect: (sid: string, token: string) => ShareApi,
   o: { expiresAt: number; passcode: string; link: { label: string | null; exp: number | null; longLived: boolean } },
@@ -137,6 +140,72 @@ export class Growing {
   }
 }
 
+/** Records per entry of the record of what was sent (8 MiB of plaintext). */
+export const SENT_GROUP = 128;
+
+/**
+ * What may have left the browser, per file id: for each group of SENT_GROUP records from the
+ * start, how many of its records were hashed (`n`) and the SHA-256 of their plaintext (`h`). An
+ * entry is saved before any of its records are sent.
+ */
+export type SentHashes = Record<string, { n: number; h: string }[]>;
+
+/**
+ * Keeps the saved job's record of what was sent, so that continuing never encrypts different
+ * plaintext under a key and record number whose ciphertext may have left the browser (AES-GCM
+ * with a reused nonce gives away both plaintexts). `save` saves the job (or, when it cannot, drops
+ * it, so that nothing continues from a record that is out of date).
+ */
+export class SentLedger {
+  constructor(
+    readonly hashes: SentHashes,
+    private save: () => boolean,
+  ) {}
+
+  private async hash(p: PackedFile, a: number, b: number): Promise<string> {
+    const plain = await new ConcatBytes(p.instances.map((i) => i.src)).read(a * RECORD_PLAINTEXT, Math.min(p.plaintextLength, b * RECORD_PLAINTEXT));
+    return b64urlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", plain)));
+  }
+
+  /** Records the plaintext of records [0, end) before any of them are sent; `avail` records are readable. */
+  async cover(p: PackedFile, end: number, avail: number) {
+    const groups = (this.hashes[p.fileId] ??= []);
+    let changed = false;
+    for (let g = 0; g * SENT_GROUP < end; g++) {
+      const a = g * SENT_GROUP;
+      const want = Math.min(SENT_GROUP, end - a);
+      if ((groups[g]?.n ?? 0) >= want) continue;
+      // The whole group when it can be read, so that it is hashed once.
+      const n = Math.max(want, Math.min(SENT_GROUP, avail - a));
+      groups[g] = { n, h: await this.hash(p, a, a + n) };
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  /**
+   * Whether everything recorded as possibly sent for `p` is the plaintext it has now, and covers
+   * `offset` ciphertext bytes the server reports (records beyond what was recorded can't be checked).
+   */
+  async check(p: PackedFile, offset: number): Promise<boolean> {
+    const groups = this.hashes[p.fileId] ?? [];
+    let covered = 0;
+    for (const [g, e] of groups.entries()) {
+      if (!e || covered !== g * SENT_GROUP) return false;
+      if (g * SENT_GROUP + e.n > p.records) return false;
+      if ((await this.hash(p, g * SENT_GROUP, g * SENT_GROUP + e.n)) !== e.h) return false;
+      covered += e.n;
+      if (e.n < SENT_GROUP) break;
+    }
+    return Math.ceil(offset / RECORD_CIPHERTEXT) <= covered;
+  }
+
+  /** `p` starts again under a new id and key. */
+  forget(fileId: string) {
+    delete this.hashes[fileId];
+  }
+}
+
 export type UploadFile = PackedFile & { growing?: Growing };
 
 /** Whether the file's length is known: it was planned whole, or its last instance is in. */
@@ -156,15 +225,38 @@ export async function uploadFiles(
   packed: UploadFile[],
   on: (p: UploadProgress) => void,
   onConn: (c: Connection) => void,
-  o: { fresh?: boolean; signal?: AbortSignal } = {},
+  o: {
+    fresh?: boolean;
+    signal?: AbortSignal;
+    /** The saved job's record of what was sent; without one, a file the server has part of starts again. */
+    ledger?: SentLedger;
+    /**
+     * A file starts again under a new id and key (its plaintext differs from what was sent, or that
+     * can't be checked): the caller saves where the new id and key are kept before anything is sent.
+     */
+    rekeyed?: (p: UploadFile, oldId: string) => Promise<void>;
+  } = {},
 ) {
   const signal = o.signal;
+  const ledger = o.ledger ?? new SentLedger({}, () => true);
   const total = () => packed.reduce((a, p) => a + ciphertextSize(p), 0);
   const offsets = new Map<string, number>();
   for (const p of packed) {
     // A new share has no uploads yet; otherwise ask the server what it has.
     const st = o.fresh ? null : await persist(() => api.uploadOffset(p.fileId), onConn, signal);
-    offsets.set(p.fileId, st ? (st.complete ? ciphertextSize(p) : st.offset) : -1);
+    let off = st ? (st.complete ? ciphertextSize(p) : st.offset) : -1;
+    // Continuing: only if what may have been sent is this plaintext, at this length.
+    const sizeOk = !st || st.length === null || !known(p) || st.length === ciphertextSize(p);
+    if (st && !(sizeOk && (await ledger.check(p, st.complete ? ciphertextSize(p) : st.offset)))) {
+      const oldId = p.fileId;
+      ledger.forget(oldId);
+      p.fileId = b64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
+      p.key = randomKeyB64();
+      await o.rekeyed?.(p, oldId);
+      await persist(() => api.deleteFile(oldId), onConn, signal).catch(() => {});
+      off = -1;
+    }
+    offsets.set(p.fileId, off);
   }
   const sentBefore = (p: PackedFile) => packed.reduce((a, q) => a + (q === p ? 0 : Math.max(0, offsets.get(q.fileId)!)), 0);
   let filesDone = packed.filter((p) => known(p) && offsets.get(p.fileId) === ciphertextSize(p)).length;
@@ -205,6 +297,8 @@ export async function uploadFiles(
         await p.growing!.changed();
         continue;
       }
+      // Recorded before any of these records leave the browser.
+      await ledger.cover(p, rec + n, known(p) ? p.records : Math.floor((p.growing!.ready - 1) / RECORD_PLAINTEXT));
       const ct = await chunk(rec, n);
       const next = rec + n;
       // A growing file's part-chunk is not encrypted ahead: more may be ready by the time it goes.
@@ -290,6 +384,8 @@ export interface UploadJob {
   longLived: boolean;
   /** The studies' names, for the "did not finish" notice. */
   title: string;
+  /** What may have been sent of each file (SentLedger). */
+  sent?: SentHashes;
   startedAt: number;
 }
 
