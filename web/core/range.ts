@@ -1,20 +1,9 @@
-// Record arithmetic for the encrypted files (spec/README.md §9.2–9.3) and range planning.
+// Range planning over the encrypted files (spec/README.md §9.3). The record grid itself (sizes,
+// counts, nonces) is viewer-kit's record-decrypt.ts, re-exported here.
 import type { SeriesEntry } from "./bundle";
+import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "../../viewer-kit/src/record-decrypt";
 
-/** Plaintext bytes per record. */
-export const RECORD_PLAINTEXT = 65_520;
-/** AES-GCM tag bytes per record. */
-export const TAG = 16;
-/** Ciphertext bytes per full record. */
-export const RECORD_CIPHERTEXT = RECORD_PLAINTEXT + TAG;
-
-export function recordCount(plaintextLength: number): number {
-  return plaintextLength === 0 ? 1 : Math.ceil(plaintextLength / RECORD_PLAINTEXT);
-}
-
-export function ciphertextLength(plaintextLength: number): number {
-  return plaintextLength + recordCount(plaintextLength) * TAG;
-}
+export { ciphertextLength, RECORD_CIPHERTEXT, recordCiphertextLength, recordCount, recordNonce, RECORD_PLAINTEXT, TAG } from "../../viewer-kit/src/record-decrypt";
 
 /** One HTTP Range read covering plaintext [plaintextStart, plaintextEnd) of a file. */
 export interface RangePlan {
@@ -88,12 +77,4 @@ export function planRuns(series: SeriesEntry, maxBytes = 8 * 1024 * 1024): Range
   });
   if (series.instances.length) out.push(planInstances(series, start, series.instances.length - 1));
   return out;
-}
-
-/** The 12-byte AES-GCM nonce of record i: uint96 big-endian. */
-export function recordNonce(i: number): Uint8Array<ArrayBuffer> {
-  const n = new Uint8Array(12);
-  new DataView(n.buffer).setUint32(8, i >>> 0);
-  new DataView(n.buffer).setUint32(4, Math.floor(i / 2 ** 32));
-  return n;
 }

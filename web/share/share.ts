@@ -13,7 +13,7 @@ import { drawThumbnail } from "../core/render";
 import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, sharePatient, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
-import { applyChoices, buildBundle, ciphertextSize, looseReports, planStudyFiles, relinkFile, subsetBundle, type PackedFile } from "./lib/pack";
+import { applyChoices, buildBundle, looseReports, planStudyFiles, relinkFile, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import { loadShlWasm } from "./lib/shl-wasm";
 import {
@@ -22,7 +22,7 @@ import {
 } from "./lib/compress";
 import { clearJob, freeJobs, holdJob, loadJob, loadJobs, persist, releaseJob, saveJob, SentLedger, startShare, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
 import { StreamPlan } from "./lib/stream";
-import { recordCount } from "../core/range";
+import { ciphertextLength, recordCount } from "../core/range";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
 import { canPickHandles, clearHandles, filesFrom, loadHandles, pathOf, permitted, pick, quickId, saveHandles, type PickedHandles } from "./lib/handles";
 import { parseStudyIndex } from "../core/bundle";
@@ -944,7 +944,7 @@ async function runUpload(p: Pending) {
   setUploadError(null);
   const { job, api, packed, stream } = p;
   const totalRecords = () => packed.reduce((a, x) => a + x.records, 0);
-  let last = { sent: 0, total: packed.reduce((a, x) => a + ciphertextSize(x), 0), done: 0 };
+  let last = { sent: 0, total: packed.reduce((a, x) => a + ciphertextLength(x.plaintextLength), 0), done: 0 };
   let lastU: Pick<UploadProgress, "offsets" | "sending"> = { offsets: new Map() };
   let conn: Connection = { state: "ok" };
   const paint = () => {
@@ -980,7 +980,7 @@ async function runUpload(p: Pending) {
         last = { sent: Math.max(u.total === last.total || stream ? last.sent : 0, u.sent), total: u.total, done: u.filesDone };
         lastU = u;
         paint();
-        if (u.finished) $("up-log").prepend(h("li", null, `${plainStudyTitle(u.finished.study.description, studyModalities(u.finished.study))} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextSize(u.finished))} · ${plural(u.finished.records, "record")}`));
+        if (u.finished) $("up-log").prepend(h("li", null, `${plainStudyTitle(u.finished.study.description, studyModalities(u.finished.study))} → ${u.finished.fileId.slice(0, 6)}….bin · ${formatBytes(ciphertextLength(u.finished.plaintextLength))} · ${plural(u.finished.records, "record")}`));
       },
       onConn,
       {

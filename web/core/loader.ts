@@ -17,7 +17,7 @@
 // ImageStore (images.ts) instead takes `ciphertext()` and decrypts and decodes in one worker job.
 import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
-import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, type RangePlan } from "./range";
+import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCiphertextLength, type RangePlan } from "./range";
 import type { LinkResolver } from "./resolver";
 
 /** Same values as viewer-kit's Priority: lower runs first. */
@@ -197,10 +197,6 @@ export class InstanceLoader {
     }
   }
 
-  private recordLength(series: SeriesEntry, r: number): number {
-    return Math.min(RECORD_CIPHERTEXT, series.file.ciphertextLength - r * RECORD_CIPHERTEXT);
-  }
-
   /** Records plan.firstRecord..plan.lastRecord of the plan's file, joined into one fresh buffer. */
   private records(series: SeriesEntry, plan: RangePlan, o: LoadOptions, cache: boolean): Promise<Uint8Array> {
     if (o.signal?.aborted) return Promise.reject(abortError());
@@ -279,7 +275,7 @@ export class InstanceLoader {
         let n = 0;
         for (let r = plan.firstRecord; r <= plan.lastRecord; r++) {
           const p = parts[r - plan.firstRecord];
-          const len = this.recordLength(series, r);
+          const len = recordCiphertextLength(series.file.plaintextLength, r);
           if (p instanceof Uint8Array || (p as Deferred).done) n += len;
           else {
             const s = root(this.pending.get(`${fileId}:${r}`) ?? spans[0]);

@@ -15,7 +15,7 @@ import { headerEnd } from "../../viewer-kit/src/header-end";
 import type { DecodedImage, DecoderPool } from "../../viewer-kit/src/index";
 import type { SeriesEntry } from "../core/bundle";
 import type { InstanceLoader } from "../core/loader";
-import { RECORD_PLAINTEXT, type RangePlan } from "../core/range";
+import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, type RangePlan } from "../core/range";
 import { FrameStream } from "../core/frames";
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -51,7 +51,7 @@ function decode(bytes: Uint8Array, first = 0, count = 0): DecodedImage {
 function standIns(bytes: Uint8Array) {
   const series = {
     id: "file@0",
-    file: { fileId: "file", plaintextLength: bytes.byteLength, ciphertextLength: Math.ceil(bytes.byteLength / RECORD_PLAINTEXT) * 65536 },
+    file: { fileId: "file", plaintextLength: bytes.byteLength, ciphertextLength: Math.ceil(bytes.byteLength / RECORD_PLAINTEXT) * RECORD_CIPHERTEXT },
     instances: [{ offset: 0, length: bytes.byteLength, sopClass: "", uid: "x" }],
   } as unknown as SeriesEntry;
   let reads = 0, readBytes = 0;

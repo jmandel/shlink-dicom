@@ -3,9 +3,9 @@
 // as passed or refused; the slice is decoded only when every record passes. The tamper switch flips
 // one bit of the response on arrival: that record is refused, and the image is not shown, because a
 // receiver uses no bytes from a refused record. This holds whatever the Pixel Data's encoding.
-import { decryptParams, planBytes, planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordNonce, RecordAuthenticationError } from "../core/index";
+import { decryptParams, planBytes, planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCiphertextLength, recordNonce, RecordAuthenticationError } from "../core/index";
 import { drawThumbnail } from "../core/render";
-import { code, h, hex, n, para, recordLength, S, wait } from "./state";
+import { code, h, hex, n, para, S, wait } from "./state";
 
 const isAuthError = (e: unknown) => e instanceof RecordAuthenticationError || (e as Error)?.name === "RecordAuthenticationError";
 
@@ -75,7 +75,7 @@ export function mountGcm(pic: HTMLElement, exact: HTMLElement) {
       const flipped = S.tamper.flipped as { byte: number; bit: number } | null;
       const records = tiles.map((t) => {
         const off = (t.r - plan.firstRecord) * RECORD_CIPHERTEXT;
-        return { ...t, rec: ct.slice(off, off + recordLength(f, t.r)) };
+        return { ...t, rec: ct.slice(off, off + recordCiphertextLength(f.plaintextLength, t.r)) };
       });
       for (const x of records) {
         x.el.className = "rec-tile";

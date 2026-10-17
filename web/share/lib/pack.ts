@@ -6,7 +6,7 @@ import { b64urlDecode, b64urlEncode } from "../../core/b64";
 import { ConcatBytes } from "./bytes";
 import { randomKeyB64 } from "../../core/jwe";
 import { EXT_LINKED_FILE } from "../../core/bundle";
-import { RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
+import { ciphertextLength, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
 import { sharePatient, type Collection, type Instance, type StudyModel } from "./ingest";
 import { shlWasm } from "./shl-wasm";
 
@@ -37,9 +37,6 @@ export function planStudyFiles(studies: StudyModel[]): PackedFile[] {
   });
 }
 
-/** The file's length: P + 16·n (§9.2). */
-export const ciphertextSize = (p: { plaintextLength: number; records: number }) => p.plaintextLength + TAG * p.records;
-
 /** Records per upload chunk: 8 MiB of ciphertext. */
 export const CHUNK_RECORDS = 128;
 
@@ -57,7 +54,7 @@ export async function encryptRecords(p: PackedFile, key: CryptoKey, first: numbe
       const i = first + k;
       const chunk = plain.subarray(k * RECORD_PLAINTEXT, Math.min(plain.length, (k + 1) * RECORD_PLAINTEXT));
       const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: recordNonce(i), tagLength: 128 }, key, chunk);
-      out.set(new Uint8Array(ct), k * (RECORD_PLAINTEXT + TAG));
+      out.set(new Uint8Array(ct), k * RECORD_CIPHERTEXT);
     }),
   );
   return out;
@@ -70,9 +67,9 @@ export function fileKey(p: PackedFile): Promise<CryptoKey> {
 /** The whole file in memory, for scripts and small test fixtures. /share streams instead. */
 export async function encryptFile(p: PackedFile): Promise<Uint8Array> {
   const key = await fileKey(p);
-  const out = new Uint8Array(ciphertextSize(p));
+  const out = new Uint8Array(ciphertextLength(p.plaintextLength));
   for (let r = 0; r < p.records; r += CHUNK_RECORDS) {
-    out.set(await encryptRecords(p, key, r, Math.min(p.records, r + CHUNK_RECORDS)), r * (RECORD_PLAINTEXT + TAG));
+    out.set(await encryptRecords(p, key, r, Math.min(p.records, r + CHUNK_RECORDS)), r * RECORD_CIPHERTEXT);
   }
   return out;
 }

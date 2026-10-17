@@ -11,13 +11,14 @@ beforeAll(() => useShlWasm());
 const golden = JSON.parse(readFileSync(new URL("../fixtures/golden/bundle.json", import.meta.url), "utf8"));
 const copy = () => structuredClone(golden);
 const study = (b: any) => b.entry.find((e: any) => e.resource.resourceType === "ImagingStudy").resource;
-const A = "AAECAwQFBgcICQoLDA0ODw", B = "EBESExQVFhcYGRobHB0eHw";
+const vector = JSON.parse(readFileSync(new URL("../fixtures/golden/vector.json", import.meta.url), "utf8"));
+const [A, B] = vector.files.map((f: any) => f.fileId);
 
 describe("parseStudyIndex", () => {
   test("study default file, series override, offsets per file", () => {
     const st = parseStudyIndex(golden).studies[0];
-    expect(st.series.map((s) => `${s.file.fileId}@${s.offset}+${s.bytes}`)).toEqual([`${A}@0+70000`, `${A}@70000+80000`, `${B}@0+20000`]);
-    expect(st.files.map((f) => [f.fileId, f.plaintextLength])).toEqual([[A, 150000], [B, 20000]]);
+    expect(st.series.map((s) => `${s.file.fileId}@${s.offset}+${s.bytes}`)).toEqual(vector.layout.map((l: any) => `${l.fileId}@${l.offset}+${l.length}`));
+    expect(st.files.map((f) => [f.fileId, f.plaintextLength])).toEqual(vector.files.map((f: any) => [f.fileId, f.plaintextLength]));
     expect(st.series[1].file).toBe(st.files[0]);
     expect(new Set(st.series.map((s) => s.id)).size).toBe(3);
   });

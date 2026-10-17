@@ -71,6 +71,21 @@ export function recordNonce(i: number): Uint8Array<ArrayBuffer> {
   return n;
 }
 
+/** Records in a file of `plaintextLength` bytes (an empty file is one record: its tag). */
+export function recordCount(plaintextLength: number): number {
+  return plaintextLength === 0 ? 1 : Math.ceil(plaintextLength / RECORD_PLAINTEXT);
+}
+
+/** Ciphertext length of a file of `plaintextLength` bytes. */
+export function ciphertextLength(plaintextLength: number): number {
+  return plaintextLength + recordCount(plaintextLength) * TAG;
+}
+
+/** Ciphertext length of record i of a file of `plaintextLength` bytes. */
+export function recordCiphertextLength(plaintextLength: number, i: number): number {
+  return Math.min(RECORD_CIPHERTEXT, ciphertextLength(plaintextLength) - i * RECORD_CIPHERTEXT);
+}
+
 /** Plaintext length of a run of records whose ciphertext is `ciphertextLength` bytes. */
 export function plaintextLengthOf(ciphertextLength: number): number {
   const n = Math.ceil(ciphertextLength / RECORD_CIPHERTEXT);

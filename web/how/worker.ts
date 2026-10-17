@@ -3,36 +3,37 @@
 import { receive } from "./receiver.js";
 import { WasmDecoder } from "../../viewer-kit/src/wasm-decoder";
 import { parseDicomSync, T } from "../core/dicom";
+import vector from "../../fixtures/golden/vector.json";
+import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordNonce } from "../../viewer-kit/src/record-decrypt";
 
 const post = (m: any) => (self as any).postMessage(m);
 const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const b64 = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 
-// spec/README.md appendix B.
+// spec/README.md appendix B: the golden fixture's first file (fixtures/golden/vector.json, written
+// by reference/test-vector.ts).
+const golden = vector.files[0];
 const TV = {
-  key: "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
-  plaintextSha256: "02675bf9284bd74223e98ceea96ebee4c9a469272ead358f462d89753f8c909b",
-  ciphertextLength: 150048,
-  ciphertextSha256: "f3205658d3fee29b343d3ba3ef20f52b3e66c2cb05974a93b65504866665fc4e",
-  tags: ["9a8421bd6740aeac5eb211cf59511b2f", "4cd810f700957e87ae68edc29e40caf9", "cf980ddc661684644fa17e5b00b08819"],
+  key: golden.key,
+  plaintextLength: golden.plaintextLength,
+  plaintextSha256: golden.plaintextSha256,
+  ciphertextLength: golden.ciphertextLength,
+  ciphertextSha256: golden.ciphertextSha256,
+  tags: golden.recordTags,
 };
 
 async function testVector() {
-  const R = 65520;
-  const pt = Uint8Array.from({ length: 150000 }, (_, k) => k % 251);
+  const R = RECORD_PLAINTEXT;
+  const pt = Uint8Array.from({ length: TV.plaintextLength }, (_, k) => k % 251);
   const key = await crypto.subtle.importKey("raw", b64(TV.key), "AES-GCM", false, ["encrypt", "decrypt"]);
-  const nonce = (i: number) => {
-    const b = new Uint8Array(12);
-    new DataView(b.buffer).setUint32(8, i);
-    return b;
-  };
+  const nonce = recordNonce;
   const recs: Uint8Array[] = [];
   for (let i = 0; i * R < pt.length; i++) recs.push(new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce(i) }, key, pt.subarray(i * R, Math.min(pt.length, (i + 1) * R)))));
   const ct = new Uint8Array(recs.reduce((a, r) => a + r.length, 0));
   recs.reduce((o, r) => (ct.set(r, o), o + r.length), 0);
   const sha = async (b: Uint8Array) => hex(new Uint8Array(await crypto.subtle.digest("SHA-256", b)));
   const refused = (data: Uint8Array, i: number) => crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce(i) }, key, data).then(() => false, () => true);
-  const flipped = ct.slice(0, 65536);
+  const flipped = ct.slice(0, RECORD_CIPHERTEXT);
   flipped[1000] ^= 1;
   const rows: { label: string; ok: boolean; value: string }[] = [];
   const p = await sha(pt), c = await sha(ct);
@@ -43,7 +44,7 @@ async function testVector() {
     const t = hex(r.subarray(r.length - 16));
     rows.push({ label: `Piece ${i} tag`, ok: t === TV.tags[i], value: t });
   });
-  const f = await refused(flipped, 0), s = await refused(ct.slice(65536, 131072), 0);
+  const f = await refused(flipped, 0), s = await refused(ct.slice(RECORD_CIPHERTEXT, 2 * RECORD_CIPHERTEXT), 0);
   rows.push({ label: "Tampering", ok: f && s, value: f && s ? "a flipped bit and a moved piece are both refused" : "not detected" });
   return rows;
 }

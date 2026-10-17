@@ -2,9 +2,8 @@
 // instead of after all of them are. Instances join their file in file order; an instance whose
 // compression finishes early waits for the ones before it. lib/upload.ts sends a file's records as
 // its plaintext grows and gives the server the length with the last append.
-import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCount } from "../../core/range";
+import { ciphertextLength, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCount } from "../../core/range";
 import type { Instance } from "./ingest";
-import { ciphertextSize } from "./pack";
 import { Growing, type UploadFile, type UploadProgress } from "./upload";
 
 export class StreamPlan {
@@ -68,7 +67,7 @@ export class StreamPlan {
     for (const p of this.files) {
       let off = Math.max(0, u.offsets.get(p.fileId) ?? 0);
       if (u.sending?.fileId === p.fileId) off = Math.max(off, u.sending.offset);
-      const whole = p.growing!.done && off >= ciphertextSize(p);
+      const whole = p.growing!.done && off >= ciphertextLength(p.plaintextLength);
       const U = whole ? p.plaintextLength : Math.floor(off / RECORD_CIPHERTEXT) * RECORD_PLAINTEXT;
       const k = this.cursor.get(p)!;
       let a = 0;

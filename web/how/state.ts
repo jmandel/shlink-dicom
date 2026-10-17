@@ -1,17 +1,12 @@
 // Shared state for /how: the opened sample, the slice the page follows (one slice of the brain
 // MRI), the requests this page made, the decoder pool, and small DOM helpers.
-import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT, TAG, type FileEntry, type OpenShare, type RequestEvent, type SeriesEntry, type SiteConfig, type StudyEntry } from "../core/index";
+import { type OpenShare, type RequestEvent, type SeriesEntry, type SiteConfig, type StudyEntry } from "../core/index";
 import type { DecoderPool } from "../core/images";
 
 export interface Req extends RequestEvent {
   id: number;
   time: Date;
   recipient: string | null;
-}
-
-/** Ciphertext length of record i of a file. */
-export function recordLength(f: FileEntry, i: number): number {
-  return i < f.recordCount - 1 ? RECORD_CIPHERTEXT : f.plaintextLength - i * RECORD_PLAINTEXT + TAG;
 }
 
 type Handler = (...a: any[]) => void;

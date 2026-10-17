@@ -2,10 +2,10 @@
 // CHUNK_RECORDS records, with at most two chunks in memory. The server keeps what it has received,
 // even from an interrupted request (lib/api.ts uploadOffset), so an upload continues where it
 // stopped: after a network failure, and after the page is reloaded (see saveJob).
-import { RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "../../core/range";
+import { ciphertextLength, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "../../core/range";
 import { ApiError, type ShareApi } from "./api";
 import { LinkError } from "../../core/resolver";
-import { CHUNK_RECORDS, ciphertextSize, encryptRecords, fileKey, type PackedFile } from "./pack";
+import { CHUNK_RECORDS, encryptRecords, fileKey, type PackedFile } from "./pack";
 import { ConcatBytes } from "./bytes";
 import { b64urlEncode } from "../../core/b64";
 import { randomKeyB64 } from "../../core/jwe";
@@ -239,15 +239,15 @@ export async function uploadFiles(
 ) {
   const signal = o.signal;
   const ledger = o.ledger ?? new SentLedger({}, () => true);
-  const total = () => packed.reduce((a, p) => a + ciphertextSize(p), 0);
+  const total = () => packed.reduce((a, p) => a + ciphertextLength(p.plaintextLength), 0);
   const offsets = new Map<string, number>();
   for (const p of packed) {
     // A new share has no uploads yet; otherwise ask the server what it has.
     const st = o.fresh ? null : await persist(() => api.uploadOffset(p.fileId), onConn, signal);
-    let off = st ? (st.complete ? ciphertextSize(p) : st.offset) : -1;
+    let off = st ? (st.complete ? ciphertextLength(p.plaintextLength) : st.offset) : -1;
     // Continuing: only if what may have been sent is this plaintext, at this length.
-    const sizeOk = !st || st.length === null || !known(p) || st.length === ciphertextSize(p);
-    if (st && !(sizeOk && (await ledger.check(p, st.complete ? ciphertextSize(p) : st.offset)))) {
+    const sizeOk = !st || st.length === null || !known(p) || st.length === ciphertextLength(p.plaintextLength);
+    if (st && !(sizeOk && (await ledger.check(p, st.complete ? ciphertextLength(p.plaintextLength) : st.offset)))) {
       const oldId = p.fileId;
       ledger.forget(oldId);
       p.fileId = b64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
@@ -259,14 +259,14 @@ export async function uploadFiles(
     offsets.set(p.fileId, off);
   }
   const sentBefore = (p: PackedFile) => packed.reduce((a, q) => a + (q === p ? 0 : Math.max(0, offsets.get(q.fileId)!)), 0);
-  let filesDone = packed.filter((p) => known(p) && offsets.get(p.fileId) === ciphertextSize(p)).length;
+  let filesDone = packed.filter((p) => known(p) && offsets.get(p.fileId) === ciphertextLength(p.plaintextLength)).length;
   const report = (sent: number, finished?: PackedFile, sending?: UploadProgress["sending"]) => on({ sent, total: total(), filesDone, offsets, finished, sending });
   report([...offsets.values()].reduce((a, n) => a + Math.max(0, n), 0));
   for (const p of packed) {
     let off = offsets.get(p.fileId)!;
-    if (known(p) && off === ciphertextSize(p)) continue;
+    if (known(p) && off === ciphertextLength(p.plaintextLength)) continue;
     if (off < 0) {
-      await persist(() => api.createUpload(p.fileId, known(p) ? ciphertextSize(p) : null), onConn, signal);
+      await persist(() => api.createUpload(p.fileId, known(p) ? ciphertextLength(p.plaintextLength) : null), onConn, signal);
       off = 0;
     }
     const base = sentBefore(p);
@@ -289,7 +289,7 @@ export async function uploadFiles(
       return persist(() => encryptRecords(p, key, rec, rec + n), onConn, signal);
     };
     let attempt = 0;
-    while (!known(p) || off < ciphertextSize(p)) {
+    while (!known(p) || off < ciphertextLength(p.plaintextLength)) {
       signal?.throwIfAborted();
       const rec = Math.floor(off / RECORD_CIPHERTEXT);
       const n = sendable(rec);
@@ -308,7 +308,7 @@ export async function uploadFiles(
       const body = ct.subarray(off - rec * RECORD_CIPHERTEXT);
       const from = off;
       // Known now; the server learns the length with this append if it had none.
-      const size = known(p) ? ciphertextSize(p) : null;
+      const size = known(p) ? ciphertextLength(p.plaintextLength) : null;
       try {
         const r = await api.appendUpload(p.fileId, from, body, from + body.length === size, (loaded) => report(base + from + loaded, undefined, { fileId: p.fileId, offset: from + loaded }), size);
         off = r.offset;
@@ -331,15 +331,15 @@ export async function uploadFiles(
         // Ask where the server got to before sending more.
         const st = await persist(() => api.uploadOffset(p.fileId), onConn, signal);
         if (!st) {
-          await persist(() => api.createUpload(p.fileId, known(p) ? ciphertextSize(p) : null), onConn, signal);
+          await persist(() => api.createUpload(p.fileId, known(p) ? ciphertextLength(p.plaintextLength) : null), onConn, signal);
           off = 0;
-        } else off = st.complete ? ciphertextSize(p) : st.offset;
+        } else off = st.complete ? ciphertextLength(p.plaintextLength) : st.offset;
         onConn({ state: "ok" });
       }
     }
-    offsets.set(p.fileId, ciphertextSize(p));
+    offsets.set(p.fileId, ciphertextLength(p.plaintextLength));
     filesDone++;
-    report(base + ciphertextSize(p), p);
+    report(base + ciphertextLength(p.plaintextLength), p);
   }
 }
 

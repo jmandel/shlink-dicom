@@ -2,10 +2,10 @@
 // slice, the arithmetic to the record range and the exact Range header. Dragging across the strip
 // fetches the chosen records with one Range request; every image wholly inside them is decrypted
 // and decoded in a worker and appears.
-import { decryptParams, planBytes, planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, type SeriesEntry } from "../core/index";
+import { decryptParams, planBytes, planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCiphertextLength, type SeriesEntry } from "../core/index";
 import type { DecodedImage } from "../core/images";
 import { drawThumbnail } from "../core/render";
-import { code, excerpt, h, mb, n, onRequest, para, recordLength, reqRow, S } from "./state";
+import { code, excerpt, h, mb, n, onRequest, para, reqRow, S } from "./state";
 
 /** Fetches records a..b (inclusive) of the series' file with one Range request. */
 async function fetchRecords(series: SeriesEntry, a: number, b: number) {
@@ -17,7 +17,7 @@ async function fetchRecords(series: SeriesEntry, a: number, b: number) {
 async function decodeFrom(series: SeriesEntry, i: number, ct: Uint8Array, a: number): Promise<DecodedImage> {
   const inst = series.instances[i];
   const start = (inst.firstRecord - a) * RECORD_CIPHERTEXT;
-  const end = (inst.lastRecord - a) * RECORD_CIPHERTEXT + recordLength(series.file, inst.lastRecord);
+  const end = (inst.lastRecord - a) * RECORD_CIPHERTEXT + recordCiphertextLength(series.file.plaintextLength, inst.lastRecord);
   const encrypted = await decryptParams(series, planInstances(series, i));
   const pool = await S.pool!;
   return pool.decode(ct.slice(start, end), { encrypted, priority: 0, header: true });
