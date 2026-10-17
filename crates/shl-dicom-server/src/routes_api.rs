@@ -278,6 +278,16 @@ pub async fn delete_share(
     }
 }
 
+/// A backstop against a client reusing an IV: a new JWE (compact: header.key.iv.ct.tag) with the
+/// stored one's IV but other content would put two plaintexts under one key and IV, which breaks
+/// AES-GCM. Refused with 409; the same bytes again are fine.
+fn reused_iv(stored: Option<&[u8]>, new: &[u8]) -> Option<Response> {
+    let stored = stored?;
+    let iv = |b: &[u8]| b.split(|&c| c == b'.').nth(2).map(<[u8]>::to_vec);
+    (stored != new && iv(stored).is_some_and(|s| !s.is_empty() && Some(s) == iv(new)))
+        .then(|| json_err(StatusCode::CONFLICT, "this Bundle reuses the stored Bundle's IV with other content; encrypt it with a fresh IV"))
+}
+
 /// `PUT /api/shares/{sid}/owner.jwe`
 pub async fn put_owner_bundle(
     State(state): State<AppState>,
@@ -301,6 +311,10 @@ pub async fn put_owner_bundle(
     let now = now_unix();
     let res = {
         let conn = conn_arc.lock().unwrap();
+        let stored: Option<Vec<u8>> = conn.query_row("SELECT owner_bundle FROM share WHERE id = 1", [], |r| r.get(0)).ok().flatten();
+        if let Some(resp) = reused_iv(stored.as_deref(), &body) {
+            return resp;
+        }
         conn.execute(
             "UPDATE share SET owner_bundle = ?1, owner_updated_at = ?2 WHERE id = 1",
             params![body.as_ref(), now],
@@ -1251,6 +1265,10 @@ pub async fn put_link_bundle(
     let origin = request_origin(&state, &headers);
 
     let conn = conn_arc.lock().unwrap();
+    let stored: Option<Vec<u8>> = conn.query_row("SELECT bundle FROM links WHERE lid = ?1", params![lid], |r| r.get(0)).ok().flatten();
+    if let Some(resp) = reused_iv(stored.as_deref(), &body) {
+        return resp;
+    }
     let changed = conn
         .execute(
             "UPDATE links SET bundle = ?1, bundle_etag = ?2, bundle_updated_at = ?3 WHERE lid = ?4",

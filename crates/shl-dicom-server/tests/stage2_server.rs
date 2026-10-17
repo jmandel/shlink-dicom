@@ -2741,3 +2741,26 @@ async fn test_unauthenticated_bodies_are_small_and_requests_are_bounded() {
     assert_eq!(client.get(format!("{base}/api/demo-shares")).send().await.unwrap().status(), StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A new Bundle (a link's, or the owner's) with the stored one's IV and other content is refused:
+/// it would encrypt two plaintexts under one key and IV. The same bytes again are fine.
+#[tokio::test]
+async fn test_a_bundle_reusing_the_stored_iv_is_refused() {
+    let dir = temp_data_dir("iv_reuse");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let link: Value = client.post(format!("{base}/api/shares/{sid}/links")).bearer_auth(&token).json(&json!({ "allowedFiles": [] })).send().await.unwrap().json().await.unwrap();
+    let lid = link["id"].as_str().unwrap().to_string();
+    for url in [format!("{base}/api/shares/{sid}/links/{lid}/bundle.jwe"), format!("{base}/api/shares/{sid}/owner.jwe")] {
+        let put = |b: &'static str| client.put(&url).bearer_auth(&token).body(b).send();
+        assert_eq!(put("hdr..IVAAAAAAAAAAAAAA.cipher1.tag1").await.unwrap().status(), StatusCode::OK, "{url}");
+        assert_eq!(put("hdr..IVAAAAAAAAAAAAAA.cipher1.tag1").await.unwrap().status(), StatusCode::OK, "the same bytes again: {url}");
+        assert_eq!(put("hdr..IVAAAAAAAAAAAAAA.cipher2.tag2").await.unwrap().status(), StatusCode::CONFLICT, "{url}");
+        assert_eq!(put("hdr..IVBBBBBBBBBBBBBB.cipher2.tag2").await.unwrap().status(), StatusCode::OK, "{url}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
