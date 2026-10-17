@@ -715,14 +715,14 @@ impl AppState {
 
     fn remove_share_files(&self, sid: &str) {
         // Its files' blobs lose a reference, and unfinished uploads are dropped. (The catalog row
-        // may be gone already, so the database is opened directly.)
-        let db = self.pool.lock().unwrap().get(sid).or_else(|| {
+        // may be gone already, so the database is opened directly.) It leaves the pool now.
+        let db = self.pool.lock().unwrap().remove(sid).or_else(|| {
             let path = self.share_db_path(sid);
             let conn = path.exists().then(|| Connection::open(&path).ok()).flatten()?;
             let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
             Some(Arc::new(Mutex::new(conn)))
         });
-        if let Some(conn_arc) = db {
+        if let Some(conn_arc) = &db {
             // Each row is deleted before its reference is released, so a second run (after a crash
             // part way through) releases nothing twice. Lock order: the share, then the catalog.
             let conn = conn_arc.lock().unwrap();
@@ -748,9 +748,9 @@ impl AppState {
                 }
             }
         }
-        if let Some(conn_arc) = self.pool.lock().unwrap().remove(sid) {
-            drop(conn_arc);
-        }
+        // Closed before its files go (on Linux an open file can be removed; not everywhere).
+        // A request still holding this connection keeps it open until it finishes.
+        drop(db);
         let _ = std::fs::remove_dir_all(self.staging_dir(sid));
         self.empty_trash_soon();
         let base = self.share_db_path(sid);
