@@ -59,7 +59,16 @@ export interface ResolverOptions {
   recipient?: string;
   onRequest?: (e: RequestEvent) => void;
   fetch?: typeof fetch;
+  /** Milliseconds now (tests). */
+  now?: () => number;
 }
+
+/**
+ * A manifest's `location` is used for at most this long after the manifest was asked for (SMART
+ * Health Links: a location may not be dereferenced more than an hour after the manifest request),
+ * then the manifest is asked for again. Five minutes short of the hour, for clocks and slow reads.
+ */
+export const LOCATION_MAX_AGE_MS = 55 * 60 * 1000;
 
 export interface OpenedLink {
   /** Decrypted Bundle bytes (UTF-8 JSON). */
@@ -100,12 +109,16 @@ export class LinkResolver {
   private sawWrongPasscode = false;
   private onRequest?: (e: RequestEvent) => void;
   private f: typeof fetch;
+  private now: () => number;
+  /** When the manifest that gave the current location was asked for. */
+  private locatedAt = 0;
 
   constructor(link: string | ShlPayload, opts: ResolverOptions = {}) {
     this.payload = typeof link === "string" ? parseShlink(link) : link;
     this.recipient = opts.recipient ?? "SHL imaging viewer";
     this.onRequest = opts.onRequest;
     this.f = opts.fetch ?? fetch.bind(globalThis);
+    this.now = opts.now ?? Date.now;
   }
 
   get isDirect() {
@@ -169,14 +182,12 @@ export class LinkResolver {
   }
 
   /**
-   * Fetches the ciphertext a RangePlan names. In manifest mode a 404 means the capability prefix
-   * may have expired: the link is re-resolved once (with the remembered passcode) and the read
-   * retried. Checks that exactly the planned number of bytes arrived.
-   */
-  /**
-   * The ciphertext of a plan. `onProgress` gets the bytes received so far against the plan's
-   * length, and the buffer they are arriving in (bytes [0, received) are final), so a caller can
-   * use the front of a long read before the rest arrives.
+   * The ciphertext of a plan. In manifest mode the location is renewed before it is an hour old
+   * (LOCATION_MAX_AGE_MS), and a 403 or 404 also re-resolves the link once (with the remembered
+   * passcode) and retries the read. Checks that exactly the planned number of bytes arrived.
+   * `onProgress` gets the bytes received so far against the plan's length, and the buffer they are
+   * arriving in (bytes [0, received) are final), so a caller can use the front of a long read
+   * before the rest arrives.
    */
   async fetchRange(plan: RangePlan, signal?: AbortSignal, onProgress?: (received: number, total: number, buffer?: Uint8Array) => void): Promise<Uint8Array> {
     const want = plan.ciphertextEnd - plan.ciphertextStart;
@@ -186,6 +197,8 @@ export class LinkResolver {
         range: plan.rangeHeader,
         signal,
       });
+    // A location older than the SHL hour is not used: ask for a fresh one first.
+    if (!this.isDirect && this.now() - this.locatedAt > LOCATION_MAX_AGE_MS) await this.refreshLocation();
     let res = await attempt();
     if ((res.status === 404 || res.status === 403) && !this.isDirect) {
       await res.body?.cancel();
@@ -216,6 +229,7 @@ export class LinkResolver {
   private async postManifest(): Promise<any> {
     if (this.lockedOut) throw new LinkError("locked", "Too many wrong passcodes. This link no longer opens.");
     if (this.needsPasscode && !this.passcode) throw new PasscodeError("required");
+    const askedAt = this.now();
     const res = await this.timedFetch(this.payload.url, {
       purpose: "manifest",
       method: "POST",
@@ -251,6 +265,7 @@ export class LinkResolver {
     const loc = manifest?.files?.find((f: any) => isFhir(f?.contentType) && typeof f?.location === "string")?.location;
     if (!loc) throw new LinkError("invalid", "The host's answer did not say where the file is.");
     this.baseUrl = loc;
+    this.locatedAt = askedAt;
     return manifest;
   }
 
