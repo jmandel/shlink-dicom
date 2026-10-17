@@ -5,10 +5,13 @@ The candidate is any command following CONTRACT.md. {in} and {out} are substitut
         --candidate "../target/release/shl-dicom-decode {in} {out}" [--format jpeg-ls] [--case SUBSTR]
 
 Outcomes per case
-  pass         decoded within the allowed difference (or refused a file that should be refused)
-  fail         decoded but wrong (shape, size or pixels), or refused a file it should decode
+  pass         decoded within the allowed difference (or refused, exit 2, a file that should be
+               refused)
+  fail         decoded but wrong (shape, size or pixels), or refused a file it should decode; also
+               a tolerance so loose that a constant 0 or 128 output would pass
   unsupported  exit code 3: the candidate says it does not handle this case yet
-  crash        killed by a signal, a Rust panic (exit 101), or timeout
+  crash        any exit code but 0, 2 and 3 (a Rust panic is 101), a signal, a timeout, or a
+               candidate that cannot be run; the command runs without a shell
 Exit status is 1 if any case fails or crashes (or, with --strict, is unsupported).
 
 Writes reports/<name>.json; with --baseline reports/<other>.json it lists regressions.
@@ -32,7 +35,30 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import FORMAT_NAMES, REPORTS, compare, load_cases, oracle_paths, sample_path  # noqa: E402
 
 
+def constant_passes(oracle: np.ndarray, max_abs: float) -> int | None:
+    """A constant output (0 or 128) that the tolerance would pass, if any: such a tolerance
+    checks nothing. An oracle that is itself one value (a 1 x 1 image, an empty segment) is only
+    matched by that value, so it is left out."""
+    if oracle.size == 0:
+        return None
+    lo, hi = float(oracle.min()), float(oracle.max())
+    if lo == hi:
+        return None
+    for c in (0, 128):
+        if hi - c <= max_abs and c - lo <= max_abs:
+            return c
+    return None
+
+
+def candidate_argv(template: str, src: Path, out: Path) -> list[str]:
+    """The candidate command as an argument list, {in} and {out} substituted (no shell, so a
+    wrapper's exit status is the decoder's own)."""
+    return [t.replace("{in}", str(src)).replace("{out}", str(out)) for t in shlex.split(template)]
+
+
 def run_case(fmt: str, case: dict, template: str, timeout: float) -> dict:
+    """Runs one case. Exit codes (CONTRACT.md): 0 decoded, 2 refused, 3 unsupported; anything
+    else, a signal or a command that cannot run is a crash."""
     cid = case["id"]
     res = {"format": fmt, "case": cid, "expect": case.get("expect")}
     src = sample_path(fmt, cid)
@@ -42,30 +68,36 @@ def run_case(fmt: str, case: dict, template: str, timeout: float) -> dict:
         return res
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "out.raw"
-        cmd = template.replace("{in}", shlex.quote(str(src))).replace("{out}", shlex.quote(str(out)))
         t0 = time.monotonic()
         try:
-            p = subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout)
+            p = subprocess.run(candidate_argv(template, src, out), capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             res.update(outcome="crash", reason=f"timeout after {timeout}s")
+            return res
+        except OSError as e:
+            res.update(outcome="crash", reason=f"cannot run the candidate: {e}")
             return res
         res["seconds"] = round(time.monotonic() - t0, 3)
         err = p.stderr.decode(errors="replace").strip().splitlines()
         res["stderr"] = err[-1][:300] if err else ""
-        if p.returncode < 0 or p.returncode == 101:
-            res.update(outcome="crash", reason=f"exit {p.returncode}")
+        if p.returncode not in (0, 2, 3):
+            res.update(outcome="crash", reason=f"exit {p.returncode}" if p.returncode >= 0 else f"signal {-p.returncode}")
             return res
         if p.returncode == 3:
             res.update(outcome="unsupported")
             return res
         if case["expect"] == "error":
-            res.update(outcome="pass" if p.returncode != 0 else "fail",
-                       reason=None if p.returncode != 0 else "decoded a file no reference can decode; check by hand")
+            res.update(outcome="pass" if p.returncode == 2 else "fail",
+                       reason=None if p.returncode == 2 else "decoded a file no reference can decode; check by hand")
             return res
-        if p.returncode != 0:
-            res.update(outcome="fail", reason=f"exit {p.returncode}")
+        if p.returncode == 2:
+            res.update(outcome="fail", reason="refused (exit 2) a file the references decode")
             return res
         oracle = np.load(npy, mmap_mode="r")
+        c = constant_passes(oracle, case["max_abs"])
+        if c is not None:
+            res.update(outcome="fail", reason=f"max_abs {case['max_abs']} lets a constant {c} output pass: fix the tolerance")
+            return res
         size = out.stat().st_size if out.exists() else 0
         if size != oracle.nbytes:
             res.update(outcome="fail", reason=f"wrote {size} bytes, expected {oracle.nbytes} "
