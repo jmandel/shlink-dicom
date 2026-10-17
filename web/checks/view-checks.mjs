@@ -2,6 +2,7 @@
 //   node web/checks/view-checks.mjs [--only=name] [--perf]
 // Each run makes fresh test links first (web/checks/fixtures.ts) and deletes them at the end.
 // Screenshots go to docs/shots/view/. Exits non-zero if any check fails.
+import { sampleOriginals } from "./sample-originals.mjs";
 import { offered, openDownloads, openPlaneOptions, openReport, openTrust, pickPlane, pickPreset } from "./ui.mjs";
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { downloadMatrix } from "./download-matrix.mjs";
@@ -644,7 +645,7 @@ async function perf() {
 async function flowDownloads(dev) {
   const label = `downloads/${dev}`;
   // The originals: the sample archives as they are now (sample-originals.py), unless given.
-  const O = JSON.parse(process.env.SAMPLE_ORIGINALS ? readFileSync(process.env.SAMPLE_ORIGINALS, "utf8") : execFileSync("uv", ["run", "--project", new URL("../../codec-corpus", import.meta.url).pathname, "python", new URL("./sample-originals.py", import.meta.url).pathname], { maxBuffer: 1 << 26 }).toString());
+  const O = JSON.parse(process.env.SAMPLE_ORIGINALS ? readFileSync(process.env.SAMPLE_ORIGINALS, "utf8") : sampleOriginals());
   const { context, page, errors } = await newPage(dev);
   await page.goto(viewUrl(F.publicLink));
   await waitOverview(page);
@@ -1137,7 +1138,7 @@ async function flowOverflow() {
 // sample's files), not its smallest file.
 async function flowThumbMiddle() {
   const label = "thumb-middle";
-  const O = JSON.parse(execFileSync("uv", ["run", "--project", new URL("../../codec-corpus", import.meta.url).pathname, "python", new URL("./sample-originals.py", import.meta.url).pathname], { maxBuffer: 1 << 26 }).toString());
+  const O = JSON.parse(sampleOriginals());
   const middle = JSON.parse(
     execFileSync("uv", ["run", "--project", new URL("../../codec-corpus", import.meta.url).pathname, "python", "-c", `
 import json, sys, pydicom

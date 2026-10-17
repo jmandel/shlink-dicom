@@ -13,6 +13,7 @@
 //   uv run --project codec-corpus python web/checks/objects/expect.py > /tmp/objects-expect.json
 //   bun web/checks/objects-fixtures.ts http://localhost:3350
 //   BASE=http://localhost:3350 node web/checks/display-checks.mjs [--only=case]
+import { sampleOriginals } from "./sample-originals.mjs";
 import { pickMeasure } from "./ui.mjs";
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { execFileSync } from "node:child_process";
@@ -366,7 +367,7 @@ async function floats() {
 async function conformance() {
   if (only && only !== "conformance") return;
   const out = "/tmp/display-conformance-quick";
-  const xr = JSON.parse(execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "python", `${ROOT}web/checks/sample-originals.py`], { maxBuffer: 1 << 26 }).toString());
+  const xr = JSON.parse(sampleOriginals());
   const dirs = [...new Set(Object.values(xr).filter((o) => /\/xr-/.test(o.path)).map((o) => o.path.replace(/\/[^/]+$/, "")))];
   execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "--with", "pillow", "python", `${ROOT}web/checks/display-synthetic.py`], { stdio: "ignore" });
   execFileSync("bun", [`${ROOT}web/checks/display-conformance.ts`, out, "/media/barracuda/shlink-display-conformance/synthetic", ...dirs], { stdio: "ignore" });

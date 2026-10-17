@@ -5,6 +5,7 @@
 //   BASE=http://localhost:3350 node web/checks/object-checks.mjs [--only=case]
 // Expected values come from pydicom (expect.py), not from the viewer's own parser.
 // Screenshots go to docs/shots/objects/.
+import { sampleOriginals } from "./sample-originals.mjs";
 import { launchBrowser, pageErrorCheck } from "./browser.mjs";
 import { downloadMatrix } from "./download-matrix.mjs";
 import { darkAudit } from "./dark.mjs";
@@ -561,7 +562,7 @@ async function videoGestures() {
 /** Originals of a share's files (sample-originals.py), cached per name. */
 function originals(name, files) {
   const out = `/tmp/originals-${name}.json`;
-  if (!existsSync(out)) writeFileSync(out, execFileSync("uv", ["run", "--project", `${ROOT}codec-corpus`, "python", `${ROOT}web/checks/sample-originals.py`, ...files], { maxBuffer: 1 << 26 }));
+  if (!existsSync(out)) writeFileSync(out, sampleOriginals(files));
   return JSON.parse(readFileSync(out, "utf8"));
 }
 

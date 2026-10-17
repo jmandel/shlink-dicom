@@ -89,6 +89,8 @@ def shared(tgz: Path) -> Path:
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 as_shared = not args and "--source" not in sys.argv
 paths = [Path(a) for a in args] or sorted((ROOT / "data" / "samples").glob("*.tgz"))
+if not paths:
+    sys.exit(f"no sample archives under {ROOT / 'data' / 'samples'} — link it to /media/barracuda/s3-samples")
 out = {}
 for a in paths:
     root = shared(a) if as_shared else extracted(a) if a.name.endswith(".tgz") else a
