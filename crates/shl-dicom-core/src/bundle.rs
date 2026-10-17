@@ -11,6 +11,11 @@ pub const PROFILE_URL: &str =
     "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/dicom-imaging-study";
 pub const EXT_LINKED_FILE: &str =
     "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/linked-file";
+/// The largest instance length, and the largest plaintext of a file, a Bundle may give: 2^53 − 1,
+/// the largest integer JavaScript readers handle exactly (Number.isSafeInteger), far above any
+/// real study.
+pub const MAX_FILE_BYTES: u64 = (1 << 53) - 1;
+
 pub const EXT_INSTANCE_LENGTH: &str =
     "http://hl7.org/fhir/uv/smart-health-cards-and-links/StructureDefinition/instance-length";
 
@@ -801,8 +806,8 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
         let mut instances = Vec::with_capacity(inst_arr.len());
         for inst_val in inst_arr {
             let length = extract_instance_length(inst_val)?;
-            if length == 0 {
-                return Err(Error::InvalidBundle("instance length must be > 0".into()));
+            if length == 0 || length > MAX_FILE_BYTES {
+                return Err(Error::InvalidBundle(format!("instance length {length} is not 1 to {MAX_FILE_BYTES}")));
             }
             let inst_uid = inst_val
                 .get("uid")
@@ -817,6 +822,11 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
                 .unwrap_or_default();
             let inst_num = inst_val.get("number").and_then(Value::as_i64).map(|n| n as i32);
 
+            // A file's instances end to end may not pass MAX_FILE_BYTES either.
+            let end = offset
+                .checked_add(length)
+                .filter(|&e| e <= MAX_FILE_BYTES)
+                .ok_or_else(|| Error::InvalidBundle(format!("file {} would pass {MAX_FILE_BYTES} bytes", files[fi].0)))?;
             instances.push(InstanceSummary {
                 uid: inst_uid,
                 sop_class,
@@ -824,9 +834,9 @@ fn parse_imaging_study(res: &Value) -> Result<Option<StudySummary>> {
                 offset,
                 length,
                 first_record: offset / RECORD_PLAINTEXT,
-                last_record: (offset + length - 1) / RECORD_PLAINTEXT,
+                last_record: (end - 1) / RECORD_PLAINTEXT,
             });
-            offset += length;
+            offset = end;
         }
         files[fi].2 = offset;
         pending.push((fi, uid, number, modality, se_desc, start, offset - start, instances));

@@ -603,3 +603,22 @@ fn test_zero_length_instance_refused() {
     let err = build_fhir_bundle(&input).unwrap_err().to_string();
     assert!(err.contains("2.25.9.2.1") && err.contains("length 0"), "{err}");
 }
+
+/// An instance length past 2^53 − 1, or a file whose instances add up past it (or past u64), is
+/// refused, not wrapped or rounded (cr-D8).
+#[test]
+fn test_instance_lengths_are_capped() {
+    let len = |b: &mut serde_json::Value, se: usize, v: serde_json::Value| b["entry"][1]["resource"]["series"][se]["instance"][0]["extension"][0]["valueDecimal"] = v;
+    let base = build_fhir_bundle(&build_input(None)).unwrap();
+    let mut b = base.clone();
+    len(&mut b, 0, serde_json::json!(1u64 << 53));
+    assert!(parse_study_index(b.to_string().as_bytes()).is_err(), "2^53 accepted");
+    let mut b = base.clone();
+    len(&mut b, 0, serde_json::json!(u64::MAX));
+    assert!(parse_study_index(b.to_string().as_bytes()).is_err(), "u64::MAX accepted");
+    // Each below the cap, together past it.
+    let mut b = base.clone();
+    len(&mut b, 0, serde_json::json!((1u64 << 52) + 1));
+    len(&mut b, 2, serde_json::json!((1u64 << 52) + 1));
+    assert!(parse_study_index(b.to_string().as_bytes()).is_err(), "a file past 2^53 accepted");
+}
