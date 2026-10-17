@@ -33,7 +33,7 @@ Each level maps (tile, plane, path) to an instance and a frame.
 - **TILED_FULL:** column varies fastest, then row, then focal plane, then optical path (PS3.3 C.8.12.4). So frame = ((path × planes) + plane) × tiles + `ty × tilesAcross + tx` within the instance that holds that path and plane.
 - **TILED_SPARSE:** each frame's Plane Position (Slide) gives its tile. Its Z Offset in Slide Coordinate System gives the plane, and its Optical Path Identification the path. Tiles with no frame are left empty, so background the scanner skipped is not fetched.
 
-**Frame to bytes** (`SlideSource.locate`). The sources are tried in this order:
+**Frame to bytes** (`FrameLocator.locate`, which `SlideSource` extends; multi-frame images read a frame at a time use it too, `web/core/frames.ts`). The sources are tried in this order:
 1. the Extended Offset Table;
 2. the Basic Offset Table;
 3. native frame arithmetic;

@@ -38,7 +38,8 @@ import { isSlideSeries } from "../core/wsi";
 import { drawSlideThumbnail, slideHooks, slideSession, SlideView, type SlideSession } from "./wsi-view";
 import { mayHoldMedia, MediaController } from "../core/video-view";
 import { linkReports, noteAccession, type ReportLink } from "../core/reports";
-import { parseDicom, parseDicomSync, T, tag } from "../core/dicom";
+import { parseDicom, parseDicomSync, parseHeader, T, tag, type DataSet } from "../core/dicom";
+import { mayStreamFrames } from "../core/frames";
 import { readInstanceBytes, probeInstance, cineTiming } from "../core/video";
 import { planInstances, RECORD_PLAINTEXT } from "../core/range";
 import { readIcon, type Icon } from "../core/icon";
@@ -49,7 +50,7 @@ import { Layers, mapColours, mapScale, type Layer } from "./layers";
 import { Measure, type Tool } from "./measure";
 import { GpuReformatter } from "../core/volume-gl";
 import { buildVolume, isAcquired, makeVolume, planeGrid, reformat, VolumeError, type Orientation, type Plane, type PlaneGrid, type PlaneSpec, type Slab, type SlabMode, type Volume } from "../core/volume";
-import { dot, geometryOf, normal } from "../core/geometry";
+import { dot, frameStacks, geometryOf, normal } from "../core/geometry";
 import { refersTo } from "../core/derived";
 import { renderReports, reportHeading } from "./report-view";
 
@@ -670,10 +671,18 @@ function updatePlaneSelect(se: SeriesEntry) {
 async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: DecodedImage }> {
   if (lastVolume?.uid === se.uid) return lastVolume;
   const input = [];
+  let key = se.uid;
   if (se.instances.length === 1) {
+    stageBusy("Loading the series");
     const img = await images!.get(se, 0, { priority: Priority.Visible, onProgress: (r, t) => stageBusy(`Loading the series · ${formatBytes(r)} of ${formatBytes(t)}`, r, t) });
     const h = await imageHeader(img);
-    for (let f = 0; f < img.frames; f++) input.push({ img, frame: f, geom: geometryOf(h!.ds, f), rescale: rescaleOf(h!.ds, f) });
+    // Several stacks in one instance: the volume is the stack of the frame on screen.
+    const stacks = frameStacks(h!.ds, img.frames);
+    const at = sliceTarget(mpr ? acquiredSlice : sliceIdx).frame;
+    const frames = stacks?.find((g) => g.includes(at)) ?? Array.from({ length: img.frames }, (_, f) => f);
+    if (stacks) key = `${se.uid}#${frames[0]}`;
+    if (lastVolume?.uid === key) return lastVolume;
+    for (const f of frames) input.push({ img, frame: f, geom: geometryOf(h!.ds, f), rescale: rescaleOf(h!.ds, f) });
   } else {
     const n = se.instances.length;
     let done = 0;
@@ -687,7 +696,7 @@ async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: D
   }
   const volume = buildVolume(input);
   lastVolume?.gpu?.destroy();
-  lastVolume = { uid: se.uid, volume, first: input[0].img };
+  lastVolume = { uid: key, volume, first: input[0].img };
   return lastVolume;
 }
 
@@ -1438,6 +1447,29 @@ function selectSeries(k: number) {
   const slider = $<HTMLInputElement>("slice");
   slider.max = String(Math.max(0, sliceCount - 1));
   slider.disabled = sliceCount <= 1;
+  if (se.instances.length === 1 && mayStreamFrames(se, 0) && !images!.peek(se, 0)) {
+    // A multi-frame instance read a frame at a time: its header first, then the middle frame.
+    stageBusy("Loading the image");
+    images!
+      .frameStream(se, 0, { priority: Priority.Visible })
+      .then(async (fs) => {
+        if (series() !== se || shownKey || mpr) return;
+        if (fs) {
+          const ds = (await parseHeader(fs.header).catch(() => null))?.ds ?? null;
+          if (series() !== se || shownKey || mpr) return;
+          sliceCount = fs.frames;
+          frameOrder = spatialFrameOrder(ds, fs.frames);
+          fs.setOrder(frameOrder);
+          slider.max = String(sliceCount - 1);
+          slider.disabled = false;
+        }
+        showSlice(Math.floor(sliceCount / 2), true);
+      })
+      .catch((e) => {
+        if ((e as any)?.name !== "AbortError" && series() === se) showSlice(0, true);
+      });
+    return;
+  }
   showSlice(Math.floor(sliceCount / 2), true);
 }
 
@@ -1517,15 +1549,22 @@ async function openLabelSheet() {
  */
 let frameOrder: number[] | null = null;
 
-function spatialFrameOrder(img: DecodedImage): number[] | null {
-  const ds = headerNow(img);
-  if (!ds || img.frames < 2) return null;
-  const geoms = Array.from({ length: img.frames }, (_, f) => geometryOf(ds, f));
+function spatialFrameOrder(ds: DataSet | null, frames: number): number[] | null {
+  if (!ds || frames < 2) return null;
+  // Several stacks, phases or acquisitions in one instance: one after another, each in space.
+  const stacks = frameStacks(ds, frames);
+  if (stacks) return stacks.flatMap((g) => spatialOrderOf(ds, g) ?? g);
+  return spatialOrderOf(ds, Array.from({ length: frames }, (_, f) => f));
+}
+
+/** Frames `fs` sorted by position along their normal, or null when they share one position. */
+function spatialOrderOf(ds: DataSet, fs: number[]): number[] | null {
+  const geoms = fs.map((f) => geometryOf(ds, f));
   const n = normal(geoms[0]);
   if (!n || geoms.some((g) => !g.position)) return null;
   const d = geoms.map((g) => dot(g.position!, n));
   if (Math.max(...d) - Math.min(...d) < 1e-3) return null;
-  return d.map((v, f) => ({ v, f })).sort((a, b) => a.v - b.v || a.f - b.f).map((x) => x.f);
+  return d.map((v, i) => ({ v, f: fs[i] })).sort((a, b) => a.v - b.v || a.f - b.f).map((x) => x.f);
 }
 
 function sliceTarget(i: number): { inst: number; frame: number } {
@@ -1550,7 +1589,9 @@ function showSlice(i: number, startPrefetch = false) {
   slider.value = String(sliceIdx);
   $("slice-label").textContent = `${sliceIdx + 1} / ${sliceCount}`;
   const { inst, frame } = sliceTarget(sliceIdx);
-  const img = images!.peek(se, inst);
+  // One multi-frame instance may be read a frame at a time (ImageStore.getFrame).
+  const single = se.instances.length === 1;
+  const img = single ? images!.peekFrame(se, inst, frame) : images!.peek(se, inst);
   $("stage-msg").classList.add("hidden");
   if (img) {
     draw(img, frame);
@@ -1562,12 +1603,12 @@ function showSlice(i: number, startPrefetch = false) {
       if (series()?.id === want.series && sliceIdx === want.slice) stageBusy(`Loading the image · ${formatBytes(r)} of ${formatBytes(t)}`, r, t);
     };
     progress(0, total);
-    images!
-      .get(se, inst, { priority: Priority.Visible, onProgress: progress })
+    (single ? images!.getFrame(se, inst, frame, { priority: Priority.Visible, onProgress: progress }) : images!.get(se, inst, { priority: Priority.Visible, onProgress: progress }))
       .then((im) => {
-        if (series()?.id !== want.series) return;
-        if (sliceIdx === want.slice) draw(im, sliceTarget(sliceIdx).frame);
-        else if (images!.peek(series(), sliceTarget(sliceIdx).inst)) showSlice(sliceIdx);
+        if (series()?.id !== want.series || mpr) return;
+        const now = sliceTarget(sliceIdx);
+        if (sliceIdx === want.slice) draw(im, now.frame);
+        else if (single ? images!.peekFrame(series(), now.inst, now.frame) : images!.peek(series(), now.inst)) showSlice(sliceIdx);
       })
       .catch((e) => {
         if ((e as any)?.name === "AbortError") return;
@@ -1622,7 +1663,7 @@ function draw(img: DecodedImage, frame: number) {
   // Single multi-frame instance: its frames become the slices, in spatial order.
   if (se.instances.length === 1 && img.frames > 1 && sliceCount !== img.frames) {
     sliceCount = img.frames;
-    frameOrder = spatialFrameOrder(img);
+    frameOrder = spatialFrameOrder(headerNow(img), img.frames);
     const slider = $<HTMLInputElement>("slice");
     slider.max = String(sliceCount - 1);
     slider.disabled = false;

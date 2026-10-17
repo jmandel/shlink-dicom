@@ -131,8 +131,21 @@ Methods:
 - `new ImageStore(loader, pool, budgetBytes?)` keeps an LRU of raw decoded images, keyed by `${series.id}/${index}` (and `…@1/2^s` when reduced). The default budget is `min(512 MiB, deviceMemory × 64 MiB)`, at least 128 MiB.
   - `get(series, i, { priority, signal, scale })` takes the instance's ciphertext from the loader and hands it to one worker job that verifies, decrypts and decodes it; the main thread gets pixels only. The same priority orders the fetch and the decode. With `scale` (thumbnails) it decodes at 1/2^scale, falls back to full size when the decoder reports the syntax as unsupported at that scale, and returns a cached full-size image when there is one.
   - `peek(series, i)` returns the cached full-size image without loading anything.
+  - `getFrame(series, i, k, o)` returns an image with frame k ready: the cached whole image, or, for a multi-frame instance read a frame at a time, the image being filled (below). `peekFrame(series, i, k)` is the same without loading.
+  - `frameStream(series, i)` opens that reading (it reads the instance's header), or gives null when the instance is read whole.
+  - While an instance is read a frame at a time, `get` waits for all its frames (with `scale`, for its middle frame), so a thumbnail or a reformat does not fetch it a second time.
 - `PoolDecryptor(pool)`: see above.
 - `Priority` is re-exported from viewer-kit.
+
+### Multi-frame images a frame at a time: `frames.ts`
+
+An enhanced CT or MR, an ultrasound cine or a tomosynthesis is one instance of tens of megabytes. Read whole, its first frame waits for all of it. `FrameStream` instead reads the header, finds the frame from the Extended or Basic Offset Table, native frame arithmetic, or a walk over the fragment items when there is no table (the slide viewer's `FrameLocator`, `wsi-source.ts`), reads that frame's bytes and decodes them. The other frames follow in stored order at Prefetch priority, a few hundred kilobytes to 4 MiB per request; a frame asked for meanwhile goes first.
+
+- **Which instances.** `mayStreamFrames(series, i)`: instances of 1 MiB or more of the SOP classes that are usually multi-frame (enhanced CT, MR, PET and XA, ultrasound multi-frame, multi-frame secondary capture, tomosynthesis, NM, angiography, ophthalmic tomography). The header then decides: one frame, float pixel data, big endian, deflated data sets and JPEG 2000 Part 2 volumes are read whole.
+- **Decoding a frame.** The decoder gets a small Part 10 file: the instance's own header with Number of Frames 1, only that frame's item of the Per-Frame Functional Groups Sequence, no Extended Offset Table, and the frame's pixel data (its fragment items, or its native bytes). The frames fill one `DecodedImage` with every frame's slot; `ready[k]` says which are in. When all are in, it has the pixels and attributes a whole decode gives, and goes into the frame cache. One difference: on some enhanced files (CT0070, fo-dicom's GH1876) a whole decode reports per-frame rescale and window values for frame 1 only, while here every frame has its own.
+- **Reads.** Through `InstanceLoader.range` (`LoaderBytes`), so the frames share the loader's queue, record cache and record states with every other read of the instance.
+- **Checked by** `bun web/checks/frame-identity.ts [files or dirs]`: for every multi-frame file, a stream over the file's bytes must finish with the pixels, metadata, palette and header of the whole decode.
+
 
 ### Rendering: `render.ts`, `wl.ts` (browser)
 

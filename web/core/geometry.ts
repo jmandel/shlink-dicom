@@ -121,3 +121,26 @@ export function spacingSourceText(s: SpacingSource): string {
       return "Not calibrated: lengths are in pixels";
   }
 }
+
+/**
+ * The volumes of an enhanced multi-frame image: its frames grouped by their Dimension Index
+ * Values, the In-Stack Position dimension left out (PS3.3 C.7.6.17), so frames of different
+ * stacks, phases or acquisitions fall in different groups. Groups are in order of their first
+ * frame. Null when the image is one group or has no dimension index values.
+ */
+export function frameStacks(ds: DataSet, frames: number): number[][] | null {
+  const dims = ds.seq(0x00209222).map((d) => d.nums(0x00209165)[0]);
+  const inStack = dims.indexOf(0x00209057);
+  const per = ds.seq(0x52009230);
+  if (per.length !== frames || frames < 2) return null;
+  const groups = new Map<string, number[]>();
+  for (let f = 0; f < frames; f++) {
+    const v = per[f].seq(0x00209111)[0]?.nums(0x00209157);
+    if (!v?.length) return null;
+    const key = v.filter((_, i) => i !== inStack).join("/");
+    let g = groups.get(key);
+    if (!g) groups.set(key, (g = []));
+    g.push(f);
+  }
+  return groups.size > 1 ? [...groups.values()] : null;
+}

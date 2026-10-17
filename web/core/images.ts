@@ -10,6 +10,7 @@ import type { InstanceLoader } from "./loader";
 import { decryptParams, RecordAuthenticationError, type RecordDecryptor } from "./decrypt";
 import type { RangePlan } from "./range";
 import { parseHeader, type ParsedDicom } from "./dicom";
+import { FrameStream, mayStreamFrames } from "./frames";
 
 export { Priority };
 export type { DecodedImage };
@@ -84,6 +85,8 @@ export class PoolDecryptor implements RecordDecryptor {
 export class ImageStore {
   readonly cache: FrameCache<string>;
   private inflight = new Map<string, { p: Promise<DecodedImage>; signal?: AbortSignal }>();
+  /** Multi-frame instances read a frame at a time (frames.ts), by key; null: read whole. */
+  private streams = new Map<string, Promise<FrameStream | null>>();
 
   constructor(
     readonly loader: InstanceLoader,
@@ -103,6 +106,75 @@ export class ImageStore {
   }
 
   /**
+   * Instance i read a frame at a time, once its header is in: for a multi-frame instance of a
+   * class that usually is one (frames.ts, mayStreamFrames). Null when it is read whole.
+   */
+  frameStream(series: SeriesEntry, i: number, o: { priority?: number; signal?: AbortSignal } = {}): Promise<FrameStream | null> {
+    const key = ImageStore.key(series, i);
+    let s = this.streams.get(key);
+    if (!s) {
+      if (this.cache.get(key) || !mayStreamFrames(series, i)) return Promise.resolve(null);
+      // A partly read instance holds its whole pixel buffer: keep a few.
+      while (this.streams.size >= ImageStore.MAX_STREAMS) this.forgetStream(this.streams.keys().next().value!);
+      s = FrameStream.open(this.loader, this.pool, series, i, { priority: o.priority ?? Priority.Visible }).catch((e) => {
+        this.forgetStream(key);
+        if ((e as any)?.name === "AbortError") throw e;
+        return null;
+      });
+      void s.then((fs) => {
+        this.settled.set(key, fs);
+        fs?.complete.then(
+          (img) => {
+            this.cache.set(key, img);
+            this.forgetStream(key);
+          },
+          () => {},
+        );
+      }, () => {});
+      this.streams.set(key, s);
+    }
+    return s.then((fs) => (fs && !fs.broken ? fs : null));
+  }
+
+  /**
+   * Frame k of instance i: an image with frame k ready (the whole instance, or one being filled a
+   * frame at a time; see frameStream). Other frames of a partly filled image are not ready.
+   */
+  async getFrame(series: SeriesEntry, i: number, k: number, o: ImageGetOptions = {}): Promise<DecodedImage> {
+    const whole = this.peek(series, i);
+    if (whole) return whole;
+    const fs = mayStreamFrames(series, i) ? await this.frameStream(series, i, o).catch(() => null) : null;
+    if (fs) {
+      try {
+        return await fs.frame(k, { priority: o.priority, signal: o.signal });
+      } catch (e) {
+        if ((e as any)?.name === "AbortError" || !fs.broken) throw e;
+      }
+    }
+    return this.get(series, i, o);
+  }
+
+  /** An image with frame k of instance i ready, without loading anything. */
+  peekFrame(series: SeriesEntry, i: number, k: number): DecodedImage | undefined {
+    return this.peek(series, i) ?? this.streamNow(series, i, (fs) => (fs.ready[k] ? fs.image ?? undefined : undefined));
+  }
+
+  /** Streams opened and past their header read, by key. */
+  private settled = new Map<string, FrameStream | null>();
+  static MAX_STREAMS = 3;
+
+  private forgetStream(key: string) {
+    this.streams.delete(key);
+    this.settled.delete(key);
+  }
+
+  /** The instance's stream if its header has been read. */
+  private streamNow<T>(series: SeriesEntry, i: number, f: (fs: FrameStream) => T | undefined): T | undefined {
+    const fs = this.settled.get(ImageStore.key(series, i));
+    return fs && !fs.broken ? f(fs) : undefined;
+  }
+
+  /**
    * Fetches, verifies, decrypts, decodes and caches instance i (all its frames). Fetch and decode
    * both use `priority`; asking again with a higher priority moves a queued request up. With
    * `scale`, a cached full-size image is returned when there is one.
@@ -113,6 +185,24 @@ export class ImageStore {
     const hit = this.cache.get(key) ?? (scale ? this.cache.get(ImageStore.key(series, i)) : undefined);
     if (hit) return Promise.resolve(hit);
     const priority = o.priority ?? Priority.Visible;
+    // Being read a frame at a time: wait for its frames (a thumbnail needs only the middle one).
+    const stream = this.streams.get(ImageStore.key(series, i));
+    if (stream) {
+      return stream.catch(() => null).then(async (fs) => {
+        if (!fs || fs.broken) return this.getWhole(series, i, o, key, priority, scale);
+        if (scale) return fs.frame(Math.floor(fs.frames / 2), { priority, signal: o.signal });
+        fs.raise(priority);
+        try {
+          return await fs.complete;
+        } catch {
+          return this.getWhole(series, i, o, key, priority, scale);
+        }
+      });
+    }
+    return this.getWhole(series, i, o, key, priority, scale);
+  }
+
+  private getWhole(series: SeriesEntry, i: number, o: ImageGetOptions, key: string, priority: number, scale: number): Promise<DecodedImage> {
     const existing = this.inflight.get(key);
     if (existing && !existing.signal?.aborted) {
       // Raise the queued fetch; the decode is deduplicated by key (and raised) in the pool.
