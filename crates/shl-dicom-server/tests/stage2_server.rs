@@ -2115,3 +2115,34 @@ async fn test_a_huge_upload_length_does_not_wrap_the_byte_limit() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A clone that reaches a blob just after its last reference went (a delete over another
+/// connection or process, between the clone's read of the source and its new reference) fails
+/// with 409 instead of naming a blob on its way out of the store; nothing is left behind.
+#[tokio::test]
+async fn test_a_clone_never_names_a_released_blob() {
+    let dir = temp_data_dir("clone_vs_release");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let (src, _) = state.create_share(true, None).unwrap();
+    let fid = b64url_encode(&[44u8; 16]);
+    shl_dicom_server::state::store_file(&state, &src, &fid, &[5u8; 70_000]).await.unwrap();
+    let key = file_key(&state, &src, &fid);
+    // An ordinary clone takes a reference.
+    let r = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let first = r.json::<Value>().await.unwrap()["share"]["id"].as_str().unwrap().to_string();
+    state.delete_share(&first).unwrap();
+
+    // The source's delete, as another process would run it, has released the last reference.
+    state.blob_release(&key);
+    assert!(!state.blob_ref(&key).unwrap(), "no reference to a blob at 0");
+    let shares_before = std::fs::read_dir(dir.join("shares")).unwrap().count();
+    let r = client.post(format!("{base}/api/shares/{src}/clone")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read_dir(dir.join("shares")).unwrap().count(), shares_before, "the failed clone is gone");
+    state.empty_trash().await;
+    assert!(!blob_exists(&state, &key).await, "the blob left the store, and no share names it");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -337,7 +337,18 @@ impl AppState {
 
     // ---------------------------------------------------------------- blobs and their references
 
-    /// One more file row names this blob.
+    /// A clone's reference to a blob some share already names: only while its count is above 0.
+    /// False when the blob is on its way to the trash (its last share was just deleted), so the
+    /// clone can't keep it. SQLite serializes this against `blob_release`, across processes too
+    /// (the seed deletes the previous sample from its own process).
+    pub fn blob_ref(&self, key: &str) -> Result<bool, String> {
+        let cat = self.catalog.lock().unwrap();
+        cat.execute("UPDATE blobs SET ref_count = ref_count + 1 WHERE storage_key = ?1 AND ref_count > 0", params![key])
+            .map(|n| n == 1)
+            .map_err(|e| e.to_string())
+    }
+
+    /// One more file row names this blob: a new blob (an upload, the seed).
     pub fn blob_add(&self, key: &str) {
         let cat = self.catalog.lock().unwrap();
         let _ = cat.execute(

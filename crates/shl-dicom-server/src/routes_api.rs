@@ -161,35 +161,40 @@ pub async fn clone_share(
             .into_response();
     };
 
-    // The clone names the same blobs (no bytes are copied); each gains a reference. The source's
-    // database stays locked until then, so a file deleted from it meanwhile can't lose its blob.
-    // Lock order: the source share, then the new share, then the catalog.
-    let copy_res: Result<(), String> = (|| {
+    // The clone names the same blobs (no bytes are copied); each gains a reference, but only one
+    // whose count is still above 0 (`blob_ref`). Holding the source's database lock is not enough:
+    // a delete may run over another connection (a pool miss, or the seed's own process replacing
+    // the sample), release the last reference and trash the blob. Then the clone fails instead of
+    // naming a deleted blob. Lock order: the source share, then the new share, then the catalog.
+    let internal = |e: String| (StatusCode::INTERNAL_SERVER_ERROR, e);
+    let copy_res: Result<(), (StatusCode, String)> = (|| {
         let src_conn = src_conn_arc.lock().unwrap();
         let rows: Vec<(String, String, i64)> = {
-            let mut stmt = src_conn.prepare("SELECT file_id, storage_key, size FROM files").map_err(|e| e.to_string())?;
+            let mut stmt = src_conn.prepare("SELECT file_id, storage_key, size FROM files").map_err(|e| internal(e.to_string()))?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
-                .map_err(|e| e.to_string())?
+                .map_err(|e| internal(e.to_string()))?
                 .flatten()
                 .collect();
             rows
         };
         let dst_conn = dst_conn_arc.lock().unwrap();
         for (fid, key, size) in rows {
-            record_file(&dst_conn, &fid, &key, size as u64)?;
-            state.blob_add(&key);
+            if !state.blob_ref(&key).map_err(internal)? {
+                return Err((StatusCode::CONFLICT, "the source share is being deleted".into()));
+            }
+            if let Err(e) = record_file(&dst_conn, &fid, &key, size as u64) {
+                state.blob_release(&key);
+                return Err(internal(e));
+            }
         }
         Ok(())
     })();
 
-    if let Err(e) = copy_res {
+    if let Err((status, e)) = copy_res {
         let _ = state.delete_share(&new_sid);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response();
+        state.empty_trash_soon();
+        return (status, Json(json!({ "error": e }))).into_response();
     }
 
     let origin = request_origin(&state, &headers);
