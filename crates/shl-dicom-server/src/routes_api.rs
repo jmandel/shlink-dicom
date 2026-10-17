@@ -888,6 +888,11 @@ pub async fn delete_share_file(
     let Some(file_id) = parse_file_name(&name) else {
         return json_err(StatusCode::BAD_REQUEST, "invalid file name");
     };
+    // Not while a PUT or PATCH of this file is in progress: it would stage and record the file
+    // again after the delete.
+    let Some(_guard) = state.claim_upload(&sid, file_id) else {
+        return json_err(StatusCode::CONFLICT, "an upload of this file is in progress");
+    };
     let Some(conn_arc) = state.open_share_db(&sid) else {
         return StatusCode::NOT_FOUND.into_response();
     };

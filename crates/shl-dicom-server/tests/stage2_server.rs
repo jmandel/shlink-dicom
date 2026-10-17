@@ -1756,3 +1756,48 @@ async fn test_deleting_a_share_twice_releases_its_blobs_once() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file can't be deleted while a PUT or PATCH of it is in progress (409); afterwards it can.
+#[tokio::test]
+async fn test_deleting_a_file_mid_upload_is_a_conflict() {
+    let dir = temp_data_dir("delete_mid_upload");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[22u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    assert_eq!(client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap().status(), StatusCode::CREATED);
+    assert!(append(&client, &url, &token, 0, vec![1u8; 1000], false, None).await.status().is_success());
+
+    // An append in progress: its body has started and not finished.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(1);
+    tx.send(Ok(vec![2u8; 1000])).await.unwrap();
+    let body = reqwest::Body::wrap_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    let req = client
+        .patch(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/partial-upload")
+        .header("Upload-Offset", "1000")
+        .header("Upload-Complete", "?1")
+        .body(body)
+        .send();
+    let patch = tokio::spawn(req);
+    // Wait until the server has claimed the upload.
+    let mut busy = false;
+    for _ in 0..200 {
+        if state.uploading.lock().unwrap().contains(&format!("{sid}/{fid}")) {
+            busy = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(busy, "the append never started");
+    assert_eq!(client.delete(&url).bearer_auth(&token).send().await.unwrap().status(), StatusCode::CONFLICT);
+    drop(tx);
+    assert_eq!(patch.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(client.delete(&url).bearer_auth(&token).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+    let _ = std::fs::remove_dir_all(&dir);
+}
