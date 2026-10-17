@@ -229,7 +229,8 @@ User=shlink
 WorkingDirectory=$ROOT/current
 Environment=PORT=$PORT
 Environment=SHL_DICOM_DATA_DIR=$DATA
-Environment=PUBLIC_ORIGIN=$ORIGIN
+# The only source of absolute URLs; forwarded headers are not trusted.
+Environment=SHL_PUBLIC_ORIGIN=$ORIGIN
 # Upload limits (see shl-dicom-server serve --help). 0 means no limit.
 Environment=SHL_MAX_SHARE_BYTES=$MAX_SHARE_BYTES
 Environment=SHL_MAX_SHARES=$MAX_SHARES

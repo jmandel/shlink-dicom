@@ -1964,6 +1964,60 @@ async fn test_a_refill_link_never_locks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// With a public origin set, forged X-Forwarded-Proto/-Host and Host change no absolute URL: not
+/// the /sample redirect, not a manifest's file location, not a share's link URLs.
+#[tokio::test]
+async fn test_a_public_origin_ignores_forwarded_headers() {
+    let dir = temp_data_dir("public_origin");
+    let mut state = test_state(&dir);
+    state.public_origin = Some("https://shl.example".into());
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let forged = |r: reqwest::RequestBuilder| r.header("X-Forwarded-Proto", "http").header("X-Forwarded-Host", "evil.example").header("Host", "evil.example");
+
+    let created: Value = forged(client.post(format!("{base}/api/shares"))).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let link: Value = forged(client.post(format!("{base}/api/shares/{sid}/links")))
+        .bearer_auth(&token)
+        .json(&json!({ "passcode": "1234", "allowedFiles": [] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lid = link["id"].as_str().unwrap().to_string();
+    assert_eq!(link["url"], format!("https://shl.example/shl/{lid}"));
+    forged(client.put(format!("{base}/api/shares/{sid}/links/{lid}/bundle.jwe"))).bearer_auth(&token).body("dummy..iv.ct.tag").send().await.unwrap();
+
+    let m: Value = forged(client.post(format!("{base}/shl/{lid}"))).json(&json!({ "passcode": "1234" })).send().await.unwrap().json().await.unwrap();
+    let loc = m["files"][0]["location"].as_str().unwrap();
+    assert!(loc.starts_with("https://shl.example/cap/"), "{loc}");
+
+    let share = state.build_share_resource(&sid, "https://shl.example").unwrap();
+    state.demo_shares.lock().unwrap().push(shl_dicom_server::state::DemoShareInfo {
+        id: sid.clone(),
+        title: "Sample".into(),
+        description: String::new(),
+        shlink_uri: "https://shl.example/#shlink:/PUBLIC".into(),
+        passcode_hint: None,
+        read_only: true,
+        share,
+    });
+    let r = forged(client.get(format!("{base}/sample"))).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::FOUND);
+    assert_eq!(r.headers()[header::LOCATION], "https://shl.example/view#shlink:/PUBLIC");
+
+    // Without one, the forwarded headers are used (documented as safe only behind a proxy that
+    // overwrites them).
+    state.public_origin = None;
+    let base2 = spawn_test_server(state.clone()).await;
+    let r = forged(client.get(format!("{base2}/sample"))).send().await.unwrap();
+    assert_eq!(r.headers()[header::LOCATION], "http://evil.example/view#shlink:/PUBLIC");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One share's token can't delete or end the sessions of another share's link: 404, and the link
 /// still works. Its own share can.
 #[tokio::test]

@@ -215,6 +215,9 @@ impl ShareDbPool {
 pub struct AppState {
     pub data_dir: PathBuf,
     pub quotas: Quotas,
+    /// The server's public origin (`https://host`), the only source of absolute URLs when set
+    /// (see `routes_shl::request_origin`).
+    pub public_origin: Option<String>,
     /// `{sid}/{fileId}` uploads in progress (one request at a time per file).
     pub uploading: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Where finished files live (local disk or S3).
@@ -265,6 +268,7 @@ impl AppState {
         let state = Self {
             data_dir,
             quotas,
+            public_origin: None,
             uploading: Arc::new(Mutex::new(std::collections::HashSet::new())),
             store,
             catalog: Arc::new(Mutex::new(conn)),

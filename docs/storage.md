@@ -271,6 +271,12 @@ On start, and every 10 minutes: drop uploads that started more than 24 hours ago
 
 Server settings, from `serve` (and `seed`) flags or the environment.
 
+**Address**
+
+| Setting | Environment | Default | Meaning |
+|---|---|---|---|
+| `--public-origin` | `SHL_PUBLIC_ORIGIN` | unset | The server's public origin (for example `https://shlink-dicom.exe.xyz`). When set, it is the only source of absolute URLs: the sample's links, the `/sample` redirect, manifest and link URLs. Unset, they come from `X-Forwarded-Proto` and `X-Forwarded-Host` (else `Host`), which clients can forge; run without it only behind a proxy that overwrites those headers. |
+
 **Limits**
 
 | Setting | Environment | Default | Meaning |

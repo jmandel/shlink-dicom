@@ -25,7 +25,14 @@ pub struct ManifestRequest {
     pub passcode: Option<String>,
 }
 
-pub fn request_origin(headers: &HeaderMap) -> String {
+/// The origin for absolute URLs (the `/sample` redirect, manifest and link URLs): the configured
+/// public origin (`--public-origin`, `SHL_PUBLIC_ORIGIN`) when set, and nothing a request says.
+/// Without one, X-Forwarded-Proto and X-Forwarded-Host (else Host), which a client can forge: use
+/// that only behind a proxy that overwrites them.
+pub fn request_origin(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(o) = &state.public_origin {
+        return o.trim_end_matches('/').to_string();
+    }
     let proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -91,7 +98,7 @@ pub async fn post_shl_manifest(
     };
 
     let req = body.map(|b| b.0).unwrap_or_default();
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     let now = now_unix();
     let path_str = format!("/shl/{lid}");
 

@@ -101,7 +101,7 @@ pub async fn create_share(State(state): State<AppState>, headers: HeaderMap, bod
         }
     };
 
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     let Some(share) = state.build_share_resource(&sid, &origin) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -192,7 +192,7 @@ pub async fn clone_share(
             .into_response();
     }
 
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     let share = state.build_share_resource(&new_sid, &origin).unwrap();
     (
         StatusCode::CREATED,
@@ -213,7 +213,7 @@ pub async fn get_share(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     match state.build_share_resource(&sid, &origin) {
         Some(share) => (StatusCode::OK, Json(share)).into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "share not found" }))).into_response(),
@@ -234,7 +234,7 @@ pub async fn patch_share(
     if let Err(e) = state.set_share_expiry(&sid, expires_at) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
     }
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     match state.build_share_resource(&sid, &origin) {
         Some(share) => (StatusCode::OK, Json(share)).into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "share not found" }))).into_response(),
@@ -1055,7 +1055,7 @@ pub async fn create_link(
             .into_response();
     }
 
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     let conn = conn_arc.lock().unwrap();
     let link_res = build_link_resource_from_row(
         &conn,
@@ -1099,7 +1099,7 @@ pub async fn put_link_bundle(
     let etag_hash = sha256_bytes(&body);
     let etag = format!("\"{}\"", b64url_encode(&etag_hash[..16]));
     let now = now_unix();
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
 
     let conn = conn_arc.lock().unwrap();
     let changed = conn
@@ -1145,7 +1145,7 @@ pub async fn patch_link(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     let mut conn = conn_arc.lock().unwrap();
     let tx = match conn.transaction() {
         Ok(t) => t,
@@ -1364,7 +1364,7 @@ pub async fn get_share_events(
 
 /// `GET /api/demo-shares`
 pub async fn get_demo_shares(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let origin = request_origin(&headers);
+    let origin = request_origin(&state, &headers);
     let mut demos = state.demo_shares.lock().unwrap().clone();
     for d in &mut demos {
         if let Some(updated) = state.build_share_resource(&d.id, &origin) {
@@ -1418,7 +1418,7 @@ pub async fn sample_redirect(state: &AppState, headers: &HeaderMap, passcode: bo
     let Some(link) = link else {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "this server has no sample" }))).into_response();
     };
-    let origin = request_origin(headers);
+    let origin = request_origin(state, headers);
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, format!("{}/view#{link}", origin.trim_end_matches('/')))

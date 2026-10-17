@@ -155,8 +155,10 @@ enum Commands {
         /// Data directory for catalog.db and shares/{sid}.db
         #[arg(long, env = "SHL_DICOM_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
-        /// Public origin URL used when pre-seeding demo links
-        #[arg(long, env = "PUBLIC_ORIGIN")]
+        /// The server's public origin (for example https://shlink-dicom.exe.xyz): the only source
+        /// of absolute URLs (the sample's links and redirect, manifest URLs). Unset: from
+        /// X-Forwarded-Proto/-Host or Host, only safe behind a proxy that overwrites them
+        #[arg(long, env = "SHL_PUBLIC_ORIGIN")]
         public_origin: Option<String>,
         /// Most encrypted bytes one share may hold (for example 20G); 0 for no limit
         #[arg(long, env = "SHL_MAX_SHARE_BYTES", default_value = "0", value_parser = parse_size)]
@@ -275,7 +277,8 @@ async fn main() {
             };
             let store = store.store(&data_dir);
             println!("Files: {}", store.describe());
-            let state = AppState::with_store(&data_dir, quotas, store).expect("failed to initialize AppState");
+            let mut state = AppState::with_store(&data_dir, quotas, store).expect("failed to initialize AppState");
+            state.public_origin = public_origin.clone().map(|o| o.trim_end_matches('/').to_string());
             // Deleted files and dropped uploads leave the store in the background.
             let gc = state.clone();
             tokio::spawn(async move {
