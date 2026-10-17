@@ -43,9 +43,10 @@ export function parseShlink(input: string): ShlPayload {
   if (!p || typeof p.url !== "string" || typeof p.key !== "string" || p.key.length !== 43) {
     throw new InvalidLinkError("This link is missing its address or key.");
   }
-  // SMART Health Links: version 1 (or none) is the one this reader knows, and a link to the file
-  // itself (U) has no passcode (P). Refused before any request is made.
-  if (p.v !== undefined && !(Number.isInteger(p.v) && p.v >= 0 && p.v <= 1)) throw new InvalidLinkError("This link uses a version of SMART Health Links this viewer does not read.");
+  // SMART Health Links: version 1 (or none, which is 1) is the one this reader knows, as the Rust
+  // reader (decode_shlink_uri) has it, and a link to the file itself (U) has no passcode (P).
+  // Refused before any request is made.
+  if (p.v !== undefined && p.v !== 1) throw new InvalidLinkError("This link uses a version of SMART Health Links this viewer does not read.");
   if ((p.flag ?? "").includes("U") && (p.flag ?? "").includes("P")) throw new InvalidLinkError("This link is not valid: a link to the file itself cannot need a passcode.");
   return p;
 }

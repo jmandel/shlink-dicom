@@ -85,8 +85,9 @@ describe("links SMART Health Links does not allow", () => {
   test("a link to the file itself with a passcode is refused", () => {
     expect(() => parseShlink(encodeShlink({ url: "https://h/x", key: KEY, flag: "PU" }))).toThrow(/cannot need a passcode/);
   });
-  test("a version above 1 is refused; 1 and none are read", () => {
+  test("a version other than 1 is refused; 1 and none are read (as decode_shlink_uri)", () => {
     expect(() => parseShlink(encodeShlink({ url: "https://h/x", key: KEY, v: 2 }))).toThrow(/version/);
+    expect(() => parseShlink(encodeShlink({ url: "https://h/x", key: KEY, v: 0 }))).toThrow(/version/);
     expect(parseShlink(encodeShlink({ url: "https://h/x", key: KEY, v: 1 })).v).toBe(1);
     expect(parseShlink(encodeShlink({ url: "https://h/x", key: KEY })).v).toBeUndefined();
   });
