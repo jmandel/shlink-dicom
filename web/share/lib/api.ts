@@ -1,7 +1,8 @@
 // Client for the share and link API (PLAN.md §5.2). The server sees only ciphertext, the owner
 // Bundle encrypted under the owner key, and each link's encrypted Bundle.
 import { b64urlDecode, b64urlEncode, utf8 } from "../../core/b64";
-import { decryptJwe, encryptJwe } from "../../core/jwe";
+import { encryptJwe } from "../../core/jwe";
+import { decryptBundle } from "../../core/reader";
 import { encodeShlink } from "../../core/shlink";
 import { fromUtf8 } from "../../core/b64";
 
@@ -324,11 +325,11 @@ export async function publishLinkBundle(api: ShareApi, ownerKey: string, lid: st
 /** A link's Bundle, decrypted with its key; null when the link has none. */
 export async function readLinkBundle(api: ShareApi, ownerKey: string, lid: string): Promise<any | null> {
   const jwe = await api.getLinkBundle(lid);
-  return jwe === null ? null : JSON.parse(fromUtf8(await decryptJwe(jwe, await linkKey(ownerKey, lid))));
+  return jwe === null ? null : JSON.parse(fromUtf8(await decryptBundle(jwe, await linkKey(ownerKey, lid))));
 }
 
 export async function readOwnerBundle(api: ShareApi, ownerKey: string): Promise<any> {
-  return JSON.parse(fromUtf8(await decryptJwe(await api.getOwner(), ownerKey)));
+  return JSON.parse(fromUtf8(await decryptBundle(await api.getOwner(), ownerKey)));
 }
 
 // ----------------------------------------------------------- the owner link (manage URL)

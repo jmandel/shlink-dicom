@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { packAndShare } from "./pack-share";
 import { splitAnnexB } from "../core/video-remux";
-import { parseStudyIndex } from "../core/bundle";
+import { parseIndex } from "../core/reader";
 import { studyTitle } from "../core/format";
 import { element, part10 } from "./synthetic";
 
@@ -428,7 +428,7 @@ if (pick) {
 
 const shared = await packAndShare(base, files);
 // Where each case is in the share, as the viewer lists it.
-const index = parseStudyIndex(shared.bundle);
+const index = await parseIndex(shared.bundle);
 for (const c of cases) {
   const sop = readUi(new Uint8Array(readFileSync(c.file)), 0x0008, 0x0018);
   index.studies.forEach((st, i) =>
@@ -446,7 +446,7 @@ for (const c of cases) {
 const { shlink } = await shared.mint(shared.bundle, { label: "Video checks" });
 const cineShared = cineFiles.length ? await packAndShare(base, cineFiles) : null;
 const cineLink = cineShared ? (await cineShared.mint(cineShared.bundle, { label: "Cine checks" })).shlink : null;
-const cineIndex = cineShared ? parseStudyIndex(cineShared.bundle) : null;
+const cineIndex = cineShared ? await parseIndex(cineShared.bundle) : null;
 for (const c of cineCases) {
   const st = cineIndex?.studies.find((s) => s.studyInstanceUid === c.studyUid);
   if (!st) throw new Error(`${c.name}: study ${c.studyUid} not in the Bundle`);

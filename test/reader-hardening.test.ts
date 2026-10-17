@@ -4,15 +4,21 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { frameTableFromHeader, parseSlideHeader, MAX_FRAMES, type SlideHeader } from "../web/core/wsi";
 import { SeriesReader } from "../web/core/wsi-source";
-import { InvalidBundleError, MAX_INSTANCE_BYTES, parseStudyIndex } from "../web/core/bundle";
+import { decryptBundle, parseIndex, ReaderError } from "../web/core/reader";
+
+/** The longest instance, and file, a Bundle may list: 2^53 − 1 bytes (crates/shl-dicom-core bundle.rs MAX_FILE_BYTES). */
+const MAX_INSTANCE_BYTES = 2 ** 53 - 1;
 import { InstanceLoader } from "../web/core/loader";
 import { ciphertextLength, recordCount, RECORD_PLAINTEXT } from "../web/core/range";
-import { decryptJwe, encryptJwe, JweError, MAX_JWE_CHARS, randomKeyB64 } from "../web/core/jwe";
+import { encryptJwe, MAX_JWE_CHARS, randomKeyB64 } from "../web/core/jwe";
 import { b64urlEncode, utf8 } from "../web/core/b64";
 import { seriesKey } from "../web/core/decrypt";
 import { LinkError, LinkResolver } from "../web/core/resolver";
 import { encodeShlink } from "../web/core/shlink";
 import { element, part10 } from "../web/checks/synthetic";
+
+/** The reader's code for a failure. */
+const code = (p: Promise<unknown>) => p.then(() => "ok", (e) => (e instanceof ReaderError ? e.code : String(e)));
 
 const header = (o: Partial<SlideHeader>): SlideHeader =>
   ({ complete: true, encapsulated: true, numberOfFrames: 3, firstFragmentOffset: 1000, extendedOffsets: null, basicOffsets: null, ...o }) as SlideHeader;
@@ -71,8 +77,8 @@ describe("R4: lengths", () => {
     st.series[0].instance[0].extension.find((x: any) => /instance-length/.test(x.url)).valueDecimal = length;
     return g;
   };
-  test("an instance within the bound is read", () => expect(parseStudyIndex(bundle(70000)).studies.length).toBe(1));
-  test("an instance longer than the bound is refused", () => expect(() => parseStudyIndex(bundle(MAX_INSTANCE_BYTES + 1))).toThrow(InvalidBundleError));
+  test("an instance within the bound is read", async () => expect((await parseIndex(bundle(70000))).studies.length).toBe(1));
+  test("an instance longer than the bound is refused", async () => expect(await code(parseIndex(bundle(MAX_INSTANCE_BYTES + 1)))).toBe("invalid-bundle"));
   test("a read too large to hold is refused before anything is planned", async () => {
     const L = 1e10;
     const file = { fileId: "AAAAAAAAAAAAAAAAAAAAAA", key: "A".repeat(43), plaintextLength: L, ciphertextLength: ciphertextLength(L), recordCount: recordCount(L) };
@@ -88,17 +94,15 @@ describe("K3 and cty: JWE", () => {
   const key = randomKeyB64();
   test("a JWE that expands past 64 MiB is refused", async () => {
     const jwe = await encryptJwe(new Uint8Array(65 * 1024 * 1024), key);
-    await expect(decryptJwe(jwe, key)).rejects.toThrow("64 MiB");
+    expect(await code(decryptBundle(jwe, key))).toBe("too-large");
   }, 30_000);
-  test("a JWE longer than the bound is refused before decrypting", () => expect(decryptJwe("a".repeat(MAX_JWE_CHARS + 1), key)).rejects.toThrow(JweError));
+  test("a JWE longer than the bound is refused before decrypting", async () => expect(await code(decryptBundle("a".repeat(MAX_JWE_CHARS + 1), key))).toBe("too-large"));
   test("a JWE whose content type is not FHIR is refused", async () => {
     const jwe = await encryptJwe(utf8("{}"), key, { cty: "application/smart-health-card" });
-    await expect(decryptJwe(jwe, key)).rejects.toThrow("content type");
+    expect(await code(decryptBundle(jwe, key))).toBe("unsupported");
   });
-  test("a FHIR JWE, or one that names no content type, is read", async () => {
-    expect(await decryptJwe(await encryptJwe(utf8("{}"), key), key)).toEqual(utf8("{}"));
-    expect(await decryptJwe(await encryptJwe(utf8("{}"), key, {}), key)).toEqual(utf8("{}"));
-  });
+  test("a FHIR JWE is read", async () => expect(await decryptBundle(await encryptJwe(utf8("{}"), key), key)).toEqual(utf8("{}")));
+  test("one that names no content type is refused", async () => expect(await code(decryptBundle(await encryptJwe(utf8("{}"), key, {}), key))).toBe("unsupported"));
 });
 
 describe("K8: file keys", () => {
@@ -112,9 +116,9 @@ describe("K8: file keys", () => {
 describe("K6: manifest locations", () => {
   const open = async (location: string) => {
     const key = randomKeyB64();
-    const jwe = await encryptJwe(utf8("{}"), key);
+    const jwe = await encryptJwe(utf8(JSON.stringify({ resourceType: "Bundle", type: "collection", entry: [] })), key);
     const fetch = (async (_u: string, init?: RequestInit) => (init?.method === "POST" ? new Response(JSON.stringify({ files: [{ contentType: "application/fhir+json", location }] })) : new Response(jwe))) as any;
-    return new LinkResolver(encodeShlink({ url: "https://host.example/shl/x", key }), { fetch }).open();
+    return (await LinkResolver.fromLink(encodeShlink({ url: "https://host.example/shl/x", key }), { fetch })).open();
   };
   test("a file name is accepted", async () => expect((await open("https://host.example/cap/t/bundle.jwe")).baseUrl).toBe("https://host.example/cap/t/bundle.jwe"));
   test("a folder is accepted", async () => expect((await open("https://host.example/cap/t/")).baseUrl).toBe("https://host.example/cap/t/"));

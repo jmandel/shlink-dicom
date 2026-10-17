@@ -22,6 +22,7 @@ import {
   studyTitle,
   FetchPriority,
   RecordAuthenticationError,
+  startReader,
   type OpenShare,
   type SeriesEntry,
   type StudyEntry,
@@ -71,6 +72,9 @@ const metrics = {
 const mark = (name: string) => {
   if (metrics.marks[name] === undefined) metrics.marks[name] = Math.round(performance.now());
 };
+
+// The link reader's worker (core/reader.ts) at once: its module loads while the Bundle downloads.
+startReader();
 
 // Start the decoder pool at once: it compiles 0.9 MB of wasm and starts workers while the link resolves.
 const poolPromise = getDecoderPool();
@@ -846,7 +850,7 @@ async function boot() {
     return;
   }
   try {
-    resolver = new LinkResolver(link, { recipient: "Web viewer" });
+    resolver = await LinkResolver.fromLink(link, { recipient: "Web viewer" });
   } catch (e) {
     showError(e);
     return;

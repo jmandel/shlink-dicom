@@ -3,7 +3,8 @@
 // the hash decrypts the owner Bundle and derives each link's key; it is never sent to the server.
 import { loadConfig, siteUrl, type SiteConfig } from "../core/config";
 import { formatBytes, plural, formatDate } from "../core/format";
-import { parseStudyIndex, type StudyEntry, type StudyIndex } from "../core/bundle";
+import type { StudyEntry, StudyIndex } from "../core/bundle";
+import { parseIndex } from "../core/reader";
 import {
   ApiError, ShareApi, forgetShare, manageUrl, parseManageHash, publishLinkBundle, readLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor,
   type AccessEvent, type LinkResource, type OwnerCredential, type ShareResource,
@@ -67,7 +68,7 @@ function confirmBox(title: string, text: string, ok: string): Promise<boolean> {
     );
     return;
   }
-  index = parseStudyIndex(owner);
+  index = await parseIndex(owner);
   for (const st of index.studies) for (const f of st.files) fileStudy.set(f.fileId, st);
   const title = index.studies.map(studyName).join(", ");
   if (!savedShares().some((s) => s.sid === cred.sid)) saveShare({ ...cred, title, createdAt: share.createdAt, apiBase: cfg.apiBase });

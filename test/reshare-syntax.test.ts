@@ -2,7 +2,7 @@
 // the first record of each series (web/share/lib/sources.ts loadLink), so the Share page can
 // compress uncompressed images and add offset tables, as it does for files.
 import { beforeAll, describe, expect, test } from "bun:test";
-import { parseStudyIndex } from "../web/core/bundle";
+import { parseIndex } from "../web/core/reader";
 import { RECORD_PLAINTEXT, type RangePlan } from "../web/core/range";
 import { Collection } from "../web/share/lib/ingest";
 import { loadLink } from "../web/share/lib/sources";
@@ -59,7 +59,7 @@ describe("a re-shared link", () => {
         series: [{ uid: "2.25.10", modality: { code: "CT" }, instance: [inst("2.25.11", a.length)] }, { uid: "2.25.20", modality: { code: "CT" }, instance: [inst("2.25.21", b.length)] }] } }],
     };
     const share: any = {
-      index: parseStudyIndex(bundle),
+      index: await parseIndex(bundle),
       resolver: { fetchRange: async (plan: RangePlan) => bytes.slice(plan.firstRecord * RECORD_PLAINTEXT, Math.min(bytes.length, (plan.lastRecord + 1) * RECORD_PLAINTEXT)) },
       decryptor: { decrypt: async (_s: any, plan: RangePlan, ct: Uint8Array) => ct.slice(plan.plaintextStart - plan.firstRecord * RECORD_PLAINTEXT, plan.plaintextEnd - plan.firstRecord * RECORD_PLAINTEXT) },
     };

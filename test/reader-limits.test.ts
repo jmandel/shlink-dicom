@@ -2,7 +2,8 @@
 // take in (review dsmax items cr-D3/cl-D4, cr-D5, cr-D6, cl-D6, cl-D3).
 import { describe, expect, test } from "bun:test";
 import { LinkResolver } from "../web/core/resolver";
-import { encodeShlink, parseShlink } from "../web/core/shlink";
+import { encodeShlink } from "../web/core/shlink";
+import { parseLink } from "../web/core/reader";
 import { encryptJwe, MAX_JWE_CHARS, randomKeyB64 } from "../web/core/jwe";
 import { utf8 } from "../web/core/b64";
 import { buildPyramid, MAX_LEVEL_TILES } from "../web/core/wsi";
@@ -25,8 +26,8 @@ function body(total: number, fill = 0) {
 }
 
 const KEY = randomKeyB64();
-const direct = (f: typeof fetch) => {
-  const r = new LinkResolver(encodeShlink({ url: "https://host.example/f/bundle.jwe", key: KEY, flag: "U" }), { fetch: f });
+const direct = async (f: typeof fetch) => {
+  const r = await LinkResolver.fromLink(encodeShlink({ url: "https://host.example/f/bundle.jwe", key: KEY, flag: "U" }), { fetch: f });
   (r as any).baseUrl = "https://host.example/f/bundle.jwe";
   return r;
 };
@@ -35,17 +36,17 @@ const plan = { fileId: "F", ciphertextStart: 65536, ciphertextEnd: 131072, range
 describe("file reads take what the plan names", () => {
   test("a host that answers a range with the whole file: the read stops once the range is in", async () => {
     const b = body(200 << 20);
-    const out = await direct((async () => new Response(b.stream, { status: 200 })) as any).fetchRange(plan);
+    const out = await (await direct((async () => new Response(b.stream, { status: 200 })) as any)).fetchRange(plan);
     expect(out.byteLength).toBe(65536);
     expect(b.pulled()).toBeLessThanOrEqual(4 << 20);
   });
   test("a range answer longer than the range is refused without reading it all", async () => {
     const b = body(200 << 20);
-    await expect(direct((async () => new Response(b.stream, { status: 206 })) as any).fetchRange(plan)).rejects.toThrow(/more than/);
+    await expect((await direct((async () => new Response(b.stream, { status: 206 })) as any)).fetchRange(plan)).rejects.toThrow(/more than/);
     expect(b.pulled()).toBeLessThanOrEqual(4 << 20);
   });
   test("a range answer of the right length is read", async () => {
-    const out = await direct((async () => new Response(new Uint8Array(65536).fill(3), { status: 206 })) as any).fetchRange(plan);
+    const out = await (await direct((async () => new Response(new Uint8Array(65536).fill(3), { status: 206 })) as any)).fetchRange(plan);
     expect(out.byteLength).toBe(65536);
     expect(out[65535]).toBe(3);
   });
@@ -54,13 +55,13 @@ describe("file reads take what the plan names", () => {
 describe("the Bundle and the manifest are read up to a limit", () => {
   test("a Bundle longer than the limit is refused as it arrives", async () => {
     const b = body(MAX_JWE_CHARS + (16 << 20), 0x41);
-    const r = new LinkResolver(encodeShlink({ url: "https://host.example/f/bundle.jwe", key: KEY, flag: "U" }), { fetch: (async () => new Response(b.stream)) as any });
+    const r = await LinkResolver.fromLink(encodeShlink({ url: "https://host.example/f/bundle.jwe", key: KEY, flag: "U" }), { fetch: (async () => new Response(b.stream)) as any });
     await expect(r.open()).rejects.toThrow(/too large/);
     expect(b.pulled()).toBeLessThanOrEqual(MAX_JWE_CHARS + (2 << 20));
   });
   test("a manifest longer than the limit is refused as it arrives", async () => {
     const b = body(MAX_JWE_CHARS + (16 << 20), 0x20);
-    const r = new LinkResolver(encodeShlink({ url: "https://host.example/m", key: KEY }), { fetch: (async () => new Response(b.stream)) as any });
+    const r = await LinkResolver.fromLink(encodeShlink({ url: "https://host.example/m", key: KEY }), { fetch: (async () => new Response(b.stream)) as any });
     await expect(r.open()).rejects.toThrow(/too large/);
     expect(b.pulled()).toBeLessThanOrEqual(MAX_JWE_CHARS + (2 << 20));
   });
@@ -74,7 +75,7 @@ describe("the Bundle and the manifest are read up to a limit", () => {
       }
       return new Response(jwe);
     };
-    const r = new LinkResolver(encodeShlink({ url: "https://host.example/m", key: KEY }), { fetch: f as any });
+    const r = await LinkResolver.fromLink(encodeShlink({ url: "https://host.example/m", key: KEY }), { fetch: f as any });
     const opened = await r.open();
     expect(opened.baseUrl).toBe("https://host.example/cap/x/bundle.jwe");
     expect(seen.some((u) => u.startsWith("https://elsewhere.example"))).toBe(false);
@@ -82,20 +83,20 @@ describe("the Bundle and the manifest are read up to a limit", () => {
 });
 
 describe("links SMART Health Links does not allow", () => {
-  test("a link to the file itself with a passcode is refused", () => {
-    expect(() => parseShlink(encodeShlink({ url: "https://h/x", key: KEY, flag: "PU" }))).toThrow(/cannot need a passcode/);
+  test("a link to the file itself with a passcode is refused", async () => {
+    await expect(LinkResolver.fromLink(encodeShlink({ url: "https://h/x", key: KEY, flag: "PU" }))).rejects.toThrow(/cannot need a passcode/);
   });
-  test("a version other than 1 is refused; 1 and none are read (as decode_shlink_uri)", () => {
-    expect(() => parseShlink(encodeShlink({ url: "https://h/x", key: KEY, v: 2 }))).toThrow(/version/);
-    expect(() => parseShlink(encodeShlink({ url: "https://h/x", key: KEY, v: 0 }))).toThrow(/version/);
-    expect(parseShlink(encodeShlink({ url: "https://h/x", key: KEY, v: 1 })).v).toBe(1);
-    expect(parseShlink(encodeShlink({ url: "https://h/x", key: KEY })).v).toBeUndefined();
+  test("a version other than 1 is refused; 1 and none are read (as decode_shlink_uri)", async () => {
+    await expect(LinkResolver.fromLink(encodeShlink({ url: "https://h/x", key: KEY, v: 2 }))).rejects.toThrow(/version/);
+    await expect(LinkResolver.fromLink(encodeShlink({ url: "https://h/x", key: KEY, v: 0 }))).rejects.toThrow(/version/);
+    expect((await parseLink(encodeShlink({ url: "https://h/x", key: KEY, v: 1 }))).v).toBe(1);
+    expect((await parseLink(encodeShlink({ url: "https://h/x", key: KEY }))).v).toBeUndefined();
   });
   test("neither is requested from the host", async () => {
     let asked = 0;
     const f = (async () => (asked++, new Response("{}"))) as any;
     for (const p of [{ flag: "PU" }, { v: 2 }]) {
-      expect(() => new LinkResolver(encodeShlink({ url: "https://h/x", key: KEY, ...p }), { fetch: f })).toThrow();
+      await expect(LinkResolver.fromLink(encodeShlink({ url: "https://h/x", key: KEY, ...p }), { fetch: f })).rejects.toThrow();
     }
     expect(asked).toBe(0);
   });

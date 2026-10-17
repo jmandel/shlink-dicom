@@ -1,5 +1,6 @@
-// SMART Health Link URIs: parse `shlink:/…` (bare, or after a viewer prefix's `#`) and encode them.
-import { b64urlDecode, b64urlEncode, fromUtf8, utf8 } from "./b64";
+// SMART Health Link URIs: find `shlink:/…` in text and encode them. Links are read and checked by
+// the reader module (reader.ts parseLink: crates/shl-dicom-reader).
+import { b64urlEncode, utf8 } from "./b64";
 
 /** The decoded SHL payload (SMART Health Links spec). */
 export interface ShlPayload {
@@ -16,10 +17,31 @@ export interface ShlPayload {
 }
 
 export class InvalidLinkError extends Error {
-  constructor(msg: string) {
+  constructor(
+    msg: string,
+    /** The reader's code (crates/shl-dicom-reader/README.md). */
+    readonly code = "",
+  ) {
     super(msg);
     this.name = "InvalidLinkError";
   }
+}
+
+/** What to tell the person for each of the reader's link codes. */
+const LINK_MESSAGES: Record<string, string> = {
+  "not-a-link": "This is not a SMART Health Link.",
+  damaged: "This link is damaged: its contents could not be read.",
+  "missing-url-or-key": "This link is missing its address or key.",
+  "bad-key": "This link is missing its address or key.",
+  "bad-flag": "This link is damaged: its contents could not be read.",
+  "bad-exp": "This link is damaged: its contents could not be read.",
+  "u-with-p": "This link is not valid: a link to the file itself cannot need a passcode.",
+  version: "This link uses a version of SMART Health Links this viewer does not read.",
+};
+
+/** The InvalidLinkError for a code parseLink failed with. */
+export function invalidLink(code: string): InvalidLinkError {
+  return new InvalidLinkError(LINK_MESSAGES[code] ?? "This link is damaged: its contents could not be read.", code);
 }
 
 /** Finds the `shlink:/…` part in a bare link, a viewer URL (`https://viewer/#shlink:/…`) or a hash. */
@@ -30,39 +52,7 @@ export function extractShlink(input: string): string | null {
   return s.slice(i).split(/\s/)[0];
 }
 
-export function parseShlink(input: string): ShlPayload {
-  const link = extractShlink(input);
-  if (!link) throw new InvalidLinkError("This is not a SMART Health Link.");
-  let payload: unknown;
-  try {
-    payload = JSON.parse(fromUtf8(b64urlDecode(link.slice("shlink:/".length))));
-  } catch {
-    throw new InvalidLinkError("This link is damaged: its contents could not be read.");
-  }
-  const p = payload as ShlPayload;
-  if (!p || typeof p.url !== "string" || typeof p.key !== "string" || !isKey32(p.key)) {
-    throw new InvalidLinkError("This link is missing its address or key.");
-  }
-  // SMART Health Links: version 1 (or none, which is 1) is the one this reader knows, as the Rust
-  // reader (decode_shlink_uri) has it, and a link to the file itself (U) has no passcode (P).
-  // Refused before any request is made.
-  if (p.v !== undefined && p.v !== 1) throw new InvalidLinkError("This link uses a version of SMART Health Links this viewer does not read.");
-  if ((p.flag ?? "").includes("U") && (p.flag ?? "").includes("P")) throw new InvalidLinkError("This link is not valid: a link to the file itself cannot need a passcode.");
-  return p;
-}
-
-/** A base64url key of 32 bytes (43 characters, or 44 with padding). */
-function isKey32(k: string): boolean {
-  try {
-    return b64urlDecode(k).length === 32;
-  } catch {
-    return false;
-  }
-}
-
 export function encodeShlink(payload: ShlPayload, viewerPrefix?: string): string {
   const body = "shlink:/" + b64urlEncode(utf8(JSON.stringify(payload)));
   return viewerPrefix ? `${viewerPrefix.replace(/#+$/, "")}#${body}` : body;
 }
-
-export const hasFlag = (p: ShlPayload, f: "L" | "P" | "U") => (p.flag ?? "").includes(f);

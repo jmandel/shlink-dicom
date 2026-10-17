@@ -1,8 +1,11 @@
 // Link resolution (SMART Health Links + spec/README.md §10): U mode and manifest mode, passcodes,
 // fresh /cap/ locations when a capability prefix expires, and Range reads of the encrypted files.
-import { decryptJwe, JweError, MAX_JWE_CHARS } from "./jwe";
-import { hasFlag, parseShlink, type ShlPayload } from "./shlink";
+// Reading the link, the manifest's location and the Bundle is the reader module's (reader.ts).
+import { InvalidBundleError, type StudyIndex } from "./bundle";
+import { MAX_JWE_CHARS } from "./jwe";
+import { invalidLink } from "./shlink";
 import type { RangePlan } from "./range";
+import { manifestLocation, openBundle, parseLink, ReaderError, type ParsedLink } from "./reader";
 
 export type LinkFailure =
   /** The link's own `exp` has passed. */
@@ -73,6 +76,8 @@ export const LOCATION_MAX_AGE_MS = 55 * 60 * 1000;
 export interface OpenedLink {
   /** Decrypted Bundle bytes (UTF-8 JSON). */
   bundleBytes: Uint8Array;
+  /** The Bundle's study index. */
+  index: StudyIndex;
   /** Where `{fileId}.bin` resolves: the U-mode url, or the manifest's `location`. */
   baseUrl: string;
   /** The manifest response, in manifest mode. */
@@ -99,8 +104,17 @@ function takeEarlyBundle(url: string): EarlyBundle | null {
   return e;
 }
 
+/** What to tell the person when the reader can't open a link's Bundle. */
+function bundleFailure(e: unknown): Error {
+  if (!(e instanceof ReaderError)) return e as Error;
+  if (e.code === "invalid-bundle") return new InvalidBundleError(e.message);
+  if (e.code === "decrypt") return new LinkError("invalid", "This link's key does not open its file.");
+  if (e.code === "too-large") return new LinkError("invalid", "This link's file is too large to be a link's Bundle.");
+  return new LinkError("invalid", `This link's file can't be read (${e.message}).`);
+}
+
 export class LinkResolver {
-  readonly payload: ShlPayload;
+  readonly payload: ParsedLink;
   readonly recipient: string;
   private passcode?: string;
   private baseUrl: string | null = null;
@@ -113,8 +127,18 @@ export class LinkResolver {
   /** When the manifest that gave the current location was asked for. */
   private locatedAt = 0;
 
-  constructor(link: string | ShlPayload, opts: ResolverOptions = {}) {
-    this.payload = typeof link === "string" ? parseShlink(link) : link;
+  /** A resolver for the link in `text` (the reader checks it). Throws InvalidLinkError. */
+  static async fromLink(text: string, opts: ResolverOptions = {}): Promise<LinkResolver> {
+    try {
+      return new LinkResolver(await parseLink(text), opts);
+    } catch (e) {
+      throw e instanceof ReaderError ? invalidLink(e.code) : e;
+    }
+  }
+
+  /** A resolver for a link already read (LinkResolver.fromLink, or reader.ts parseLink). */
+  constructor(link: ParsedLink, opts: ResolverOptions = {}) {
+    this.payload = link;
     this.recipient = opts.recipient ?? "SHL imaging viewer";
     this.onRequest = opts.onRequest;
     this.f = opts.fetch ?? fetch.bind(globalThis);
@@ -122,13 +146,13 @@ export class LinkResolver {
   }
 
   get isDirect() {
-    return hasFlag(this.payload, "U");
+    return this.payload.direct;
   }
   get needsPasscode() {
-    return hasFlag(this.payload, "P");
+    return this.payload.passcode;
   }
   get isLongLived() {
-    return hasFlag(this.payload, "L");
+    return this.payload.longLived;
   }
   get label() {
     return this.payload.label ?? null;
@@ -142,7 +166,7 @@ export class LinkResolver {
     return this.baseUrl;
   }
 
-  /** Resolves the link and decrypts its Bundle. Throws PasscodeError or LinkError. */
+  /** Resolves the link, decrypts and indexes its Bundle. Throws PasscodeError, LinkError or InvalidBundleError. */
   async open(passcode?: string): Promise<OpenedLink> {
     if (passcode !== undefined) this.passcode = passcode;
     const exp = this.expires;
@@ -164,13 +188,13 @@ export class LinkResolver {
     const res = (early && (await this.earlyFetch(bundleUrl, early))) || (await this.timedFetch(bundleUrl, { purpose: "bundle" }));
     if (!res.ok) throw this.httpError(res.status);
     const jwe = new TextDecoder().decode(await readCapped(res, MAX_JWE_CHARS, "Bundle"));
-    let bundleBytes: Uint8Array;
+    let opened: { index: StudyIndex; bundle: Uint8Array };
     try {
-      bundleBytes = await decryptJwe(jwe, this.payload.key);
+      opened = await openBundle(jwe, this.payload.key);
     } catch (e) {
-      throw new LinkError("invalid", e instanceof JweError ? "This link's key does not open its file." : String(e));
+      throw bundleFailure(e);
     }
-    return { bundleBytes, baseUrl: this.baseUrl!, manifest };
+    return { bundleBytes: opened.bundle, index: opened.index, baseUrl: this.baseUrl!, manifest };
   }
 
   /** `{fileId}.bin` resolved against the base URL, with `?recipient=`. */
@@ -254,25 +278,19 @@ export class LinkResolver {
       throw new LinkError("locked", "Too many wrong passcodes. This link no longer opens.");
     }
     if (!res.ok) throw this.httpError(res.status);
+    const text = new TextDecoder().decode(await readCapped(res, MAX_JWE_CHARS, "manifest"));
+    let loc: string;
+    try {
+      loc = await manifestLocation(text);
+    } catch (e) {
+      if (!(e instanceof ReaderError)) throw e;
+      if (e.code === "bad-location") throw new LinkError("invalid", "The host's answer gave a file address the encrypted files can't be found next to.");
+      throw new LinkError("invalid", "The host's answer did not say where the file is.");
+    }
     let manifest: any = null;
     try {
-      manifest = JSON.parse(new TextDecoder().decode(await readCapped(res, MAX_JWE_CHARS, "manifest")));
-    } catch (e) {
-      if (e instanceof LinkError) throw e;
-    }
-    // The Bundle's entry: FHIR JSON with a location (another entry first in the list is not it).
-    const isFhir = (t: unknown) => typeof t === "string" && t.split(";")[0].trim().toLowerCase() === "application/fhir+json";
-    const loc = manifest?.files?.find((f: any) => isFhir(f?.contentType) && typeof f?.location === "string")?.location;
-    if (!loc) throw new LinkError("invalid", "The host's answer did not say where the file is.");
-    // Files resolve next to the location ({fileId}.bin under its prefix, spec/README.md): its last segment must be a file
-    // name (with a ".") or empty (a "/"), or `{fileId}.bin` would land somewhere else.
-    let last: string;
-    try {
-      last = new URL(loc).pathname.split("/").pop() ?? "";
-    } catch {
-      throw new LinkError("invalid", "The host's answer gave an address that can't be read.");
-    }
-    if (last !== "" && !last.includes(".")) throw new LinkError("invalid", "The host's answer gave a file address the encrypted files can't be found next to.");
+      manifest = JSON.parse(text);
+    } catch {}
     this.baseUrl = loc;
     this.locatedAt = askedAt;
     return manifest;

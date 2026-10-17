@@ -9,7 +9,7 @@ import { planBytes } from "../web/core/range";
 
 async function setup() {
   const key = randomKeyB64();
-  const jwe = await encryptJwe(new TextEncoder().encode("{}"), key);
+  const jwe = await encryptJwe(new TextEncoder().encode(JSON.stringify({ resourceType: "Bundle", type: "collection", entry: [] })), key);
   let clock = 1_000_000, manifests = 0;
   const reads: string[] = [];
   const fetch = (async (url: string, init?: RequestInit) => {
@@ -22,7 +22,7 @@ async function setup() {
     return new Response(new Uint8Array(32), { status: 206 });
   }) as any;
   const link = encodeShlink({ url: "https://host.example/shl/x", key, v: 1 });
-  const r = new LinkResolver(link, { fetch, now: () => clock });
+  const r = await LinkResolver.fromLink(link, { fetch, now: () => clock });
   await r.open();
   const series: any = { file: { fileId: "F", plaintextLength: 16, ciphertextLength: 32 } };
   const plan = planBytes(series, 0, 16);

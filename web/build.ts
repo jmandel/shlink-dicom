@@ -5,7 +5,8 @@
 //   dist/web/how/index.html        How it works      (/how), plus how/data.json and the pages it links (web/how/bake.ts)
 //   dist/web/share/                Share             (/share, /share/manage, /share/smart-callback)
 //   dist/web/assets/               one bundle per entry point + shared chunks, decoder worker,
-//                                  shl_dicom_decode.wasm, shl_dicom_decode_jxl.wasm (loaded only for JPEG XL), shl_dicom_wasm_bg.wasm (Share and Manage: the packer's Rust code), CSS
+//                                  shl_dicom_decode.wasm, shl_dicom_decode_jxl.wasm (loaded only for JPEG XL), shl_dicom_wasm_bg.wasm (Share and Manage: the packer's Rust code),
+//                                  reader-worker.js and shl_dicom_reader_bg.wasm (every page that opens a link), CSS
 //
 // Pages reference assets relatively, so the static parts can be served from any path.
 // Run: bun web/build.ts   (package.json: build:web)
@@ -41,6 +42,14 @@ const SHL_WASM_GZ_BUDGET = 180_000;
   if (gz > SHL_WASM_GZ_BUDGET) throw new Error(`${offsetWasm} is ${gz} bytes gzipped, over its budget of ${SHL_WASM_GZ_BUDGET} (see web/build.ts)`);
 }
 
+// The link reader (crates/shl-dicom-reader): links, manifests, Bundle JWEs and study indexes, the
+// same Rust code the CLI and the server run, in its own small module that every receiving page
+// loads (in web/core/reader-worker.ts).
+const readerWasm = "crates/shl-dicom-reader/pkg/shl_dicom_reader_bg.wasm";
+if (!existsSync(readerWasm)) {
+  throw new Error(`${readerWasm} missing: cargo build --profile wasm-reader --target wasm32-unknown-unknown -p shl-dicom-reader, then wasm-bindgen --target web (crates/shl-dicom-reader/README.md)`);
+}
+
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 mkdirSync(assets, { recursive: true });
@@ -49,7 +58,7 @@ const minify = process.env.MINIFY !== "0";
 
 // Decoder worker: its own file (Workers need a URL).
 const w = await Bun.build({
-  entrypoints: ["viewer-kit/src/decoder-worker.ts", "web/core/video-mpeg2-worker.ts", "web/share/lib/compress-worker.ts"],
+  entrypoints: ["viewer-kit/src/decoder-worker.ts", "web/core/video-mpeg2-worker.ts", "web/share/lib/compress-worker.ts", "web/core/reader-worker.ts"],
   outdir: assets,
   target: "browser",
   format: "esm",
@@ -67,6 +76,7 @@ cpSync("viewer-kit/dist/shl_dicom_decode_jxl.wasm", `${assets}/shl_dicom_decode_
 mkdirSync(`${assets}/pdfjs`, { recursive: true });
 for (const f of ["pdf.min.mjs", "pdf.worker.min.mjs"]) cpSync(`node_modules/pdfjs-dist/build/${f}`, `${assets}/pdfjs/${f}`);
 cpSync(offsetWasm, `${assets}/shl_dicom_wasm_bg.wasm`);
+cpSync(readerWasm, `${assets}/shl_dicom_reader_bg.wasm`);
 // The Share page's lossless encoder (codecs/shl-dicom-transcode-wasm), loaded by its compress worker.
 const transcodePkg = "codecs/shl-dicom-transcode-wasm/pkg";
 if (!existsSync(`${transcodePkg}/shl_dicom_transcode_wasm_bg.wasm`)) {

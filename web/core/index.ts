@@ -3,6 +3,7 @@ export * from "./b64";
 export * from "./shlink";
 export * from "./jwe";
 export * from "./resolver";
+export * from "./reader";
 export * from "./bundle";
 export * from "./range";
 export * from "./decrypt";

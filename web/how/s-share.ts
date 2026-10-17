@@ -2,7 +2,7 @@
 // visitor's own copy of the sample share), opens it, revokes it, and shows the next request
 // failing. Uses the server's API as a sharer would (see web/checks/fixtures.ts).
 import qrcode from "qrcode-generator";
-import { decryptParams, encodeShlink, encryptJwe, LinkError, LinkResolver, parseStudyIndex, planInstances, randomKeyB64, utf8, viewerUrl } from "../core/index";
+import { decryptParams, encodeShlink, encryptJwe, LinkError, LinkResolver, parseIndex, planInstances, randomKeyB64, utf8, viewerUrl } from "../core/index";
 import { drawThumbnail } from "../core/render";
 import { h, linkButtons, n, para, reqRow, S } from "./state";
 
@@ -78,7 +78,7 @@ export function mountShare(pic: HTMLElement, exact: HTMLElement) {
       const q = h("div", { class: "qr small-qr", role: "img", "aria-label": "QR code of your link" });
       q.innerHTML = qr.createSvgTag({ cellSize: 3, margin: 2, scalable: true });
       result.replaceChildren(h("p", { class: "status-line good", text: "A new link to the MRI only:" }), h("div", { class: "qr-row" }, q, linkButtons(url, "newlink")));
-      const studies = parseStudyIndex(text).studies.length;
+      const studies = (await parseIndex(bundle)).studies.length;
       facts.textContent = `Your link's Bundle: ${n(jwe.length)} bytes as a JWE, listing ${studies} of the ${idx.studies.length} ImagingStudies. The server may serve ${files.length} file under it: ${files.join(", ")}.`;
       open.disabled = false;
       revoke.disabled = false;
@@ -96,9 +96,9 @@ export function mountShare(pic: HTMLElement, exact: HTMLElement) {
     const reqs = h("div", { class: "reqs" });
     result.replaceChildren(status, reqs);
     try {
-      const res = new LinkResolver(sb.shlink, { recipient: RECIPIENT, onRequest: (r) => reqs.prepend(reqRow({ ...r, recipient: RECIPIENT })) });
+      const res = await LinkResolver.fromLink(sb.shlink, { recipient: RECIPIENT, onRequest: (r) => reqs.prepend(reqRow({ ...r, recipient: RECIPIENT })) });
       const opened = await res.open();
-      const index = parseStudyIndex(opened.bundleBytes);
+      const index = opened.index;
       const series = index.studies[0].series.find((s) => s.uid === S.series!.uid)!;
       const p = planInstances(series, S.slice);
       const ct = await res.fetchRange(p);

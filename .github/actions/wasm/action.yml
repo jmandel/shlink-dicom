@@ -1,7 +1,7 @@
 name: Wasm modules
 description: >
-  shl-dicom-wasm (the packer's frame offset tables) and shl-dicom-transcode-wasm (the lossless
-  transcoder), into their pkg/ directories. Needs the toolchain action first.
+  shl-dicom-wasm (the packer's Rust code for the Share page), shl-dicom-reader (the viewer's link
+  reader) and shl-dicom-transcode-wasm (the lossless transcoder), into their pkg/ directories. Needs the toolchain action first.
 runs:
   using: composite
   steps:
@@ -10,5 +10,7 @@ runs:
       run: |
         cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-wasm
         wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
+        cargo build -q --profile wasm-reader --target wasm32-unknown-unknown -p shl-dicom-reader
+        wasm-bindgen --target web --remove-name-section --remove-producers-section --out-dir crates/shl-dicom-reader/pkg target/wasm32-unknown-unknown/wasm-reader/shl_dicom_reader.wasm
         (cd codecs && cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm)
         wasm-bindgen --target web --out-dir codecs/shl-dicom-transcode-wasm/pkg codecs/target/wasm32-unknown-unknown/release/shl_dicom_transcode_wasm.wasm

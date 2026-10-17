@@ -29,20 +29,24 @@ vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); /
 
 ## Modules
 
-### Links: `shlink.ts`, `resolver.ts`, `jwe.ts`, `b64.ts`
+### Links: `reader.ts`, `shlink.ts`, `resolver.ts`, `jwe.ts`, `b64.ts`
+
+Reading a link, a manifest's location and a Bundle is the reader module's: the same Rust code the
+CLI and the server use (crates/shl-dicom-reader, its rules and error codes in its README), run in a
+worker (`reader-worker.ts`) that a page starts as it loads (`startReader()`). In Bun it runs in place.
 
 | Export | What it does |
 |---|---|
-| `parseShlink(input)` | Decodes the payload from a bare `shlink:/…`, a viewer URL (`https://x/view#shlink:/…`) or a hash. Throws `InvalidLinkError`. |
+| `parseLink(text)` | The checked link in a bare `shlink:/…`, a viewer URL (`https://x/view#shlink:/…`) or a hash: the payload, `direct`, `passcode`, `longLived`, `expired`. Throws `ReaderError` (`code`). |
+| `openBundle(jwe, key)` / `decryptBundle(jwe, key)` / `parseIndex(bundle)` | A Bundle decrypted and indexed in one worker call; decrypted only; indexed only. |
 | `extractShlink(input)` | Returns the `shlink:/…` part, or null. |
-| `encodeShlink(payload, viewerPrefix?)` | The reverse. With a prefix it gives `${prefix}#shlink:/…`. |
-| `hasFlag(payload, "L" \| "P" \| "U")` | Tests a flag. |
-| `new LinkResolver(link, { recipient?, onRequest?, fetch? })` | One link. Properties: `payload`, `label`, `expires`, `needsPasscode`, `isDirect`, `isLongLived`, `base`. |
-| `resolver.open(passcode?)` | U mode: GETs the file. Manifest mode: POSTs `{recipient, passcode}`, then GETs `files[0].location`. Decrypts the JWE and returns `{ bundleBytes, baseUrl, manifest }`. Checks `exp` before any request. |
+| `encodeShlink(payload, viewerPrefix?)` | Writes a link. With a prefix it gives `${prefix}#shlink:/…`. |
+| `LinkResolver.fromLink(text, { recipient?, onRequest?, fetch? })` | One link (read by `parseLink`; throws `InvalidLinkError`). Properties: `payload`, `label`, `expires`, `needsPasscode`, `isDirect`, `isLongLived`, `base`. |
+| `resolver.open(passcode?)` | U mode: GETs the file. Manifest mode: POSTs `{recipient, passcode}`, then GETs the Bundle's location (`manifestLocation`). Decrypts and indexes the Bundle in the worker and returns `{ bundleBytes, index, baseUrl, manifest }`. Checks `exp` before any request. |
 | `resolver.fetchRange(plan, signal?, onProgress?)` | One Range read of `{fileId}.bin` against the base URL, with `?recipient=`; `onProgress` gets the bytes received so far. In manifest mode a 404 re-resolves the manifest once, with the remembered passcode, for a fresh `/cap/` prefix, then retries. Checks the byte count. A 200 answer is sliced locally. |
 | `resolver.fileUrl(fileId)` | The URL it reads from. |
 | `onRequest(e: RequestEvent)` | Called for every exchange: `{ method, url, range, status, bytes, ms, purpose: "manifest" \| "bundle" \| "file" }`. Use it for network panels. |
-| `decryptJwe(compact, key)` / `encryptJwe(bytes, key)` | Compact JWE: `dir`, `A256GCM`, `zip: DEF`. Uses WebCrypto and `(De)CompressionStream("deflate-raw")`. |
+| `encryptJwe(bytes, key)` | Writes a compact JWE: `dir`, `A256GCM`, `zip: DEF`, `cty: application/fhir+json`. Uses WebCrypto and `CompressionStream("deflate-raw")`. |
 | `randomKeyB64()` | 32 random bytes, base64url. |
 
 **Errors.** Everything the UI must explain is typed:
@@ -57,11 +61,12 @@ vp.setView({ windowCenter: 40, windowWidth: 400, zoom: 2, panX: 0, panY: 0 }); /
 | | `"network"` | `fetch` threw: offline (`navigator.onLine === false`), DNS, CORS or connection refused |
 | | `"invalid"` | Damaged link, or the key does not decrypt the file |
 | | `"server"` | Any other HTTP status, or a short Range answer |
-| `InvalidLinkError` | | Not a SMART Health Link |
+| `InvalidLinkError` | `code` | Not a SMART Health Link, or one the reader refuses (the reader's code: `damaged`, `u-with-p`, `version`, …) |
+| `InvalidBundleError` | | The Bundle breaks a rule of spec/README.md §8 (`invalid-bundle`) |
 
 ### The Bundle: `bundle.ts`
 
-`parseStudyIndex(bytes | string | object): StudyIndex` reads spec/README.md §8:
+The reader module's index of a Bundle (spec/README.md §8), from `openBundle` or `parseIndex`:
 
 ```ts
 StudyIndex  { lastUpdated, patient: { name, birthDate, id }, reports: ReportEntry[], studies: StudyEntry[], bundle }
@@ -74,7 +79,7 @@ ReportEntry { id, status, title, conclusion, issued, effective, studyIds[], text
 
 Each series is in a file: its own `linked-file`, else its study's. Offsets run per file, through the series and instances in Bundle order (spec/README.md §8.1), so `instance.offset` and `series.offset` are positions in `series.file`. There is one `FileEntry` object per file id, shared by its series; `study.files` lists them in first-use order. `series.bytes` is the series' own size; `series.file.plaintextLength` is the whole file's. Several series share a file, so key caches and maps by `series.id` (`${file.fileId}@${offset}`), not by the file id.
 
-The field names match the Rust `StudyIndex` in `shl-dicom-core`, with additions.
+It is the Rust `StudyIndex` of `shl-dicom-core`; `reader.ts` links each series to its study's `FileEntry` object, decodes attachments and adds the parsed Bundle.
 
 Helpers:
 - `reportsForStudy(index, study)`;

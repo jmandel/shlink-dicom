@@ -2,7 +2,7 @@
 // One step per screen. See docs/EXPERIENCES.md §1.
 import { utf8 } from "../core/b64";
 import { encryptJwe, randomKeyB64 } from "../core/jwe";
-import { extractShlink, parseShlink, hasFlag } from "../core/shlink";
+import { extractShlink } from "../core/shlink";
 import { formatBytes, formatDate, formatPersonName, plural } from "../core/format";
 import { loadConfig, siteUrl, type SiteConfig } from "../core/config";
 import { fetchSampleLinks } from "../core/samples";
@@ -25,7 +25,7 @@ import { StreamPlan } from "./lib/stream";
 import { ciphertextLength, recordCount } from "../core/range";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
 import { canPickHandles, clearHandles, filesFrom, loadHandles, pathOf, permitted, pick, quickId, saveHandles, type PickedHandles } from "./lib/handles";
-import { parseStudyIndex } from "../core/bundle";
+import { parseIndex } from "../core/reader";
 import {
   ApiError, ShareApi, manageUrl, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor, type LinkResource,
 } from "./lib/api";
@@ -262,15 +262,13 @@ $("link-form").addEventListener("submit", async (e) => {
     err.classList.remove("hidden");
   };
   if (!link) return fail("That doesn't contain a SMART Health Link (shlink:/…).");
-  let payload;
   try {
-    payload = parseShlink(link);
-  } catch {
-    return fail("That link is damaged.");
+    linkResolver ??= await LinkResolver.fromLink(link, { recipient: "Share page (re-share)" });
+  } catch (x) {
+    return fail((x as Error).message || "That link is damaged.");
   }
-  linkResolver ??= new LinkResolver(link, { recipient: "Share page (re-share)" });
   const passcode = $<HTMLInputElement>("in-link-pass").value || undefined;
-  if (hasFlag(payload, "P") && !passcode) {
+  if (linkResolver.needsPasscode && !passcode) {
     $("link-pass-row").classList.remove("hidden");
     $("in-link-pass").focus();
     return fail("This link needs a passcode. The person who sent it should have given it to you separately.");
@@ -1057,10 +1055,10 @@ async function sameFiles(job: UploadJob, picked: File[]): Promise<File[]> {
 }
 
 /** Rebuilds the file plan of a saved job from its owner Bundle and the re-opened source. */
-function planFromOwner(owner: any, c: Collection): PackedFile[] {
+async function planFromOwner(owner: any, c: Collection): Promise<PackedFile[]> {
   const byUid = new Map<string, { inst: Instance; study: StudyModel }>();
   for (const st of c.list()) for (const se of st.series) for (const inst of se.instances) byUid.set(inst.h.sopInstanceUid, { inst, study: st });
-  const idx = parseStudyIndex(owner);
+  const idx = await parseIndex(owner);
   const out: PackedFile[] = [];
   for (const st of idx.studies) {
     for (const file of st.files) {
@@ -1132,7 +1130,7 @@ async function resumeJob(job: UploadJob, files?: File[], link?: string) {
     // The same bytes as before: each re-encoded image from its staged copy (or encoded again and checked).
     if (job.compress) {
       const planned = new Set(job.plan?.flatMap((f) => f.uids));
-      const inBundle = new Set(owner ? parseStudyIndex(owner).studies.map((s) => s.studyInstanceUid) : []);
+      const inBundle = new Set(owner ? (await parseIndex(owner)).studies.map((s) => s.studyInstanceUid) : []);
       const studies = c.list().filter((s) => (owner ? inBundle.has(s.uid) : s.series.some((se) => se.instances.some((i) => planned.has(i.h.sopInstanceUid)))));
       const zst = await openStager(job.compress.stage ?? `${st.session}-z`);
       try {
@@ -1153,7 +1151,7 @@ async function resumeJob(job: UploadJob, files?: File[], link?: string) {
     }
     if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
     if (job.plan) applyChoices(c, stored, job.patientSource ?? "dicom");
-    await runUpload({ job, api, owner, packed: job.plan ? planFromJob(job.plan, c) : planFromOwner(owner, c), col: c });
+    await runUpload({ job, api, owner, packed: job.plan ? planFromJob(job.plan, c) : await planFromOwner(owner, c), col: c });
   } catch (x) {
     // Back to the notice, saying what was wrong, so the person can choose again.
     pending = null;

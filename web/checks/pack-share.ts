@@ -1,7 +1,7 @@
 // Test helper: share files on a server the way the Share page does (web/share/lib), from Bun.
 //   const s = await packAndShare(base, files, { addOffsetTables });
 //   const link = await s.mint(s.bundle, { label: "…" });
-import { encodeShlink, encryptJwe, parseStudyIndex, randomKeyB64 } from "../core/index";
+import { encodeShlink, encryptJwe, parseIndex, randomKeyB64 } from "../core/index";
 import { Collection } from "../share/lib/ingest";
 import { buildBundle, encryptFile, planStudyFiles } from "../share/lib/pack";
 import { addOffsetTables } from "../share/lib/offset-tables";
@@ -30,8 +30,8 @@ const j = async (r: Response) => {
 };
 
 /** The files a Bundle links, as `{fileId}.bin`. */
-function bundleFiles(bundle: any): string[] {
-  return parseStudyIndex(bundle).studies.flatMap((st) => st.files.map((f) => `${f.fileId}.bin`));
+async function bundleFiles(bundle: any): Promise<string[]> {
+  return (await parseIndex(bundle)).studies.flatMap((st) => st.files.map((f) => `${f.fileId}.bin`));
 }
 
 /** Links over an existing share (for example a clone of the sample). */
@@ -43,7 +43,7 @@ export function linksFor(base: string, sid: string, token: string) {
         await fetch(`${base}/api/shares/${sid}/links`, {
           method: "POST",
           headers: { ...auth, "Content-Type": "application/json" },
-          body: JSON.stringify({ label: o.label, passcode: o.passcode, exp: o.exp, allowedFiles: bundleFiles(bundle) }),
+          body: JSON.stringify({ label: o.label, passcode: o.passcode, exp: o.exp, allowedFiles: await bundleFiles(bundle) }),
         }),
       );
       const key = randomKeyB64();

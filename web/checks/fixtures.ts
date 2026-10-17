@@ -11,7 +11,7 @@
 //   passcodeTestLink           passcode 1234, for wrong-passcode tries
 //   perfLink                   synthetic 512² CT × 100 + 2048² DX (web/checks/synthetic.ts)
 import { readFileSync, writeFileSync } from "node:fs";
-import { extractShlink, openShare, parseStudyIndex } from "../core/index";
+import { extractShlink, openShare, parseIndex } from "../core/index";
 import { linksFor, packAndShare } from "./pack-share";
 import { ctSeries, dxImage } from "./synthetic";
 
@@ -131,8 +131,8 @@ const out = {
   reportsMriText: reportsLink?.mriText ?? "",
   perfLink: perf.shlink,
   // Positions in the perf link's overview (studies are ordered by date, then UID: look them up).
-  perfCtStudy: parseStudyIndex(new TextEncoder().encode(JSON.stringify(perfShare.bundle))).studies.findIndex((s) => s.modalities.includes("CT")),
-  perfDxStudy: parseStudyIndex(new TextEncoder().encode(JSON.stringify(perfShare.bundle))).studies.findIndex((s) => s.modalities.includes("DX")),
+  perfCtStudy: (await parseIndex(perfShare.bundle)).studies.findIndex((s) => s.modalities.includes("CT")),
+  perfDxStudy: (await parseIndex(perfShare.bundle)).studies.findIndex((s) => s.modalities.includes("DX")),
   // DELETE these after the run.
   shares: [
     { sid: cloned.share.id, token: cloned.controlToken },
