@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { cpus } from "node:os";
 import { join } from "node:path";
-import { binDir } from "../lib/build.mjs";
+import { binDir, nativeBinary } from "../lib/build.mjs";
 import { verifyOutput } from "../lib/verify.mjs";
 
 // glibc returns large freed blocks to the OS, so every run would page-fault its output buffer
@@ -18,7 +18,8 @@ function command(bin, args) {
   return ["taskset", ["-c", String(cpus().length - 1), bin, ...args]];
 }
 
-export async function runNative(cases, opts, log = console.error) {
+/** `build`: "native" (x86-64-v3 on x86_64) or "native-base" (the default target); see lib/build.mjs. */
+export async function runNative(cases, opts, log = console.error, build = "native") {
   // Decoded outputs go next to the run's binaries (or under BENCH_TMP), not to the system temp
   // directory, which may be a small tmpfs.
   const dir = mkdtempSync(join(process.env.BENCH_TMP || binDir(), "dump-"));
@@ -26,18 +27,18 @@ export async function runNative(cases, opts, log = console.error) {
   try {
     for (const c of cases) {
       const args = ["--warmup", opts.warmup, "--min-runs", opts.min_runs, "--max-runs", opts.max_runs, "--budget-ms", opts.budget_ms, "--dump", dir, c.sample].map(String);
-      const [cmd, argv] = command(join(binDir(), "bench-native"), args);
+      const [cmd, argv] = command(join(binDir(), nativeBinary(build)), args);
       const line = execFileSync(cmd, argv, { maxBuffer: 1 << 26, env: { ...process.env, GLIBC_TUNABLES: NATIVE_MALLOC } }).toString().trim();
       const r = JSON.parse(line);
-      const rec = { case: c.id, runner: "native", build: "native", status: r.status };
-      if (r.status !== 0) { rec.msg = r.msg; records.push(rec); log(`  native ${c.id}: exit ${r.status} ${r.msg}`); continue; }
+      const rec = { case: c.id, runner: build, build, status: r.status };
+      if (r.status !== 0) { rec.msg = r.msg; records.push(rec); log(`  ${build} ${c.id}: exit ${r.status} ${r.msg}`); continue; }
       const out = readFileSync(r.dump);
       rec.verify = verifyOutput(new Uint8Array(out.buffer, out.byteOffset, out.byteLength), readFileSync(c.oracle), c.max_abs);
       if (!r.consistent) Object.assign(rec.verify, { ok: false, reason: "output changed between runs" });
       rmSync(r.dump);
       Object.assign(rec, { cold_ms: r.cold, n: r.runs.length, runs: r.runs, hash: r.hash });
       records.push(rec);
-      log(`  native ${c.id.padEnd(70)} ${median(r.runs).toFixed(2).padStart(9)} ms ${rec.verify.ok ? "" : "VERIFY FAILED " + rec.verify.reason}`);
+      log(`  ${build.padEnd(11)} ${c.id.padEnd(60)} ${median(r.runs).toFixed(2).padStart(9)} ms ${rec.verify.ok ? "" : "VERIFY FAILED " + rec.verify.reason}`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
