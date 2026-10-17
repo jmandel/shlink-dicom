@@ -283,6 +283,35 @@ fn bytes_of<'a>(elems: &[Elem<'a>], tag: u32) -> Option<&'a [u8]> {
     }
 }
 
+/// Whether the input to the VOI LUT can be negative, which decides the VR of a VOI LUT
+/// Sequence's LUT Descriptor (PS3.3 C.11.2.1.1: SS when the output of the Rescale or Modality LUT
+/// may be signed). A Modality LUT gives unsigned values; a rescale is applied to the stored range
+/// (Bits Stored, Pixel Representation); with neither, the stored values themselves. Declines when
+/// a VOI LUT is present and the rescale cannot be read.
+fn voi_input_signed(elems: &[Elem<'_>], pixel_signed: bool, bits_stored: u32) -> Result<bool, Declined> {
+    if find(elems, 0x0028_3010).is_none() {
+        return Ok(pixel_signed);
+    }
+    if find(elems, 0x0028_3000).is_some() {
+        return Ok(false);
+    }
+    let ds = |tag: u32| -> Result<Option<f64>, Declined> {
+        let Some(v) = bytes_of(elems, tag) else { return Ok(None) };
+        let t = text(v);
+        let first = t.split('\\').next().unwrap_or("").trim();
+        if first.is_empty() {
+            return Ok(None);
+        }
+        first.parse::<f64>().map(Some).map_err(|_| no(format!("VOI LUT: rescale value {t:?} unreadable, so its LUT Descriptor's VR is unknown")))
+    };
+    let (Some(intercept), slope) = (ds(0x0028_1052)?, ds(0x0028_1053)?.unwrap_or(1.0)) else {
+        return Ok(pixel_signed);
+    };
+    let bits = bits_stored.clamp(1, 32) as i32;
+    let (lo, hi) = if pixel_signed { (-(2f64.powi(bits - 1)), 2f64.powi(bits - 1) - 1.0) } else { (0.0, 2f64.powi(bits) - 1.0) };
+    Ok((lo * slope).min(hi * slope) + intercept < 0.0)
+}
+
 fn us(elems: &[Elem<'_>], tag: u32) -> Option<u16> {
     bytes_of(elems, tag).and_then(|v| v.get(..2)).map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
@@ -565,7 +594,8 @@ fn wrap(input: &[u8], p: Prepared<'_>, ts: &str, fragments: Vec<Vec<u8>>, report
     let mut out = Vec::with_capacity(meta.end + report.pixel_bytes_out + ds.len().saturating_sub(pixel_len));
     write_meta(&mut out, &meta, ts, name);
     let ds_start = out.len();
-    Writer { signed: first.signed }
+    let voi_signed = voi_input_signed(&elems, first.signed, u32::from(first.bits_stored))?;
+    Writer { signed: first.signed, voi_signed }
         .elems(&mut out, &elems)
         .map_err(|e| no(format!("cannot write the data set as Explicit VR: {e}")))?;
     drop(elems);
@@ -578,8 +608,14 @@ fn wrap(input: &[u8], p: Prepared<'_>, ts: &str, fragments: Vec<Vec<u8>>, report
         .map_err(|e| no(format!("self-check: output data set not readable: {e}")))?
         .0;
     let skip = [PIXEL_DATA, 0x7FE0_0001, 0x7FE0_0002, 0x0028_0006];
-    if ds::flatten(&in_elems, &skip) != ds::flatten(&out_elems, &skip) {
+    // Bytes and VR: a value with the same bytes under another VR (US read as SS) has changed.
+    let (a, b) = (ds::flatten(&in_elems, &skip), ds::flatten(&out_elems, &skip));
+    if a.len() != b.len() || a.iter().zip(&b).any(|(x, y)| x.0 != y.0 || x.2 != y.2) {
         return Err(no("self-check mismatch: a non-pixel value changed"));
+    }
+    if let Some((x, y)) = a.iter().zip(&b).find(|(x, y)| !ds::vr_kept(*x.0.last().unwrap(), x.1, y.1)) {
+        let t = x.0.last().unwrap();
+        return Err(no(format!("self-check mismatch: ({:04X},{:04X}) VR {} became {}", t >> 16, t & 0xFFFF, String::from_utf8_lossy(&x.1), String::from_utf8_lossy(&y.1))));
     }
     if !planar_changed && !planar_added && bytes_of(&in_elems, 0x0028_0006) != bytes_of(&out_elems, 0x0028_0006) {
         return Err(no("self-check mismatch: Planar Configuration changed"));

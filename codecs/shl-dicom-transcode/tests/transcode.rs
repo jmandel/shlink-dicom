@@ -156,3 +156,33 @@ fn jpeg2000_output() {
         }
     }
 }
+
+/// The VR given to a VOI LUT Sequence's LUT Descriptor when an Implicit VR file is written as
+/// Explicit VR: SS when the rescale makes the VOI LUT's input negative (PS3.3 C.11.2.1.1), though
+/// Pixel Representation is 0. The same bytes as US would read as first input value 64512.
+#[test]
+fn voi_lut_descriptor_takes_the_rescaled_range() {
+    let lut_descriptor_vr = |intercept: &str| {
+        let mut d = Ds::new(Enc::ImplicitLe);
+        d.text(0x0008, 0x0060, b"CS", "CT");
+        d.us(0x0028, 0x0002, 1).text(0x0028, 0x0004, b"CS", "MONOCHROME2");
+        d.us(0x0028, 0x0010, 16).us(0x0028, 0x0011, 16);
+        d.us(0x0028, 0x0100, 16).us(0x0028, 0x0101, 12).us(0x0028, 0x0102, 11).us(0x0028, 0x0103, 0);
+        d.text(0x0028, 0x1052, b"DS", intercept).text(0x0028, 0x1053, b"DS", "1");
+        let lut: Vec<u8> = (0..4096u16).flat_map(|v| v.to_le_bytes()).collect();
+        d.seq(0x0028, 0x3010, &[&|i: &mut Ds| {
+            let desc: Vec<u8> = [4096u16, (-1024i16) as u16, 12].iter().flat_map(|v| v.to_le_bytes()).collect();
+            i.elem(0x0028, 0x3002, b"SS", &desc).elem(0x0028, 0x3006, b"OW", &lut);
+        }]);
+        let px: Vec<u8> = (0..256u16).flat_map(|i| (i * 16).to_le_bytes()).collect();
+        d.elem(0x7FE0, 0x0010, b"OW", &px);
+        let input = part10_meta("1.2.840.10008.1.2", &[(0x0002, "1.2.840.10008.5.1.4.1.1.2"), (0x0003, "2.25.31")], &d.out, true);
+        let out = transcode_part10(&input, JPEG_LOSSLESS_SV1).map_err(|d| d.0)?;
+        let at = out.windows(4).position(|w| w == [0x28, 0x00, 0x02, 0x30]).expect("LUT Descriptor");
+        Ok::<_, String>(String::from_utf8_lossy(&out[at + 4..at + 6]).to_string())
+    };
+    assert_eq!(lut_descriptor_vr("-1024").unwrap(), "SS");
+    assert_eq!(lut_descriptor_vr("0").unwrap(), "US");
+    // A rescale that does not read leaves the VR unknown: declined, not guessed.
+    assert!(lut_descriptor_vr("minus").unwrap_err().contains("VOI LUT"));
+}

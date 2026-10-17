@@ -232,9 +232,16 @@ fn resolve_vr(tag: u32, len: usize, signed: bool) -> [u8; 2] {
 }
 
 pub(crate) struct Writer {
-    /// Pixel Representation of the top-level data set, for US/SS.
+    /// Pixel Representation of the data set being written (an item that gives its own uses
+    /// that), for US/SS.
     pub signed: bool,
+    /// Whether the input to the VOI LUT, the output of the Rescale or Modality LUT, can be
+    /// negative: the VR of the LUT Descriptor in VOI LUT Sequence items (PS3.3 C.11.2.1.1).
+    pub voi_signed: bool,
 }
+
+/// VOI LUT Sequence (0028,3010).
+const VOI_LUT_SEQUENCE: u32 = 0x0028_3010;
 
 impl Writer {
     /// Serialize `elems` as Explicit VR Little Endian, recomputing group lengths.
@@ -300,7 +307,15 @@ impl Writer {
                 let mut body = Vec::new();
                 for item in items {
                     let mut content = Vec::new();
-                    self.elems(&mut content, &item.elems)?;
+                    // Inside a VOI LUT item the US/SS choice follows the VOI LUT's input range;
+                    // an item with its own Pixel Representation (an icon image) uses that.
+                    let own = item.elems.iter().find(|x| x.tag == 0x0028_0103).and_then(|x| match &x.value {
+                        Value::Bytes(v) => v.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]) == 1),
+                        Value::Owned(v) => v.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]) == 1),
+                        _ => None,
+                    });
+                    let signed = if e.tag == VOI_LUT_SEQUENCE { self.voi_signed } else { own.unwrap_or(self.signed) };
+                    Writer { signed, voi_signed: self.voi_signed }.elems(&mut content, &item.elems)?;
                     body.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
                     if item.undefined {
                         body.extend_from_slice(&UNDEFINED.to_le_bytes());
@@ -345,25 +360,27 @@ impl Writer {
 /// Every value in the tree as (path, bytes), in order: the path is the chain of (tag, item
 /// index) down to the element. Sequences contribute their items' elements; group lengths and the
 /// elements in `skip` (top level only) are left out. Used to check that a rewrite changed no value.
-pub(crate) fn flatten<'b>(elems: &'b [Elem<'_>], skip: &[u32]) -> Vec<(Vec<u32>, &'b [u8])> {
-    fn walk<'b>(elems: &'b [Elem<'_>], path: &mut Vec<u32>, skip: &[u32], top: bool, out: &mut Vec<(Vec<u32>, &'b [u8])>) {
+/// Every value of a data set, with its path (tags, and item indexes for sequences) and its VR,
+/// in order, for comparing two data sets; group lengths and the top-level `skip` tags left out.
+pub(crate) fn flatten<'b>(elems: &'b [Elem<'_>], skip: &[u32]) -> Vec<(Vec<u32>, [u8; 2], &'b [u8])> {
+    fn walk<'b>(elems: &'b [Elem<'_>], path: &mut Vec<u32>, skip: &[u32], top: bool, out: &mut Vec<(Vec<u32>, [u8; 2], &'b [u8])>) {
         for e in elems {
             if e.tag & 0xFFFF == 0 || (top && skip.contains(&e.tag)) {
                 continue;
             }
             path.push(e.tag);
             match &e.value {
-                Value::Bytes(v) | Value::Raw(v) => out.push((path.clone(), v)),
-                Value::Owned(v) => out.push((path.clone(), v)),
+                Value::Bytes(v) | Value::Raw(v) => out.push((path.clone(), e.vr, v)),
+                Value::Owned(v) => out.push((path.clone(), e.vr, v)),
                 Value::Seq { items, .. } => {
-                    out.push((path.clone(), &[]));
+                    out.push((path.clone(), *b"SQ", &[]));
                     for (k, item) in items.iter().enumerate() {
                         path.push(0xFFFE_0000 | k as u32);
                         walk(&item.elems, path, skip, false, out);
                         path.pop();
                     }
                 }
-                Value::Encapsulated { .. } => out.push((path.clone(), &[])),
+                Value::Encapsulated { .. } => out.push((path.clone(), e.vr, &[])),
             }
             path.pop();
         }
@@ -373,9 +390,30 @@ pub(crate) fn flatten<'b>(elems: &'b [Elem<'_>], skip: &[u32]) -> Vec<(Vec<u32>,
     out
 }
 
+/// Whether the output VR keeps the input's: the same VR when the input stated one (Explicit VR),
+/// else one the dictionary lists for the tag (Implicit VR, read as `AMBIGUOUS` when it lists
+/// several), UN for an unknown tag.
+pub(crate) fn vr_kept(tag: u32, input: [u8; 2], output: [u8; 2]) -> bool {
+    if input != AMBIGUOUS {
+        return input == output;
+    }
+    crate::vrs_of(tag).map_or(output == *b"UN", |options| options.contains(&output))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vr_is_kept_or_one_the_dictionary_lists() {
+        // Explicit input: the same VR only.
+        assert!(vr_kept(0x0028_0107, *b"SS", *b"SS"));
+        assert!(!vr_kept(0x0028_0107, *b"SS", *b"US"));
+        // Implicit input, several VRs listed: any of them; one listed: that one; unknown: UN.
+        assert!(vr_kept(0x0028_0107, AMBIGUOUS, *b"US") && vr_kept(0x0028_0107, AMBIGUOUS, *b"SS"));
+        assert!(!vr_kept(0x0028_0107, AMBIGUOUS, *b"OW"));
+        assert!(vr_kept(0x0009_1001, AMBIGUOUS, *b"UN"));
+    }
 
     #[test]
     fn explicit_round_trip_is_identical() {
@@ -387,7 +425,7 @@ mod tests {
         let r = Reader { buf: &ds, explicit: true };
         let (elems, _) = r.elems(0, ds.len(), false, 0).unwrap();
         let mut out = Vec::new();
-        Writer { signed: false }.elems(&mut out, &elems).unwrap();
+        Writer { signed: false, voi_signed: false }.elems(&mut out, &elems).unwrap();
         assert_eq!(out, ds);
     }
 
@@ -401,7 +439,7 @@ mod tests {
         let r = Reader { buf: &ds, explicit: false };
         let (elems, _) = r.elems(0, ds.len(), false, 0).unwrap();
         let mut out = Vec::new();
-        Writer { signed: true }.elems(&mut out, &elems).unwrap();
+        Writer { signed: true, voi_signed: true }.elems(&mut out, &elems).unwrap();
         let mut want = Vec::new();
         want.extend_from_slice(b"\x08\x00\x60\x00CS\x02\x00CT");
         want.extend_from_slice(b"\x09\x00\x10\x00LO\x04\x00ACME");
@@ -409,6 +447,8 @@ mod tests {
         want.extend_from_slice(b"\x28\x00\x07\x01SS\x02\x00\xFF\x0F");
         assert_eq!(out, want);
         let back = Reader { buf: &out, explicit: true }.elems(0, out.len(), false, 0).unwrap().0;
-        assert_eq!(flatten(&elems, &[]), flatten(&back, &[]));
+        let (a, b) = (flatten(&elems, &[]), flatten(&back, &[]));
+        assert_eq!(a.iter().map(|x| (&x.0, x.2)).collect::<Vec<_>>(), b.iter().map(|x| (&x.0, x.2)).collect::<Vec<_>>());
+        assert!(a.iter().zip(&b).all(|(x, y)| vr_kept(*x.0.last().unwrap(), x.1, y.1)));
     }
 }
