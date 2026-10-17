@@ -65,8 +65,11 @@ BUN="$ROOT/bun/bun-$BUN_VERSION"
 RELEASES="${RELEASES:-https://github.com/$REPO/releases/download}"
 
 SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
+# The log is written by this shell (tee, not under sudo), so it belongs to whoever runs this,
+# readable by no one else.
 $SUDO touch /var/log/shlink-bootstrap.log
-$SUDO chmod 666 /var/log/shlink-bootstrap.log
+$SUDO chown "$(id -u):$(id -g)" /var/log/shlink-bootstrap.log
+$SUDO chmod 600 /var/log/shlink-bootstrap.log
 exec > >(tee -a /var/log/shlink-bootstrap.log) 2>&1
 echo "== bootstrap-shlink-dicom $(date -Is)"
 

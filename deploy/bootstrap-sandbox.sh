@@ -44,8 +44,11 @@ BUN="$ROOT/bun/bun-$BUN_VERSION"
 RELEASES="https://github.com/$REPO/releases/download"
 
 SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
+# The log is written by this shell (tee, not under sudo), so it belongs to whoever runs this,
+# readable by no one else.
 $SUDO touch /var/log/shlink-bootstrap-sandbox.log
-$SUDO chmod 666 /var/log/shlink-bootstrap-sandbox.log
+$SUDO chown "$(id -u):$(id -g)" /var/log/shlink-bootstrap-sandbox.log
+$SUDO chmod 600 /var/log/shlink-bootstrap-sandbox.log
 exec > >(tee -a /var/log/shlink-bootstrap-sandbox.log) 2>&1
 echo "== bootstrap-sandbox $(date -Is)"
 
@@ -115,7 +118,9 @@ fi
 # 4. Configuration, the unit, and the switch.
 # The introspection key is generated once and kept across runs.
 if ! $SUDO test -f /etc/imaging-sandbox.env; then
-  echo "INTROSPECTION_KEY=$(openssl rand -hex 24)" | $SUDO tee /etc/imaging-sandbox.env >/dev/null
+  # Made mode 600 before the key is written to it.
+  $SUDO install -m 600 -o root -g root /dev/null /etc/imaging-sandbox.env
+  echo "INTROSPECTION_KEY=$(openssl rand -hex 24)" | $SUDO tee -a /etc/imaging-sandbox.env >/dev/null
 fi
 $SUDO sed -i '/^\(PORT\|BASE_URL\|HOST\|ALLOWED_ORIGINS\|LOG_REQUESTS\|SHARE_REDIRECT_URIS\)=/d' /etc/imaging-sandbox.env
 $SUDO tee -a /etc/imaging-sandbox.env >/dev/null <<EOF
