@@ -122,8 +122,8 @@ await $`${server} compress ${inputs} --out ${join(work, "plain")}`;
 
 // 3. Pack with the recorded keys (with --new-keys: new ones, for the studies a first pack finds).
 if (newKeys) {
-  await $`${server} pack ${join(work, "plain")} --out ${join(work, "probe")}`.quiet();
-  const probe = parseStudyIndex(readFileSync(join(work, "probe/bundle.json")));
+  await $`${server} pack ${join(work, "plain")} --out ${join(work, "probe")} --bundle-json ${join(work, "probe-bundle.json")}`.quiet();
+  const probe = parseStudyIndex(readFileSync(join(work, "probe-bundle.json")));
   cfg.studies = probe.studies.map((s) => ({
     description: s.description ?? "",
     studyInstanceUid: s.studyInstanceUid,
@@ -149,7 +149,7 @@ writeFileSync(
   }),
 );
 const packDir = join(work, "pack");
-const packed = await $`${server} pack ${join(work, "plain")} --out ${packDir} --keys ${join(work, "keys.json")} --base-url ${siteUrl}demo-links/ --label ${cfg.label}`
+const packed = await $`${server} pack ${join(work, "plain")} --out ${packDir} --keys ${join(work, "keys.json")} --base-url ${siteUrl}demo-links/ --bundle-json ${join(work, "bundle.json")} --label ${cfg.label}`
   .nothrow()
   .quiet();
 if (packed.exitCode !== 0) fail(`${packed.stderr.toString().trim()}\nIf the input changed on purpose, run bun pages/build.ts --new-keys (new keys and file ids; the link changes).`);
@@ -160,7 +160,7 @@ cfg.bundleSha256 = recorded.bundleSha256;
 for (const st of cfg.studies) st.plaintextSha256 = recorded.studies[st.studyInstanceUid].plaintextSha256;
 
 // 4. Check every study file against the recorded ciphertext hash.
-const index: StudyIndex = parseStudyIndex(readFileSync(join(packDir, "bundle.json")));
+const index: StudyIndex = parseStudyIndex(readFileSync(join(work, "bundle.json")));
 for (const st of cfg.studies) {
   const entry = index.studies.find((s) => s.studyInstanceUid === st.studyInstanceUid) ?? fail(`study ${st.studyInstanceUid} not packed`);
   const file = entry.files[0];

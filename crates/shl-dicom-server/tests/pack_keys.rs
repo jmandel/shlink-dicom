@@ -42,7 +42,7 @@ fn pack_keys_records_hashes_and_refuses_changed_input() {
         .to_string(),
     )
     .unwrap();
-    let pack = |out: &str| run_pack_cli(&[dir.join("in")], &dir.join(out), None, None, false, Some(&keys), false);
+    let pack = |out: &str| run_pack_cli(&[dir.join("in")], &dir.join(out), None, None, None, false, Some(&keys), false);
 
     pack("a").unwrap();
     let recorded: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&keys).unwrap()).unwrap();

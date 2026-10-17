@@ -87,16 +87,25 @@ pub fn pack_link_url(base: &str, segment: &str) -> Result<String, String> {
     Ok(format!("{base}{segment}/bundle.jwe"))
 }
 
+#[allow(clippy::too_many_arguments)] // one per `pack` option
 pub fn run_pack_cli(
     inputs: &[PathBuf],
     out_dir: &Path,
     base_url: Option<&str>,
+    bundle_json: Option<&Path>,
     label: Option<&str>,
     add_offset_tables: bool,
     keys_path: Option<&Path>,
     same_patient: bool,
 ) -> Result<(), String> {
     let keys = keys_path.map(read_pack_keys).transpose()?;
+    // The decrypted Bundle holds every file key: never where the hosted output goes.
+    if let Some(p) = bundle_json {
+        let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        if abs(p).starts_with(abs(out_dir)) {
+            return Err(format!("--bundle-json {:?} is inside --out {:?}, which is what gets hosted; put it elsewhere", p, out_dir));
+        }
+    }
     let mut session = IngestSession::new();
     for path in inputs {
         ingest_path(&mut session, path)?;
@@ -194,9 +203,12 @@ pub fn run_pack_cli(
     let jwe_path = host_dir.join("bundle.jwe");
     std::fs::write(&jwe_path, &link_out.bundle_jwe)
         .map_err(|e| format!("write {:?}: {e}", jwe_path))?;
-    let json_path = out_dir.join("bundle.json");
-    std::fs::write(&json_path, &link_out.bundle_json)
-        .map_err(|e| format!("write {:?}: {e}", json_path))?;
+    if let Some(json_path) = bundle_json {
+        if let Some(d) = json_path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(d).map_err(|e| format!("create {:?}: {e}", d))?;
+        }
+        std::fs::write(json_path, &link_out.bundle_json).map_err(|e| format!("write {:?}: {e}", json_path))?;
+    }
 
     let shlink = encode_shlink_uri(
         &ShlPayload {

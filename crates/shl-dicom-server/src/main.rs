@@ -101,14 +101,19 @@ enum Commands {
         /// Input paths (.tgz, .zip, .dcm, or directory)
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
-        /// Output directory
+        /// Folder to write to. The link's files (bundle.jwe and one .bin per study, all encrypted)
+        /// go in OUT/<name>/, where <name> is 256 random bits, since the SHL specification requires
+        /// the link's url to carry at least 256 bits of entropy. OUT holds nothing else
         #[arg(long, default_value = "dist/pack")]
         out: PathBuf,
-        /// URL of the folder under which the output is hosted. The files go in a new folder with a
-        /// random 256-bit name beneath it (OUT/<name>/, served as BASE_URL<name>/), since the SHL
-        /// specification requires the link's url to carry at least 256 bits of entropy
+        /// Where OUT/<name>/ will be served from, without <name>: the link is
+        /// BASE_URL<name>/bundle.jwe
         #[arg(long)]
         base_url: Option<String>,
+        /// Also write the decrypted Bundle here. It holds every study's file key, so it is not
+        /// written unless asked for, and never inside OUT
+        #[arg(long)]
+        bundle_json: Option<PathBuf>,
         /// SHL label
         #[arg(long)]
         label: Option<String>,
@@ -207,12 +212,13 @@ async fn main() {
             inputs,
             out,
             base_url,
+            bundle_json,
             label,
             add_offset_tables,
             keys,
             same_patient,
         } => {
-            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), label.as_deref(), add_offset_tables, keys.as_deref(), same_patient) {
+            if let Err(e) = run_pack_cli(&inputs, &out, base_url.as_deref(), bundle_json.as_deref(), label.as_deref(), add_offset_tables, keys.as_deref(), same_patient) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }

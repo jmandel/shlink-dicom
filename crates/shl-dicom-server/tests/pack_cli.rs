@@ -18,18 +18,19 @@ fn pack_hosts_its_files_under_a_256_bit_folder() {
     std::fs::write(&input, part10("2.25.88.1.1")).unwrap();
 
     let out1 = dir.join("out1");
-    run_pack_cli(std::slice::from_ref(&input), &out1, Some("https://host.example/x/"), None, false, None, false).unwrap();
+    run_pack_cli(std::slice::from_ref(&input), &out1, Some("https://host.example/x/"), None, None, false, None, false).unwrap();
     let f1 = folders(&out1);
     assert_eq!(f1.len(), 1);
     assert_eq!(b64url_decode(&f1[0]).unwrap().len(), 32, "{}", f1[0]);
     let hosted: Vec<String> = std::fs::read_dir(out1.join(&f1[0])).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     assert!(hosted.contains(&"bundle.jwe".to_string()) && hosted.iter().any(|n| n.ends_with(".bin")), "{hosted:?}");
     assert!(!hosted.contains(&"bundle.json".to_string()), "the plaintext Bundle is not in the hosted folder");
-    assert!(out1.join("bundle.json").exists());
+    let all: Vec<String> = std::fs::read_dir(&out1).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(all, f1, "OUT holds only the hosted folder (no decrypted Bundle)");
 
     // Another pack, another folder.
     let out2 = dir.join("out2");
-    run_pack_cli(std::slice::from_ref(&input), &out2, None, None, false, None, false).unwrap();
+    run_pack_cli(std::slice::from_ref(&input), &out2, None, None, None, false, None, false).unwrap();
     assert_ne!(folders(&out2)[0], f1[0]);
 
     // --keys with a segment keeps it (an update in place).
@@ -46,12 +47,18 @@ fn pack_hosts_its_files_under_a_256_bit_folder() {
     )
     .unwrap();
     let out3 = dir.join("out3");
-    run_pack_cli(std::slice::from_ref(&input), &out3, None, None, false, Some(&keys), false).unwrap();
+    run_pack_cli(std::slice::from_ref(&input), &out3, None, None, None, false, Some(&keys), false).unwrap();
     assert_eq!(folders(&out3), vec![segment.clone()]);
     // A short segment is refused.
     std::fs::write(&keys, std::fs::read_to_string(&keys).unwrap().replace(&segment, &b64url_encode(&[9u8; 16]))).unwrap();
-    assert!(run_pack_cli(&[input], &dir.join("out4"), None, None, false, Some(&keys), false).is_err());
+    assert!(run_pack_cli(std::slice::from_ref(&input), &dir.join("out4"), None, None, None, false, Some(&keys), false).is_err());
 
+    // The decrypted Bundle only where asked, never inside OUT.
+    let inside = dir.join("out5").join("bundle.json");
+    assert!(run_pack_cli(std::slice::from_ref(&input), &dir.join("out5"), None, Some(&inside), None, false, None, false).is_err());
+    let outside = dir.join("private").join("bundle.json");
+    run_pack_cli(std::slice::from_ref(&input), &dir.join("out6"), None, Some(&outside), None, false, None, false).unwrap();
+    assert!(std::fs::read_to_string(&outside).unwrap().contains("\"resourceType\""));
     assert_eq!(pack_link_url("https://h.example/x", &segment).unwrap(), format!("https://h.example/x/{segment}/bundle.jwe"));
     assert!(pack_link_url("https://h.example/x/bundle.jwe", &segment).is_err());
     let _ = std::fs::remove_dir_all(&dir);
