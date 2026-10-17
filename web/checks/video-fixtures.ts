@@ -414,6 +414,18 @@ for (const [name, meta] of Object.entries(IDC)) {
 
 // ------------------------------------------------------------------------------------- share
 
+// VIDEO_ONLY=a,b: share only the cases whose names contain one of these (a quick run).
+const pick = process.env.VIDEO_ONLY?.split(",").filter(Boolean);
+if (pick) {
+  const want = (n: string) => pick.some((p) => n.includes(p));
+  const keep = <T extends { name: string }>(xs: T[], name: (x: T) => string = (x) => x.name) => xs.splice(0, xs.length, ...xs.filter((x) => want(name(x))));
+  keep(cases);
+  keep(files, (f) => f.name.replace(/\.dcm$/, ""));
+  // The cine files are small: all of them, or none when no cine case is picked.
+  keep(cineCases);
+  if (!cineCases.length) cineFiles.length = 0;
+}
+
 const shared = await packAndShare(base, files);
 // Where each case is in the share, as the viewer lists it.
 const index = parseStudyIndex(shared.bundle);
@@ -432,11 +444,11 @@ for (const c of cases) {
   if (!c.at) throw new Error(`${c.name}: instance ${sop} not in the Bundle`);
 }
 const { shlink } = await shared.mint(shared.bundle, { label: "Video checks" });
-const cineShared = await packAndShare(base, cineFiles);
-const cineLink = (await cineShared.mint(cineShared.bundle, { label: "Cine checks" })).shlink;
-const cineIndex = parseStudyIndex(cineShared.bundle);
+const cineShared = cineFiles.length ? await packAndShare(base, cineFiles) : null;
+const cineLink = cineShared ? (await cineShared.mint(cineShared.bundle, { label: "Cine checks" })).shlink : null;
+const cineIndex = cineShared ? parseStudyIndex(cineShared.bundle) : null;
 for (const c of cineCases) {
-  const st = cineIndex.studies.find((s) => s.studyInstanceUid === c.studyUid);
+  const st = cineIndex?.studies.find((s) => s.studyInstanceUid === c.studyUid);
   if (!st) throw new Error(`${c.name}: study ${c.studyUid} not in the Bundle`);
   c.study = studyTitle(st);
 }
@@ -445,7 +457,7 @@ const out = {
   share: { sid: shared.sid, token: shared.token },
   dir,
   cases,
-  cine: { link: cineLink, share: { sid: cineShared.sid, token: cineShared.token }, cases: cineCases.map((c) => ({ ...c, durations: undefined, meanMs: c.durations.reduce((a, b) => a + b, 0) / c.durations.length, durationsHead: c.durations.slice(0, 6) })) },
+  cine: { link: cineLink, share: cineShared && { sid: cineShared.sid, token: cineShared.token }, cases: cineCases.map((c) => ({ ...c, durations: undefined, meanMs: c.durations.reduce((a, b) => a + b, 0) / c.durations.length, durationsHead: c.durations.slice(0, 6) })) },
 };
 writeFileSync("/tmp/video-fixtures.json", JSON.stringify(out, null, 2));
 console.log(JSON.stringify({ ...out, link: undefined, cine: out.cine.cases.map((c) => `${c.name} "${c.study}" ${c.frames}f×${c.instances} ${c.timing} ${c.meanMs}ms`), cases: cases.map((c) => `${c.name} ${c.ts} ${c.expect.frames}f ${c.expect.duration}s`) }, null, 2));
