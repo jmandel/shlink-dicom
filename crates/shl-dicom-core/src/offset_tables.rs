@@ -510,6 +510,18 @@ pub(crate) mod tests {
         part10_meta(ts, &[(0x0002, SM), (0x0003, "1.2.3.4.5.6")], &d.out, true)
     }
 
+    /// A file meta element whose length runs past the end of the address space (on wasm32 and
+    /// other 32-bit targets) is unreadable, not a panic.
+    #[test]
+    fn a_huge_meta_length_is_unreadable() {
+        let mut b = synthetic(3, &[1], false);
+        // (0002,0001) File Meta Information Version, OB: its 4-byte length follows the group length.
+        let at = 132 + 12;
+        assert_eq!(&b[at..at + 6], &[0x02, 0x00, 0x01, 0x00, b'O', b'B']);
+        b[at + 8..at + 12].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        assert_eq!(offset_table_status(&b), OffsetTableStatus::NotApplicable);
+    }
+
     #[test]
     fn reader_patch_matches_in_memory_patch() {
         for (split, seq) in [(vec![1], false), (vec![1, 2, 3], true)] {

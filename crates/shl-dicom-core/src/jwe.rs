@@ -174,14 +174,16 @@ mod tests {
 
     #[test]
     fn oversized_bundles_and_jwes_are_refused() {
+        const MIB64: usize = 64 << 20;
         let key = [3u8; 32];
         // One repeated byte deflates about 1000:1, so a 64 MiB Bundle is a small JWE.
-        let big = vec![b' '; (MAX_BUNDLE_BYTES + 1) as usize];
-        let jwe = encrypt_bundle_jwe(&big, &key).unwrap();
-        assert!(jwe.len() < MAX_JWE_CHARS);
-        assert!(decrypt_bundle_jwe(&jwe, &key).unwrap_err().to_string().contains("inflates past"));
-        let ok = vec![b' '; MAX_BUNDLE_BYTES as usize];
+        let jwe = encrypt_bundle_jwe(&vec![b' '; MIB64 + 1], &key).unwrap();
+        assert!(jwe.len() < 1 << 20);
+        let err = decrypt_bundle_jwe(&jwe, &key).expect_err("a Bundle past 64 MiB was inflated");
+        assert!(err.to_string().contains("inflates past"), "{err}");
+        let ok = vec![b' '; MIB64];
         assert_eq!(decrypt_bundle_jwe(&encrypt_bundle_jwe(&ok, &key).unwrap(), &key).unwrap().len(), ok.len());
-        assert!(decrypt_bundle_jwe(&"a".repeat(MAX_JWE_CHARS + 1), &key).is_err());
+        let err = decrypt_bundle_jwe(&"a".repeat(90 << 20), &key).expect_err("a 90 MiB JWE was read");
+        assert!(err.to_string().contains("longer than"), "{err}");
     }
 }
