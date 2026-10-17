@@ -2696,3 +2696,48 @@ async fn test_concurrent_unknown_length_uploads_stay_within_the_byte_limit() {
     let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Requests that need no token carry small bodies only, and past its limit of requests at once the
+/// server answers 503 instead of queueing.
+#[tokio::test]
+async fn test_unauthenticated_bodies_are_small_and_requests_are_bounded() {
+    let dir = temp_data_dir("small_bodies");
+    let state = AppState::with_store(&dir, shl_dicom_server::state::Quotas { max_requests: 2, ..Default::default() }, test_store(&dir)).unwrap();
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let big = vec![b' '; 16 * 1024 + 1]; // just over SMALL_BODY
+    assert_eq!(client.post(format!("{base}/api/shares")).header("content-type", "application/json").body(big.clone()).send().await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let lid = b64url_encode(&[5u8; 32]);
+    assert_eq!(client.post(format!("{base}/shl/{lid}")).header("content-type", "application/json").body(big).send().await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Two appends whose bodies stall hold both places; a third request is turned away.
+    let mut held = Vec::new();
+    for k in 0..2u8 {
+        let url = format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[70 + k; 16]));
+        client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(1);
+        tx.send(Ok(vec![1u8; 100])).await.unwrap();
+        let req = client
+            .patch(&url)
+            .bearer_auth(&token)
+            .header("Content-Type", "application/partial-upload")
+            .header("Upload-Offset", "0")
+            .header("Upload-Complete", "?0")
+            .body(reqwest::Body::wrap_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            .send();
+        held.push((tx, tokio::spawn(req)));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let r = client.get(format!("{base}/api/demo-shares")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(r.headers().contains_key(header::RETRY_AFTER));
+    for (tx, h) in held {
+        drop(tx);
+        h.await.unwrap().unwrap();
+    }
+    assert_eq!(client.get(format!("{base}/api/demo-shares")).send().await.unwrap().status(), StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&dir);
+}

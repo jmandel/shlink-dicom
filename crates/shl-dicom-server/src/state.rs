@@ -33,15 +33,18 @@ pub struct Quotas {
     /// Longest one upload request (PUT or PATCH) may take, in seconds, however steadily its body
     /// arrives; what came is kept and the client goes on with another request.
     pub upload_request_secs: u64,
+    /// Requests the server handles at once; more are answered 503 at once.
+    pub max_requests: usize,
 }
 
 impl Default for Quotas {
     fn default() -> Self {
-        Self { share_bytes: None, total_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS, upload_request_secs: DEFAULT_UPLOAD_REQUEST_SECS }
+        Self { share_bytes: None, total_bytes: None, share_files: None, shares: Some(256), request_bytes: 64 * 1024 * 1024, cap_ttl_secs: DEFAULT_CAP_TTL_SECS, upload_request_secs: DEFAULT_UPLOAD_REQUEST_SECS, max_requests: DEFAULT_MAX_REQUESTS }
     }
 }
 
 pub const DEFAULT_UPLOAD_REQUEST_SECS: u64 = 2 * 3600;
+pub const DEFAULT_MAX_REQUESTS: usize = 512;
 /// A claim on an upload older than its request could last, plus this, belongs to a request that
 /// is stuck (for example in a call to the store); the stale-upload sweep breaks it.
 const CLAIM_GRACE_SECS: u64 = 600;

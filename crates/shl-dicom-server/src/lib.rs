@@ -20,6 +20,7 @@ use tower_http::{
 use crate::state::AppState;
 
 pub fn build_app_router(state: AppState) -> Router {
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(state.quotas.max_requests));
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([
@@ -64,7 +65,8 @@ pub fn build_app_router(state: AppState) -> Router {
 
     Router::new()
         // Zero-Knowledge Share & Link Control API
-        .route("/api/shares", post(routes_api::create_share))
+        // Bodies anyone can send without a token stay small.
+        .route("/api/shares", post(routes_api::create_share).layer(DefaultBodyLimit::max(SMALL_BODY)))
         .route("/api/shares/{sid}/clone", post(routes_api::clone_share))
         .route(
             "/api/shares/{sid}",
@@ -104,7 +106,7 @@ pub fn build_app_router(state: AppState) -> Router {
         .route("/sample", get(routes_api::get_sample))
         .route("/sample/passcode", get(routes_api::get_sample_passcode))
         // Receiver-facing SHL & Capability Range Routes
-        .route("/shl/{lid}", post(routes_shl::post_shl_manifest))
+        .route("/shl/{lid}", post(routes_shl::post_shl_manifest).layer(DefaultBodyLimit::max(SMALL_BODY)))
         .route("/shl/{lid}/{tail}", get(routes_shl::get_shl_file))
         .route("/cap/{token}/{tail}", get(routes_shl::get_cap_file))
         // Experiences: landing (/), View, How it works, Share
@@ -122,7 +124,29 @@ pub fn build_app_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(static_cache))
         .layer(cors)
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn_with_state(limit, at_most))
         .with_state(state)
+}
+
+/// Largest body of a request that needs no token (creating a share, asking for a manifest).
+pub const SMALL_BODY: usize = 16 * 1024;
+
+/// At most `max_requests` requests in a handler at once; past that, 503 with Retry-After at once
+/// rather than a queue. (A response body that streams after its handler has returned, such as a
+/// file read, no longer holds its place.)
+async fn at_most(
+    axum::extract::State(limit): axum::extract::State<std::sync::Arc<tokio::sync::Semaphore>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Ok(_permit) = limit.try_acquire() else {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            .header(header::RETRY_AFTER, "5")
+            .body(axum::body::Body::from("the server is busy; try again shortly"))
+            .unwrap();
+    };
+    next.run(req).await
 }
 
 /// On every response: send no Referer onward (link URLs carry keys in their fragment and ids in
