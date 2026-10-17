@@ -227,11 +227,11 @@ Every FHIR resource request and every WADO-RS request needs `Authorization: Bear
 
   **Verification by other decoders.** `test/data-check.ts` decodes every copy with pydicom and its plugins (pylibjpeg-libjpeg, pylibjpeg-openjpeg, GDCM, pinned in `codec-corpus/uv.lock`) through `web/checks/pixel-identity.py`, and requires the stored image's pixels and every other element unchanged. An encoder bug that its own decoder shares would pass the self-check but fail this one. The release workflow runs it before publishing; it also decodes the copies with `shl-dicom-decode` when that is built.
 
-  Sizes of the images stored uncompressed, as stored, SV1 and J2K:
+  Sizes of the images stored uncompressed, as stored and as this project's transcoder writes them in SV1 and J2K (the copies that release sandbox-b147251 builds):
 
   | Study | Stored | SV1 | J2K |
   |---|---|---|---|
-  | MRI brain (263 images) | 44.3 MB | 28.6 MB | 26.7 MB |
+  | MRI brain (267 images) | 44.3 MB | 28.6 MB | 26.7 MB |
   | CT abdomen and pelvis (457 images) | 246.0 MB | 89.9 MB | 69.4 MB |
   | XR left wrist (3) | 40.7 MB | 16.9 MB | 15.3 MB |
   | XR right hand and wrist (3) | 40.7 MB | 16.2 MB | 14.5 MB |

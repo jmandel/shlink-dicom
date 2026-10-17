@@ -167,5 +167,5 @@ curl -s "http://localhost:$PORT/fhir/.well-known/smart-configuration" | head -c 
 echo "$TAG" > "$ROOT/current-tag"
 
 # Releases other than the current one and the $KEEP_RELEASES - 1 most recent are removed.
-ls -1dt "$ROOT"/releases/sandbox-* 2>/dev/null | grep -v -x "$DIR" | tail -n "+$KEEP_RELEASES" | xargs -r rm -rf
+ls -1dt "$ROOT"/releases/sandbox-* 2>/dev/null | { grep -v -x "$DIR" || true; } | tail -n "+$KEEP_RELEASES" | xargs -r rm -rf
 echo "== done: $TAG at $BASE_URL"
