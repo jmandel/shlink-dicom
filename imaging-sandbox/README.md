@@ -19,11 +19,13 @@ Deployed (private for now) at **https://smart-imaging-sandbox.exe.xyz**: see [De
 
 Requires Bun 1.4.3. The server has no runtime dependencies. The tests use `playwright-core` and `pdfjs-dist`, pinned in `package.json` (`bun install`).
 
-The data build also needs dcmtk (`dcmcjpeg`) and `uv`, for the compressed copies; `--no-variants` builds without them. It adds the slide's frame offset tables with the packer's Rust code through `crates/shl-dicom-wasm`, so build that module first, from the repository root (Rust with the wasm32 target, and wasm-bindgen 0.2.128):
+The data build runs two of the project's Rust crates as wasm, so build them first, from the repository root (Rust with the wasm32 target, and wasm-bindgen 0.2.128): `crates/shl-dicom-wasm` adds the slide's frame offset tables with the packer's code, and `codecs/shl-dicom-transcode-wasm` makes the compressed copies. `--no-variants` builds without the copies.
 
 ```sh
 cargo build --release --target wasm32-unknown-unknown -p shl-dicom-wasm
 wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
+(cd codecs && cargo build --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm)
+wasm-bindgen --target web --out-dir codecs/shl-dicom-transcode-wasm/pkg codecs/target/wasm32-unknown-unknown/release/shl_dicom_transcode_wasm.wasm
 ```
 
 ```sh
@@ -155,7 +157,7 @@ These are linked:
 
 Dates and times match the studies.
 
-The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The DICOM files total 555.2 MB. `deploy/bootstrap-sandbox.sh` checks the digest of `SHA256SUMS` (`EXPECTED_SUMS`) after building on the VM.
+The output is deterministic: two builds give identical bytes. `build/dataset/SHA256SUMS` lists every file. The DICOM files total 555.2 MB. Its SHA-256 is committed in `data/SHA256SUMS.sha256`; the release workflow and `deploy/bootstrap-sandbox.sh` require a build to match it.
 
 ### Plain export for other consumers
 
@@ -221,11 +223,9 @@ Every FHIR resource request and every WADO-RS request needs `Authorization: Bear
     - a range without `transfer-syntax` (PS3.18 reads that as Explicit VR Little Endian; the sandbox refuses it so apps learn to send the parameter);
     - every range at `q=0`;
     - a list without `*` that some instance can't meet.
-- **The compressed copies.** `scripts/make-variants.py` makes them during `scripts/build-data.ts`, using encoders that are not this project's code:
-  - SV1 with dcmtk's `dcmcjpeg`;
-  - JPEG 2000 with OpenJPEG, through pinned `pylibjpeg-openjpeg` and `pydicom` run by `uv`.
+- **The compressed copies.** `scripts/lib/variants.ts` makes them during `scripts/build-data.ts`, with this project's transcoder (`codecs/shl-dicom-transcode`, through its wasm build, as the Share page re-encodes), in Bun workers. The transcoder decodes each copy and compares it with the original pixels bit for bit before returning it, and changes nothing but the transfer syntax and Pixel Data; the UIDs are kept. The copies live in `build/variants/` (gitignored). They are not in `SHA256SUMS`, because their bytes depend on the encoder version. `--no-variants` skips them.
 
-  A copy is kept only if it decodes (pydicom with libjpeg or OpenJPEG) to exactly the original pixels and its other attributes are unchanged. The UIDs are kept, and `dcmcjpeg` adds a Derivation Description. The copies live in `build/variants/` (gitignored). They are not in `SHA256SUMS`, because their bytes depend on the encoder versions; `test/data-check.ts` decodes every copy with `shl-dicom-decode` and compares it with the stored image. `--no-variants` skips them.
+  **Verification by other decoders.** `test/data-check.ts` decodes every copy with pydicom and its plugins (pylibjpeg-libjpeg, pylibjpeg-openjpeg, GDCM, pinned in `codec-corpus/uv.lock`) through `web/checks/pixel-identity.py`, and requires the stored image's pixels and every other element unchanged. An encoder bug that its own decoder shares would pass the self-check but fail this one. The release workflow runs it before publishing; it also decodes the copies with `shl-dicom-decode` when that is built.
 
   Sizes of the images stored uncompressed, as stored, SV1 and J2K:
 
@@ -354,19 +354,19 @@ Against a remote server it skips the checks that need special settings, and runs
 
 ## Deploying
 
-```sh
-scripts/deploy.sh               # DEPLOY_HOST defaults to smart-imaging-sandbox.exe.xyz
-```
+Releases are built in CI and installed on the VM with only Bun; the VM has no git checkout and no Rust, dcmtk or Python.
 
-The script:
-1. builds the dataset locally, as a reference;
-2. copies the code (no build output) to `~/imaging-sandbox` on the VM;
-3. installs Bun 1.4.3 if needed;
-4. rebuilds the dataset on the VM from the pinned GitHub sources, and fails unless its `SHA256SUMS` is identical to the local build;
-5. writes `/etc/imaging-sandbox.env`: `PORT=8000`, `BASE_URL=https://smart-imaging-sandbox.exe.xyz`, `ALLOWED_ORIGINS`, and an `INTROSPECTION_KEY` generated once and kept across deploys;
-6. installs and restarts the `imaging-sandbox` systemd unit, then checks it.
+- **The release.** [`.github/workflows/sandbox-release.yml`](../.github/workflows/sandbox-release.yml) runs on pushes to `main` that change the sandbox, the two wasm crates it uses or their dependencies, and on manual dispatch. It builds the wasm modules and the full dataset with its copies, requires `data/SHA256SUMS.sha256` and `test/data-check.ts` (including the pydicom check of every copy) to pass, smoke-tests the bundled server, then publishes the code as a GitHub Release `sandbox-<short commit>`: `imaging-sandbox-sandbox-<sha>.tar.gz` (a few MB: the bundled server, the data build scripts, the two wasm modules and `MANIFEST.json` with the commit, the expected dataset digest and every file's SHA-256) and its `.sha256`. The release `sandbox-latest` holds `latest.json`, naming the current tag. The workflow keeps the last five releases.
+- **The VM.** [`deploy/bootstrap-sandbox.sh`](../deploy/bootstrap-sandbox.sh) installs a pinned Bun binary (checked by SHA-256), downloads the release named in `latest.json` (or the tag given as its argument), checks its SHA-256 and unpacks it into `/opt/imaging-sandbox/releases/<tag>`. It then builds the dataset there with the release's code, from the pinned sources (my-health-data and IDC, each checked by SHA-256 and kept in `/opt/imaging-sandbox/sources`), and stops unless the dataset digest matches. Only then does it point `/opt/imaging-sandbox/current` at the release, write `/etc/imaging-sandbox.env` (`PORT=8000`, `BASE_URL`, `ALLOWED_ORIGINS`, the Share page's redirect URIs, and an `INTROSPECTION_KEY` generated once and kept), restart the `imaging-sandbox` unit and check `/fhir/.well-known/smart-configuration`. If that check fails, it points `current` back at the previous release and restarts it.
 
-exe.dev's HTTPS proxy forwards `https://smart-imaging-sandbox.exe.xyz/` to port 8000 (`ssh exe.dev share show smart-imaging-sandbox`). The VM is **private**: the proxy asks for an exe.dev login. Publishing it (`ssh exe.dev share set-public smart-imaging-sandbox`) is Josh's call. Logs: `ssh smart-imaging-sandbox.exe.xyz journalctl -u imaging-sandbox -f`.
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-sandbox.sh | bash                    # the latest release
+  curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-sandbox.sh | bash -s sandbox-1a2b3c4  # a given release
+  ```
+
+- **Rollback.** Run the script with the older tag. A release already unpacked and built on the VM is reused, so going back takes seconds.
+
+exe.dev's HTTPS proxy forwards `https://smart-imaging-sandbox.exe.xyz/` to port 8000 (`ssh exe.dev share show smart-imaging-sandbox`). The VM is **private**: the proxy asks for an exe.dev login. Publishing it (`ssh exe.dev share set-public smart-imaging-sandbox`) is Josh's call. Logs: `journalctl -u imaging-sandbox -f` on the VM; the bootstrap's log is `/var/log/shlink-bootstrap-sandbox.log`.
 
 ## Files
 
@@ -376,7 +376,7 @@ exe.dev's HTTPS proxy forwards `https://smart-imaging-sandbox.exe.xyz/` to port 
 - `src/wado.ts`: WADO-RS and capability URLs
 - `src/data.ts`, `src/dicom.ts`, `src/tar.ts`: load the dataset and read DICOM
 - `src/scopes.ts`: SMART scope parsing
-- `scripts/build-data.ts`, `scripts/lib/`: the dataset build, header rewrite, report text and PDF writer
-- `scripts/deploy.sh`: deployment to exe.dev
+- `scripts/build-data.ts`, `scripts/lib/`: the dataset build, header rewrite, compressed copies, report text and PDF writer
+- `scripts/pack-release.ts`: the release tarball (see [Deploying](#deploying))
 - `data/`: committed inputs for the build
 - `test/`: the client, the tests and helpers

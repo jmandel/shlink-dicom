@@ -1,0 +1,163 @@
+# Builds and publishes the imaging sandbox release that deploy/bootstrap-sandbox.sh installs
+# (imaging-sandbox/README.md, Deploying). The release is code only; before publishing, this
+# workflow builds the full dataset with its compressed copies, requires the committed dataset
+# digest and test/data-check.ts (including pydicom's check of every copy), and builds the dataset
+# again from the packed release to prove the release reproduces it.
+name: Sandbox release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - imaging-sandbox/**
+      - crates/shl-dicom-wasm/**
+      - crates/shl-dicom-core/**
+      - codecs/**
+      - Cargo.toml
+      - Cargo.lock
+      - deploy/lib/pinned-fetch.ts
+      - web/checks/pixel-identity.py
+      - codec-corpus/pyproject.toml
+      - codec-corpus/uv.lock
+      - .github/workflows/sandbox-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sandbox-release
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: "1.4.3"
+  WASM_BINDGEN_VERSION: "0.2.128"
+  UV_VERSION: "0.13.1"
+  KEEP_RELEASES: "5"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Rust, wasm-bindgen, uv, and the checks' tools
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+          t="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
+          curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$t.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin" --strip-components=1 "$t/wasm-bindgen"
+          curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
+          # data-check's slide checks (dcmdump, dcmj2pnm) and PDF check (qpdf); verification only.
+          sudo apt-get update -qq && sudo apt-get install -y -qq dcmtk qpdf
+          cargo --version; wasm-bindgen --version; uv --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            codecs/target
+          key: sandbox-cargo-${{ hashFiles('Cargo.lock', 'codecs/Cargo.lock') }}
+          restore-keys: sandbox-cargo-
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            imaging-sandbox/build/sources
+            ~/.cache/uv
+          key: sandbox-inputs-${{ hashFiles('imaging-sandbox/data/studies.json', 'codec-corpus/uv.lock') }}
+          restore-keys: sandbox-inputs-
+
+      - name: Wasm modules
+        run: |
+          cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-wasm
+          wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
+          (cd codecs && cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm)
+          wasm-bindgen --target web --out-dir codecs/shl-dicom-transcode-wasm/pkg codecs/target/wasm32-unknown-unknown/release/shl_dicom_transcode_wasm.wasm
+
+      - name: Dataset and compressed copies
+        working-directory: imaging-sandbox
+        run: |
+          bun install --frozen-lockfile
+          bun scripts/build-data.ts --export none
+          (cd build/dataset && sha256sum -c ../../data/SHA256SUMS.sha256)
+
+      - name: Check the dataset and every copy (test/data-check.ts)
+        working-directory: imaging-sandbox
+        run: |
+          uv sync --quiet --project ../codec-corpus
+          PYDICOM_PYTHON="$PWD/../codec-corpus/.venv/bin/python" bun test/data-check.ts
+
+      - name: Pack the release
+        id: pack
+        run: |
+          tag="sandbox-${GITHUB_SHA::7}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          bun imaging-sandbox/scripts/pack-release.ts --tag "$tag" --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/release"
+          ls -l "$RUNNER_TEMP/release"
+
+      # What the VM does: unpack, build the dataset with the release's code, check the digest, run.
+      - name: Build the dataset from the packed release, and run it
+        run: |
+          tag="${{ steps.pack.outputs.tag }}"
+          rel="$RUNNER_TEMP/unpacked"
+          mkdir -p "$rel"
+          (cd "$RUNNER_TEMP/release" && sha256sum -c "imaging-sandbox-$tag.tar.gz.sha256")
+          tar -xzf "$RUNNER_TEMP/release/imaging-sandbox-$tag.tar.gz" -C "$rel" --strip-components=1
+          cd "$rel/imaging-sandbox"
+          bun scripts/build-data.ts --quiet --export none --sources "$GITHUB_WORKSPACE/imaging-sandbox/build/sources"
+          want="$(bun -e 'console.log(JSON.parse(await Bun.file("../MANIFEST.json").text()).datasetDigest)')"
+          got="$(sha256sum build/dataset/SHA256SUMS | cut -d' ' -f1)"
+          echo "dataset digest $got, expected $want"
+          test "$got" = "$want"
+          # The copies are the ones data-check verified, byte for byte.
+          bun -e '
+            const a = JSON.parse(await Bun.file("build/variants/manifest.json").text());
+            const b = JSON.parse(await Bun.file(process.argv[1]).text());
+            const k = (m) => JSON.stringify(m.instances.map((e) => [e.source, e.variants.map((v) => v.sha256 ?? v.error)]));
+            if (k(a) !== k(b)) { console.error("the release made different copies"); process.exit(1); }
+            console.log(`${a.instances.length} instances: copies identical to the verified build`);' \
+            "$GITHUB_WORKSPACE/imaging-sandbox/build/variants/manifest.json"
+          PORT=3999 BASE_URL=http://localhost:3999 bun dist/server.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:3999/fhir/.well-known/smart-configuration > "$RUNNER_TEMP/smart.json" && break; sleep 1; done
+          grep -q '"token_endpoint"' "$RUNNER_TEMP/smart.json"
+          head -8 "$RUNNER_TEMP/server.log"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.pack.outputs.tag }}"
+          dir="$RUNNER_TEMP/release"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "$dir"/imaging-sandbox-"$tag".* --clobber
+          else
+            gh release create "$tag" "$dir"/imaging-sandbox-"$tag".* --target "$GITHUB_SHA" --latest=false \
+              --title "Imaging sandbox $tag" \
+              --notes "The SMART Imaging Access sandbox at ${GITHUB_SHA}: code only. Install with deploy/bootstrap-sandbox.sh $tag (imaging-sandbox/README.md, Deploying)."
+          fi
+          sha="$(cut -d' ' -f1 "$dir/imaging-sandbox-$tag.tar.gz.sha256")"
+          printf '{"tag":"%s","commit":"%s","sha256":"%s"}\n' "$tag" "$GITHUB_SHA" "$sha" > "$dir/latest.json"
+          if ! gh release view sandbox-latest > /dev/null 2>&1; then
+            gh release create sandbox-latest --target "$GITHUB_SHA" --latest=false --title "Imaging sandbox: latest" \
+              --notes "latest.json names the current sandbox release; deploy/bootstrap-sandbox.sh reads it."
+          fi
+          gh release upload sandbox-latest "$dir/latest.json" --clobber
+          echo "published $tag: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
+
+      - name: Keep the last ${{ env.KEEP_RELEASES }} releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^sandbox-[0-9a-f]+$"))] | sort_by(.createdAt) | reverse | .[env.KEEP_RELEASES | tonumber:] | .[].tagName' \
+            | while read -r t; do echo "deleting $t"; gh release delete "$t" --yes --cleanup-tag; done
