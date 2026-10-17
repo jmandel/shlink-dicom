@@ -120,7 +120,18 @@ pub fn build_app_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // JSON and JWE bodies; encrypted files stream (routes_api::put_share_file)
         .layer(axum::middleware::from_fn(static_cache))
         .layer(cors)
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+/// On every response: send no Referer onward (link URLs carry keys in their fragment and ids in
+/// their path), and have browsers use the Content-Type as given.
+async fn security_headers(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(header::REFERRER_POLICY, axum::http::HeaderValue::from_static("no-referrer"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, axum::http::HeaderValue::from_static("nosniff"));
+    res
 }
 
 /// Cache-Control for the site's own files (the API and SHL routes set their own). Assets named

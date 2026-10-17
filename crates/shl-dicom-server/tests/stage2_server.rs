@@ -1845,3 +1845,31 @@ async fn test_the_append_limit_holds_for_a_chunked_body() {
     assert_eq!(h.headers()["upload-offset"].to_str().unwrap(), (1000 + (1 << 20)).to_string());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every response, API, SHL, static or CORS preflight, says no-referrer and nosniff.
+#[tokio::test]
+async fn test_security_headers_on_every_response() {
+    let dir = temp_data_dir("security_headers");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let lid = b64url_encode(&[1u8; 16]);
+    let responses = [
+        client.post(format!("{base}/api/shares")).send().await.unwrap(),
+        client.get(format!("{base}/api/shares/nope")).send().await.unwrap(),
+        client.post(format!("{base}/shl/{lid}")).json(&json!({ "recipient": "t" })).send().await.unwrap(),
+        client.get(format!("{base}/no-such-page")).send().await.unwrap(),
+        client
+            .request(reqwest::Method::OPTIONS, format!("{base}/api/shares"))
+            .header("Origin", "https://example.org")
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .unwrap(),
+    ];
+    for r in responses {
+        assert_eq!(r.headers()["referrer-policy"], "no-referrer", "{}", r.url());
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff", "{}", r.url());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
