@@ -29,6 +29,7 @@ PORT="${PORT:-8000}"
 BASE_URL="${BASE_URL:-https://smart-imaging-sandbox.exe.xyz}"
 SHARE_ORIGIN="${SHARE_ORIGIN:-https://shlink-dicom.exe.xyz}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
+# The same pinned Bun as deploy/bootstrap-shlink-dicom.sh.
 BUN_VERSION="1.4.3"
 BUN_SHA256_X64="3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18"
 BUN_SHA256_X64_BASELINE="1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b"
