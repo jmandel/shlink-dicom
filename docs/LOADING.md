@@ -177,6 +177,17 @@ The overview's slide thumbnail read (3.7 MB of another study's file, I7eKgDnI71,
 - **Scheduler:** the read goes through the loader. In one Fast 4G session, opening the enhanced CT aborted it with 0 bytes received.
 - On main, the read didn't appear in the 3 enhanced-CT sessions logged.
 
+### Opening a link with the reader module, 17 Oct
+
+The viewer reads the link, the manifest's location and the Bundle with the reader module (web/core/reader.ts; crates/shl-dicom-reader, 230 KB, 80 KB brotli), in a worker that the page starts from its head with the worker's code inline. The sample link, main (a20009d) against the reader branch, behind perf's shaper (home: 50 ms, 20 MB/s; Fast 4G: 165 ms, 1.01 MB/s), 6 runs each, interleaved, desktop, medians:
+
+| Network | Overview: main | Overview: reader | First thumbnail: main | First thumbnail: reader |
+|---|---|---|---|---|
+| Home | 238 ms | 261 ms | 424 ms | 408 ms |
+| Fast 4G | 702 ms | 800 ms | 1648 ms | 1750 ms |
+
+The cost is the module's bytes: on Fast 4G they share the link with view.js, the decoder's wasm and the Bundle. Opening the sample's Bundle in the worker takes about 28 ms. A worker started by view.js, which then fetched its script and its module, opened the overview at 1234 ms on Fast 4G. Leaving out the decoder wasm's preload gave 757 ms, but the first thumbnail came about 320 ms later.
+
 ## Causes found
 
 **MR scroll-back stall.** Eight sessions with the request log, Fast 4G desktop, scheduler branch, 4 at each size.
