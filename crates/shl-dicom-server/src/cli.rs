@@ -16,6 +16,8 @@ struct PackKeys {
     shl_key: String,
     bundle_iv: String,
     last_updated: String,
+    #[serde(default)]
+    bundle_sha256: String,
     studies: std::collections::BTreeMap<String, PackKeyFile>,
     /// The link's folder name (32 random bytes); a new one when absent.
     #[serde(default)]
@@ -27,6 +29,27 @@ struct PackKeys {
 struct PackKeyFile {
     file_id: String,
     key: String,
+    #[serde(default)]
+    plaintext_sha256: String,
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Checks `actual` against the hash recorded for `what`; Ok(true) when it was not recorded yet.
+fn check_recorded(what: &str, recorded: &str, actual: &str) -> Result<bool, String> {
+    if recorded.is_empty() {
+        return Ok(true);
+    }
+    if recorded != actual {
+        return Err(format!(
+            "{what} has SHA-256 {actual}, but the keys file records {recorded}: the input changed. \
+             Encrypting different content under the same key and nonce would break AES-GCM; use new keys."
+        ));
+    }
+    Ok(false)
 }
 
 fn read_pack_keys(path: &Path) -> Result<PackKeys, String> {
@@ -105,6 +128,51 @@ pub fn run_pack_cli(
         }
     }
 
+    let shl_key = match &keys {
+        Some(k) => decode_key_32(&k.shl_key).map_err(|e| e.to_string())?,
+        None => random_bytes::<32>().map_err(|e| e.to_string())?,
+    };
+    let mut link_out =
+        build_link_bundle(&packed.owner_bundle_json, &[], &shl_key, &now_iso).map_err(|e| e.to_string())?;
+    if let Some(k) = &keys {
+        // The same Bundle under the same key and IV gives the same bundle.jwe. The caller checks
+        // the Bundle is unchanged before publishing (a different Bundle needs a new IV).
+        let iv: [u8; 12] = b64url_decode(&k.bundle_iv).map_err(|e| e.to_string())?.try_into().map_err(|_| "bundleIv")?;
+        link_out.bundle_jwe = encrypt_bundle_jwe_with_iv(link_out.bundle_json.as_bytes(), &shl_key, &iv).map_err(|e| e.to_string())?;
+    }
+
+    if let (Some(k), Some(path)) = (&keys, keys_path) {
+        // Before anything is written: the content these keys encrypted before, or none recorded.
+        let mut record = serde_json::Map::new();
+        let mut studies = serde_json::Map::new();
+        for sf in &packed.files {
+            let Some(kf) = k.studies.get(&sf.study_uid) else { continue };
+            let key = decode_key_32(&kf.key).map_err(|e| e.to_string())?;
+            let n = sf.plaintext_len;
+            let plain = decrypt_range(&sf.ciphertext, 0, n, n, &key).map_err(|e| e.to_string())?;
+            let h = sha256_hex(&plain);
+            if check_recorded(&format!("study {}", sf.study_uid), &kf.plaintext_sha256, &h)? {
+                studies.insert(sf.study_uid.clone(), serde_json::json!(h));
+            }
+        }
+        let bundle_h = sha256_hex(link_out.bundle_json.as_bytes());
+        if check_recorded("the Bundle", &k.bundle_sha256, &bundle_h)? {
+            record.insert("bundleSha256".into(), serde_json::json!(bundle_h));
+        }
+        if !record.is_empty() || !studies.is_empty() {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("read {:?}: {e}", path))?;
+            let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{:?}: {e}", path))?;
+            for (name, h) in record {
+                v[name] = h;
+            }
+            for (uid, h) in studies {
+                v["studies"][uid]["plaintextSha256"] = h;
+            }
+            let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())? + "\n";
+            std::fs::write(path, out).map_err(|e| format!("write {:?}: {e}", path))?;
+        }
+    }
+
     // What gets hosted goes in OUT/<segment>/; the plaintext Bundle (it holds the file keys) stays
     // beside that folder, not in it.
     let segment = match keys.as_ref().and_then(|k| k.segment.clone()) {
@@ -119,19 +187,6 @@ pub fn run_pack_cli(
         let bin_path = host_dir.join(format!("{}.bin", sf.file_id));
         std::fs::write(&bin_path, &sf.ciphertext)
             .map_err(|e| format!("write {:?}: {e}", bin_path))?;
-    }
-
-    let shl_key = match &keys {
-        Some(k) => decode_key_32(&k.shl_key).map_err(|e| e.to_string())?,
-        None => random_bytes::<32>().map_err(|e| e.to_string())?,
-    };
-    let mut link_out =
-        build_link_bundle(&packed.owner_bundle_json, &[], &shl_key, &now_iso).map_err(|e| e.to_string())?;
-    if let Some(k) = &keys {
-        // The same Bundle under the same key and IV gives the same bundle.jwe. The caller checks
-        // the Bundle is unchanged before publishing (a different Bundle needs a new IV).
-        let iv: [u8; 12] = b64url_decode(&k.bundle_iv).map_err(|e| e.to_string())?.try_into().map_err(|_| "bundleIv")?;
-        link_out.bundle_jwe = encrypt_bundle_jwe_with_iv(link_out.bundle_json.as_bytes(), &shl_key, &iv).map_err(|e| e.to_string())?;
     }
 
     let jwe_path = host_dir.join("bundle.jwe");

@@ -12,7 +12,7 @@
 // the given keys by shl-dicom-server (`compress`, `pack --keys`), so every build makes the same
 // files and the link never changes. The build fails if an input, a study file's plaintext or
 // ciphertext, or the Bundle differs from the recorded hashes: a file key must never encrypt
-// different bytes (spec/README.md §13).
+// different bytes (spec/README.md §13). `pack --keys` itself refuses a changed plaintext or Bundle.
 //
 //   bun pages/build.ts [--out dist/pages] [--site-url URL] [--new-keys]
 //
@@ -23,13 +23,13 @@
 // Needs dist/web (bun web/build.ts) and the server binary ($SHL_DICOM_SERVER, else
 // $CARGO_TARGET_DIR or target/release/shl-dicom-server).
 import { $ } from "bun";
-import { createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import qrcode from "qrcode-generator";
 import { fetchPinned } from "../deploy/lib/pinned-fetch";
 import { parseStudyIndex, type StudyIndex } from "../web/core/bundle";
-import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "../web/core/range";
+import { planInstances, RECORD_PLAINTEXT } from "../web/core/range";
 
 const root = resolve(import.meta.dir, "..");
 const configPath = join(root, "pages/demo-link.json");
@@ -140,36 +140,33 @@ writeFileSync(
     bundleIv: cfg.bundleIv,
     segment: cfg.segment,
     lastUpdated: cfg.lastUpdated,
-    studies: Object.fromEntries(cfg.studies.map((s) => [s.studyInstanceUid, { fileId: s.fileId, key: s.key }])),
+    // pack refuses input whose Bundle or study plaintext differs from these (fixed keys and nonces
+    // must not encrypt different content), and fills in the empty ones (--new-keys).
+    bundleSha256: cfg.bundleSha256,
+    studies: Object.fromEntries(
+      cfg.studies.map((s) => [s.studyInstanceUid, { fileId: s.fileId, key: s.key, plaintextSha256: s.plaintextSha256 }]),
+    ),
   }),
 );
 const packDir = join(work, "pack");
-const packed = await $`${server} pack ${join(work, "plain")} --out ${packDir} --keys ${join(work, "keys.json")} --base-url ${siteUrl}demo-links/ --label ${cfg.label}`.text();
-const link = /^(shlink:\/\S+)$/m.exec(packed)?.[1] ?? fail(`no link in pack output:\n${packed}`);
+const packed = await $`${server} pack ${join(work, "plain")} --out ${packDir} --keys ${join(work, "keys.json")} --base-url ${siteUrl}demo-links/ --label ${cfg.label}`
+  .nothrow()
+  .quiet();
+if (packed.exitCode !== 0) fail(`${packed.stderr.toString().trim()}\nIf the input changed on purpose, run bun pages/build.ts --new-keys (new keys and file ids; the link changes).`);
+const link = /^(shlink:\/\S+)$/m.exec(packed.stdout.toString())?.[1] ?? fail(`no link in pack output:\n${packed.stdout}`);
+// The Bundle and plaintext hashes pack checked (and, with --new-keys, recorded).
+const recorded = JSON.parse(readFileSync(join(work, "keys.json"), "utf8"));
+cfg.bundleSha256 = recorded.bundleSha256;
+for (const st of cfg.studies) st.plaintextSha256 = recorded.studies[st.studyInstanceUid].plaintextSha256;
 
-// 4. Check the Bundle and every study file against the recorded hashes.
-const bundleJson = readFileSync(join(packDir, "bundle.json"));
-const index: StudyIndex = parseStudyIndex(bundleJson);
-check("SHA-256 of the Bundle", cfg.bundleSha256, sha256(bundleJson), (v) => (cfg.bundleSha256 = v));
+// 4. Check every study file against the recorded ciphertext hash.
+const index: StudyIndex = parseStudyIndex(readFileSync(join(packDir, "bundle.json")));
 for (const st of cfg.studies) {
   const entry = index.studies.find((s) => s.studyInstanceUid === st.studyInstanceUid) ?? fail(`study ${st.studyInstanceUid} not packed`);
   const file = entry.files[0];
   if (entry.files.length !== 1 || file.fileId !== st.fileId || file.key !== st.key) fail(`study ${st.studyInstanceUid}: unexpected file in the Bundle`);
   const ct = readFileSync(join(packDir, cfg.segment, `${st.fileId}.bin`));
   if (ct.length !== file.ciphertextLength) fail(`${st.fileId}.bin: ${ct.length} bytes, the Bundle says ${file.ciphertextLength}`);
-  // Decrypt record by record (§9.2) to hash the plaintext.
-  const key = Buffer.from(st.key, "base64url");
-  const plain = createHash("sha256");
-  for (let i = 0; i * RECORD_CIPHERTEXT < ct.length; i++) {
-    const rec = ct.subarray(i * RECORD_CIPHERTEXT, Math.min(ct.length, (i + 1) * RECORD_CIPHERTEXT));
-    const nonce = Buffer.alloc(12);
-    nonce.writeUInt32BE(i, 8);
-    const d = createDecipheriv("aes-256-gcm", key, nonce);
-    d.setAuthTag(rec.subarray(rec.length - 16));
-    plain.update(d.update(rec.subarray(0, rec.length - 16)));
-    d.final();
-  }
-  check(`plaintext SHA-256 of ${st.description}`, st.plaintextSha256, plain.digest("hex"), (v) => (st.plaintextSha256 = v));
   check(`ciphertext SHA-256 of ${st.description}`, st.ciphertextSha256, sha256(ct), (v) => (st.ciphertextSha256 = v));
 }
 if (index.studies.length !== cfg.studies.length) fail(`${index.studies.length} studies packed, ${cfg.studies.length} recorded`);
