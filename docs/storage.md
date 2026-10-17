@@ -287,7 +287,7 @@ Server settings, from `serve` (and `seed`) flags or the environment.
 | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` | Largest append (`Upload-Limit: max-append-size`) |
 | `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 | Lifetime of a passcode link's capability URL |
 
-JSON and JWE request bodies (links, Bundles, `owner.jwe`) are capped at 32 MiB. File bodies stream to the staged file and have no body cap.
+JSON and JWE request bodies are capped at 32 MiB, and a Bundle (`owner.jwe` or a link's `bundle.jwe`) at 16 MiB. A share may have 100 links. File bodies stream to the staged file and have no body cap.
 
 **Blob store.** Without `--s3-bucket`, files are kept in `{data-dir}/blobs/`.
 

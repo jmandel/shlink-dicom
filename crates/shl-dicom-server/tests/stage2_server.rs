@@ -2279,3 +2279,26 @@ async fn test_the_access_log_is_bounded() {
     assert!(r.len() <= MAX_RECIPIENT_BYTES && r.len() >= MAX_RECIPIENT_BYTES - 1 && r.chars().all(|c| c == 'é'), "{}", r.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A share may have 100 links, and a link's bundle.jwe may be 16 MiB.
+#[tokio::test]
+async fn test_links_per_share_and_bundle_size_are_capped() {
+    let dir = temp_data_dir("link_caps");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let new_link = || client.post(format!("{base}/api/shares/{sid}/links")).bearer_auth(&token).json(&json!({ "allowedFiles": [] })).send();
+    let first: Value = new_link().await.unwrap().json().await.unwrap();
+    let lid = first["id"].as_str().unwrap().to_string();
+    for _ in 1..shl_dicom_server::routes_api::MAX_LINKS_PER_SHARE {
+        assert_eq!(new_link().await.unwrap().status(), StatusCode::CREATED);
+    }
+    assert_eq!(new_link().await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let put = |n: usize| client.put(format!("{base}/api/shares/{sid}/links/{lid}/bundle.jwe")).bearer_auth(&token).body(vec![b'a'; n]).send();
+    assert_eq!(put(shl_dicom_server::routes_api::MAX_BUNDLE_BYTES).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(put(shl_dicom_server::routes_api::MAX_BUNDLE_BYTES + 1).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let _ = std::fs::remove_dir_all(&dir);
+}

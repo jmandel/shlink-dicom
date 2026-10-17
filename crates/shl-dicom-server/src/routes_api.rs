@@ -120,6 +120,11 @@ pub async fn create_share(State(state): State<AppState>, headers: HeaderMap, bod
         .into_response()
 }
 
+/// Links one share may have.
+pub const MAX_LINKS_PER_SHARE: i64 = 100;
+/// Largest Bundle (owner.jwe, or a link's bundle.jwe): reports and their PDFs are inline in it.
+pub const MAX_BUNDLE_BYTES: usize = 16 << 20;
+
 /// `POST /api/shares/{sid}/clone`
 pub async fn clone_share(
     State(state): State<AppState>,
@@ -275,7 +280,7 @@ pub async fn put_owner_bundle(
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
     }
-    if body.is_empty() || body.len() > 16 * 1024 * 1024 {
+    if body.is_empty() || body.len() > MAX_BUNDLE_BYTES {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid owner.jwe size" })),
@@ -1017,9 +1022,14 @@ pub async fn create_link(
     };
 
     // Rule: write share file first, catalog last.
-    let db_res: Result<(), String> = (|| {
+    let db_res: Result<(), (StatusCode, String)> = (|| {
+        let bad = |e: String| (StatusCode::BAD_REQUEST, e);
         let mut conn = conn_arc.lock().unwrap();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| bad(e.to_string()))?;
+        let links: i64 = tx.query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0)).map_err(|e| bad(e.to_string()))?;
+        if links >= MAX_LINKS_PER_SHARE {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_LINKS_EXCEEDED".into()));
+        }
         tx.execute(
             "INSERT INTO links (lid, label, long_lived, online, exp, passcode_salt, passcode_hash, remaining_attempts, created_at)
              VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8)",
@@ -1034,24 +1044,20 @@ pub async fn create_link(
                 created_at
             ],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| bad(e.to_string()))?;
 
         for fid in &file_ids {
             tx.execute(
                 "INSERT INTO link_files (lid, file_id) VALUES (?1, ?2)",
                 params![lid, fid],
             )
-            .map_err(|e| format!("allowed file {fid}.bin not found in share: {e}"))?;
+            .map_err(|e| bad(format!("allowed file {fid}.bin not found in share: {e}")))?;
         }
-        tx.commit().map_err(|e| e.to_string())
+        tx.commit().map_err(|e| bad(e.to_string()))
     })();
 
-    if let Err(e) = db_res {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e })),
-        )
-            .into_response();
+    if let Err((status, e)) = db_res {
+        return (status, Json(json!({ "error": e }))).into_response();
     }
 
     if let Err(e) = state.register_link_in_catalog(&sid, &lid) {
@@ -1098,6 +1104,9 @@ pub async fn put_link_bundle(
             Json(json!({ "error": "invalid lid or empty bundle.jwe" })),
         )
             .into_response();
+    }
+    if body.len() > MAX_BUNDLE_BYTES {
+        return json_err(StatusCode::PAYLOAD_TOO_LARGE, format!("a link's bundle.jwe may be at most {MAX_BUNDLE_BYTES} bytes"));
     }
     let Some(conn_arc) = state.open_share_db(&sid) else {
         return StatusCode::NOT_FOUND.into_response();
