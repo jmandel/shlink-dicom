@@ -1,6 +1,6 @@
 # Coordination state (coordinator's working file)
 
-Last updated 15 Oct 2026, about 18:45. This is the coordinator's source of truth for what is in flight, what is decided, and what comes next. **Read this first after a context compaction.** Update it whenever an agent finishes, a decision is made, or the queue changes.
+Last updated 17 Oct 2026, end of day. This is the coordinator's source of truth for what is in flight, what is decided, and what comes next. **Read this first after a context compaction.** Update it whenever an agent finishes, a decision is made, or the queue changes.
 
 Related docs:
 - `docs/EXPERIENCES.md`: the product design for the three experiences, with Josh's decisions.
@@ -21,37 +21,21 @@ Related docs:
 - **Public or outward actions need Josh's OK first:** `exe.dev share set-public`, GitHub issues and comments, pushes.
 - **Shared machine.** Many agents run benchmarks and fuzzers, so load is often 10–25. Timing claims need a quiet-machine rerun. `/tmp` is a RAM tmpfs; put large scratch data on `/media/barracuda` (about 990 GB free).
 
-## Agents: in flight (resume with SendMessage to the id) — STATE AS OF 17 Oct, 11:00 CDT
+## Agents: in flight — STATE AS OF 17 Oct, end of day
 
-**A QUIET WINDOW IS OPEN (started about 10:45 CDT).** The e2e agent is running the scheduler A/B. The decoder, JPEG XL and server agents were told to finish their current command and then do no CPU-heavy work until the coordinator sends them "quiet window over". When the e2e agent messages "DONE", send "quiet window over" to all three. The pi reviewers keep running; they are network-bound.
+None. Every agent's queue is empty and every branch is landed or deleted. Kept on purpose: `scheduler` and `loading-spikes` (loader experiments; see docs/LOADING.md; Josh: keep main's loader for now).
 
-| Agent | Id | Branch / worktree | Doing | Waits on | Next |
-|---|---|---|---|---|---|
-| e2e | a4397313d3a700665 | `scheduler` (b7e0768), ../shlink-dicom-sched; scratch builds /media/barracuda/e2e/r32M, r16M | Single scheduler (#7+#8): one queue for slices and tiles, distance ordering, tile coalescing (LUAD 183→70 requests), overview read cancelled on open (item 3). MR scrub-back not fixed yet. Now: abbreviated A/B of main, scheduler 64 KiB and scheduler 32 KiB on Fast and Slow 4G, desktop and phone. | quiet window | Report the A/B (does 32 KiB keep the open-time gains, and are the J2K pan cost and scrub-back fixed?), then run view/wsi/share checks, then land the scheduler at 64 KiB if it matches or beats main. Record size waits on Josh after that. |
-| decoder | a4b3a594727c938f4 | `dd-a` (tip 07e7f3c), ../shlink-dicom-dda | Rust de-dup: #16, #14, #2 (one is_uncompressed_image rule exported through shl-dicom-wasm; SEG/LabelMap/HeightMap explicitly EXCLUDED with reasons), C (Rust tests read vector.json; one Ds helper), #12/#13 (value precedence per-frame>shared>top; palette round(v/257)), JWE cty (writer emits, reader requires; golden bundle.jwe regenerated). | paused (quiet window) | Hash gates, then rebase onto main: conflicts with review fixes in dicom_io.rs, range.rs and the server crate are expected; keep both behaviours. Report per-file hash differences (expected from #12/#13). Then: the seed wraps bare data sets (sample_pack.rs); #3/#4/#5 (single Rust Bundle builder and subsetter by WHOLE STUDY, exported to /share); #11 (Rust walkers call parse.rs); #1 (frame boundaries with JPEG XL, exported). Branch `seg-encode` (845e034) is DROPPED; delete it. |
-| JPEG XL (browser de-dup) | a26e1d2aaf1165705 | `dedup-records` (bc61112, #6) → `dedup-singleframe` → `dedup-walker` → `dedup-syntaxes` (f76c203: #9, #16 TS, #10 one walker, #14 TS table, C TS, B jwe.ts, #15 UID web/core/implementation.ts, review 4.1 ae717c6, review 4.2 f76c203); `dedup-palette` (61d63d9, #13, HELD); `part10-wrap` (7d0008f: the Share page wraps bare data sets through the Rust part10_wrap in an opt-in wasm module) | First gate pass: matches main; LUAD ICC render pixel-identical. Re-runs of view/display/how/video were going (environment failures). | paused (quiet window) | Land dedup-records, then the stack, then part10-wrap, each at parity with main. Then apply the stashed jwe.test.ts cty assertions (after dd-a's golden lands). Land #13 only once the decoder's palette fix is in viewer-kit/dist and all 31 palettes match (/media/barracuda/dd/cmppal.ts). #17 waits for the Rust Bundle builder. Worktrees need data/samples -> /media/barracuda/s3-samples. |
-| server fixes | aeea9f1cb518b5617 | `review-fixes-3`, ../shlink-dicom-revfix | Round 3: the sample passcode link REFILLS instead of locking (per-link policy set only by the seed); SHL_PUBLIC_ORIGIN configured origin (forwarded headers only as fallback; set it in the VM env). | paused (quiet window) | Report, then merge. Rounds 1 and 2 are merged (e31ba7c…, dc3f146). |
-| release / Pages | acb1873c8bf73c54c | `portable`, ../shlink-dicom-portable | Josh: no hard architecture limits. Drop the global x86-64-v3 flag (opt-in for bench and our server); x86 releases ship baseline + .v3 binaries, the bootstrap picks v3 when the CPU has it; linux-aarch64 release; portability CI on macos-14 and ubuntu-24.04-arm; per-arch Bun pin; README. | — | Report, then merge. After that the main-server deploy from releases (server-release is merged at e1ef25b but NOT deployed to the live VM; deploy it only after portable lands, and remove /opt/shlink-dicom, /opt/rust, /opt/bun after the first run). |
+Landed 17 Oct (all with a test shown failing before the fix):
+- All verified review findings in docs/REVIEW-PLAN.md (server M1–M29, crypto/client K/R/T/P/S/W/X, outside reviews E1–E5 and C1–C7, DeepSeek max items), except "Not fixing".
+- One implementation: Rust Bundle builder, study order, subsets, patient rule, report-to-study links (report_links), element walker (parse::walk; ds.rs strict reader is the documented exception), frame-boundary rule, Part 10 wrap from the header (never a whole-file read); the viewer reads links and Bundles with crates/shl-dicom-reader in a worker (+~0.1 s open on Fast 4G, accepted).
+- Test data: synthetic corpus gap cases; sample mirror https://github.com/jmandel/shlink-dicom-samples (strict licence rule; fetch scripts try mirror, then origin, always SHA-256).
+- docs/LOADING.md: loader design notes and measurements.
 
-**pi review (adversarial, round 2).** Briefs, the pack and outputs are in /media/barracuda/pireview.
-- **Argon:** tmux `pireview`, google/gemini-4-argon, thinking high. server-report.md is COMPLETE (14 findings, unverified). crypto-report.md and client-report.md are in progress; crypto hit an upstream timeout and was nudged to continue.
-- **DeepSeek:** tmux `pireview-ds`, deepseek/deepseek-v4.1-flash-1017, thinking high, routed via DeepInfra in ~/.pi/agent/models.json (DeepSeek's own endpoint is blocked by Josh's OpenRouter no-training setting; maxTokens is capped at 65536 so DeepInfra passes the context filter). Reports ds-*-report.md are in progress. Josh: don't hurry them.
-- **Watchers:** background tasks for the Argon and DeepSeek sets. When DeepSeek completes, run /media/barracuda/pireview/launch-dsmax.sh (same briefs, thinking max, tmux `pireview-dsmax`).
-- **After all reports:** verify every finding against the code (as in round 1: read-only verification agents by area), deduplicate across reviewers, compare Argon high against DeepSeek high against DeepSeek max, and bring Josh one list. Stale items about the old bootstraps can be dropped (replaced by release bootstraps).
-- **Josh decided:** the sample passcode link refills (in progress above). The X-Forwarded-Host "open redirect" doesn't apply on exe.dev (the proxy overwrites Host), but a client X-Forwarded-Proto passes through, hence SHL_PUBLIC_ORIGIN.
+Live: server-a54d65d (shlink-dicom.exe.xyz), sandbox-55fa7df, Pages green.
 
-**Waiting on Josh:** record size (32 KiB after the scheduler A/B is the coordinator's recommendation). Nothing else.
+Gate tooling: /media/barracuda/dd/gates.sh (one cargo target dir per worktree; single check groups; PACK_CACHE). Rule: no multi-hour runs; gate with the groups a change touches; push only when tests pass (&&).
 
-**Housekeeping:**
-- **Worktrees to remove once merged:** loader (sample-archives, merged), revfix (after round 3), portable, srvrel (merged).
-- **Old worktrees:** ddbase and dd/basewt are the decoder agent's baselines; t0 is kept for quiet benchmark runs.
-- **Disk:** the main checkout's build caches and ~/.cache/shl-quirks live on /media/barracuda behind symlinks.
-
-**Published today:**
-- review response artifact https://claude.ai/artifact/3fUZQtWKrvCKXU1Ac9er93 (4.1/4.2 are "pending" until the JPEG XL stack lands; then republish dist/review/review-response.html with those hashes);
-- review pack https://claude.ai/artifact/W2s9X3YeYeyc2BjEDv3wRj;
-- GitHub Pages demo joshuamandel.com/shlink-dicom/;
-- X article.
+Agent ids (all idle, resumable): browser (web/) a26e1d2aaf1165705; decoder/Rust a4b3a594727c938f4; server/sandbox aeea9f1cb518b5617; e2e/loader a4397313d3a700665.
 
 ## Agents: finished, can be resumed
 
