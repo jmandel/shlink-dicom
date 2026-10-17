@@ -18,8 +18,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: "1.4.3"
-  WASM_BINDGEN_VERSION: "0.2.128"
   CARGO_TERM_COLOR: never
 
 jobs:
@@ -28,59 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Native builds target x86-64-v3 (.cargo/config.toml); the packer's encoder runs here.
-      - name: Check the CPU supports x86-64-v3
-        run: |
-          for f in avx2 bmi1 bmi2 fma movbe; do
-            grep -qw "$f" /proc/cpuinfo || { echo "::error::this runner's CPU lacks $f (x86-64-v3)"; exit 1; }
-          done
-          grep -m1 "model name" /proc/cpuinfo
-
-      - uses: oven-sh/setup-bun@v2
+      # Toolchain, wasm modules and web app: shared with the release workflows (.github/actions/).
+      # The packer is native x86-64-v3 code (.cargo/config.toml).
+      - uses: ./.github/actions/toolchain
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Rust and wasm-bindgen
-        run: |
-          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
-          rustup default stable
-          t="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
-          curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$t.tar.gz" \
-            | tar -xz -C "$HOME/.cargo/bin" --strip-components=1 "$t/wasm-bindgen"
-          cargo --version; wasm-bindgen --version
+          cache-key: pages
+          native: "true"
+      - uses: ./.github/actions/wasm
+      - uses: ./.github/actions/web
 
       - uses: actions/cache@v6
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-            codecs/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'codecs/Cargo.lock', '.cargo/config.toml') }}
-          restore-keys: cargo-${{ runner.os }}-
-
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.bun/install/cache
-            codecs/mpeg2-wasm/dist/ffmpeg-*.tar.xz
-            dist/pages-sources
-          key: inputs-${{ hashFiles('bun.lock', 'codecs/mpeg2-wasm/ffmpeg-source.json', 'pages/demo-link.json') }}
-          restore-keys: inputs-
-
-      - name: Wasm modules
-        run: |
-          cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-wasm
-          wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
-          (cd codecs && cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm)
-          wasm-bindgen --target web --out-dir codecs/shl-dicom-transcode-wasm/pkg codecs/target/wasm32-unknown-unknown/release/shl_dicom_transcode_wasm.wasm
-          bun viewer-kit/scripts/build.mjs
-
-      - name: Web app
-        run: |
-          bun install --frozen-lockfile
-          bun web/build.ts > /dev/null
+          path: dist/pages-sources
+          key: pages-sources-${{ hashFiles('pages/demo-link.json') }}
+          restore-keys: pages-sources-
 
       - name: Packer
         run: cargo build -q --release -p shl-dicom-server
@@ -94,6 +53,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
