@@ -7,7 +7,7 @@ name: Sandbox release
 
 on:
   push:
-    branches: [main]
+    branches: [main, sandbox-release]  # TEMPORARY: sandbox-release only to test from the branch; drop before merging
     paths:
       - imaging-sandbox/**
       - crates/shl-dicom-wasm/**
