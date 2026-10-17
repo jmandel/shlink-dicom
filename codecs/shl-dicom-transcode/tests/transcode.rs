@@ -97,9 +97,31 @@ fn declines_leave_reasons() {
     }
 }
 
+/// The (round, seed, target syntax) of each mutation: every seed with every target, round after
+/// round, up to `iterations` in all.
+fn mutation_plan(seeds: usize, iterations: usize) -> Vec<(usize, usize, &'static str)> {
+    let targets = [JPEG_LOSSLESS_SV1, shl_dicom_transcode::JPEG_2000_LOSSLESS];
+    (0..)
+        .flat_map(|round| (0..seeds).flat_map(move |seed| targets.into_iter().map(move |ts| (round, seed, ts))))
+        .take(iterations.max(seeds * targets.len()))
+        .collect()
+}
+
+#[test]
+fn every_seed_meets_every_target() {
+    for seeds in [1, 2, 3, 7] {
+        let plan = mutation_plan(seeds, 200);
+        for seed in 0..seeds {
+            for ts in [JPEG_LOSSLESS_SV1, shl_dicom_transcode::JPEG_2000_LOSSLESS] {
+                assert!(plan.iter().any(|&(_, s, t)| s == seed && t == ts), "{seeds} seeds: seed {seed} never meets {ts}");
+            }
+        }
+    }
+}
+
 /// Mutated files never panic. Seeds: the files under $SHL_TRANSCODE_FUZZ_DIR (for example the
-/// corpus's uncompressed samples) plus the files built here; $SHL_TRANSCODE_FUZZ_ITERS rounds,
-/// alternating between the two output syntaxes.
+/// corpus's uncompressed samples) plus the files built here; $SHL_TRANSCODE_FUZZ_ITERS mutations
+/// (at least one per seed and target), each seed with each output syntax in turn.
 #[test]
 fn mutated_files_never_panic() {
     let mut seeds = vec![file("1.2.840.10008.1.2", false, 3, 1, 2, 9, 7), file("1.2.840.10008.1.2.1", true, 1, 0, 2, 9, 7)];
@@ -120,8 +142,8 @@ fn mutated_files_never_panic() {
         x ^= x << 17;
         x
     };
-    for i in 0..iterations {
-        let mut f = seeds[i % seeds.len()].clone();
+    for (_, seed, ts) in mutation_plan(seeds.len(), iterations) {
+        let mut f = seeds[seed].clone();
         let span = f.len().clamp(1, 4096);
         for _ in 0..(1 + rnd() % 8) {
             let at = (rnd() as usize) % span;
@@ -136,7 +158,6 @@ fn mutated_files_never_panic() {
                 }
             }
         }
-        let ts = if i % 2 == 0 { JPEG_LOSSLESS_SV1 } else { shl_dicom_transcode::JPEG_2000_LOSSLESS };
         let _ = transcode_part10(&f, ts);
     }
 }
