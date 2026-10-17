@@ -28,6 +28,30 @@ export interface UploadProgress {
   finished?: PackedFile;
 }
 
+/**
+ * Makes the share and, with a passcode, its link, then runs `start`, which saves the upload job.
+ * The link is made with no files: the server lists only files it holds, and the files are added
+ * once uploaded. If anything fails before `start` returns, the share is deleted, so no share is
+ * left that no saved job can continue.
+ */
+export async function openShare<T>(
+  root: Pick<ShareApi, "createShare">,
+  connect: (sid: string, token: string) => ShareApi,
+  o: { expiresAt: number; passcode: string; link: { label: string | null; exp: number | null; longLived: boolean } },
+  onConn: (c: Connection) => void,
+  start: (api: ShareApi, sid: string, token: string) => Promise<T>,
+): Promise<T> {
+  const created = await persist(() => root.createShare(o.expiresAt), onConn);
+  const api = connect(created.share.id, created.controlToken);
+  try {
+    if (o.passcode) await persist(() => api.createLink({ ...o.link, passcode: o.passcode, allowedFiles: [] }), onConn);
+    return await start(api, created.share.id, created.controlToken);
+  } catch (e) {
+    await api.deleteShare().catch(() => {});
+    throw e;
+  }
+}
+
 /** Failures worth waiting out: no connection, a stall, a proxy or server error, a busy server. */
 export function isTransient(e: unknown): boolean {
   // 409 without an offset: another request for the same file is still finishing on the server.

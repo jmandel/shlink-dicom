@@ -20,7 +20,7 @@ import {
   COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, uncompressedImages, workers,
   type CompressMode, type CompressProgress, type CompressSummary, type Encoding, type SeriesEstimate,
 } from "./lib/compress";
-import { clearJob, loadJob, persist, saveJob, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
+import { clearJob, loadJob, openShare, persist, saveJob, uploadFiles, type Connection, type UploadFile, type UploadJob, type UploadProgress } from "./lib/upload";
 import { StreamPlan } from "./lib/stream";
 import { recordCount } from "../core/range";
 import { clearStaging, openStager, type Stager } from "./lib/stage";
@@ -796,33 +796,36 @@ async function upload() {
     const ownerKey = randomKeyB64();
     const early = (c: Connection) => ($("up-main").textContent = c.state === "ok" ? "" : "Connection lost, retrying…");
     const expiresAt = job.exp ?? Math.floor(Date.now() / 1000) + SERVER_MAX_DAYS * 86400;
-    const created = await persist(() => new ShareApi(cfg.apiBase).createShare(expiresAt), early);
-    const api = new ShareApi(cfg.apiBase, { sid: created.share.id, token: created.controlToken });
     // With a passcode, the link is made now, so the passcode is never saved for a reload.
-    if (passcode) {
-      const allowedFiles = packed.map((p) => `${p.fileId}.bin`);
-      await persist(() => api.createLink({ label: job.recipient, passcode, exp: job.exp, longLived: job.longLived, allowedFiles }), early);
-    }
-    // Nothing to compress: the owner Bundle first; with the manage credential it is all a reload
-    // needs to continue. Compressing: the files' sizes come later, so the saved job's plan is.
-    let owner: any = null;
-    if (!streaming) {
-      owner = buildBundle(col, packed);
-      const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
-      await persist(() => api.putOwner(ownerJwe), early);
-    }
-    if (job.source.kind === "files") {
-      $("up-tech").textContent = "Noting which files these are, to continue after a reload";
-      job.source = { ...job.source, files: await ids! };
-      if (pickedHandles) await saveHandles(pickedHandles);
-      else await clearHandles();
-    }
-    const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
-    // A link source's address holds its key: it is not kept once the files are planned; continuing
-    // after a reload asks for it again.
-    if (job.source.kind === "link") job.source = { ...job.source, link: undefined };
-    const full: UploadJob = { ...job, sid: created.share.id, token: created.controlToken, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000), expiresAt };
-    saveJob(full);
+    const { api, full, owner } = await openShare(
+      new ShareApi(cfg.apiBase),
+      (sid, token) => new ShareApi(cfg.apiBase, { sid, token }),
+      { expiresAt, passcode, link: { label: job.recipient, exp: job.exp, longLived: job.longLived } },
+      early,
+      async (api, sid, token) => {
+        // Nothing to compress: the owner Bundle first; with the manage credential it is all a reload
+        // needs to continue. Compressing: the files' sizes come later, so the saved job's plan is.
+        let owner: any = null;
+        if (!streaming) {
+          owner = buildBundle(col, packed);
+          const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
+          await persist(() => api.putOwner(ownerJwe), early);
+        }
+        if (job.source.kind === "files") {
+          $("up-tech").textContent = "Noting which files these are, to continue after a reload";
+          job.source = { ...job.source, files: await ids! };
+          if (pickedHandles) await saveHandles(pickedHandles);
+          else await clearHandles();
+        }
+        const titles = studies.map((s) => plainStudyTitle(s.description, studyModalities(s)));
+        // A link source's address holds its key: it is not kept once the files are planned;
+        // continuing after a reload asks for it again.
+        if (job.source.kind === "link") job.source = { ...job.source, link: undefined };
+        const full: UploadJob = { ...job, sid, token, ownerKey, title: titles.join(", "), startedAt: Math.floor(Date.now() / 1000), expiresAt };
+        saveJob(full);
+        return { api, full, owner };
+      },
+    );
     if (streaming) {
       streaming.saved(full);
       await runUpload({ job: full, api, owner, packed, col, fresh: true, stream: streaming.stream });
