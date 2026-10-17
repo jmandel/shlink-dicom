@@ -13,8 +13,11 @@
 // 4. Reports: each PDF parses with PDF.js (and passes `qpdf --check` when
 //    qpdf is installed), every page carries the synthetic-report footer, and the PDF
 //    text equals the text/plain attachment.
+// 5. Compressed copies: every uncompressed image has an SV1 and a J2K copy,
+//    and pydicom (web/checks/pixel-identity.py, through uv and codec-corpus)
+//    decodes each to the stored image's pixels with no other element changed.
 
-import { mkdirSync, rmSync, readdirSync, statSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, readdirSync, statSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseDicom, str } from "../src/dicom.ts";
 import { pixelDataElement, samePixelFrames, basicOffsets, basicOffsetTableValid } from "../scripts/lib/dicom-rewrite.ts";
@@ -261,7 +264,23 @@ console.log("\nLossless compressed copies (transfer syntax negotiation)");
     }
     check(`every uncompressed image (${uncompressed}) has an SV1 and a J2K copy made from the current file; no failures`, complete === uncompressed && fresh === uncompressed && vm.failures.length === 0, { complete, fresh, failures: vm.failures.length });
     for (const [id, z] of sizes) console.log(`  ${id.padEnd(26)} stored ${(z.stored / 1e6).toFixed(1).padStart(6)} MB; uncompressed images ${(z.uncompressed / 1e6).toFixed(1).padStart(6)} MB -> SV1 ${(z.sv1 / 1e6).toFixed(1).padStart(5)} MB, J2K ${(z.j2k / 1e6).toFixed(1).padStart(5)} MB`);
-    // Pixel identity through an independent decoder (the copies were made by dcmtk and OpenJPEG).
+    // Pixel identity through decoders that are not this project's code: the copies are made by
+    // its own transcoder (scripts/lib/variants.ts), so they are checked with pydicom and its
+    // plugins (pylibjpeg-libjpeg, pylibjpeg-openjpeg, GDCM), pinned in codec-corpus/uv.lock, by
+    // web/checks/pixel-identity.py: same pixels, and no other element changed. Required.
+    {
+      const pairs = vm.instances.flatMap((e: any) => e.variants.filter((x: any) => x.size).map((x: any) => ({ source: join(live, e.source), shared: join(VDIR, x.path) })));
+      writeFileSync(join(WORK, "variant-pairs.json"), JSON.stringify(pairs));
+      const r = Bun.spawnSync(["uv", "run", "--quiet", "--project", join(ROOT, "../codec-corpus"), "python", join(ROOT, "../web/checks/pixel-identity.py"), join(WORK, "variant-pairs.json")], { stdout: "pipe", stderr: "pipe" });
+      let pid: any = null;
+      try { pid = JSON.parse(r.stdout.toString()); } catch {}
+      check(
+        `pydicom (pylibjpeg / OpenJPEG / GDCM) decodes every copy to the stored image's pixels, with no other element changed (${pid?.identical ?? 0}/${pairs.length})`,
+        !!pid && pairs.length === 2 * uncompressed && pid.checked === pairs.length && pid.identical === pairs.length,
+        pid ? pid.differ.slice(0, 3) : r.stderr.toString().slice(-400),
+      );
+    }
+    // And with this project's own decoder, when built.
     const decoder = process.env.SHL_DICOM_DECODE ?? join(ROOT, "../codecs/target/coord/release/shl-dicom-decode");
     if (existsSync(decoder)) {
       const h = (f: string) => new Bun.CryptoHasher("sha256").update(readFileSync(f)).digest("hex");

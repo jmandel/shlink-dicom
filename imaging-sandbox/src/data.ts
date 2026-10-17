@@ -15,7 +15,7 @@ export interface Instance {
   path: string;
   bytes: Uint8Array;
   header: DicomElement[];
-  // Losslessly compressed copies (scripts/make-variants.py), by transfer
+  // Losslessly compressed copies (scripts/lib/variants.ts), by transfer
   // syntax UID; served from disk.
   variants: Map<string, { file: string; size: number }>;
 }

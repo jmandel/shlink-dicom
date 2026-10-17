@@ -25,8 +25,9 @@
 import { $ } from "bun";
 import { createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import qrcode from "qrcode-generator";
+import { fetchPinned } from "../deploy/lib/pinned-fetch";
 import { parseStudyIndex, type StudyIndex } from "../web/core/bundle";
 import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "../web/core/range";
 
@@ -101,18 +102,13 @@ if (newKeys) {
 // 1. The input, at the pinned commit.
 const inputs: string[] = [];
 for (const f of cfg.source.files) {
-  const local = join(cache, cfg.source.commit, f.path);
-  let bytes = existsSync(local) ? readFileSync(local) : null;
-  if (!bytes || sha256(bytes) !== f.sha256) {
-    const url = `https://raw.githubusercontent.com/${cfg.source.repo}/${cfg.source.commit}/${f.path}`;
-    const res = await fetch(url);
-    if (!res.ok) fail(`${url}: HTTP ${res.status}`);
-    bytes = Buffer.from(await res.arrayBuffer());
-    mkdirSync(dirname(local), { recursive: true });
-    writeFileSync(local, bytes);
-  }
+  const url = `https://raw.githubusercontent.com/${cfg.source.repo}/${cfg.source.commit}/${f.path}`;
+  const keep = join(cache, cfg.source.commit);
+  const bytes = await fetchPinned({ url, sha256: f.sha256, name: f.path }, { keep }).catch((e) =>
+    fail(`${(e as Error).message}. If the input changed on purpose, run bun pages/build.ts --new-keys (new keys and file ids; the link changes).`),
+  );
   check(`SHA-256 of ${f.path}`, f.sha256, sha256(bytes), (v) => (f.sha256 = v));
-  inputs.push(local);
+  inputs.push(join(keep, f.path));
 }
 console.log(`input: ${inputs.length} files from ${cfg.source.repo}@${cfg.source.commit.slice(0, 12)}, hashes match`);
 

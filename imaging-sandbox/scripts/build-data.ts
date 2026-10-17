@@ -19,19 +19,22 @@
 // 4. Writes everything, with manifest.json and SHA256SUMS, to --out, and a
 //    plain per-study export of the DICOM files and reports to --export.
 // 5. Makes losslessly compressed copies of the uncompressed images
-//    (JPEG Lossless SV1 with dcmtk, JPEG 2000 Lossless with OpenJPEG) in
-//    --variants, kept only if they decode to the original pixels. They are
+//    (JPEG Lossless SV1 and JPEG 2000 Lossless, with this project's
+//    transcoder: scripts/lib/variants.ts) in --variants, each checked by the
+//    transcoder to decode to the original pixels. They are
 //    not in SHA256SUMS: their bytes depend on the encoder versions.
 //
 // The output depends only on the pinned sources, the config and this code,
 // so two runs produce identical bytes (checked by test/data-check.ts).
 
-import { existsSync, mkdirSync, rmSync, renameSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, rmSync, renameSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, relative, dirname } from "node:path";
 import { readTgz } from "../src/tar.ts";
+import { fetchPinned } from "../../deploy/lib/pinned-fetch.ts";
 import { parseDicom, str, int } from "../src/dicom.ts";
 import { rewriteDicom, samePixelFrames, mintUid, type HeaderSet } from "./lib/dicom-rewrite.ts";
 import { addOffsetTable } from "./lib/offset-table.ts";
+import { makeVariants } from "./lib/variants.ts";
 import { buildReport, conclusion, type ReportInput } from "./lib/report.ts";
 import { renderText } from "./lib/doc.ts";
 import { buildPdf } from "./lib/pdf.ts";
@@ -47,7 +50,7 @@ const SOURCES = arg("--sources", join(ROOT, "build/sources"));
 const EXPORT = args.includes("--export") && args[args.indexOf("--export") + 1] === "none" ? null : arg("--export", join(ROOT, "out"));
 const quiet = args.includes("--quiet");
 // Losslessly compressed copies for transfer syntax negotiation
-// (scripts/make-variants.py; needs uv and dcmtk). "--no-variants" skips them.
+// (scripts/lib/variants.ts; needs codecs/shl-dicom-transcode-wasm/pkg). "--no-variants" skips them.
 const VARIANTS = args.includes("--no-variants") ? null : arg("--variants", join(ROOT, "build/variants"));
 const log = (...a: unknown[]) => { if (!quiet) console.log(...a); };
 
@@ -89,21 +92,8 @@ async function source(archive: string): Promise<Uint8Array> {
   if (!s) throw new Error(`no source for ${archive}`);
   // SOURCE_CACHE: extra directories (colon-separated) searched by file name
   // before downloading; a file is used only if its SHA-256 matches the pin.
-  const cache = (process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean).map((d) => join(d, archive));
-  for (const candidate of [join(SOURCES, archive), join(ROOT, "../data/samples", archive), ...cache]) {
-    if (existsSync(candidate)) {
-      const b = new Uint8Array(await Bun.file(candidate).arrayBuffer());
-      if (sha256(b) === s.sha256) { log(`source ${archive}: ${relative(process.cwd(), candidate)} (hash ok)`); return b; }
-    }
-  }
-  log(`source ${archive}: downloading ${s.url}`);
-  const res = await fetch(s.url);
-  if (!res.ok) throw new Error(`download ${s.url}: HTTP ${res.status}`);
-  const b = new Uint8Array(await res.arrayBuffer());
-  if (sha256(b) !== s.sha256) throw new Error(`${archive}: SHA-256 ${sha256(b)} does not match the pinned ${s.sha256}`);
-  mkdirSync(dirname(join(SOURCES, archive)), { recursive: true });
-  writeFileSync(join(SOURCES, archive), b);
-  return b;
+  const caches = [join(ROOT, "../data/samples"), ...(process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean)];
+  return fetchPinned({ url: s.url, sha256: s.sha256, name: archive }, { keep: SOURCES, caches, log: (l) => log(`source ${l}`) });
 }
 
 const compact = (d: string) => d.replace(/-/g, "");
@@ -297,11 +287,8 @@ rmSync(OUT, { recursive: true, force: true });
 renameSync(tmp, OUT);
 const digest = sha256(new TextEncoder().encode(sums.join("\n") + "\n"));
 if (VARIANTS) {
-  const p = Bun.spawnSync(["uv", "run", "--quiet", "--python", "3.12", join(ROOT, "scripts/make-variants.py"), "--dataset", OUT, "--out", VARIANTS], { stdout: "pipe", stderr: "pipe" });
-  const out = p.stdout.toString() + p.stderr.toString();
-  if (p.exitCode !== 0) throw new Error(`make-variants failed:\n${out}`);
-  const vm = JSON.parse(require("node:fs").readFileSync(join(VARIANTS, "manifest.json"), "utf8"));
-  if (vm.failures.length) throw new Error(`lossless copies failed the pixel check:\n${JSON.stringify(vm.failures.slice(0, 5))}`);
-  log(out.trim());
+  const v = await makeVariants(OUT, VARIANTS);
+  if (v.failures.length) throw new Error(`lossless copies failed:\n${JSON.stringify(v.failures.slice(0, 5))}`);
+  log(`variants: ${v.instances} uncompressed instances, ${v.kept} copies kept, ${v.failures.length} failures`);
 }
 log(`wrote ${sums.length} files to ${relative(process.cwd(), OUT) || "."}; SHA-256 of SHA256SUMS: ${digest}`);
