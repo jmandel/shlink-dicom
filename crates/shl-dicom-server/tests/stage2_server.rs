@@ -2471,3 +2471,41 @@ async fn test_a_failed_whole_file_put_leaves_no_upload() {
     assert_eq!(client.put(&url).bearer_auth(&token).body(vec![1u8; 5000]).send().await.unwrap().status(), StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An append whose share is deleted while its body arrives leaves no staging directory behind.
+#[tokio::test]
+async fn test_an_append_to_a_deleted_share_leaves_nothing() {
+    let dir = temp_data_dir("append_after_delete");
+    let state = test_state(&dir);
+    let base = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+    let sid = created["share"]["id"].as_str().unwrap().to_string();
+    let token = created["controlToken"].as_str().unwrap().to_string();
+    let fid = b64url_encode(&[48u8; 16]);
+    let url = format!("{base}/api/shares/{sid}/files/{fid}.bin");
+    assert_eq!(client.put(&url).bearer_auth(&token).header("Upload-Complete", "?0").send().await.unwrap().status(), StatusCode::CREATED);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(1);
+    tx.send(Ok(vec![2u8; 1000])).await.unwrap();
+    let req = client
+        .patch(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/partial-upload")
+        .header("Upload-Offset", "0")
+        .header("Upload-Complete", "?0")
+        .body(reqwest::Body::wrap_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        .send();
+    let patch = tokio::spawn(req);
+    for _ in 0..200 {
+        if state.part_path(&sid, &fid).metadata().is_ok_and(|m| m.len() > 0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    state.delete_share(&sid).unwrap();
+    tx.send(Ok(vec![2u8; 1000])).await.unwrap();
+    drop(tx);
+    assert_eq!(patch.await.unwrap().unwrap().status(), StatusCode::NOT_FOUND);
+    assert!(!state.staging_dir(&sid).exists(), "staging directory left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}

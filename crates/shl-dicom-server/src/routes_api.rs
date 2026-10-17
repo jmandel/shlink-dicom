@@ -514,6 +514,10 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
     let Some(local) = start.checked_sub(flushed) else {
         return Append::Fail(json_err(StatusCode::CONFLICT, "that part of the upload has already been stored"));
     };
+    // Not for a share deleted (or expired) meanwhile: its staging directory would outlive it.
+    if !state.catalog_has_share(sid) {
+        return Append::Fail(StatusCode::NOT_FOUND.into_response());
+    }
     let _ = tokio::fs::create_dir_all(state.staging_dir(sid)).await;
     let Ok(mut file) = tokio::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&part).await else {
         return Append::Fail(json_err(StatusCode::INTERNAL_SERVER_ERROR, "could not open the upload file"));
@@ -562,6 +566,12 @@ async fn append_body(state: &AppState, sid: &str, file_id: &str, start: u64, tot
         got += chunk.len() as u64;
     }
     let _ = file.flush().await;
+    // Deleted while the body arrived: what this request staged goes with it.
+    if !state.catalog_has_share(sid) {
+        drop(file);
+        let _ = tokio::fs::remove_dir_all(state.staging_dir(sid)).await;
+        return Append::Fail(StatusCode::NOT_FOUND.into_response());
+    }
     Append::Ok(start + got)
 }
 
