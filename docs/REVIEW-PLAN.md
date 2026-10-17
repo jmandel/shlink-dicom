@@ -1,6 +1,6 @@
 # Review findings: fix plan
 
-Written 17 Oct 2026. It covers every finding from the second review round that checked out against the code: the Argon and DeepSeek reviews of the server, crypto and client areas. Each was verified on main at 21e5910 or 7bf2c28. Spurious and refuted claims are listed at the end with the reason.
+Written 17 Oct 2026. Status at 18:00 CDT: M1 (d4d60ff), X1 (74e8928), the server round (598b0c5, deployed live on both VMs) and dd-a (0678bcb, with `cty`) are on main. It covers every finding from the second review round that checked out against the code: the Argon and DeepSeek reviews of the server, crypto and client areas. Each was verified on main at 21e5910 or 7bf2c28. Spurious and refuted claims are listed at the end with the reason.
 
 Rule (Josh): every verified finding gets fixed. Spec SHALL violations, over-sharing, persisted secrets and false claims in our own spec are never "Low".
 
@@ -21,7 +21,7 @@ Ids are from the server verification (M1–M29).
 
 | Id | Finding | Fix | State |
 |---|---|---|---|
-| M1 | Any share's token can delete another share's link and end its sessions | Bind `lid` to `sid` in both statements; 404 otherwise | Written, `m1-alone` |
+| M1 | Any share's token can delete another share's link and end its sessions | Bind `lid` to `sid` in both statements; 404 otherwise | Landed d4d60ff |
 | K4 | Link ids are 128 bits; SHL requires ≥256 bits of entropy in the manifest URL | 32-byte link ids, their own 43-character check; state the rule in our spec | Sent |
 | M3 | `Upload-Length` overflow gets past the share byte limit | Reject above `i64::MAX`; saturating sums | Written |
 | M2 | Clone racing a delete keeps references to deleted blobs | Conditional reference (`ref_count > 0`) | Written |
@@ -85,6 +85,18 @@ Where the logic exists in Rust, the browser calls it through wasm instead of add
 | W1 | Wasm32 overflow in the header scan's meta loop | `checked_add` |
 | K2 | Rust Bundle JWE has no `cty` | Done on dd-a, 9c626aa; lands with that branch |
 | D1 | Cut-short headers throw; video without delimiter (round 1, 4.1 and 4.2) | Done on `dedup-syntaxes` (77d35e6, 7b883db); lands with the stack |
+
+## Outside review: interrupted, resumed and changed shares
+
+A second outside review (17 Oct) looked at sharing that is interrupted, resumed or changed. Verified with repros in `/media/barracuda/pireview/verify-ext/`.
+
+| Id | Finding | Verdict | Fix | Owner |
+|---|---|---|---|---|
+| E1 | `upload-job` (P1) creates the passcode link with files not uploaded yet: 400 foreign key, share stranded | Confirmed, branch only | Early link with no files; nothing stranded on failure | JPEG XL agent |
+| E2 | Two patients in one import: the Bundle takes the first patient's demographics and files the other's studies under them, even when the first patient's study is left out | Confirmed, main | Patient from included studies only; refuse more than one patient; state the rule in the spec | Decoder agent (dd-b) |
+| E3 | Resume checks only size and the first and last 64 KiB, then re-encrypts the cut record under the same key and nonce: mixed old and new content, and GCM nonce reuse against a host that under-reports its offset | Confirmed, main | Per-chunk plaintext hashes in the saved job; any mismatch gets a new file id and key | JPEG XL agent |
+| E4 | Reload during a compressing upload: attached and portal reports lost; a link source's report choices reset, sharing reports the sharer left out | Partly (compressing uploads), worse than stated | Save the final report selection in the job; portal resume keeps the portal's Patient | JPEG XL agent |
+| E5 | Opening Share in another tab deletes this tab's staged files; one saved job per browser | Confirmed | Web Lock per staging session; jobs keyed per share | JPEG XL agent |
 
 ## Not fixing
 
