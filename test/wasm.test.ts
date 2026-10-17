@@ -2,7 +2,7 @@
 // Self-contained: builds a synthetic multi-frame file. Run: bun test test/wasm.test.ts
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { initSync, offset_table_patch_wasm } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+import { FragmentWalker, initSync, offset_table_first_fragment_wasm, offset_table_patch_wasm } from "../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
 
 initSync({ module: readFileSync(new URL("../crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm", import.meta.url)) });
 
@@ -105,6 +105,25 @@ test("frames split over several fragments point at each frame's first fragment",
   const r = apply(file)!;
   const { bot, fragments } = readPixelData(r.out);
   expect(bot).toEqual([0, 3, 6, 9].map((i) => fragments[i].at));
+});
+
+test("the fragment walker, fed what it asks for, gives the in-memory patch", () => {
+  for (const split of [1, 3]) {
+    const { file } = slide(4, split);
+    const want = offset_table_patch_wasm(file)!;
+    const first = offset_table_first_fragment_wasm(file)!;
+    const w = new FragmentWalker(first, file.length);
+    let reads = 0;
+    for (let at; (at = w.want()); reads++) w.feed(file.subarray(at[0], at[0] + at[1]));
+    expect(reads).toBe(4 * split + 1);
+    const got = w.patch(file.subarray(0, first))!;
+    expect([got.resume_at, got.frames, Array.from(got.head)]).toEqual([want.resume_at, want.frames, Array.from(want.head)]);
+    // Cut short, the walk fails and there is no patch.
+    const cut = new FragmentWalker(first, file.length - 2);
+    for (let at; (at = cut.want()); ) cut.feed(file.subarray(at[0], at[0] + at[1]));
+    expect(cut.patch(file.subarray(0, first))).toBeUndefined();
+    for (const x of [want, got, w, cut]) x.free();
+  }
 });
 
 test("leaves files that need no table, or whose frames are ambiguous", () => {

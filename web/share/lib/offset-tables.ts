@@ -43,30 +43,6 @@ export async function anyLacksOffsetTable(series: SeriesModel[]): Promise<boolea
   return false;
 }
 
-/** Walks the fragment items from `at`, reading item headers through a window. */
-async function fragments(src: Bytes, at: number) {
-  const r = new WindowReader(src);
-  const positions: number[] = [], lengths: number[] = [], heads: number[] = [], headLens: number[] = [];
-  let p = at;
-  for (;;) {
-    const hdr = await r.get(p, 8);
-    if (!hdr) return null;
-    const dv = new DataView(hdr.buffer, hdr.byteOffset, 8);
-    const tag = ((dv.getUint16(0, true) << 16) | dv.getUint16(2, true)) >>> 0;
-    const len = dv.getUint32(4, true);
-    if (tag === 0xfffee0dd) break;
-    if (tag !== 0xfffee000 || len === 0xffffffff || p + 8 + len > src.size) return null;
-    const n = Math.min(len, 8);
-    const head = n ? await r.get(p + 8, n) : new Uint8Array(0);
-    positions.push(p);
-    lengths.push(len);
-    for (let i = 0; i < 8; i++) heads.push(head && i < n ? head[i] : 0);
-    headLens.push(n);
-    p += 8 + len;
-  }
-  return { positions: new Float64Array(positions), lengths: new Uint32Array(lengths), heads: new Uint8Array(heads), headLens: new Uint8Array(headLens) };
-}
-
 /**
  * Adds offset tables to the instances that lack one, in place. Returns how many were rewritten
  * (an instance whose frames can't be located unambiguously is left as it is).
@@ -101,8 +77,20 @@ export async function addOffsetTable(se: SeriesModel, inst: Instance): Promise<b
 
 async function patchInstance(se: SeriesModel, inst: Instance, need: { prefix: Uint8Array; at: number }): Promise<boolean> {
   const m = await loadShlWasm();
-  const f = await fragments(inst.src, need.at);
-  const patch = f && m.offset_table_patch_from_fragments_wasm(need.prefix, f.positions, f.lengths, f.heads, f.headLens);
+  // The fragment items are walked by the core's walker, reading what it asks for through a window.
+  const r = new WindowReader(inst.src);
+  const walker = new m.FragmentWalker(need.at, inst.src.size);
+  let patch: ReturnType<typeof walker.patch>;
+  try {
+    for (let at; (at = walker.want()); ) {
+      const b = await r.get(at[0], at[1]);
+      if (!b) break;
+      walker.feed(b);
+    }
+    patch = walker.patch(need.prefix);
+  } finally {
+    walker.free();
+  }
   if (!patch) return false;
   const head = patch.head;
   const rest = new SubBytes(inst.src, patch.resume_at, inst.src.size - patch.resume_at);

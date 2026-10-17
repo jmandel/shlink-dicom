@@ -3,7 +3,7 @@
 //! (`shl_dicom_core::offset_tables`) and the rule for which instances the lossless encoder is
 //! offered (`shl_dicom_transcode::is_uncompressed_image`).
 use shl_dicom_core::offset_tables::{
-    offset_table_first_fragment, offset_table_patch, offset_table_patch_from_fragments, FragmentInfo, OffsetTableKind,
+    offset_table_first_fragment, offset_table_patch, offset_table_patch_from_fragments, FragmentWalk, OffsetTableKind,
     OffsetTablePatch,
 };
 use wasm_bindgen::prelude::*;
@@ -56,24 +56,42 @@ pub fn offset_table_first_fragment_wasm(prefix: &[u8]) -> Option<f64> {
     offset_table_first_fragment(prefix).map(|p| p as f64)
 }
 
-/// The rewrite from the file's first bytes and its fragment items, for files too large to hold:
-/// `positions[i]` is item i's header position in the file, `lengths[i]` its value length, and
-/// `heads[8 i .. 8 i + head_lens[i]]` the first bytes of its value.
+/// Walks one file's fragment items for [`FragmentWalker::patch`], for files too large to hold
+/// (`shl_dicom_core::offset_tables::FragmentWalk`). The caller reads what `want` asks for and
+/// passes it to `feed`, until `want` returns `undefined`:
+///
+/// ```js
+/// const w = new FragmentWalker(firstFragment, file.size);
+/// for (let at; (at = w.want()); ) w.feed(await read(at[0], at[1]));
+/// const patch = w.patch(prefix);
+/// ```
 #[wasm_bindgen]
-pub fn offset_table_patch_from_fragments_wasm(
-    prefix: &[u8],
-    positions: &[f64],
-    lengths: &[u32],
-    heads: &[u8],
-    head_lens: &[u8],
-) -> Option<WasmOffsetTablePatch> {
-    if positions.len() != lengths.len() || heads.len() != 8 * positions.len() || head_lens.len() != positions.len() {
-        return None;
+pub struct FragmentWalker(FragmentWalk);
+
+#[wasm_bindgen]
+impl FragmentWalker {
+    /// `first`: where the first fragment item starts (`offset_table_first_fragment_wasm`);
+    /// `file_len`: the file's length.
+    #[wasm_bindgen(constructor)]
+    pub fn new(first: f64, file_len: f64) -> FragmentWalker {
+        FragmentWalker(FragmentWalk::new(first as u64, file_len as u64))
     }
-    let frags: Vec<FragmentInfo> = (0..positions.len())
-        .map(|i| FragmentInfo { pos: positions[i] as u64, len: lengths[i], head: &heads[8 * i..8 * i + head_lens[i].min(8) as usize] })
-        .collect();
-    offset_table_patch_from_fragments(prefix, &frags).map(to_wasm)
+
+    /// `[position, count]` of the bytes to read next, or `undefined` when the walk has ended.
+    pub fn want(&self) -> Option<Vec<f64>> {
+        self.0.want().map(|(at, n)| vec![at as f64, n as f64])
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.0.feed(bytes);
+    }
+
+    /// The rewrite, from the file's first bytes (at least up to the first fragment item);
+    /// `undefined` when the walk failed, or the instance needs no table, or its frames can't be
+    /// located unambiguously.
+    pub fn patch(&self, prefix: &[u8]) -> Option<WasmOffsetTablePatch> {
+        offset_table_patch_from_fragments(prefix, &self.0.fragments()?).map(to_wasm)
+    }
 }
 
 /// Whether the Share page offers an instance to its lossless encoder: the packer's rule
