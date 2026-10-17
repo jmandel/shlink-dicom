@@ -607,7 +607,7 @@ async function objectDownloads() {
   }
 }
 
-const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap", "pet-rwvm-seg", "rt-plan-set"];
+const CASES = ["synthetic-objects", "sr-measurement", "sr-dose", "sr-basic-or-enhanced", "pdf", "seg", "rtstruct", "gsps", "ps-blending", "kos", "waveform-ecg", "model-stl", "other-nonimage", "pmap", "listed-synthetic"];
 try {
   for (const c of CASES) if (!only || only === c) await objectCase(c).catch((e) => check(`${c}: flow threw`, false, String(e?.stack ?? e).slice(0, 400)));
   if (!only || only === "video-gestures") await videoGestures().catch((e) => check("video gestures: flow threw", false, String(e?.stack ?? e).slice(0, 400)));
