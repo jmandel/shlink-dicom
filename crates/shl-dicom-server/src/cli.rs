@@ -55,6 +55,12 @@ pub fn run_pack_cli(
     for path in inputs {
         ingest_path(&mut session, path)?;
     }
+    if !session.skipped().is_empty() {
+        eprintln!("Skipped {} file(s):", session.skipped().len());
+        for s in session.skipped() {
+            eprintln!("  {}: {}", s.name, s.reason);
+        }
+    }
     let missing = session.instances_missing_offset_tables();
     session.set_add_offset_tables(add_offset_tables);
     if let Some(k) = &keys {
@@ -177,7 +183,8 @@ fn ingest_path(session: &mut IngestSession, path: &Path) -> Result<(), String> {
     } else if name.ends_with(".zip") {
         session.ingest_zip(&bytes).map_err(|e| e.to_string())?;
     } else {
-        let _ = session.ingest_dicom_bytes(&name, bytes);
+        // A file that is not a DICOM instance is recorded in the session's skipped list.
+        session.ingest_dicom_bytes(&name, bytes).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

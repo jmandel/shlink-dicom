@@ -1,11 +1,43 @@
 use std::io::{Cursor, Read};
 use dicom_core::Tag;
 use dicom_dictionary_std::tags;
+use dicom_encoding::transfer_syntax::{Codec, TransferSyntax, TransferSyntaxIndex};
 use dicom_object::{FileDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions};
+use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use flate2::read::GzDecoder;
+use std::sync::OnceLock;
 use crate::{Error, Result};
 
 const MEDIA_STORAGE_DIRECTORY_SOP_CLASS: &str = "1.2.840.10008.1.3.10";
+
+/// A file that was not ingested, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    pub name: String,
+    pub reason: String,
+}
+
+/// dicom-rs 0.7's registry plus a stand-in for the compressed transfer syntaxes it does not list:
+/// the retired JPEG processes (1.2.840.10008.1.2.4.52–.66), JPEG XL (.110–.112), HTJ2K
+/// (.201–.203), any later 1.2.840.10008.1.2.4.x, and Deflated Image Frame Compression
+/// (1.2.840.10008.1.2.8.1). All of them encode the data set as explicit VR little endian with
+/// encapsulated Pixel Data, which is all the packer needs: it reads headers and copies files byte
+/// for byte. The transfer syntax reported for a file is always the one in its own header.
+struct Syntaxes;
+
+impl TransferSyntaxIndex for Syntaxes {
+    fn get(&self, uid: &str) -> Option<&TransferSyntax> {
+        static STAND_IN: OnceLock<TransferSyntax> = OnceLock::new();
+        let uid = uid.trim_end_matches(|c: char| c.is_whitespace() || c == '\0');
+        TransferSyntaxRegistry.get(uid).or_else(|| {
+            (uid.starts_with("1.2.840.10008.1.2.4.") || uid == "1.2.840.10008.1.2.8.1").then(|| {
+                STAND_IN.get_or_init(|| {
+                    TransferSyntax::new_ele("1.2.840.10008.1.2.4", "Encapsulated, not listed by dicom-rs", Codec::EncapsulatedPixelData(None, None))
+                })
+            })
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedDicomInstance {
@@ -36,6 +68,18 @@ fn has_part10_magic(bytes: &[u8]) -> bool {
 fn looks_like_bare_dicom(bytes: &[u8]) -> bool {
     // Bare little-endian DICOM datasets begin with a group 0x0008 element (bytes 08 00 .. ..)
     bytes.len() >= 64 && bytes[0] == 0x08 && bytes[1] == 0x00
+}
+
+/// Why a file's name says it is not a DICOM instance, if it does.
+fn non_dicom_name(path: &str) -> Option<String> {
+    is_non_dicom_filename(path).then(|| {
+        let fname = path.rsplit('/').next().unwrap_or(path);
+        if fname.eq_ignore_ascii_case("DICOMDIR") {
+            "a DICOMDIR (media directory), not an instance".to_string()
+        } else {
+            "not a DICOM file (by its name)".to_string()
+        }
+    })
 }
 
 fn is_non_dicom_filename(path: &str) -> bool {
@@ -108,23 +152,27 @@ fn get_i32_tag(obj: &InMemDicomObject, tag: Tag) -> Option<i32> {
 }
 
 /// Parses a DICOM Part 10 byte buffer (or bare dataset, wrapping it in Part 10 if needed).
-/// Returns `Ok(None)` if the file is a `DICOMDIR` index rather than an instance.
-pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> Result<Option<ParsedDicomInstance>> {
-    if is_non_dicom_filename(source_name) || raw_bytes.len() < 132 {
-        return Ok(None);
+/// `Err` carries the reason a file is not ingested: not DICOM, a `DICOMDIR` index, or unreadable.
+pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::Result<ParsedDicomInstance, String> {
+    if let Some(reason) = non_dicom_name(source_name) {
+        return Err(reason);
+    }
+    if raw_bytes.len() < 132 {
+        return Err("too short to be a DICOM file".into());
     }
 
     let (file_obj, final_bytes, was_bare_wrapped) = if has_part10_magic(&raw_bytes) {
         let obj = OpenFileOptions::new()
+            .tranfer_syntax_index(Syntaxes)
             .read_until(Tag(0x7FE0, 0x0000))
             .from_reader(Cursor::new(&raw_bytes))
-            .map_err(|e| Error::Dicom(format!("{source_name}: {e}")))?;
+            .map_err(|e| format!("unreadable DICOM: {e}"))?;
         (obj, raw_bytes, false)
     } else if looks_like_bare_dicom(&raw_bytes) {
         // Attempt to parse bare dataset and wrap in Part 10 preamble + file meta header.
         let full_obj: FileDicomObject<InMemDicomObject> = OpenFileOptions::new()
             .from_reader(Cursor::new(&raw_bytes))
-            .map_err(|e| Error::Dicom(format!("{source_name}: {e}")))?;
+            .map_err(|e| format!("unreadable DICOM data set: {e}"))?;
         let sop_class = get_uid_tag(&full_obj, tags::SOP_CLASS_UID)
             .unwrap_or_else(|| "1.2.840.10008.5.1.4.1.1.7".to_string());
         let sop_inst = get_uid_tag(&full_obj, tags::SOP_INSTANCE_UID)
@@ -137,14 +185,14 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> Result<Option
                     .media_storage_sop_class_uid(sop_class)
                     .media_storage_sop_instance_uid(sop_inst),
             )
-            .map_err(|e| Error::Dicom(format!("meta build for {source_name}: {e}")))?;
+            .map_err(|e| format!("cannot build a Part 10 header: {e}"))?;
         let mut buf = Vec::new();
         wrapped_obj
             .write_all(&mut buf)
-            .map_err(|e| Error::Dicom(format!("write Part 10 for {source_name}: {e}")))?;
+            .map_err(|e| format!("cannot write Part 10: {e}"))?;
         (wrapped_obj, buf, true)
     } else {
-        return Ok(None);
+        return Err("not a DICOM file (no DICM preamble)".into());
     };
 
     parsed_from_object(source_name, &file_obj, final_bytes, was_bare_wrapped)
@@ -152,14 +200,16 @@ pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> Result<Option
 
 /// Reads only the header of a Part 10 file from `reader` (up to Pixel Data), so a large file is
 /// never held. `bytes` in the result is empty. Bare data sets are not handled here.
-pub fn parse_dicom_header_reader<R: std::io::Read>(source_name: &str, reader: R) -> Result<Option<ParsedDicomInstance>> {
-    if is_non_dicom_filename(source_name) {
-        return Ok(None);
+/// `Err` carries the reason the file is not ingested, as for [`parse_dicom_bytes`].
+pub fn parse_dicom_header_reader<R: std::io::Read>(source_name: &str, reader: R) -> std::result::Result<ParsedDicomInstance, String> {
+    if let Some(reason) = non_dicom_name(source_name) {
+        return Err(reason);
     }
     let file_obj = OpenFileOptions::new()
+        .tranfer_syntax_index(Syntaxes)
         .read_until(Tag(0x7FE0, 0x0000))
         .from_reader(reader)
-        .map_err(|e| Error::Dicom(format!("{source_name}: {e}")))?;
+        .map_err(|e| format!("unreadable DICOM: {e}"))?;
     parsed_from_object(source_name, &file_obj, Vec::new(), false)
 }
 
@@ -168,18 +218,18 @@ fn parsed_from_object(
     file_obj: &FileDicomObject<InMemDicomObject>,
     final_bytes: Vec<u8>,
     was_bare_wrapped: bool,
-) -> Result<Option<ParsedDicomInstance>> {
+) -> std::result::Result<ParsedDicomInstance, String> {
     let meta_sop_class = clean_uid(file_obj.meta().media_storage_sop_class_uid());
     let sop_class_uid = get_uid_tag(&file_obj, tags::SOP_CLASS_UID)
         .filter(|s| !s.is_empty())
         .unwrap_or(meta_sop_class);
 
     if sop_class_uid == MEDIA_STORAGE_DIRECTORY_SOP_CLASS {
-        return Ok(None);
+        return Err("a DICOMDIR (media directory), not an instance".into());
     }
 
     let study_instance_uid = get_uid_tag(&file_obj, tags::STUDY_INSTANCE_UID)
-        .ok_or_else(|| Error::Dicom(format!("{source_name}: missing StudyInstanceUID")))?;
+        .ok_or("no Study Instance UID")?;
     let series_instance_uid = get_uid_tag(&file_obj, tags::SERIES_INSTANCE_UID)
         .unwrap_or_else(|| format!("{study_instance_uid}.0"));
     let sop_instance_uid = get_uid_tag(&file_obj, tags::SOP_INSTANCE_UID)
@@ -187,11 +237,11 @@ fn parsed_from_object(
             let m = clean_uid(file_obj.meta().media_storage_sop_instance_uid());
             (!m.is_empty()).then_some(m)
         })
-        .ok_or_else(|| Error::Dicom(format!("{source_name}: missing SOPInstanceUID")))?;
+        .ok_or("no SOP Instance UID")?;
 
     let transfer_syntax_uid = clean_uid(file_obj.meta().transfer_syntax());
 
-    Ok(Some(ParsedDicomInstance {
+    Ok(ParsedDicomInstance {
         source_name: source_name.to_string(),
         bytes: final_bytes,
         was_bare_wrapped,
@@ -210,13 +260,14 @@ fn parsed_from_object(
         patient_name: get_str_tag(&file_obj, tags::PATIENT_NAME),
         patient_id: get_str_tag(&file_obj, tags::PATIENT_ID),
         patient_birth_date: get_str_tag(&file_obj, tags::PATIENT_BIRTH_DATE),
-    }))
+    })
 }
 
-pub fn extract_dicom_from_tar_gz(tgz_bytes: &[u8]) -> Result<Vec<ParsedDicomInstance>> {
+/// The DICOM instances in a `.tar.gz`, and every other file in it with the reason it was skipped.
+pub fn extract_dicom_from_tar_gz(tgz_bytes: &[u8]) -> Result<(Vec<ParsedDicomInstance>, Vec<Skipped>)> {
     let gz = GzDecoder::new(Cursor::new(tgz_bytes));
     let mut archive = tar::Archive::new(gz);
-    let mut out = Vec::new();
+    let (mut out, mut skipped) = (Vec::new(), Vec::new());
 
     let entries = archive
         .entries()
@@ -232,24 +283,27 @@ pub fn extract_dicom_from_tar_gz(tgz_bytes: &[u8]) -> Result<Vec<ParsedDicomInst
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown.dcm".to_string());
         if path.split('/').any(|seg| seg.starts_with('.')) {
+            skipped.push(Skipped { name: path, reason: "hidden file".into() });
             continue;
         }
         let mut buf = Vec::with_capacity(entry.size() as usize);
         entry
             .read_to_end(&mut buf)
             .map_err(|e| Error::Dicom(format!("tar read {path}: {e}")))?;
-        if let Ok(Some(parsed)) = parse_dicom_bytes(&path, buf) {
-            out.push(parsed);
+        match parse_dicom_bytes(&path, buf) {
+            Ok(parsed) => out.push(parsed),
+            Err(reason) => skipped.push(Skipped { name: path, reason }),
         }
     }
 
-    Ok(out)
+    Ok((out, skipped))
 }
 
-pub fn extract_dicom_from_zip(zip_bytes: &[u8]) -> Result<Vec<ParsedDicomInstance>> {
+/// The DICOM instances in a `.zip`, and every other file in it with the reason it was skipped.
+pub fn extract_dicom_from_zip(zip_bytes: &[u8]) -> Result<(Vec<ParsedDicomInstance>, Vec<Skipped>)> {
     let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
         .map_err(|e| Error::Dicom(format!("zip archive: {e}")))?;
-    let mut out = Vec::new();
+    let (mut out, mut skipped) = (Vec::new(), Vec::new());
 
     for i in 0..archive.len() {
         let mut file = archive
@@ -259,16 +313,61 @@ pub fn extract_dicom_from_zip(zip_bytes: &[u8]) -> Result<Vec<ParsedDicomInstanc
             continue;
         }
         let name = file.name().to_string();
-        if name.split('/').any(|seg| seg.starts_with('.')) || is_non_dicom_filename(&name) {
+        if name.split('/').any(|seg| seg.starts_with('.')) {
+            skipped.push(Skipped { name, reason: "hidden file".into() });
             continue;
         }
         let mut buf = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut buf)
             .map_err(|e| Error::Dicom(format!("zip read {name}: {e}")))?;
-        if let Ok(Some(parsed)) = parse_dicom_bytes(&name, buf) {
-            out.push(parsed);
+        match parse_dicom_bytes(&name, buf) {
+            Ok(parsed) => out.push(parsed),
+            Err(reason) => skipped.push(Skipped { name, reason }),
         }
     }
 
-    Ok(out)
+    Ok((out, skipped))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::offset_tables::tests::synthetic;
+
+    /// The synthetic slide with another transfer syntax UID of the same length.
+    fn with_ts(uid: &[u8; 23]) -> Vec<u8> {
+        let mut b = synthetic(3, &[1], false);
+        let at = b.windows(23).position(|w| w == b"1.2.840.10008.1.2.4.50\0").unwrap();
+        b[at..at + 23].copy_from_slice(uid);
+        b
+    }
+
+    #[test]
+    fn reads_syntaxes_missing_from_the_dicom_rs_registry() {
+        for uid in [b"1.2.840.10008.1.2.4.110", b"1.2.840.10008.1.2.4.111", b"1.2.840.10008.1.2.4.112", b"1.2.840.10008.1.2.4.201", b"1.2.840.10008.1.2.4.203", b"1.2.840.10008.1.2.4.55\0", b"1.2.840.10008.1.2.8.1\0\0"] {
+            let b = with_ts(uid);
+            let p = parse_dicom_bytes("slide.dcm", b.clone()).unwrap();
+            assert_eq!(p.transfer_syntax_uid.as_bytes(), uid.strip_suffix(b"\0\0").or(uid.strip_suffix(b"\0")).unwrap_or(uid));
+            assert_eq!(p.study_instance_uid, "1.2.3.4");
+            assert_eq!(p.bytes, b);
+            let h = parse_dicom_header_reader("slide.dcm", Cursor::new(&b)).unwrap();
+            assert_eq!(h.sop_instance_uid, "1.2.3.4.5.6");
+        }
+    }
+
+    #[test]
+    fn gives_a_reason_for_every_skipped_file() {
+        let slide = synthetic(3, &[1], false);
+        let reason = |name: &str, b: Vec<u8>| parse_dicom_bytes(name, b).unwrap_err();
+        assert!(reason("DICOMDIR", slide.clone()).contains("DICOMDIR"));
+        assert!(reason("notes.txt", slide.clone()).contains("by its name"));
+        assert!(reason("a.dcm", vec![0; 10]).contains("too short"));
+        assert!(reason("a.dcm", vec![1; 400]).contains("no DICM"));
+        let mut broken = slide.clone();
+        broken.truncate(200);
+        assert!(reason("a.dcm", broken).contains("unreadable"));
+        // A transfer syntax outside DICOM's own is reported, not dropped.
+        let unknown = with_ts(b"1.2.3.4.5.6.7.8.9.10.11");
+        assert!(reason("a.dcm", unknown).contains("unreadable"));
+    }
 }

@@ -258,11 +258,10 @@ On the full colour cube, `iccToSrgb` matches lcms2 with a mean difference of 0.1
 
 The worst case, the bottom-right tile, reads the whole base level: 1.05 GB for luad-1gb. On localhost the walk took about 1 s per 140 MB. At 50 Mbit/s, which was not measured, 378 MB would take about a minute.
 
-**Adding them when packing.** Josh decided that offsets go in the files, not the Bundle. When asked, the packer fills in the table for each encapsulated multi-frame instance that has an empty BOT and no EOT. The code is `crates/shl-dicom-core/src/offset_tables.rs`, turned on by `IngestSession::set_add_offset_tables`, so it is the same for every packer:
-- the CLI: `shl-dicom pack --add-offset-tables`;
-- the server seed;
-- the browser: `offset_table_patch_wasm` (shl-dicom-wasm), one file at a time;
-- /share: a box in the review step, shown only when such files are present.
+**Adding them when packing.** Josh decided that offsets go in the files, not the Bundle. The packer fills in the table for each encapsulated multi-frame instance that has an empty BOT and no EOT. Every packer uses the same code, `crates/shl-dicom-core/src/offset_tables.rs`; whether it runs depends on the packer:
+- **/share:** a box in the review step, shown only when an included study has such files, and ticked by default. The browser runs the code through shl-dicom-wasm (`offset_table_patch_from_fragments_wasm`), one file at a time, without holding the file.
+- **The server seed** (`shl-dicom-server seed`, which packs the public sample): always, for every sample file that lacks a table (`add_offset_table_to_file`). The sample slide's files already carry a Basic Offset Table, written when the sandbox dataset is built (`imaging-sandbox/scripts/lib/dicom-rewrite.ts`, `fillBasicOffsetTable`), so today the seed adds none. Those tables are the bytes the Rust code writes: stripping the slide's three tables and adding them again with `pack --add-offset-tables` gives the same packed files.
+- **The CLI:** only with `shl-dicom-server pack --add-offset-tables` (`IngestSession::set_add_offset_tables`). Without it, the CLI says how many instances lack a table.
 
 How it works:
 - **Which table.** It writes a Basic Offset Table, or an Extended Offset Table (offsets and lengths, inserted before Pixel Data) when an offset passes 4 GiB. The EOT case needs one fragment per frame, as PS3.5 A.4 requires. It never writes both tables.

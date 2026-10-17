@@ -241,6 +241,13 @@ async fn main() {
                     for (why, n) in &c.declined {
                         println!("  kept as they were ({why}): {n}");
                     }
+                    println!("Added frame offset tables to {} multi-frame instance(s) that lacked one", r.offset_tables_added);
+                    if !r.skipped.is_empty() {
+                        println!("Skipped {} file(s):", r.skipped.len());
+                        for s in &r.skipped {
+                            println!("  {}: {}", s.name, s.reason);
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("Error: {e}");

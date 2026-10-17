@@ -327,7 +327,9 @@ fn test_pack_and_lossless_roundtrip() {
         original_hashes.insert(sop.clone(), sha256_hex(bytes));
     }
     original_hashes.insert("2.25.2002.1.1".into(), sha256_hex(&cr));
-    for inst in extract_dicom_from_tar_gz(&tgz).unwrap() {
+    let (parsed, skipped) = extract_dicom_from_tar_gz(&tgz).unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    for inst in parsed {
         assert_eq!(sha256_hex(&inst.bytes), original_hashes[&inst.sop_instance_uid]);
     }
 

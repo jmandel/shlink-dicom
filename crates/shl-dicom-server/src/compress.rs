@@ -109,7 +109,7 @@ fn compress_if_image(path: &Path, stats: &mut CompressStats) -> Result<(), Strin
     let name = path.to_string_lossy().to_string();
     let Ok(f) = File::open(path) else { return Ok(()) };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let Ok(Some(h)) = shl_dicom_core::dicom_io::parse_dicom_header_reader(&name, BufReader::with_capacity(64 << 10, f)) else {
+    let Ok(h) = shl_dicom_core::dicom_io::parse_dicom_header_reader(&name, BufReader::with_capacity(64 << 10, f)) else {
         return Ok(());
     };
     if is_uncompressed_image(&h.transfer_syntax_uid, &h.sop_class_uid, len) {

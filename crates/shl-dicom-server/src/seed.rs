@@ -61,6 +61,10 @@ pub struct SeedReport {
     pub bytes: u64,
     /// Images re-encoded without loss, and their bytes before and after.
     pub compression: crate::compress::CompressStats,
+    /// Multi-frame instances given a frame offset table.
+    pub offset_tables_added: usize,
+    /// Archive members that are not DICOM instances, with the reason.
+    pub skipped: Vec<shl_dicom_core::dicom_io::Skipped>,
 }
 
 /// Packs `samples/*.tgz` (with `samples/reports.json`) into a new read-only sample share, streaming
@@ -153,7 +157,15 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
             let _ = state.delete_share(&prev.sid);
         }
     }
-    Ok(SeedReport { sid: saved.sid, files: packed.file_ids.len(), instances: packed.instances, bytes: packed.bytes, compression: packed.compression })
+    Ok(SeedReport {
+        sid: saved.sid,
+        files: packed.file_ids.len(),
+        instances: packed.instances,
+        bytes: packed.bytes,
+        compression: packed.compression,
+        offset_tables_added: packed.offset_tables_added,
+        skipped: packed.skipped,
+    })
 }
 
 fn populate_demo_list(

@@ -41,7 +41,7 @@ bun web/build.ts
 cargo run --release -p shl-dicom-server -- serve --port 3333
 ```
 
-The server seeds a sample share from every `.tgz` in `data/samples/`.
+The server seeds a sample share from every `.tgz` in `data/samples/` (`shl-dicom-server seed`). It adds a frame offset table to any multi-frame file that lacks one, and lists every file it skips with the reason. `shl-dicom-server pack` lists skipped files the same way.
 
 Native x86_64 builds target x86-64-v3 (AVX2); for an older CPU see [codecs/README.md](codecs/README.md#cpu-requirement).
 

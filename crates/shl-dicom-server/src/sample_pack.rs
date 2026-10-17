@@ -2,8 +2,10 @@
 //! one record and one header in memory: each archive member is written to a scratch file while its
 //! header is read, then every study is encrypted record by record (spec/README.md §9.2, §11.1: one
 //! file per study, its series in order) from those files into a staged file, which goes into the blob store.
-//! Uncompressed images are re-encoded without loss first (compress.rs), as the Share page does;
-//! every other instance is kept byte for byte.
+//! As the Share page does by default, uncompressed images are re-encoded without loss first
+//! (compress.rs), and encapsulated multi-frame instances that lack a frame offset table get one
+//! (`shl_dicom_core::offset_tables`, fragment bytes unchanged); every other instance is kept byte
+//! for byte. Files that are not DICOM instances are reported with the reason, never dropped silently.
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -13,7 +15,8 @@ use std::{
 use shl_dicom_core::{
     bundle::{build_fhir_bundle, BundleBuildInput, InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput},
     crypto::{b64url_encode, encrypt_file_stream, random_bytes},
-    dicom_io::{parse_dicom_header_reader, ParsedDicomInstance},
+    dicom_io::{parse_dicom_header_reader, ParsedDicomInstance, Skipped},
+    offset_tables::add_offset_table_to_file,
 };
 use crate::{
     compress::{compress_file, is_uncompressed_image, CompressStats},
@@ -38,13 +41,23 @@ pub struct PackedSample {
     pub instances: usize,
     pub bytes: u64,
     pub compression: CompressStats,
+    /// Multi-frame instances that were given a frame offset table.
+    pub offset_tables_added: usize,
+    /// Archive members that are not DICOM instances, with the reason.
+    pub skipped: Vec<Skipped>,
 }
 
-/// The instance's header, read from its file up to Pixel Data; None for anything that isn't a
-/// Part 10 DICOM instance.
-fn parse_header(path: &Path, name: &str) -> Option<ParsedDicomInstance> {
-    let f = File::open(path).ok()?;
-    parse_dicom_header_reader(name, BufReader::with_capacity(64 << 10, f)).ok().flatten()
+/// The instance's header, read from its file up to Pixel Data; `Err` gives the reason for anything
+/// that isn't a Part 10 DICOM instance.
+fn parse_header(path: &Path, name: &str) -> Result<ParsedDicomInstance, String> {
+    let f = File::open(path).map_err(|e| e.to_string())?;
+    parse_dicom_header_reader(name, BufReader::with_capacity(64 << 10, f))
+}
+
+/// Native transfer syntaxes never take an offset table, so their files are not read again
+/// (offset_tables.rs also declines video syntaxes, from the header).
+fn may_lack_offset_table(ts: &str) -> bool {
+    !matches!(ts, "1.2.840.10008.1.2" | "1.2.840.10008.1.2.1" | "1.2.840.10008.1.2.2" | "1.2.840.10008.1.2.1.99")
 }
 
 /// Packs every `*.tgz` in `samples_dir` into share `sid`. `scratch` is removed afterwards.
@@ -65,6 +78,8 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
         let mut members: Vec<Member> = Vec::new();
         let mut n = 0usize;
         let mut compression = CompressStats::default();
+        let mut offset_tables_added = 0usize;
+        let mut skipped = Vec::new();
         for tgz in &tgzs {
             let gz = flate2::read::GzDecoder::new(BufReader::new(File::open(tgz).map_err(|e| e.to_string())?));
             let mut ar = tar::Archive::new(gz);
@@ -81,19 +96,27 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
                 out.flush().map_err(|e| e.to_string())?;
                 drop(out);
                 match parse_header(&path, &name) {
-                    Some(h) => {
-                        // Uncompressed images become JPEG Lossless SV1 (pixel-identical); the rest stay as they are.
-                        let len = if is_uncompressed_image(&h.transfer_syntax_uid, &h.sop_class_uid, len) { compress_file(&path, &mut compression)? } else { len };
+                    Ok(h) => {
+                        // Uncompressed images become JPEG Lossless SV1 (pixel-identical); encapsulated
+                        // multi-frame instances without a frame offset table get one; the rest stay as they are.
+                        let mut len = if is_uncompressed_image(&h.transfer_syntax_uid, &h.sop_class_uid, len) { compress_file(&path, &mut compression)? } else { len };
+                        if may_lack_offset_table(&h.transfer_syntax_uid) {
+                            if let Some(new_len) = add_offset_table_to_file(&path).map_err(|e| format!("{name}: {e}"))? {
+                                len = new_len;
+                                offset_tables_added += 1;
+                            }
+                        }
                         members.push(Member { path, len, h })
                     }
-                    _ => {
+                    Err(reason) => {
                         let _ = std::fs::remove_file(&path);
+                        skipped.push(Skipped { name: format!("{}: {name}", tgz.file_name().unwrap_or_default().to_string_lossy()), reason });
                     }
                 }
             }
         }
         if members.is_empty() {
-            return Err("no DICOM instances in samples/*.tgz".to_string());
+            return Err(format!("no DICOM instances in samples/*.tgz ({} file(s) skipped)", skipped.len()));
         }
 
         // 2. Group and order as the packer does (spec/README.md §11.1).
@@ -192,7 +215,7 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
             patient_birth_date,
             studies: study_inputs,
         });
-        Ok(PackedSample { owner_bundle_json: bundle.to_string(), file_ids, instances, bytes, compression })
+        Ok(PackedSample { owner_bundle_json: bundle.to_string(), file_ids, instances, bytes, compression, offset_tables_added, skipped })
     })();
     let _ = std::fs::remove_dir_all(scratch);
     result

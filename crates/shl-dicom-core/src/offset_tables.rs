@@ -248,6 +248,87 @@ pub fn offset_table_patch_from_fragments(prefix: &[u8], frags: &[FragmentInfo]) 
     patch_parts(prefix, frags, u32::MAX as u64)
 }
 
+/// The same rewrite as [`offset_table_patch`], for a file read through `r` (`len` bytes long)
+/// without holding it: the header is read in growing prefixes (256 KiB, 4 MiB, 32 MiB), then each
+/// fragment item's header and first 8 bytes. `Ok(None)` when no table is needed or the frames
+/// cannot be located unambiguously.
+pub fn offset_table_patch_from_reader<R: std::io::Read + std::io::Seek>(r: &mut R, len: u64) -> std::io::Result<Option<OffsetTablePatch>> {
+    use std::io::SeekFrom;
+    let mut prefix = Vec::new();
+    let mut first = None;
+    for n in [256u64 << 10, 4 << 20, 32 << 20] {
+        let n = n.min(len);
+        prefix.resize(n as usize, 0);
+        r.seek(SeekFrom::Start(0))?;
+        r.read_exact(&mut prefix)?;
+        // A header that does not end inside this prefix needs a longer one.
+        if scan_header(&prefix).is_some() || n == len {
+            first = offset_table_first_fragment(&prefix);
+            break;
+        }
+    }
+    let Some(first) = first else { return Ok(None) };
+    // Fragment item headers: (position, length, first bytes of the value).
+    let (mut items, mut heads): (Vec<(u64, u32)>, Vec<[u8; 8]>) = (Vec::new(), Vec::new());
+    let mut head_lens = Vec::new();
+    let mut p = first as u64;
+    loop {
+        let mut h = [0u8; 8];
+        r.seek(SeekFrom::Start(p))?;
+        if p + 8 > len {
+            return Ok(None);
+        }
+        r.read_exact(&mut h)?;
+        let tag = ((u16::from_le_bytes([h[0], h[1]]) as u32) << 16) | u16::from_le_bytes([h[2], h[3]]) as u32;
+        let flen = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
+        if tag == SEQ_DELIM {
+            break;
+        }
+        if tag != ITEM || flen == UNDEF {
+            return Ok(None);
+        }
+        let take = (flen as u64).min(8).min(len.saturating_sub(p + 8)) as usize;
+        let mut v = [0u8; 8];
+        r.read_exact(&mut v[..take])?;
+        items.push((p, flen));
+        heads.push(v);
+        head_lens.push(take);
+        p = p + 8 + flen as u64;
+    }
+    let frags: Vec<FragmentInfo> = items
+        .iter()
+        .zip(&heads)
+        .zip(&head_lens)
+        .map(|((&(pos, len), h), &n)| FragmentInfo { pos, len, head: &h[..n] })
+        .collect();
+    Ok(offset_table_patch_from_fragments(&prefix, &frags))
+}
+
+/// [`add_offset_table`] for a file on disk, without holding it: when the instance needs a table,
+/// writes the patch's head and then the original bytes from where it resumes to a temporary file
+/// beside it, and renames that over the original. Returns the new length, or `None` when the file
+/// was left as it is.
+pub fn add_offset_table_to_file(path: &std::path::Path) -> std::io::Result<Option<u64>> {
+    use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let Some(patch) = offset_table_patch_from_reader(&mut BufReader::with_capacity(64 << 10, &mut f), len)? else {
+        return Ok(None);
+    };
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".offset-table");
+    let tmp = std::path::PathBuf::from(tmp);
+    {
+        let mut out = BufWriter::new(std::fs::File::create(&tmp)?);
+        out.write_all(&patch.head)?;
+        f.seek(SeekFrom::Start(patch.resume_at as u64))?;
+        std::io::copy(&mut f, &mut out)?;
+        out.flush()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(Some(patch.new_len(len as usize) as u64))
+}
+
 /// `bot_limit`: the largest offset a BOT may hold (u32::MAX; tests lower it to reach the EOT path).
 fn patch_with_limit(bytes: &[u8], bot_limit: u64) -> Option<OffsetTablePatch> {
     let first_item = offset_table_first_fragment(bytes)?;
@@ -459,6 +540,38 @@ pub(crate) mod tests {
         }
         b.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
         b
+    }
+
+    #[test]
+    fn reader_patch_matches_in_memory_patch() {
+        for (split, seq) in [(vec![1], false), (vec![1, 2, 3], true)] {
+            let src = synthetic(7, &split, seq);
+            let want = offset_table_patch(&src).unwrap();
+            let got = offset_table_patch_from_reader(&mut std::io::Cursor::new(&src), src.len() as u64).unwrap().unwrap();
+            assert_eq!((got.head, got.resume_at, got.frames, got.kind), (want.head, want.resume_at, want.frames, want.kind));
+        }
+        // An instance that already has a table, and a truncated one, give no patch.
+        let (with_table, _) = add_offset_table(synthetic(7, &[1], false));
+        assert!(offset_table_patch_from_reader(&mut std::io::Cursor::new(&with_table), with_table.len() as u64).unwrap().is_none());
+        let src = synthetic(7, &[1], false);
+        let cut = &src[..src.len() - 20];
+        assert!(offset_table_patch_from_reader(&mut std::io::Cursor::new(cut), cut.len() as u64).unwrap().is_none());
+    }
+
+    #[test]
+    fn file_rewrite_matches_in_memory_rewrite() {
+        let dir = std::env::temp_dir().join(format!("shl-offset-table-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("slide.dcm");
+        let src = synthetic(9, &[1, 2], true);
+        std::fs::write(&path, &src).unwrap();
+        let (want, changed) = add_offset_table(src);
+        assert!(changed);
+        assert_eq!(add_offset_table_to_file(&path).unwrap(), Some(want.len() as u64));
+        assert_eq!(std::fs::read(&path).unwrap(), want);
+        // A second pass finds the table and leaves the file alone.
+        assert_eq!(add_offset_table_to_file(&path).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

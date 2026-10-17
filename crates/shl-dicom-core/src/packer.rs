@@ -8,7 +8,7 @@ use crate::{
     },
     crypto::{b64url_encode, encrypt_file_stream, random_bytes},
     range::ciphertext_length,
-    dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance},
+    dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance, Skipped},
     jwe::encrypt_bundle_jwe,
     offset_tables::{add_offset_table, offset_table_status, OffsetTableStatus},
     Error, Result,
@@ -53,6 +53,7 @@ pub struct StudyFile {
 
 pub struct IngestSession {
     instances: Vec<ParsedDicomInstance>,
+    skipped: Vec<Skipped>,
     add_offset_tables: bool,
     study_files: Option<BTreeMap<String, StudyFile>>,
 }
@@ -67,6 +68,7 @@ impl IngestSession {
     pub fn new() -> Self {
         Self {
             instances: Vec::new(),
+            skipped: Vec::new(),
             add_offset_tables: false,
             study_files: None,
         }
@@ -95,27 +97,43 @@ impl IngestSession {
             .count()
     }
 
+    /// Ingests one file; returns false, and records the reason in [`Self::skipped`], when it is
+    /// not a DICOM instance or cannot be read.
     pub fn ingest_dicom_bytes(&mut self, source_name: &str, raw_bytes: Vec<u8>) -> Result<bool> {
-        if let Some(parsed) = parse_dicom_bytes(source_name, raw_bytes)? {
-            self.instances.push(parsed);
-            Ok(true)
-        } else {
-            Ok(false)
+        match parse_dicom_bytes(source_name, raw_bytes) {
+            Ok(parsed) => {
+                self.instances.push(parsed);
+                Ok(true)
+            }
+            Err(reason) => {
+                self.skipped.push(Skipped { name: source_name.to_string(), reason });
+                Ok(false)
+            }
         }
     }
 
+    /// Ingests every DICOM instance in a `.tar.gz`; returns how many. Other files go to
+    /// [`Self::skipped`] with their reasons.
     pub fn ingest_tar_gz(&mut self, tgz_bytes: &[u8]) -> Result<usize> {
-        let parsed = extract_dicom_from_tar_gz(tgz_bytes)?;
+        let (parsed, skipped) = extract_dicom_from_tar_gz(tgz_bytes)?;
         let count = parsed.len();
         self.instances.extend(parsed);
+        self.skipped.extend(skipped);
         Ok(count)
     }
 
+    /// As [`Self::ingest_tar_gz`], for a `.zip`.
     pub fn ingest_zip(&mut self, zip_bytes: &[u8]) -> Result<usize> {
-        let parsed = extract_dicom_from_zip(zip_bytes)?;
+        let (parsed, skipped) = extract_dicom_from_zip(zip_bytes)?;
         let count = parsed.len();
         self.instances.extend(parsed);
+        self.skipped.extend(skipped);
         Ok(count)
+    }
+
+    /// Files that were not ingested, each with the reason.
+    pub fn skipped(&self) -> &[Skipped] {
+        &self.skipped
     }
 
     pub fn instances(&self) -> &[ParsedDicomInstance] {
@@ -129,7 +147,8 @@ impl IngestSession {
     /// FHIR R4 Bundle.
     pub fn pack(self, last_updated: &str) -> Result<PackedStudySet> {
         if self.instances.is_empty() {
-            return Err(Error::Dicom("no DICOM instances ingested".into()));
+            let n = self.skipped.len();
+            return Err(Error::Dicom(format!("no DICOM instances ingested ({n} file(s) skipped)")));
         }
 
         let study_files = self.study_files;
