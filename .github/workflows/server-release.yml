@@ -1,0 +1,92 @@
+# Builds and publishes the shlink-dicom server release that deploy/bootstrap-shlink-dicom.sh installs
+# (README.md, Deploying). The release is code only: the native server (x86-64-v3), the web app, and
+# the sandbox dataset build the VM uses to make the public sample. Before publishing, this workflow
+# installs the packed release on the runner with the bootstrap script itself (from a local
+# directory, under systemd), and checks /, /view/, /sample and a Range read of the sample.
+name: Server release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - codecs/**
+      - web/**
+      - viewer-kit/**
+      - deploy/**
+      - imaging-sandbox/src/**
+      - imaging-sandbox/scripts/**
+      - imaging-sandbox/data/**
+      - Cargo.toml
+      - Cargo.lock
+      - package.json
+      - bun.lock
+      - .cargo/**
+      - .github/workflows/server-release.yml
+      - .github/actions/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: server-release
+  cancel-in-progress: false
+
+env:
+  KEEP_RELEASES: "5"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # Toolchain, wasm modules and web app: shared with the other workflows (.github/actions/).
+      - uses: ./.github/actions/toolchain
+        with:
+          cache-key: server
+          native: "true"
+      - uses: ./.github/actions/wasm
+      - uses: ./.github/actions/web
+
+      - name: Server
+        run: cargo build -q --release -p shl-dicom-server
+
+      - name: Pack the release
+        id: pack
+        run: |
+          tag="server-${GITHUB_SHA::7}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/releases"
+          bun deploy/pack-server-release.ts --tag "$tag" --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/releases/$tag"
+          ls -l "$RUNNER_TEMP/releases/$tag"
+
+      # The sample's pinned sources, where the bootstrap keeps them.
+      - name: Source cache directory
+        run: sudo mkdir -p /opt/shlink-dicom-server/sources && sudo chown -R "$(id -u):$(id -g)" /opt/shlink-dicom-server
+      - uses: actions/cache@v6
+        with:
+          path: /opt/shlink-dicom-server/sources
+          key: server-sample-sources-${{ hashFiles('imaging-sandbox/data/studies.json') }}
+          restore-keys: server-sample-sources-
+
+      - name: Install the packed release with the bootstrap, and check it
+        run: |
+          tag="${{ steps.pack.outputs.tag }}"
+          RELEASES="file://$RUNNER_TEMP/releases" ORIGIN=http://localhost:8000 bash deploy/bootstrap-shlink-dicom.sh "$tag"
+          grep -E "Sample packed|Compressed .* without loss" /var/log/shlink-bootstrap.log | tail -2
+          link="$(curl -s http://localhost:8000/api/demo-shares | bun -e 'const j = JSON.parse(await Bun.stdin.text()); console.log(j.shares.find((s) => !s.passcodeHint).shlinkUri)')"
+          /opt/shlink-dicom-server/current/bin/shl-dicom-server inspect "$link" | tee "$RUNNER_TEMP/inspect.txt"
+          grep -q "HTTP 206" "$RUNNER_TEMP/inspect.txt"
+
+      - uses: ./.github/actions/publish-release
+        with:
+          prefix: server
+          tag: ${{ steps.pack.outputs.tag }}
+          name: shlink-dicom-${{ steps.pack.outputs.tag }}
+          dir: ${{ runner.temp }}/releases/${{ steps.pack.outputs.tag }}
+          product: shlink-dicom server
+          notes: "The shlink-dicom server and web app at ${{ github.sha }}: code only, native x86-64-v3. Install with deploy/bootstrap-shlink-dicom.sh ${{ steps.pack.outputs.tag }} (README.md, Deploying)."
+          keep: ${{ env.KEEP_RELEASES }}

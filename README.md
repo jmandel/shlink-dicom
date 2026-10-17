@@ -24,7 +24,7 @@ Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each 
   - `/share` creating and managing shares;
   - `web/checks/` scripted browser checks.
 - **`imaging-sandbox/`**: a SMART Imaging Access sandbox (FHIR, WADO-RS, SMART App Launch) serving a fictional patient's studies.
-- **`deploy/`**: bootstrap scripts that build and run the sandbox and the server on a fresh VM.
+- **`deploy/`**: the bootstrap scripts that install the server and the sandbox on a VM from releases built in CI (see [Deploying](#deploying)).
 - **`pages/`**: the static copy at [joshuamandel.com/shlink-dicom](https://joshuamandel.com/shlink-dicom/): the viewer and one demo link (the brain MRI and left wrist X-rays) served as plain files by GitHub Pages, built by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) with the keys recorded in [`pages/demo-link.json`](pages/demo-link.json).
 
 ## Build and run
@@ -44,6 +44,22 @@ cargo run --release -p shl-dicom-server -- serve --port 3333
 The server seeds a sample share from every `.tgz` in `data/samples/` (`shl-dicom-server seed`). It adds a frame offset table to any multi-frame file that lacks one, and lists every file it skips with the reason. `shl-dicom-server pack` lists skipped files the same way.
 
 Native x86_64 builds target x86-64-v3 (AVX2); for an older CPU see [codecs/README.md](codecs/README.md#cpu-requirement).
+
+## Deploying
+
+CI builds both services and publishes them as GitHub Releases; a VM installs a release with one script and needs no git checkout, Rust or C toolchain.
+
+- **The server.** [`.github/workflows/server-release.yml`](.github/workflows/server-release.yml) runs on pushes to `main` that change the code it ships, and on manual dispatch. It builds the native `shl-dicom-server` (x86-64-v3), the wasm modules and the web app, packs them with the sandbox's dataset build ([`deploy/pack-server-release.ts`](deploy/pack-server-release.ts); `MANIFEST.json` gives the commit, the CPU level, the glibc it needs, the sample's expected digest and every file's SHA-256), installs that tarball on the runner with the bootstrap script, checks `/`, `/view/`, `/sample` and a Range read, and publishes it as `server-<short commit>`. The pre-release `server-latest` holds `latest.json`, naming the current tag; the workflow keeps the last five releases.
+- **On the VM.** [`deploy/bootstrap-shlink-dicom.sh`](deploy/bootstrap-shlink-dicom.sh) checks the CPU (x86-64-v3) and glibc, installs the SQLite runtime library and a pinned Bun, downloads the release (the latest, or the tag given as its argument), checks its SHA-256 and every file, and unpacks it into `/opt/shlink-dicom-server/releases/<tag>`. With the release's code it builds the public sample from the pinned sources (my-health-data and IDC, each checked by SHA-256) and stops unless the dataset digest matches. It then seeds the sample share in `/var/lib/shlink-dicom` when the sample changed, points `/opt/shlink-dicom-server/current` at the release, restarts the `shlink-dicom` unit and checks `/`, `/view/` and `/sample`; if that fails it goes back to the previous release. S3 storage is configured in `/etc/shlink-dicom.env` (see the script's header).
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-shlink-dicom.sh | bash                   # the latest release
+  curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-shlink-dicom.sh | bash -s server-1a2b3c4  # a given release
+  ```
+
+  Rollback is running it with an older tag; a release already built on the VM is reused.
+- **The sandbox** works the same way: [imaging-sandbox/README.md](imaging-sandbox/README.md#deploying).
+- The three workflows share their build steps in [`.github/actions/`](.github/actions/).
 
 ## Tests
 
