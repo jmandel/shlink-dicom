@@ -336,54 +336,52 @@ pub fn read_dataset(ds: &[u8], assumed: Syntax) -> Result<Attributes<'_>, Error>
             if assumed.explicit { "explicit" } else { "implicit" }
         )));
     }
-    let mut a = Attributes::default();
-    while c.remaining() > 0 {
-        let h = read_header(&mut c, s)?;
-        let tag = h.tag();
-        if tag == 0x7FE0_0010 {
-            a.pixel = Some(if h.len == UNDEFINED {
-                read_encapsulated(&mut c, s)?
-            } else {
-                PixelValue::Native { data: c.take(h.len as usize)?, vr: h.vr }
-            });
-            break;
-        }
-        if h.group == 0xFFFE {
-            // A stray item or delimiter tag at the top level (seen in a Philips US file,
-            // fo-dicom #364): pydicom reads it as an element of its stated length and goes on.
-            if h.len == UNDEFINED {
-                return Err(invalid(format!(
-                    "undefined-length ({:04X},{:04X}) at the top level of the data set",
-                    h.group, h.element
-                )));
+    struct Collect<'a> {
+        a: Attributes<'a>,
+        pixel_at: Option<usize>,
+    }
+    impl<'a> Visitor<'a> for Collect<'a> {
+        fn element(&mut self, e: &Element<'a>) -> Step {
+            if e.tag == 0x7FE0_0010 {
+                match e.value {
+                    Some(data) => self.a.pixel = Some(PixelValue::Native { data, vr: e.vr }),
+                    None => self.pixel_at = Some(e.pos),
+                }
+                return Step::Stop;
             }
-            c.take(h.len as usize)?;
-            continue;
+            let Some(v) = e.value else { return Step::Skip };
+            let a = &mut self.a;
+            match e.tag {
+                0x0008_0010 => a.recognition_code = Some(v),
+                0x0028_1101..=0x0028_1103 => a.palette_descriptors[(e.tag - 0x0028_1101) as usize] = Some(v),
+                0x0028_1201..=0x0028_1203 => a.palette_data[(e.tag - 0x0028_1201) as usize] = Some(v),
+                0x0028_0002 => a.samples_per_pixel = Some(v),
+                0x0028_0004 => a.photometric = Some(v),
+                0x0028_0006 => a.planar_configuration = Some(v),
+                0x0028_0008 => a.number_of_frames = Some(v),
+                0x0028_0010 => a.rows = Some(v),
+                0x0028_0011 => a.columns = Some(v),
+                0x0028_0100 => a.bits_allocated = Some(v),
+                0x0028_0101 => a.bits_stored = Some(v),
+                0x0028_0103 => a.pixel_representation = Some(v),
+                0x7FE0_0001 => a.extended_offsets = Some(v),
+                0x7FE0_0002 => a.extended_lengths = Some(v),
+                0x7FE0_0008 => a.float_pixel = Some((v, 32)),
+                0x7FE0_0009 => a.float_pixel = Some((v, 64)),
+                _ => {}
+            }
+            Step::Next
         }
-        if h.len == UNDEFINED {
-            skip_undefined(&mut c, s, &h, 0)?;
-            continue;
-        }
-        let v = c.take(h.len as usize)?;
-        match tag {
-            0x0008_0010 => a.recognition_code = Some(v),
-            0x0028_1101..=0x0028_1103 => a.palette_descriptors[(tag - 0x0028_1101) as usize] = Some(v),
-            0x0028_1201..=0x0028_1203 => a.palette_data[(tag - 0x0028_1201) as usize] = Some(v),
-            0x0028_0002 => a.samples_per_pixel = Some(v),
-            0x0028_0004 => a.photometric = Some(v),
-            0x0028_0006 => a.planar_configuration = Some(v),
-            0x0028_0008 => a.number_of_frames = Some(v),
-            0x0028_0010 => a.rows = Some(v),
-            0x0028_0011 => a.columns = Some(v),
-            0x0028_0100 => a.bits_allocated = Some(v),
-            0x0028_0101 => a.bits_stored = Some(v),
-            0x0028_0103 => a.pixel_representation = Some(v),
-            0x7FE0_0001 => a.extended_offsets = Some(v),
-            0x7FE0_0002 => a.extended_lengths = Some(v),
-            0x7FE0_0008 => a.float_pixel = Some((v, 32)),
-            0x7FE0_0009 => a.float_pixel = Some((v, 64)),
-            _ => {}
-        }
+    }
+    // The top level only (sequences are skipped); the walk stops at Pixel Data.
+    let mut col = Collect { a: Attributes::default(), pixel_at: None };
+    walk(ds, s, &|_| false, &mut col)?;
+    let mut a = col.a;
+    if let Some(at) = col.pixel_at {
+        // Encapsulated Pixel Data: its items, read from its header on.
+        c.pos = at;
+        read_header(&mut c, s)?;
+        a.pixel = Some(read_encapsulated(&mut c, s)?);
     }
     Ok(a)
 }
@@ -444,6 +442,158 @@ fn skip_item(c: &mut Cursor<'_>, s: Syntax, depth: u32) -> Result<(), Error> {
             c.take(h.len as usize)?;
         }
     }
+}
+
+// ------------------------------------------------------------------------------------- walk
+
+/// One element as [`walk`] meets it.
+#[derive(Debug, Clone, Copy)]
+pub struct Element<'a> {
+    pub tag: u32,
+    /// The VR as written (explicit VR), None in implicit VR.
+    pub vr: Option<[u8; 2]>,
+    /// Where its header starts in the data set.
+    pub pos: usize,
+    /// Its value (defined length), or None for an undefined length.
+    pub value: Option<&'a [u8]>,
+    /// Nesting: 0 for the top level, 1 inside an item of a top-level sequence, and so on.
+    #[allow(dead_code)] // read by shl-dicom-decode-wasm, which compiles this file too
+    pub depth: u32,
+}
+
+/// What [`walk`] does after an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Go on (into the items, when the element is a sequence).
+    Next,
+    /// Go on, but not into this sequence's items.
+    Skip,
+    /// Stop the walk here.
+    Stop,
+}
+
+/// What a [`walk`] reports, in order.
+pub trait Visitor<'a> {
+    /// Every element. A sequence (SQ, an undefined length, or a tag `is_sequence` names) is entered
+    /// unless this returns [`Step::Skip`].
+    fn element(&mut self, e: &Element<'a>) -> Step;
+    /// An item of the sequence last entered starts (`index` from 0) / ends.
+    fn item(&mut self, _index: usize, _depth: u32) {}
+    fn item_end(&mut self, _depth: u32) {}
+    /// The sequence last entered ends.
+    fn sequence_end(&mut self, _depth: u32) {}
+}
+
+/// Walks a data set's elements in order, entering sequences, with the rules [`read_dataset`] uses
+/// to read and skip them: an undefined-length item may be in implicit VR (detected from its first
+/// element, as pydicom does), an undefined-length UN holds implicit VR little endian items (PS3.5
+/// 6.2.2), at most 64 levels of nesting, and every length checked against the bytes present.
+/// `is_sequence` names tags to read as sequences when their length is defined and no VR says so
+/// (implicit VR). Returns where the walk ended (the data set's end, or the element it stopped at).
+pub fn walk<'a>(ds: &'a [u8], s: Syntax, is_sequence: &dyn Fn(u32) -> bool, v: &mut dyn Visitor<'a>) -> Result<usize, Error> {
+    let mut c = Cursor::new(ds);
+    match walk_elements(&mut c, ds.len(), s, is_sequence, v, 0)? {
+        Some(at) => Ok(at),
+        None => Ok(c.pos),
+    }
+}
+
+/// Elements up to `end` (or an item delimiter); Some(position) when the visitor stopped.
+fn walk_elements<'a>(c: &mut Cursor<'a>, end: usize, s: Syntax, is_sequence: &dyn Fn(u32) -> bool, v: &mut dyn Visitor<'a>, depth: u32) -> Result<Option<usize>, Error> {
+    if depth > MAX_DEPTH {
+        return Err(invalid("sequences nested too deeply"));
+    }
+    while c.pos < end {
+        let pos = c.pos;
+        let h = read_header(c, s)?;
+        if h.group == 0xFFFE {
+            if depth > 0 {
+                if h.element == 0xE00D {
+                    return Ok(None); // end of an undefined-length item
+                }
+                return Err(invalid(format!("unexpected ({:04X},{:04X}) inside an item", h.group, h.element)));
+            }
+            // A stray item or delimiter tag at the top level (seen in a Philips US file,
+            // fo-dicom #364): pydicom reads it as an element of its stated length and goes on.
+            if h.len == UNDEFINED {
+                return Err(invalid(format!("undefined-length ({:04X},{:04X}) at the top level of the data set", h.group, h.element)));
+            }
+            c.take(h.len as usize)?;
+            continue;
+        }
+        let tag = h.tag();
+        let sequence = h.len == UNDEFINED || h.vr == Some(*b"SQ") || (h.vr.is_none() && is_sequence(tag));
+        let value = if h.len == UNDEFINED || sequence { None } else { Some(c.take(h.len as usize)?) };
+        let step = v.element(&Element { tag, vr: h.vr, pos, value: if sequence { None } else { value }, depth });
+        if step == Step::Stop {
+            return Ok(Some(pos));
+        }
+        if !sequence {
+            continue;
+        }
+        if h.len == UNDEFINED {
+            let items = match h.vr {
+                None | Some([b'S', b'Q']) => s,
+                Some([b'U', b'N']) => IMPLICIT_LE,
+                Some([b'O', b'B']) | Some([b'O', b'W']) if tag == 0x7FE0_0010 => s,
+                Some(vr) => {
+                    return Err(invalid(format!("undefined length on {}{} element ({:04X},{:04X})", vr[0] as char, vr[1] as char, h.group, h.element)))
+                }
+            };
+            if step == Step::Skip || tag == 0x7FE0_0010 {
+                skip_sequence(c, items, depth.saturating_add(1))?;
+            } else if let Some(at) = walk_items(c, None, items, is_sequence, v, depth + 1)? {
+                return Ok(Some(at));
+            }
+        } else {
+            let seq_end = c.pos.checked_add(h.len as usize).filter(|&e| e <= c.buf.len()).ok_or_else(|| invalid("sequence past the end of data"))?;
+            if step == Step::Skip {
+                c.pos = seq_end;
+            } else if let Some(at) = walk_items(c, Some(seq_end), s, is_sequence, v, depth + 1)? {
+                return Ok(Some(at));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The items of a sequence (defined length: up to `end`; else to its delimiter).
+fn walk_items<'a>(c: &mut Cursor<'a>, end: Option<usize>, s: Syntax, is_sequence: &dyn Fn(u32) -> bool, v: &mut dyn Visitor<'a>, depth: u32) -> Result<Option<usize>, Error> {
+    if depth > MAX_DEPTH {
+        return Err(invalid("sequences nested too deeply"));
+    }
+    let mut index = 0usize;
+    loop {
+        if end.is_some_and(|e| c.pos >= e) {
+            break;
+        }
+        let group = c.u16(s.little)?;
+        let element = c.u16(s.little)?;
+        let len = c.u32(s.little)?;
+        match (group, element) {
+            (0xFFFE, 0xE0DD) => break,
+            (0xFFFE, 0xE000) => {
+                v.item(index, depth);
+                let item_syntax = detect_vr_mode(c, s, false);
+                let item_end = if len == UNDEFINED {
+                    end.unwrap_or(c.buf.len())
+                } else {
+                    c.pos.checked_add(len as usize).filter(|&e| e <= end.unwrap_or(c.buf.len())).ok_or_else(|| invalid("item past the end of its sequence"))?
+                };
+                if let Some(at) = walk_elements(c, item_end, item_syntax, is_sequence, v, depth)? {
+                    return Ok(Some(at));
+                }
+                if len != UNDEFINED {
+                    c.pos = item_end;
+                }
+                v.item_end(depth);
+                index += 1;
+            }
+            _ => return Err(invalid(format!("expected an item in sequence, found ({group:04X},{element:04X})"))),
+        }
+    }
+    v.sequence_end(depth);
+    Ok(None)
 }
 
 /// Parse encapsulated items stored inside a defined-length Pixel Data value.

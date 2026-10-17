@@ -28,7 +28,7 @@ mod parse;
 
 pub use shl_dicom_decode::{decode_file, decode_file_scaled, Canonical, Error};
 
-use parse::{PixelValue, Syntax, TS_EXPLICIT_BE, TS_IMPLICIT_LE};
+use parse::{PixelValue, TS_EXPLICIT_BE, TS_IMPLICIT_LE};
 
 // --------------------------------------------------------------------------------- metadata
 
@@ -180,8 +180,6 @@ fn first_number(v: &[u8]) -> Option<f64> {
     first.parse::<f64>().ok().filter(|x| x.is_finite())
 }
 
-const UNDEFINED: u32 = 0xFFFF_FFFF;
-const MAX_DEPTH: u32 = 16;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctx {
@@ -202,7 +200,6 @@ enum Ctx {
 }
 
 struct Walker<'a> {
-    b: &'a [u8],
     little: bool,
     extra: Extra,
     shared: FrameValues,
@@ -210,121 +207,63 @@ struct Walker<'a> {
     pixel_representation: u16,
     /// The Real World Value Mapping item found so far, and the rank of where it was found.
     real_world: Option<(u8, RealWorld)>,
+    /// The context of the data set or item being read (top level first).
+    ctx: Vec<Ctx>,
+    /// The context of each sequence entered, for its items.
+    seqs: Vec<Ctx>,
+}
+
+/// Sequences read as such when their length is defined and implicit VR gives no VR: the
+/// functional group, VOI LUT, pixel value transformation and Real World Value Mapping ones.
+fn known_sequence(tag: u32) -> bool {
+    matches!(tag, 0x5200_9229 | 0x5200_9230 | 0x0028_9145 | 0x0028_9132 | 0x0040_9096 | 0x0040_08EA)
+}
+
+impl<'a> parse::Visitor<'a> for Walker<'a> {
+    fn element(&mut self, e: &parse::Element<'a>) -> parse::Step {
+        let ctx = *self.ctx.last().unwrap_or(&Ctx::Top);
+        if e.depth == 0 && e.tag >> 16 == 0x7FE0 {
+            return parse::Step::Stop; // Pixel Data: everything needed comes before it.
+        }
+        let Some(v) = e.value else {
+            let child = match (ctx, e.tag) {
+                (Ctx::Top, 0x5200_9229) => Ctx::Shared,
+                (Ctx::Top, 0x5200_9230) => Ctx::PerFrameItems,
+                // Rank: Per-Frame, then Shared Functional Groups, then the top level (decision (b)).
+                (Ctx::PerFrame(_), 0x0040_9096) => Ctx::RealWorld { rank: 0, units: false },
+                (Ctx::Shared, 0x0040_9096) => Ctx::RealWorld { rank: 1, units: false },
+                (Ctx::Top, 0x0040_9096) => Ctx::RealWorld { rank: 2, units: false },
+                (Ctx::RealWorld { rank, .. }, 0x0040_08EA) => Ctx::RealWorld { rank, units: true },
+                (Ctx::Shared | Ctx::PerFrame(_), _) => ctx, // functional group macros
+                _ => Ctx::Ignore,
+            };
+            if child == Ctx::Ignore {
+                return parse::Step::Skip;
+            }
+            self.seqs.push(child);
+            return parse::Step::Next;
+        };
+        self.record(ctx, (e.tag >> 16) as u16, e.tag as u16, v);
+        parse::Step::Next
+    }
+    fn item(&mut self, index: usize, _depth: u32) {
+        let item = match *self.seqs.last().unwrap_or(&Ctx::Ignore) {
+            Ctx::PerFrameItems => Ctx::PerFrame(index),
+            // Only the first item of a Real World Value Mapping Sequence is read.
+            Ctx::RealWorld { .. } if index > 0 => Ctx::Ignore,
+            c => c,
+        };
+        self.ctx.push(item);
+    }
+    fn item_end(&mut self, _depth: u32) {
+        self.ctx.pop();
+    }
+    fn sequence_end(&mut self, _depth: u32) {
+        self.seqs.pop();
+    }
 }
 
 impl<'a> Walker<'a> {
-    fn u16(&self, p: usize) -> Option<u16> {
-        parse::read_u16(self.b.get(p..p + 2)?, self.little)
-    }
-    fn u32(&self, p: usize) -> Option<u32> {
-        parse::read_u32(self.b.get(p..p + 4)?, self.little)
-    }
-
-    /// Walk elements in `pos..end` (end = None: until an item delimiter or the end of data).
-    /// Returns the position after the last element read (after the item delimiter, if any).
-    fn elements(&mut self, mut pos: usize, end: usize, explicit: bool, ctx: Ctx, depth: u32) -> Option<usize> {
-        if depth > MAX_DEPTH {
-            return None;
-        }
-        while pos + 8 <= end {
-            let group = self.u16(pos)?;
-            let element = self.u16(pos + 2)?;
-            if group == 0xFFFE {
-                // Item delimiter (E00D) ends an undefined-length item.
-                return Some(pos + 8);
-            }
-            if ctx == Ctx::Top && group == 0x7FE0 {
-                return Some(pos); // Pixel Data: everything needed comes before it.
-            }
-            let vr = self.b.get(pos + 4..pos + 6)?;
-            // Undefined-length items may switch to implicit VR (pydicom does the same check).
-            let is_explicit = explicit && vr.iter().all(u8::is_ascii_uppercase);
-            let (len, hdr, is_sq, is_un) = if is_explicit {
-                let long = matches!(
-                    vr,
-                    b"OB" | b"OD" | b"OF" | b"OL" | b"OV" | b"OW" | b"SQ" | b"SV" | b"UC" | b"UN" | b"UR" | b"UT" | b"UV"
-                );
-                if long {
-                    (self.u32(pos + 8)?, 12, vr == b"SQ", vr == b"UN")
-                } else {
-                    (u32::from(self.u16(pos + 6)?), 8, false, false)
-                }
-            } else {
-                (self.u32(pos + 4)?, 8, false, false)
-            };
-            let vstart = pos + hdr;
-            let tag = (u32::from(group) << 16) | u32::from(element);
-            let known_sq =
-                matches!(tag, 0x5200_9229 | 0x5200_9230 | 0x0028_9145 | 0x0028_9132 | 0x0040_9096 | 0x0040_08EA);
-            if len == UNDEFINED || is_sq || known_sq {
-                let child_ctx = match (ctx, tag) {
-                    (Ctx::Top, 0x5200_9229) => Ctx::Shared,
-                    (Ctx::Top, 0x5200_9230) => Ctx::PerFrameItems,
-                    // Rank: Per-Frame, then Shared Functional Groups, then the top level (decision (b)).
-                    (Ctx::PerFrame(_), 0x0040_9096) => Ctx::RealWorld { rank: 0, units: false },
-                    (Ctx::Shared, 0x0040_9096) => Ctx::RealWorld { rank: 1, units: false },
-                    (Ctx::Top, 0x0040_9096) => Ctx::RealWorld { rank: 2, units: false },
-                    (Ctx::RealWorld { rank, .. }, 0x0040_08EA) => Ctx::RealWorld { rank, units: true },
-                    (Ctx::Shared | Ctx::PerFrame(_), _) => ctx, // functional group macros
-                    _ => Ctx::Ignore,
-                };
-                // Undefined-length UN holds implicit VR little endian.
-                let child_explicit = explicit && !is_un;
-                let seq_end = if len == UNDEFINED { self.b.len() } else { vstart.checked_add(len as usize)?.min(self.b.len()) };
-                pos = self.items(vstart, seq_end, len == UNDEFINED, child_explicit, child_ctx, depth + 1)?;
-                continue;
-            }
-            let vend = vstart.checked_add(len as usize)?;
-            let v = self.b.get(vstart..vend)?;
-            self.record(ctx, group, element, v);
-            pos = vend;
-        }
-        Some(pos)
-    }
-
-    /// Items of a sequence starting at `pos`. Returns the position after the sequence.
-    fn items(&mut self, mut pos: usize, end: usize, undefined: bool, explicit: bool, ctx: Ctx, depth: u32) -> Option<usize> {
-        let mut index = 0usize;
-        while pos + 8 <= end {
-            let group = self.u16(pos)?;
-            let element = self.u16(pos + 2)?;
-            let len = self.u32(pos + 4)?;
-            pos += 8;
-            if group != 0xFFFE {
-                return None;
-            }
-            match element {
-                0xE0DD => return Some(pos), // sequence delimiter
-                0xE000 => {
-                    let item_ctx = match ctx {
-                        Ctx::PerFrameItems => Ctx::PerFrame(index),
-                        // Only the first item of a Real World Value Mapping Sequence is read, and
-                        // per-frame only from frame 0.
-                        Ctx::RealWorld { .. } if index > 0 => Ctx::Ignore,
-                        c => c,
-                    };
-                    if len == UNDEFINED {
-                        pos = self.elements(pos, end, explicit, item_ctx, depth)?;
-                    } else {
-                        let iend = pos.checked_add(len as usize)?;
-                        if iend > end {
-                            return None;
-                        }
-                        self.elements(pos, iend, explicit, item_ctx, depth)?;
-                        pos = iend;
-                    }
-                    index += 1;
-                }
-                _ => pos = pos.checked_add(if len == UNDEFINED { 0 } else { len as usize })?,
-            }
-        }
-        if undefined {
-            None
-        } else {
-            Some(end)
-        }
-    }
-
     fn record(&mut self, ctx: Ctx, group: u16, element: u16, v: &'a [u8]) {
         match ctx {
             Ctx::Top => {
@@ -390,17 +329,19 @@ impl Walker<'_> {
 pub fn read_extra(bytes: &[u8]) -> Extra {
     let Ok(prepared) = parse::prepare(bytes) else { return Extra::default() };
     let ds: &[u8] = &prepared.dataset;
-    let Syntax { explicit, little } = prepared.syntax;
+    let little = prepared.syntax.little;
     let mut w = Walker {
-        b: ds,
         little,
         extra: Extra::default(),
         shared: FrameValues::default(),
         palette: RawPalette::default(),
         pixel_representation: 0,
         real_world: None,
+        ctx: vec![Ctx::Top],
+        seqs: Vec::new(),
     };
-    let _ = w.elements(0, ds.len(), explicit, Ctx::Top, 0);
+    // Values read before an error are kept: read_extra never fails.
+    let _ = parse::walk(ds, prepared.syntax, &known_sequence, &mut w);
     let shared = w.shared;
     let palette = build_palette(&w.palette, little, w.pixel_representation == 1);
     let real_world = w.real_world.take().map(|(_, rw)| rw);
@@ -903,6 +844,18 @@ mod tests {
         assert_eq!(got, [(Some(2.0), Some(0.0), Some(100.0)), (Some(3.0), Some(1.0), Some(200.0)), (Some(4.5), Some(2.0), Some(300.0))]);
         // The image-level values are frame 1's.
         assert_eq!((e.rescale_slope, e.window_center), (Some(2.0), Some(100.0)));
+    }
+
+    /// read_extra reads with the decoder's walker (parse::walk): a stray item at the top level
+    /// (fo-dicom #364) is read past, as the decoder does, so the values after it are found.
+    #[test]
+    fn values_after_a_stray_top_level_item_are_read() {
+        let mut ds = Ds::new(LE);
+        ds.text(0x0008, 0x0060, b"CS", "US");
+        ds.raw(&[0xFE, 0xFF, 0x00, 0xE0, 4, 0, 0, 0, 1, 2, 3, 4]);
+        ds.text(0x0028, 0x1050, b"DS", "127").text(0x0028, 0x1051, b"DS", "254");
+        let e = read_extra(&part10(EXPLICIT_LE, &ds.out, true));
+        assert_eq!((e.window_center, e.window_width), (Some(127.0), Some(254.0)));
     }
 
     #[test]
