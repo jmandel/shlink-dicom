@@ -1,6 +1,6 @@
 // Files pinned by URL and SHA-256, read from a local copy when one has the right hash, else
-// downloaded, checked and kept. Used by the builds that start from published inputs:
-// pages/build.ts (the GitHub Pages demo link) and imaging-sandbox/scripts/build-data.ts (the
+// downloaded (from the sample mirror first when the pin names a release), checked and kept. Used
+// by the builds that start from published inputs: pages/build.ts (the GitHub Pages demo link) and imaging-sandbox/scripts/build-data.ts (the
 // sandbox dataset, also run on the sandbox VM by deploy/bootstrap-sandbox.sh).
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -12,7 +12,13 @@ export interface PinnedFile {
   sha256: string;
   /** Its path under `keep` and the `caches`. */
   name: string;
+  /** A release of the sample mirror (github.com/jmandel/shlink-dicom-samples) that holds it as
+   * `<sha256>.dcm`; tried before `url`. */
+  mirror?: string;
 }
+
+/** The sample mirror's release downloads. */
+export const SAMPLE_MIRROR = "https://github.com/jmandel/shlink-dicom-samples/releases/download";
 
 export interface FetchOptions {
   /** Where downloads are kept (as keep/name); searched first. */
@@ -35,8 +41,17 @@ export async function fetchPinned(f: PinnedFile, o: FetchOptions): Promise<Uint8
       return b;
     }
   }
-  o.log?.(`${f.name}: downloading ${f.url}`);
-  const b = await download(f.url);
+  let b: Uint8Array | null = null;
+  if (f.mirror && f.sha256) {
+    const url = `${SAMPLE_MIRROR}/${f.mirror}/${f.sha256}.dcm`;
+    o.log?.(`${f.name}: downloading ${url}`);
+    b = await download(url, 2).catch(() => null);
+    if (b && sha256Hex(b) !== f.sha256) b = null;
+  }
+  if (!b) {
+    o.log?.(`${f.name}: downloading ${f.url}`);
+    b = await download(f.url);
+  }
   if (f.sha256 && sha256Hex(b) !== f.sha256) throw new Error(`${f.name}: SHA-256 ${sha256Hex(b)} does not match the pinned ${f.sha256} (${f.url})`);
   mkdirSync(dirname(join(o.keep, f.name)), { recursive: true });
   writeFileSync(join(o.keep, f.name), b);

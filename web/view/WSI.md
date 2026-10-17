@@ -144,7 +144,7 @@ UIDs:
 
 Attribution: "National Cancer Institute Clinical Proteomic Tumor Analysis Consortium (CPTAC), via the NCI Imaging Data Commons. CC BY 4.0." Cite the DOI in the table for each slide.
 
-The files are in `/media/barracuda/shlink-dicom-slides/dl/<series_uuid>/`, kept local only.
+The files are in `/media/barracuda/shlink-dicom-slides/dl/<series_uuid>/`. `bun web/view/wsi-tools/fetch-slides.ts` puts them there from the list in `wsi-tools/slides.json`: from the sample mirror ([jmandel/shlink-dicom-samples](https://github.com/jmandel/shlink-dicom-samples), release `slides-1`) first, then from IDC, each checked against its SHA-256.
 
 ### Feature test data
 

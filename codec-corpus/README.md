@@ -8,6 +8,17 @@ Test files, reference ("oracle") decodes and scripts for checking pure-Rust DICO
 - `scripts/` — `discover.py`, `generate.py`, `oracle.py`, `check.py`, `ref_decode.py`, `common.py`.
 - `prevalence/` — how often each format occurs in real-world data, and the coverage estimate built from it.
 
+## Get the samples
+
+```sh
+cd codec-corpus
+uv run python scripts/restore.py          # fetched cases: the sample mirror first, then each file's source
+uv run python scripts/generate.py         # generated cases
+uv run python scripts/oracle.py
+```
+
+`restore.py` takes each file from the sample mirror ([jmandel/shlink-dicom-samples](https://github.com/jmandel/shlink-dicom-samples), release `codec-corpus-1`) when it is there, else from its source, and keeps it only when its SHA-256 matches `cases.json`. The mirror holds only files whose source clearly allows redistribution; its `NOTICE.md` lists each one's source, licence and attribution. A case that no source still has stays missing, and `check.py` skips it.
+
 ## Rebuild everything
 
 ```sh

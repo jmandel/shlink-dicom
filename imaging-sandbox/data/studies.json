@@ -147,31 +147,36 @@
       "archive": "8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
       "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
       "sha256": "f2738454f281ff5db55a0dcfa116a35fd0c8c4cd63e751622e34c3a909cf44cb",
-      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 18425 x 11712, 3773 tiles"
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 18425 x 11712, 3773 tiles",
+      "mirror": "slides-1"
     },
     {
       "archive": "7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
       "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
       "sha256": "3e0ebddd42b6736c0b0d67b017c7b25882627e987003104daa3c3069ab086bfa",
-      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 4606 x 2928, 260 tiles"
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 4606 x 2928, 260 tiles",
+      "mirror": "slides-1"
     },
     {
       "archive": "709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
       "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
       "sha256": "cf72e87d5442e8b21eaebd6660d6cf0937e11b9caf0eee9e0fecbf4068308524",
-      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 2303 x 1464, 70 tiles"
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: VOLUME 2303 x 1464, 70 tiles",
+      "mirror": "slides-1"
     },
     {
       "archive": "4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
       "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
       "sha256": "0b3f9aaffb7229b0db19853b46d1b7776d506315783ab38edcb1704c4112f7ac",
-      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: OVERVIEW"
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: OVERVIEW",
+      "mirror": "slides-1"
     },
     {
       "archive": "dc7c0527-9e55-49a2-946c-17471edb63aa.dcm",
       "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/dc7c0527-9e55-49a2-946c-17471edb63aa.dcm",
       "sha256": "7b50284096b876593071b473146c1e55d36b12dffc7ed00543eebd386e06130c",
-      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: THUMBNAIL"
+      "_note": "IDC CPTAC-LUAD C3N-02231 H&E slide, series 4a6b5ed5-a7e8-450d-9af6-e739b1807bac: THUMBNAIL",
+      "mirror": "slides-1"
     },
     {
       "archive": "mri-brain-2020/0021-ViewportCapture-MR.tgz",

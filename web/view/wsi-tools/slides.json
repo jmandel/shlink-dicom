@@ -1,0 +1,937 @@
+{
+ "_note": "Whole-slide inputs for wsi-fixtures.ts, share-checks.mjs (SLIDE_DIR) and the imaging sandbox, from the NCI Imaging Data Commons (CC BY; attribution per file in the sample mirror's NOTICE.md). fetch-slides.ts puts them under SLIDES (default /media/barracuda/shlink-dicom-slides/dl) as <name>. The base level of CPTAC-LUAD 4a6b5ed5 (1 GB, used by nothing) is left out.",
+ "mirror": "slides-1",
+ "files": [
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/8107d7b4-cafd-4c80-92e4-041d73a453b4.dcm",
+   "sha256": "b1d79702604057b2b3b0e2aab238845ce7e1ec270ee457099375f355bf58e782",
+   "size": 3308306,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/8107d7b4-cafd-4c80-92e4-041d73a453b4.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/5df97af0-d33d-4827-b8d8-970710b007b3.dcm",
+   "sha256": "6cb1b3d2aca1ba4f6f066afb5c9e9ef01f12b3e727deffd2d2ed50c28c058933",
+   "size": 11940492,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/5df97af0-d33d-4827-b8d8-970710b007b3.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/83653407-d93d-4bb2-b0ca-e2d0116566de.dcm",
+   "sha256": "c6ec6ff477fabed1219e4c4c794c9fbc927282f02ec18f41fbb34a6b17f8c626",
+   "size": 1951598,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/83653407-d93d-4bb2-b0ca-e2d0116566de.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/79c59208-8c3d-4866-b5f6-f765f01e9dd7.dcm",
+   "sha256": "6f25fced2364854e8fcdc4014c3964065bd50ec22457dc17faba72ff251e32b8",
+   "size": 155982228,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/79c59208-8c3d-4866-b5f6-f765f01e9dd7.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/501501ef-c302-40cc-86eb-dbe125284b92.dcm",
+   "sha256": "b1810cf6d58e26f421a1bb264200735d9f88813dad46ac37e99645814fa975e8",
+   "size": 1388146,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/501501ef-c302-40cc-86eb-dbe125284b92.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/8c6b71f7-330a-46b0-8572-ef085315fb8c.dcm",
+   "sha256": "723f0fee1d3cf5e28d54f9189118fe168da6a3fcfb72619e90ddcc0615ff8369",
+   "size": 791268,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/8c6b71f7-330a-46b0-8572-ef085315fb8c.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "29368d94-3a65-4fdc-a796-9b1a48540c67/e03218f8-2201-4b2d-aeec-dd9cec756e35.dcm",
+   "sha256": "cbc6055270ce21da6f65bbde4cb696937084c3086295ed629e766f54752da33a",
+   "size": 1719592,
+   "url": "https://idc-open-data.s3.amazonaws.com/29368d94-3a65-4fdc-a796-9b1a48540c67/e03218f8-2201-4b2d-aeec-dd9cec756e35.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/93d409ea-b747-40ee-96e2-a43b99e89d20.dcm",
+   "sha256": "9e6d312898d2aa2fc3f96430c97e1dffe3dc208825ed45d0ee3fa5f82a8f022e",
+   "size": 2371220,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/93d409ea-b747-40ee-96e2-a43b99e89d20.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/09e6e6f5-05d1-4492-a092-d703a4cd84ef.dcm",
+   "sha256": "c9c900ba239b99a4988c7e76bc0f1da6ece9495bf563427516f62fdc086606e6",
+   "size": 1182416,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/09e6e6f5-05d1-4492-a092-d703a4cd84ef.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/1ccd19c5-2d16-4a9f-a264-4e5d6d5ac915.dcm",
+   "sha256": "5422eb22c1e39eab17c1317a89604bb37ef9bd41486ede6b44c521d0eb7702c9",
+   "size": 21258960,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/1ccd19c5-2d16-4a9f-a264-4e5d6d5ac915.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/88397b77-c798-4e89-9993-b13a44771300.dcm",
+   "sha256": "c3d546c6a452e10a4d363402e561aae4161540f3ae17d10bab7a936a3fa28071",
+   "size": 3308414,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/88397b77-c798-4e89-9993-b13a44771300.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/80c36f6b-97d3-4eb0-abce-5578bb4e289f.dcm",
+   "sha256": "bdcd3e998ba3eb76c2fc6831ec3bcaf1fabe47d971217e5a7a6b522480767d0d",
+   "size": 1719708,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/80c36f6b-97d3-4eb0-abce-5578bb4e289f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/2c939ada-9274-4289-b1c6-a3f7fb86dbd8.dcm",
+   "sha256": "62dc8f41a83fc90ca14fce13a9bd597efa4eeb3e4bc6364396aac13f62e226f2",
+   "size": 180094774,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/2c939ada-9274-4289-b1c6-a3f7fb86dbd8.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "321c7412-23ba-4bb2-b976-0000e6df7c5a/a617a2b0-351f-463a-a3cb-785222e31d8c.dcm",
+   "sha256": "b0b8b2c4c754a8f801d2d0ebbe7cacf3595431cac46f5c4bd9aacee76586acdf",
+   "size": 1100762,
+   "url": "https://idc-open-data.s3.amazonaws.com/321c7412-23ba-4bb2-b976-0000e6df7c5a/a617a2b0-351f-463a-a3cb-785222e31d8c.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "4a6b5ed5-a7e8-450d-9af6-e739b1807bac/4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
+   "sha256": "0b3f9aaffb7229b0db19853b46d1b7776d506315783ab38edcb1704c4112f7ac",
+   "size": 3308224,
+   "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/4f7bec96-0490-4d39-a77d-b273b3d3f902.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "4a6b5ed5-a7e8-450d-9af6-e739b1807bac/dc7c0527-9e55-49a2-946c-17471edb63aa.dcm",
+   "sha256": "7b50284096b876593071b473146c1e55d36b12dffc7ed00543eebd386e06130c",
+   "size": 2286362,
+   "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/dc7c0527-9e55-49a2-946c-17471edb63aa.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "4a6b5ed5-a7e8-450d-9af6-e739b1807bac/5633c6eb-b2a4-4fd0-bc40-aec2c1e98a1b.dcm",
+   "sha256": "8ee7c71aeaf6db2f4af22a83102ad246ef6262d53423aa0eb88af52566707c69",
+   "size": 1719506,
+   "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/5633c6eb-b2a4-4fd0-bc40-aec2c1e98a1b.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "4a6b5ed5-a7e8-450d-9af6-e739b1807bac/8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
+   "sha256": "f2738454f281ff5db55a0dcfa116a35fd0c8c4cd63e751622e34c3a909cf44cb",
+   "size": 132118504,
+   "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/8d7a5787-7c81-4c38-929f-d0f57ea1db4a.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "4a6b5ed5-a7e8-450d-9af6-e739b1807bac/7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
+   "sha256": "3e0ebddd42b6736c0b0d67b017c7b25882627e987003104daa3c3069ab086bfa",
+   "size": 10966180,
+   "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/7ef22e67-3359-4978-a7ab-1eb9f2d8a918.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "4a6b5ed5-a7e8-450d-9af6-e739b1807bac/709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
+   "sha256": "cf72e87d5442e8b21eaebd6660d6cf0937e11b9caf0eee9e0fecbf4068308524",
+   "size": 3560662,
+   "url": "https://idc-open-data.s3.amazonaws.com/4a6b5ed5-a7e8-450d-9af6-e739b1807bac/709a1540-374d-43ae-bcee-fc4630ee7863.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/cc66722f-008a-405b-bae4-04c0740ad02e.dcm",
+   "sha256": "09b298315fb49cd560de8843ab7317a809bb81712f183d6bd7ce100ce64fad2b",
+   "size": 795492,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/cc66722f-008a-405b-bae4-04c0740ad02e.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/55050bbe-6d1e-4d76-baec-dca96b2cb6db.dcm",
+   "sha256": "e0f73ed712320e66e80e71a1c68334cf4f458fc9accd7706263c810ca97cefe2",
+   "size": 1536108,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/55050bbe-6d1e-4d76-baec-dca96b2cb6db.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/cdad38ae-2ffd-496f-94f5-ea62c68d4d9f.dcm",
+   "sha256": "61a1ec4aa9b5e1119e86119d9354b733ea5fdbdeadbb1a6e1a8b1a8645eb00a1",
+   "size": 116157516,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/cdad38ae-2ffd-496f-94f5-ea62c68d4d9f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/d690fc22-ce1f-4a72-bde7-5cc799472aec.dcm",
+   "sha256": "8f4a2b7ecc11a076f7f0e7c347114f940c13ac62052668824dd6f69ea9696bcf",
+   "size": 25706048,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/d690fc22-ce1f-4a72-bde7-5cc799472aec.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/2e582bb5-465d-4d4a-a2db-6708d3e31df3.dcm",
+   "sha256": "f56dfbed2ad6a464f51dad13052266bf3bf8d7e69c5f54b13389abddef26c6d3",
+   "size": 2905300,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/2e582bb5-465d-4d4a-a2db-6708d3e31df3.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/96080171-5689-4cfa-b41c-541ebacb8dba.dcm",
+   "sha256": "d4d6ec03a1a9dc0324895ecc8764638f42745987ff5a3d796781578c5ec14da9",
+   "size": 1084742,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/96080171-5689-4cfa-b41c-541ebacb8dba.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "5928613e-17d1-4182-84e8-12220d80ca11/96c5670d-45c0-4ad8-917b-1250cfd9acfb.dcm",
+   "sha256": "ef113b762994be1d9a1c0ebb3efaa9f1e2134713264db62b25dd67f9ab8460c1",
+   "size": 1944144,
+   "url": "https://idc-open-data.s3.amazonaws.com/5928613e-17d1-4182-84e8-12220d80ca11/96c5670d-45c0-4ad8-917b-1250cfd9acfb.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/e49c34ab-b6ee-4460-9436-261d33ebd805.dcm",
+   "sha256": "43c0375d9eca0a81ba2b7f1c97153688f95b32156f2ad89e92b97d8b21516d7e",
+   "size": 186630,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/e49c34ab-b6ee-4460-9436-261d33ebd805.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/68553600-7df7-494a-aedf-a75b38d5b2b1.dcm",
+   "sha256": "a542994807300e5f9ce9ecb6ffb9a7a0ae5ac2362611233107180fdad8f86100",
+   "size": 186414,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/68553600-7df7-494a-aedf-a75b38d5b2b1.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/301c16e6-c193-4210-a841-1ae46f1f648e.dcm",
+   "sha256": "ad0f0f95fd8752eec47d0ded6a5813142fa68ccc3b3cac15ccc014310dda2048",
+   "size": 186418,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/301c16e6-c193-4210-a841-1ae46f1f648e.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/569c1c09-6b31-47a5-893d-ef0083f83851.dcm",
+   "sha256": "0bac1c79fe102bcdcf2815fb3c088f6663d0ee2e8ca296edf172e1695ebeeaa6",
+   "size": 186640,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/569c1c09-6b31-47a5-893d-ef0083f83851.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/0b8b3c11-7840-4139-a610-5939b5e90c04.dcm",
+   "sha256": "25fd2c30f1cefe81bfec0dba6c74f273abd7a601f61f263cf991aad691ad6447",
+   "size": 186630,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/0b8b3c11-7840-4139-a610-5939b5e90c04.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/343750fe-3d1b-4b43-99fc-12e21bab4a30.dcm",
+   "sha256": "cf4637a4b0be48c04d6b227eeb007d79703cffc5a030ed84c45b4308e3b1cea5",
+   "size": 186410,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/343750fe-3d1b-4b43-99fc-12e21bab4a30.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/7f456d33-6d0e-4a27-ac3b-6ffdbf9ee6c7.dcm",
+   "sha256": "03003d6f008e51355dfc82c144f363d60744de460dfab5ffeb12a7eb4eb80abe",
+   "size": 186512,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/7f456d33-6d0e-4a27-ac3b-6ffdbf9ee6c7.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/4a2f7891-8b25-4267-be2e-83dfdb15146b.dcm",
+   "sha256": "da6fefb05478446a0bc21a4ad5d4d6112bc7a65d28ce266fe94c21ca3709cbf9",
+   "size": 186416,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/4a2f7891-8b25-4267-be2e-83dfdb15146b.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/0fc58a47-2b0b-42a0-9451-14548812edfa.dcm",
+   "sha256": "6d457a4e6031a29ba9622e58f99aeab8f885c2981a83ebfc8ce10db39acc9707",
+   "size": 186416,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/0fc58a47-2b0b-42a0-9451-14548812edfa.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/55eda235-4309-4b10-b03c-c295cf1e2d84.dcm",
+   "sha256": "424736aa995de3e988a1ca32a207a3be80cf51860cea3bd466e9e968c8571700",
+   "size": 186418,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/55eda235-4309-4b10-b03c-c295cf1e2d84.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/ade0b966-9670-4c73-9506-83cb90a8fede.dcm",
+   "sha256": "8f3dab6e26cb0603eaf99e709471c7ec73b2a2a39fafeb0ee95db811f2d22616",
+   "size": 186620,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/ade0b966-9670-4c73-9506-83cb90a8fede.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/82e0a591-62d2-4ebe-a8e0-154e4e6301e9.dcm",
+   "sha256": "16fa2c260004d711a981b1f49ada75ef40f5a99871176756f65d1fad37f11f5f",
+   "size": 186418,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/82e0a591-62d2-4ebe-a8e0-154e4e6301e9.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/95988349-d1a8-4375-9c94-5bb1a1511295.dcm",
+   "sha256": "51d94d38f2f337538ad2d2211897efab32ff82cdaed90c0a9e81b83888ea5c42",
+   "size": 186630,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/95988349-d1a8-4375-9c94-5bb1a1511295.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/c29f0081-a60d-41b1-b9c7-e4a7a05d4fd0.dcm",
+   "sha256": "75e7f4bdf3178457b20a7e4381292fa040ed46cb57fa4c5d9d31b2f6e13b9256",
+   "size": 186412,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/c29f0081-a60d-41b1-b9c7-e4a7a05d4fd0.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/06489932-3488-4ebc-9df0-28aaf228b4f3.dcm",
+   "sha256": "0170067ef02402a96a9999ba1cd04cc49674fa7b6e9ce848bedbc9cacb660ca6",
+   "size": 186434,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/06489932-3488-4ebc-9df0-28aaf228b4f3.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/a7e9d78b-15ce-406d-a25b-709ccf2dc4c3.dcm",
+   "sha256": "30738b58ad254e04acde8744cf396daff7b28e52807e42eec9ee72863fb7d160",
+   "size": 186438,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/a7e9d78b-15ce-406d-a25b-709ccf2dc4c3.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/85822e73-cac3-4796-8bd6-0d4ad02058c6.dcm",
+   "sha256": "33321ac75c52a3d9beb6ce86ca197b270565ce887971f953eceb89ff8b6d08ab",
+   "size": 186640,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/85822e73-cac3-4796-8bd6-0d4ad02058c6.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/e01326b8-461e-417c-844e-8dea53d983db.dcm",
+   "sha256": "dc92d1eb19728a3ae4d768fe40bb8a22592fc1a7557fed3011c8b033f6152acb",
+   "size": 186414,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/e01326b8-461e-417c-844e-8dea53d983db.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/7cd43b6b-a442-4b51-8935-7974e8fd0228.dcm",
+   "sha256": "cd058ac9cab1b9244faba056b3c4ffbf433249e948040cada8dda47fa957b1db",
+   "size": 186412,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/7cd43b6b-a442-4b51-8935-7974e8fd0228.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/01327859-3380-423b-8ed7-cd7285bcc5c9.dcm",
+   "sha256": "15b197d3e4afafbabdc62279c5808465a9031b5e3cce771a5988d8afb466afa8",
+   "size": 186418,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/01327859-3380-423b-8ed7-cd7285bcc5c9.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/f29bbad6-95be-4314-8e4b-f9925501a6ba.dcm",
+   "sha256": "3f48f01acf9fefc09f10dc98580dfb6e0faac5f8a2c751c69bed0ab3251f1a7d",
+   "size": 186624,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/f29bbad6-95be-4314-8e4b-f9925501a6ba.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/3a688fbf-3895-448a-b154-72ac3e62f267.dcm",
+   "sha256": "34dfa1ecf4a88a8e790e618dd65fa96207702a9aeab0e090a7f434b5f0374467",
+   "size": 186412,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/3a688fbf-3895-448a-b154-72ac3e62f267.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/736ff290-8b81-4bfa-a7d7-11c1b4fa4f98.dcm",
+   "sha256": "b4f95579fd27c51e80e8de97ced19edc853e3ee0da3b57524b8b4e4fd3e3b8a2",
+   "size": 186412,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/736ff290-8b81-4bfa-a7d7-11c1b4fa4f98.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/5cf2fa99-385e-4273-b2d3-1788625bdc5a.dcm",
+   "sha256": "9e9433d835c8977231c5755b469b3230169e14fe52d6562fa32d93ee2ba2ac6b",
+   "size": 186428,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/5cf2fa99-385e-4273-b2d3-1788625bdc5a.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/08ef09a9-198f-434a-b7bb-4caefcd88a1b.dcm",
+   "sha256": "e795b73e3fb9728738ffa82e23f22404b41494eb1aa751a4d1ce3ad317e260dc",
+   "size": 186622,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/08ef09a9-198f-434a-b7bb-4caefcd88a1b.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/5ec7a28b-23de-4d1f-810f-124a171ff07a.dcm",
+   "sha256": "4cdb90faad500dee9cba247b63c16fb42ffc2a014dc9118dc6fb29f84b033b93",
+   "size": 186440,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/5ec7a28b-23de-4d1f-810f-124a171ff07a.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/a65d56b6-30ad-4841-8dc0-70469879fd8f.dcm",
+   "sha256": "7292d4169f83c38fd9dea25a14791a6ee4894b6e12c197607c4e2cc8085dd2e1",
+   "size": 186412,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/a65d56b6-30ad-4841-8dc0-70469879fd8f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "76cce1d6-61fa-4ced-bb8f-3695eb76758e/3800779c-900a-4084-81c1-aaaa574f57ce.dcm",
+   "sha256": "2c51fb0ca145167f21e981b147d17e3bb3141e5a4890c407d448e0faa419f369",
+   "size": 186636,
+   "url": "https://idc-open-data.s3.amazonaws.com/76cce1d6-61fa-4ced-bb8f-3695eb76758e/3800779c-900a-4084-81c1-aaaa574f57ce.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/f150d8c0-074f-4f07-8120-5e87ca157b24.dcm",
+   "sha256": "6d9c4fd0fc9ddfc36acefa569bf41ba74fd60ce83a92dff05dfb1b1ad9fca109",
+   "size": 116654,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/f150d8c0-074f-4f07-8120-5e87ca157b24.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/1b2a9c1c-2751-4954-8651-be90da360dc2.dcm",
+   "sha256": "083935977abd3543a06513d151d5e5011f6fa073ab568f0b02a4d3f04a927293",
+   "size": 116648,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/1b2a9c1c-2751-4954-8651-be90da360dc2.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/16de91fa-7ff9-4a43-85d3-8d213a00ecf6.dcm",
+   "sha256": "b083ee6e66ec669d39bbc6a98e5438645df5593714edf257f64e04569ec7369b",
+   "size": 8397628,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/16de91fa-7ff9-4a43-85d3-8d213a00ecf6.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/abc1eef0-70a6-450d-a983-5a1c4d7cdb3c.dcm",
+   "sha256": "6d27895dd6678bc82b88aa9e29de29d112ec2a6242e6b149a4909b9423c64a2e",
+   "size": 1987166,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/abc1eef0-70a6-450d-a983-5a1c4d7cdb3c.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/98fc95b9-4a10-43b7-bf7d-fea8efef15aa.dcm",
+   "sha256": "07657bcc4e2f158aa1003740e4f16bcc92a2466d9572f30a062446465630a97b",
+   "size": 441222,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/98fc95b9-4a10-43b7-bf7d-fea8efef15aa.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/3a3227dd-000c-4b88-9535-437e1607bb68.dcm",
+   "sha256": "3d6b18a6577cf0f1ebac92c30643ec1ce31663be040551fd091c4ed6f1f2f551",
+   "size": 8397644,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/3a3227dd-000c-4b88-9535-437e1607bb68.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/683c37ed-c6ec-40e7-abe5-51fb7b708fa2.dcm",
+   "sha256": "0877259a1ade656fcce821ff604a3a8e8a73cce434332e27a87ae8f9111f2e2b",
+   "size": 1987510,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/683c37ed-c6ec-40e7-abe5-51fb7b708fa2.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/e0952f0e-76ab-49d8-82f2-5d1985be43ae.dcm",
+   "sha256": "8cddaa8fb785a59dd3c4692552a5190090b39f788f6fc641bb24c3b9063b7a31",
+   "size": 116656,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/e0952f0e-76ab-49d8-82f2-5d1985be43ae.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/8a3e2453-8693-4072-8af5-76c4fd529b72.dcm",
+   "sha256": "e5d04d0830dec5ac6f77293ca94f910e4e731d7f25bb70ea827bc5d394721b3e",
+   "size": 116664,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/8a3e2453-8693-4072-8af5-76c4fd529b72.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/4ce174bb-441f-464d-9722-75dd2678f7eb.dcm",
+   "sha256": "0eff6fc4498ae10ee9688943fa36e9a5521f39c3b729788dd3d4bb4d5c74fde8",
+   "size": 8397826,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/4ce174bb-441f-464d-9722-75dd2678f7eb.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/24b36997-c517-4c6e-bf8a-60231b0b3897.dcm",
+   "sha256": "b23b328485ceee0315169add786b40342c97c5341d7bad06bb96450af36ad1f7",
+   "size": 35686,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/24b36997-c517-4c6e-bf8a-60231b0b3897.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/54d2eaec-54a2-41e2-9a9c-9847d5df4c71.dcm",
+   "sha256": "e6cb083bd5f4ee74684a583d1d8a9def7a17affb69745ead03eb8ddd5b0d0f77",
+   "size": 1987316,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/54d2eaec-54a2-41e2-9a9c-9847d5df4c71.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/3d8cd854-8866-48a6-a7b7-58308edfc774.dcm",
+   "sha256": "15bf6955432aafe97f58f3b64da3e8dfcf3f512cd938d949d85c499d509d8928",
+   "size": 35558,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/3d8cd854-8866-48a6-a7b7-58308edfc774.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/5bc34e1b-b815-4de6-ad15-b0efc0b1911e.dcm",
+   "sha256": "d4b2ba94ba0868c0ab9bd549a7e91c6e2cf68de4ef45672387094f932e73f6d5",
+   "size": 8397494,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/5bc34e1b-b815-4de6-ad15-b0efc0b1911e.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/6e52e271-fc40-4ca6-9b30-86159394c3b0.dcm",
+   "sha256": "671481163fcc723cc70b4888081334055a1a311d91ca67dfb78549e702591dd1",
+   "size": 35708,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/6e52e271-fc40-4ca6-9b30-86159394c3b0.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/8583db3a-49cb-4746-90ff-c075a916a43e.dcm",
+   "sha256": "37c760a1842754bf9ab59210946d2de9515edd984df19d1e407a0408098f6136",
+   "size": 35680,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/8583db3a-49cb-4746-90ff-c075a916a43e.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/200914d9-3b26-4090-9eb9-c11832a62da8.dcm",
+   "sha256": "cb3d07d89f0eb7258bf20c1d4cf8f2858ab9467229e550022ad1bb76033e4260",
+   "size": 1987308,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/200914d9-3b26-4090-9eb9-c11832a62da8.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/da1099a9-34ef-41ed-a1a6-d3471d4eaae5.dcm",
+   "sha256": "005268488f6a7400be9041c48381daa1b26a49ec685cb581068182ade33ed1a5",
+   "size": 35696,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/da1099a9-34ef-41ed-a1a6-d3471d4eaae5.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/9d87a5b3-98e2-44d1-a019-7055561f4614.dcm",
+   "sha256": "bab223c242951399be2b3e02093802411683d2b5294c47085e99cc84bcbc8cb2",
+   "size": 35692,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/9d87a5b3-98e2-44d1-a019-7055561f4614.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/64dd9e43-368d-489f-9d1c-545a3164c602.dcm",
+   "sha256": "1b23ecaea6fd1b61014991d828db7f0d2bc01da2a10aa92ee0fabe1a05d7d2bf",
+   "size": 8397644,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/64dd9e43-368d-489f-9d1c-545a3164c602.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/1157c530-31da-4d95-817d-4e4291874a9f.dcm",
+   "sha256": "1691f1252d2d66f415205f01a173a8424f822d9d850c95c16534951f779e39fb",
+   "size": 8397622,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/1157c530-31da-4d95-817d-4e4291874a9f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/774e6ac0-1d13-49a9-bc8b-b7608c332568.dcm",
+   "sha256": "444a154c5dc476cfcf932bc0a8e7a501f59a0f90c0e0e727d8ad7305322e4f04",
+   "size": 8397636,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/774e6ac0-1d13-49a9-bc8b-b7608c332568.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/d51303db-595c-4d32-8546-20e567e1c64f.dcm",
+   "sha256": "47179b878dcb67b04112932822d1712ddce4fb2c529cbbd2786ffd9872200099",
+   "size": 35696,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/d51303db-595c-4d32-8546-20e567e1c64f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/843a7cb4-d2e3-4bf7-99b3-81475d5ea95f.dcm",
+   "sha256": "c0f550e363bdd06972d2305e1389fc2f56745ac969c97d31c549279e87b3d862",
+   "size": 441428,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/843a7cb4-d2e3-4bf7-99b3-81475d5ea95f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/f8d577fc-a670-4e26-b306-f8807866b0c6.dcm",
+   "sha256": "197ef85949517a733d3b8dc01230944a672792f2fa833946229015ca01bf6093",
+   "size": 1987498,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/f8d577fc-a670-4e26-b306-f8807866b0c6.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/259901e9-5243-4a6f-a32f-6da4ade6f366.dcm",
+   "sha256": "bca1b806b4be48073da8eeb5ee41eaa761f5cd01279ccd2f5429d534facf96e7",
+   "size": 8397632,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/259901e9-5243-4a6f-a32f-6da4ade6f366.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/d7e2c693-5954-4a40-8cb7-5f76ac007b39.dcm",
+   "sha256": "73993e118a27fb89584681a45324033b47e787c80daf721ff222cc1ea0f39838",
+   "size": 35700,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/d7e2c693-5954-4a40-8cb7-5f76ac007b39.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/9ce9b721-33e2-40cf-b944-3d01d349fcf8.dcm",
+   "sha256": "dc00fe11125849cd11ed7f294cd120e0eedd1920048ea1d99b17757caca9d2b0",
+   "size": 441214,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/9ce9b721-33e2-40cf-b944-3d01d349fcf8.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/94a6ab79-0d7f-44b0-a01f-0b229a29b606.dcm",
+   "sha256": "271ed5597186a9e1120e8d11fd964104bfc684c25e3b2b59d1d7753a30e687d9",
+   "size": 116668,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/94a6ab79-0d7f-44b0-a01f-0b229a29b606.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/c139378f-93d9-439a-bef7-393ba6e0e358.dcm",
+   "sha256": "132b7dca53a57f913ffe802ca60ca4a92cd1fb5ee853bff718ecd4abf31f16d0",
+   "size": 8397616,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/c139378f-93d9-439a-bef7-393ba6e0e358.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/41587bcc-66ce-4054-9a95-db1a7de891ea.dcm",
+   "sha256": "93c0ee861597cfa92efba9b7e51d94c3092ad292d68302740ccf072020298590",
+   "size": 35902,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/41587bcc-66ce-4054-9a95-db1a7de891ea.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/35728bd3-314a-4bdc-8a3e-e8377a526da1.dcm",
+   "sha256": "2b72c2771b58e060b4abbeef346b8df358d215f2aeac9720d617f90671bdd653",
+   "size": 116676,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/35728bd3-314a-4bdc-8a3e-e8377a526da1.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/69dc0480-96ad-4c22-806f-af321ad40543.dcm",
+   "sha256": "e11f9809cdbdbb22a75c0f5bcc126172e4382f98ee68310ab8e8ae06fc0782c6",
+   "size": 116526,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/69dc0480-96ad-4c22-806f-af321ad40543.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/e162a5cb-c6c7-4b6b-ac8b-294a7bf1a4a3.dcm",
+   "sha256": "cc9310ae6bb3c5050adddadd765d33cb0da07e35aa2964c5bc89acd2a9a3d983",
+   "size": 116676,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/e162a5cb-c6c7-4b6b-ac8b-294a7bf1a4a3.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/7f9af349-d87b-4ec2-b136-89692d03f086.dcm",
+   "sha256": "d84ccbc2ce1011824e611376611538d6cfa89fa752c3b95e12926b9b3b012c2c",
+   "size": 441226,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/7f9af349-d87b-4ec2-b136-89692d03f086.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/252009ed-0577-400a-9d22-efcb2dc37481.dcm",
+   "sha256": "222cca3ba2bd02ec9ded21551b443af9665f30aefb0cf3aeeea5d21e5fa48682",
+   "size": 1987288,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/252009ed-0577-400a-9d22-efcb2dc37481.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/782fb204-5713-4b28-ae30-f6b82bdc95f6.dcm",
+   "sha256": "c1db9d149b499313bfe6b954e65dd2db24b4dda398a3f8aa5175d83cb3ef7d95",
+   "size": 1987304,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/782fb204-5713-4b28-ae30-f6b82bdc95f6.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/9b81bd2d-9b56-49bb-bd70-5788559b2a33.dcm",
+   "sha256": "e03cf91b56970b09855bc2a76161fb14f52bfd51365c4196003710923025670c",
+   "size": 8397632,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/9b81bd2d-9b56-49bb-bd70-5788559b2a33.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/b3515c7d-7abb-4f36-8b82-68b299aed586.dcm",
+   "sha256": "f7ea6be63c3dbcd80522f6deecca01260260f39f28f1f302cbab0928da9f232c",
+   "size": 35890,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/b3515c7d-7abb-4f36-8b82-68b299aed586.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/f5e18eb6-2364-4f7e-a9ad-58fd75d530be.dcm",
+   "sha256": "5faae87a0f92ca1977445f51751d22a54f6efbe9ded85ed345cc101c1963a017",
+   "size": 1987316,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/f5e18eb6-2364-4f7e-a9ad-58fd75d530be.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/dc58d5a5-e5aa-4f11-8089-be2561a758b4.dcm",
+   "sha256": "9c63c9d21ff0fc62150c319fc24f2f8149c927d52b1dfd5209d0f8aecc80052c",
+   "size": 441222,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/dc58d5a5-e5aa-4f11-8089-be2561a758b4.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/d54511a2-a7be-4919-8449-ff7e78a66844.dcm",
+   "sha256": "7354782848aec6b2c09c106eafceeaace062db49f1ed5b6343685364dc6d36bc",
+   "size": 441234,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/d54511a2-a7be-4919-8449-ff7e78a66844.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/3acc36cb-9abc-4a51-8dc8-9e8010b61ca3.dcm",
+   "sha256": "c7b4ec653ee48c0fb6eb495ea80f45157c95d7d0680bc6210ff3656971f6c732",
+   "size": 8397838,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/3acc36cb-9abc-4a51-8dc8-9e8010b61ca3.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/183d1693-15ab-4e2f-9ddb-be8c43d36589.dcm",
+   "sha256": "6467eaa42fa201e4e729af3d30cac9d777019f4dec666c37758608ec3fbaa11b",
+   "size": 116660,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/183d1693-15ab-4e2f-9ddb-be8c43d36589.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/6d7576a5-7243-4a24-8176-49835877b0d4.dcm",
+   "sha256": "7fd9069bd96a3955ea417041b9d5e4866029530e863b3e749ce68e6bcdb335b2",
+   "size": 441084,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/6d7576a5-7243-4a24-8176-49835877b0d4.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/14372f25-054d-4d07-8484-311098f9ea37.dcm",
+   "sha256": "8e6e2c15843ed022d8003711d54ac4da6a6ef22ba37c98a58416bc977226836c",
+   "size": 35688,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/14372f25-054d-4d07-8484-311098f9ea37.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/97426070-9920-4abf-849e-9acda6095768.dcm",
+   "sha256": "7e4b3341bc619e1874384b8870dbb27763c685529037513abbe3142007328216",
+   "size": 441206,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/97426070-9920-4abf-849e-9acda6095768.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/90478d71-d674-4ade-a5d9-e7975210b437.dcm",
+   "sha256": "fa7e922dd97658b68154da18cbd26bf87bd4e1ef61e4b7de95d8bb5b11875638",
+   "size": 1987296,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/90478d71-d674-4ade-a5d9-e7975210b437.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/38bed394-43b6-432b-a8b8-ab532110788f.dcm",
+   "sha256": "c91d6a9d2b6d819edf407e4f4ba5930c97c29575d7cffc033c4705804504b308",
+   "size": 116664,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/38bed394-43b6-432b-a8b8-ab532110788f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/074a9aa7-9fc8-4a97-9b55-536db587bbc9.dcm",
+   "sha256": "e7f90d50c2e660c5b00cafb1616440410f4a6d0397e97bbdc139476af3896f00",
+   "size": 441416,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/074a9aa7-9fc8-4a97-9b55-536db587bbc9.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/58706716-3b3c-4c7a-9c58-822f192bea42.dcm",
+   "sha256": "2d02b0817040c26391604db1f1afc8494b40605bae2b994dac07c78c355fe48c",
+   "size": 116870,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/58706716-3b3c-4c7a-9c58-822f192bea42.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/3df2a765-3755-4c2c-8c32-80f23026aaa7.dcm",
+   "sha256": "217ab7366ca52f8f3865b99bf08b9342ca9963b9487f321dbd582a428479dad0",
+   "size": 441218,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/3df2a765-3755-4c2c-8c32-80f23026aaa7.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/c73e9deb-b48a-4595-a90f-58d4f53334d9.dcm",
+   "sha256": "763bd2bf2b2e0759d28d3abea2d94aebff3dcd82b27d1fb14c3908e2e2b55f79",
+   "size": 1987294,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/c73e9deb-b48a-4595-a90f-58d4f53334d9.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/f8ad43bb-b879-4c7e-b253-7b34d08a031f.dcm",
+   "sha256": "965c899aafe26655dbf9205c3946f1e26a0ab9b6f9d1ba78c0630bfaa59802a2",
+   "size": 8397624,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/f8ad43bb-b879-4c7e-b253-7b34d08a031f.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/097b7481-4219-45dc-8653-95ecb4c6a7b9.dcm",
+   "sha256": "0b7d54ddd30cd0ccde1f4a7879cc9a3447525059c7ec69d33aab4d88a7500ca1",
+   "size": 35708,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/097b7481-4219-45dc-8653-95ecb4c6a7b9.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/0c39663b-b4e9-46e7-b918-31454ca8c8f7.dcm",
+   "sha256": "7455f90f65cb65e1c3cdb73ad0d3596b83787f3cf632c18e86981fe2316dfce5",
+   "size": 1987304,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/0c39663b-b4e9-46e7-b918-31454ca8c8f7.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/83a82509-4de1-4ea9-ba8e-06abf70ff64c.dcm",
+   "sha256": "92501e81a8bc150d71d4faa982b7293be35119cdf78f4f193f111b1e17e908eb",
+   "size": 441212,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/83a82509-4de1-4ea9-ba8e-06abf70ff64c.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/eaa8deaa-980e-4f5b-a7b1-76d499dd397c.dcm",
+   "sha256": "d4f960aea3fd063fca81e3b1cbae37777d95de2e8efb846aa3db13ae7511b1af",
+   "size": 441234,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/eaa8deaa-980e-4f5b-a7b1-76d499dd397c.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/f901433f-b3d4-422a-929a-84c54ef33156.dcm",
+   "sha256": "384b1dea51ceb52c810272e7f7024703c4e3db41a946e5089b529ee420438799",
+   "size": 116858,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/f901433f-b3d4-422a-929a-84c54ef33156.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "b67a9aee-2f12-4e9d-9e00-7130e5017545/4bd70b97-f247-4189-95c0-8587e02892e7.dcm",
+   "sha256": "a7f31c1e36ba547c6995230a08cf305e6072200ab154f9a6437003d3d05728e6",
+   "size": 1987300,
+   "url": "https://idc-open-data.s3.amazonaws.com/b67a9aee-2f12-4e9d-9e00-7130e5017545/4bd70b97-f247-4189-95c0-8587e02892e7.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SEG-5192a672-eff2-400d-848d-d4a18ab4e021/c641d2b2-2bed-4b68-96fe-49e0316096e9.dcm",
+   "sha256": "5e9a5783e161d541639c48b731193b25073d60506644b06f8e03929b31119fe1",
+   "size": 11382,
+   "url": "https://idc-open-data.s3.amazonaws.com/5192a672-eff2-400d-848d-d4a18ab4e021/c641d2b2-2bed-4b68-96fe-49e0316096e9.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SEG-47b2be3f-c5b7-473f-a444-b48f6e3e9ce1/6a17479b-b3f0-4c80-a213-a09b7f73f0fa.dcm",
+   "sha256": "d1c8a64ad782c23cdc9dcb16d8d36b9614db3be9e73edcc08de89d4bfb5f5a7f",
+   "size": 502660,
+   "url": "https://idc-open-data.s3.amazonaws.com/47b2be3f-c5b7-473f-a444-b48f6e3e9ce1/6a17479b-b3f0-4c80-a213-a09b7f73f0fa.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SEG-47b2be3f-c5b7-473f-a444-b48f6e3e9ce1/eb3b61b1-11fc-4756-91b1-d5b6f82bf717.dcm",
+   "sha256": "f4a1e7d23a80f880afe656a205d674cecbb7b575d88d8f025db34fcabcc8badc",
+   "size": 6892424,
+   "url": "https://idc-open-data.s3.amazonaws.com/47b2be3f-c5b7-473f-a444-b48f6e3e9ce1/eb3b61b1-11fc-4756-91b1-d5b6f82bf717.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SEG-47b2be3f-c5b7-473f-a444-b48f6e3e9ce1/c17c5b2e-20fa-4270-b7d7-ffd03de5997d.dcm",
+   "sha256": "c4e349cf46b3c6888db9a969e1a966348960c9bc0f48e81d203532704476891f",
+   "size": 78738,
+   "url": "https://idc-open-data.s3.amazonaws.com/47b2be3f-c5b7-473f-a444-b48f6e3e9ce1/c17c5b2e-20fa-4270-b7d7-ffd03de5997d.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-550c3700-5382-4b8c-a8f0-3344bfff4871/bd4497e2-202a-4698-bacd-65435b60a746.dcm",
+   "sha256": "8e115d8f283e78beca16f576fed425b1736e0b9d4a1c5b00d9999082bf3fd3f7",
+   "size": 97341066,
+   "url": "https://idc-open-data.s3.amazonaws.com/550c3700-5382-4b8c-a8f0-3344bfff4871/bd4497e2-202a-4698-bacd-65435b60a746.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-550c3700-5382-4b8c-a8f0-3344bfff4871/5e45ab09-5a86-4327-a656-841358f79f36.dcm",
+   "sha256": "4ea984ce04dc175d0fe408f13683338f805af83dbf51a00782afca52c45d78bd",
+   "size": 5189688,
+   "url": "https://idc-open-data.s3.amazonaws.com/550c3700-5382-4b8c-a8f0-3344bfff4871/5e45ab09-5a86-4327-a656-841358f79f36.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-550c3700-5382-4b8c-a8f0-3344bfff4871/723af72e-a7fa-4f55-8c14-4e8d78048b08.dcm",
+   "sha256": "66b3d02db65b9a9083c33104dac91f072ac25d3e1b5ca3de3ccd117fbf669ee7",
+   "size": 1866936,
+   "url": "https://idc-open-data.s3.amazonaws.com/550c3700-5382-4b8c-a8f0-3344bfff4871/723af72e-a7fa-4f55-8c14-4e8d78048b08.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-550c3700-5382-4b8c-a8f0-3344bfff4871/cb4bd656-c064-42f2-b5b2-09f2cf71e08d.dcm",
+   "sha256": "ab665e1ac24fe3c70fdefa91e8b8e64ab86ab1bf2bfa3cf653f4871367e804e3",
+   "size": 14050840,
+   "url": "https://idc-open-data.s3.amazonaws.com/550c3700-5382-4b8c-a8f0-3344bfff4871/cb4bd656-c064-42f2-b5b2-09f2cf71e08d.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/ANN-cdd04f64-c03b-47ef-bcce-528317edeb10/df545678-62b2-425b-9a94-b357f18b0233.dcm",
+   "sha256": "901b9c4190a6ceb0ca1b6e5e76cc3d394e4eb2e3fbd10afb579cda133894de5e",
+   "size": 2111938,
+   "url": "https://idc-open-data.s3.amazonaws.com/cdd04f64-c03b-47ef-bcce-528317edeb10/df545678-62b2-425b-9a94-b357f18b0233.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-62828643-1ae6-4e24-b0e7-16b88a8d548b/95280708-ddbc-49fc-9e47-6710b490efb9.dcm",
+   "sha256": "19b1b2af89b5d7e3058b41a2fb2c0099cd4b4ca2593018e100c38991eec7a672",
+   "size": 34625382,
+   "url": "https://idc-open-data.s3.amazonaws.com/62828643-1ae6-4e24-b0e7-16b88a8d548b/95280708-ddbc-49fc-9e47-6710b490efb9.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-62828643-1ae6-4e24-b0e7-16b88a8d548b/8f2aa431-0e3f-4bb9-8a6f-69409e06f159.dcm",
+   "sha256": "fb8cc6276fa44e301231239cb9aa4fdd27ae9034e4263acb246a3adb3f73ca1e",
+   "size": 5227298,
+   "url": "https://idc-open-data.s3.amazonaws.com/62828643-1ae6-4e24-b0e7-16b88a8d548b/8f2aa431-0e3f-4bb9-8a6f-69409e06f159.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-62828643-1ae6-4e24-b0e7-16b88a8d548b/0076d919-4451-49d2-99c8-9f9fcdbe2210.dcm",
+   "sha256": "98d32760193e05ff0d3e92dd57e5105b3541858a670ab6925e3735f0c104e906",
+   "size": 1707960,
+   "url": "https://idc-open-data.s3.amazonaws.com/62828643-1ae6-4e24-b0e7-16b88a8d548b/0076d919-4451-49d2-99c8-9f9fcdbe2210.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-62828643-1ae6-4e24-b0e7-16b88a8d548b/8b7c7ffc-270f-4f42-a809-46867efcf9bc.dcm",
+   "sha256": "f04dce7b4c42856e98d45fb769c0bfef21214870997a8eb5b250a8d97e30d063",
+   "size": 2121046,
+   "url": "https://idc-open-data.s3.amazonaws.com/62828643-1ae6-4e24-b0e7-16b88a8d548b/8b7c7ffc-270f-4f42-a809-46867efcf9bc.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-5b454b12-b716-471d-abde-f59ec88cf4ef/1275245c-0fb2-4d12-9abf-4b0067f76fad.dcm",
+   "sha256": "f55f60b564da873949bd6b526d6afe0159185e0da23b5e288aaaffff0f0ff00b",
+   "size": 1640074,
+   "url": "https://idc-open-data.s3.amazonaws.com/5b454b12-b716-471d-abde-f59ec88cf4ef/1275245c-0fb2-4d12-9abf-4b0067f76fad.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-5b454b12-b716-471d-abde-f59ec88cf4ef/d3563639-0f3c-45cb-a5e2-407248d72e70.dcm",
+   "sha256": "06a5438a84ee836382c510b0138e427352bcdd3d8b4fb7e8857a90bb5f7f69d1",
+   "size": 8195606,
+   "url": "https://idc-open-data.s3.amazonaws.com/5b454b12-b716-471d-abde-f59ec88cf4ef/d3563639-0f3c-45cb-a5e2-407248d72e70.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SM-5b454b12-b716-471d-abde-f59ec88cf4ef/252659f3-0117-4286-bfa9-927088742249.dcm",
+   "sha256": "40bb6e944490dca3a6181914022427cbce0cfb4840c78bc2cec3ecd05cb20569",
+   "size": 774486,
+   "url": "https://idc-open-data.s3.amazonaws.com/5b454b12-b716-471d-abde-f59ec88cf4ef/252659f3-0117-4286-bfa9-927088742249.dcm",
+   "licence": "CC BY 3.0"
+  },
+  {
+   "name": "study-26f5b0cf/SEG-ac7cef6d-69d1-4b32-a5a9-8b12d923e41b/906a6e71-b64f-4085-9f29-fa63fec6c455.dcm",
+   "sha256": "981e404aff4c9d7f604a3f709c9b68890d64b5dda09ed8abc39f5f0c7edfc202",
+   "size": 13118,
+   "url": "https://idc-open-data.s3.amazonaws.com/ac7cef6d-69d1-4b32-a5a9-8b12d923e41b/906a6e71-b64f-4085-9f29-fa63fec6c455.dcm",
+   "licence": "CC BY 4.0"
+  },
+  {
+   "name": "study-26f5b0cf/SEG-992b538e-a3f9-4ced-941a-5c1dd732867b/88830e75-4f7a-4644-b9e8-259c32414c61.dcm",
+   "sha256": "0494e3627038c7218a45f38f737aa1a211d9b45126b9af505889a52a97c9efca",
+   "size": 12558,
+   "url": "https://idc-open-data.s3.amazonaws.com/992b538e-a3f9-4ced-941a-5c1dd732867b/88830e75-4f7a-4644-b9e8-259c32414c61.dcm",
+   "licence": "CC BY 4.0"
+  }
+ ]
+}

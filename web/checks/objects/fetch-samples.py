@@ -3,7 +3,10 @@
     uv run --project codec-corpus python web/checks/objects/fetch-samples.py [--out DIR] [--no-refs] [--only CASE ...]
 
 Data goes to --out (default /media/barracuda/shlink-dicom-objects/<case-id>/), not into git.
-Every file is pinned by sha256 in samples.json after the first run; later runs verify against it.
+Every file is pinned by sha256 in samples.json after the first run. Later runs take a pinned file
+from the mirror (github.com/jmandel/shlink-dicom-samples, release objects-1) first, then from its
+source, and only with the pinned bytes; a pinned file no source has any more is skipped. restore.py
+puts the files back without rebuilding samples.json.
 
 Sources (in order of preference used when picking):
   pydicom test data (pydicom.data.get_testdata_file), GDCM gdcmData, highdicom, dcm4che, fo-dicom,
@@ -37,6 +40,10 @@ from pathlib import Path
 
 import pydicom
 from pydicom.uid import UID
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "codec-corpus" / "scripts"))
+from mirror import MIRROR, fetch as mirror_fetch  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "samples.json"
@@ -279,6 +286,16 @@ def obtain(spec: dict, dst: Path, cache: Path) -> str:
     return url
 
 
+def obtain_desc(spec: dict) -> str:
+    """The provenance string `obtain` gives for a spec, without fetching."""
+    kind, p = spec["kind"], spec["p"]
+    if kind == "pydicom":
+        return f"pydicom.data.get_testdata_file('{p}') (pydicom {pydicom.__version__})"
+    if kind == "idc":
+        return f"https://{spec['aws_bucket']}.s3.amazonaws.com/{spec['crdc_series_uuid']}/{spec['crdc_instance_uuid']}.dcm"
+    return URL[kind].format(p=p if kind == "clunie" else urllib.parse.quote(p))
+
+
 def describe(p: Path) -> dict:
     ds = pydicom.dcmread(p, force=True, defer_size=4096)
     sop = str(ds.get("SOPClassUID", ""))
@@ -400,12 +417,18 @@ def main():
         for s in specs:
             dst = case_dir / s["dest"]
             dst.parent.mkdir(parents=True, exist_ok=True)
-            src = obtain(s, dst, cache)
+            want = pinned.get((cid, s["dest"]))
+            if want:
+                # A pinned file: the mirror first, then its source, and only with the pinned bytes.
+                got = mirror_fetch(dst, want, "objects-1", [lambda tmp, s=s: obtain(s, tmp, cache)])
+                if not got:
+                    print(f"  {cid}: {s['dest']} skipped: no source has it (optional)")
+                    continue
+                src = obtain_desc(s) if got in ("local", "source") or got.startswith(MIRROR) else got
+            else:
+                src = obtain(s, dst, cache)
             d = describe(dst)
             digest = sha256(dst)
-            want = pinned.get((cid, s["dest"]))
-            if want and want != digest:
-                raise SystemExit(f"{cid}/{s['dest']}: sha256 {digest} != pinned {want}")
             src_desc = src
             if s["kind"] == "idc":
                 src_desc = (f"IDC {s['collection_id']} SeriesInstanceUID {s['SeriesInstanceUID']} "

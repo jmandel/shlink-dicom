@@ -79,7 +79,8 @@ const patient = JSON.parse(await Bun.file(join(ROOT, "data/patient.json")).text(
 const clinical = JSON.parse(await Bun.file(join(ROOT, "data/clinical.json")).text());
 const cfg = JSON.parse(await Bun.file(join(ROOT, "data/studies.json")).text()) as {
   uidNamespace: string;
-  sources: { archive: string; url: string; sha256: string }[];
+  /** `mirror`: the sample mirror's release that also holds the file (tried first). */
+  sources: { archive: string; url: string; sha256: string; mirror?: string }[];
   removeTags: { tags: string[] };
   studies: StudyConfig[];
 };
@@ -93,7 +94,7 @@ async function source(archive: string): Promise<Uint8Array> {
   // SOURCE_CACHE: extra directories (colon-separated) searched by file name
   // before downloading; a file is used only if its SHA-256 matches the pin.
   const caches = [join(ROOT, "../data/samples"), ...(process.env.SOURCE_CACHE ?? "").split(":").filter(Boolean)];
-  return fetchPinned({ url: s.url, sha256: s.sha256, name: archive }, { keep: SOURCES, caches, log: (l) => log(`source ${l}`) });
+  return fetchPinned({ url: s.url, sha256: s.sha256, name: archive, mirror: s.mirror }, { keep: SOURCES, caches, log: (l) => log(`source ${l}`) });
 }
 
 const compact = (d: string) => d.replace(/-/g, "");
