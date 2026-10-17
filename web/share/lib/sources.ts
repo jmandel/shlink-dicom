@@ -132,7 +132,7 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
 
 function blankHeader(): DicomHeader {
   return {
-    transferSyntax: "", sopClassUid: "", sopInstanceUid: "", patientName: "", patientId: "", patientBirthDate: "",
+    transferSyntax: "", sopClassUid: "", sopInstanceUid: "", patientName: "", patientId: "", patientIdIssuer: "", patientBirthDate: "",
     patientSex: "", studyDate: "", studyTime: "", accessionNumber: "", studyDescription: "", studyInstanceUid: "",
     studyId: "", referringPhysician: "", seriesInstanceUid: "", modality: "", seriesNumber: "", seriesDescription: "",
     instanceNumber: "", specificCharacterSet: "",

@@ -9,6 +9,8 @@ export interface DicomHeader {
   sopInstanceUid: string;
   patientName: string;
   patientId: string;
+  /** Issuer of Patient ID (0010,0021). */
+  patientIdIssuer: string;
   patientBirthDate: string;
   patientSex: string;
   studyDate: string;
@@ -38,6 +40,7 @@ export async function readDicomHeader(bytes: Uint8Array): Promise<DicomHeader> {
     sopInstanceUid: meta.str(tag(0x0002, 0x0003)) ?? s(T.SOPInstanceUID),
     patientName: s(T.PatientName),
     patientId: s(tag(0x0010, 0x0020)),
+    patientIdIssuer: s(tag(0x0010, 0x0021)),
     patientBirthDate: s(tag(0x0010, 0x0030)),
     patientSex: s(tag(0x0010, 0x0040)),
     studyDate: s(T.StudyDate),

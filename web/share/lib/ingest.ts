@@ -38,7 +38,7 @@ export interface PatientInfo {
   /** The name as the Share page shows it. */
   name: string | null;
   birthDate: string | null;
-  identifier: { system?: string; value: string }[];
+  identifier: { system?: string; value: string; assigner?: { display: string } }[];
   /** A FHIR source's HumanName, for the Bundle. */
   humanName?: any;
 }
@@ -254,7 +254,7 @@ export class Collection {
 
 /** The included studies' patient, or the two records that name different people. */
 export type SharePatient =
-  | { patient: { dicomName: string | null; birthDate: string | null; identifiers: { value: string }[] } }
+  | { patient: { dicomName: string | null; birthDate: string | null; identifiers: { value: string; assigner?: { display: string } }[] } }
   | { conflict: { first: [string | null, string | null]; other: [string | null, string | null] }; message: string };
 
 /**
@@ -265,7 +265,7 @@ export type SharePatient =
 export function sharePatient(studies: StudyModel[], samePatient: boolean): SharePatient {
   const records = studies.flatMap((st) =>
     st.series.flatMap((se) =>
-      se.instances.map((i) => ({ name: i.h.patientName || null, birthDate: i.h.patientBirthDate || null, id: i.h.patientId || null, issuer: null })),
+      se.instances.map((i) => ({ name: i.h.patientName || null, birthDate: i.h.patientBirthDate || null, id: i.h.patientId || null, issuer: i.h.patientIdIssuer || null })),
     ),
   );
   return JSON.parse(shlWasm().share_patient(JSON.stringify(records), samePatient));
