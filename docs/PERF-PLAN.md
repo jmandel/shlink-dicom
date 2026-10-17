@@ -1,27 +1,25 @@
 # Performance plan: phase 2
 
-Status: proposed (16 Oct 2026). Phase 1 was the decoder and encoder speed rounds that ended with the decoder-perf merge (8de3607).
+Status: **closed** (16 Oct 2026, evening). Every track stopped under the rule below or finished; the table under "Where we stand" is the closing scoreboard. Phase 1 was the decoder and encoder speed rounds that ended with the decoder-perf merge (8de3607).
 
 **Goal:** keep making the codecs faster for as long as each change pays for itself, and stop each line of work at the point of diminishing returns or before it starts to cost maintainability. Matching the reference library is not a reason to stop, and falling short of it is not a reason to keep going.
 
 ## Where we stand
 
-Our time ÷ the reference's time, single-threaded, same frames; below 1 means we're faster. From the quiet full run of 16 Oct, 13:53 (`codecs/bench/results/2026-10-16-18-53-28-quiet-full3.json`; load 1.2 when it started, no other benchmarks). Ours is the bench's codec stage per frame. The native references are the bench's own; the browser references are the C/C++ libraries built to wasm (Cornerstone, and libjxl 0.12 with SIMD), timed in the same Chromium worker. JPEG 2000 native uses `shl-j2k-bench` against OpenJPEG 2.5.4 through imagecodecs.
+Our time ÷ the reference's time, single-threaded, same frames; below 1 means we're faster. From the closing quiet run of 16 Oct, 21:06 (`codecs/bench/results/2026-10-17-01-48-10-quiet-close.json`; load 0.65 when it started, no other benchmarks), with native builds for x86-64-v3. Ours is the codec stage per frame. The native references are the bench's own, except JPEG 2000 (OpenJPEG 2.5.4 through imagecodecs, the per-format tool) and the 8-bit colour photo (the per-format tool against libjpeg-turbo's tj3, because the bench row varied between runs). The browser references are the C/C++ libraries built to wasm (Cornerstone, and libjxl 0.12 with SIMD), timed in the same Chromium worker.
 
 | Format | Reference | Native | Browser (wasm) |
 |---|---|---|---|
-| JPEG baseline, 8-bit colour | libjpeg-turbo 3.2 | 1.08–1.27 (2048² photo 1.27) | 0.46–0.56 |
-| JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.55–0.58 | no wasm reference decodes 12-bit; 0.80–0.84 of *native* libjpeg-turbo's time |
-| JPEG Lossless SV1 | libjpeg-turbo 3.2 | 0.46–0.65 | 0.45 (8-bit GE file, the only one the wasm reference decodes) |
-| JPEG-LS | CharLS | grey 0.77–1.01; colour 1.07–1.18 | 0.82–1.19 |
-| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.89–1.00; lossy 0.94–1.11 | 0.72–0.88 |
-| HTJ2K | OpenJPH | 1.63–2.66 | large frames 1.17–1.20; small 0.82–1.04 |
-| JPEG XL lossless | libjxl 0.12 | effort 1: 1.62–1.91; effort 7: 0.97–1.01 | effort 1: 1.67–1.81; effort 7: 1.06–1.09 |
-| JPEG XL lossy | libjxl 0.12 | 2.28–2.99 | 1.28–1.77 |
+| JPEG baseline, 8-bit colour | libjpeg-turbo 3.2 | 1.06–1.16 (cine and slide tiles 1.13) | 0.44–0.57 |
+| JPEG extended, 12-bit grey | libjpeg-turbo 3.2 | 0.59–0.64 | no wasm reference decodes 12-bit; 0.81–0.86 of *native* libjpeg-turbo's time |
+| JPEG Lossless SV1 | libjpeg-turbo 3.2 | 0.44–0.80 | 0.45 (8-bit GE file, the only one the wasm reference decodes); 0.67–0.89 of native libjpeg-turbo's time |
+| JPEG-LS | CharLS 2.4 | grey 0.69–0.98; colour 0.94–1.05 | 0.81–1.22 (2048² DX 1.14, NEAR 3 1.22) |
+| JPEG 2000 | OpenJPEG 2.5.4 | lossless 0.82–0.94; lossy 0.76–1.11 | 0.73–0.91 |
+| HTJ2K | OpenJPH | 1.26–2.85 | 2048² frames 1.17–1.22; 640×480 and smaller 0.84–1.03 |
+| JPEG XL lossless | libjxl 0.12 | effort 1: 1.11–1.18; effort 7: 0.83–0.88 | effort 1: 1.10–1.13; effort 7: 0.99–1.02 |
+| JPEG XL lossy | libjxl 0.12 | 1.64–1.97 | 1.11–1.28 |
 
 **What the browser column measures.** The Cornerstone builds of libjpeg-turbo, OpenJPEG, CharLS and OpenJPH are what web DICOM viewers ship, so they're the fair comparison for users. But libjpeg-turbo's speed comes from hand-written SIMD for each architecture (x86 assembly, Arm NEON), and there is no WebAssembly SIMD port. Its wasm build is the plain C fallback: the Cornerstone libjpeg-turbo and OpenJPEG modules contain essentially no SIMD instructions, against about 27,000 in ours. So the browser JPEG figures read as "faster than libjpeg-turbo as web viewers ship it", not faster than libjpeg-turbo at its best. The native column is the second comparison.
-
-**JPEG XL rows predate a fix.** The bench measured our JPEG XL 30–60% slower than the JPEG XL agent's harness because the DICOM wrapper converted planes to interleaved samples one sample at a time; the viewer pays that too. The fix (44b2cb9) cut native cycles by 11–28% on lossy and effort-1 cases. The JPEG XL rows above are from before it; the next quiet run replaces them.
 
 | Encoder, MB/s (higher is better) | Ours native | Reference native | Ours wasm | Reference wasm |
 |---|---|---|---|---|
