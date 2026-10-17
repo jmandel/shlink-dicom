@@ -24,7 +24,7 @@ A SMART Health Link (SHL) is a way to share health data by handing over a link o
   - `U`: `url` points directly at a single encrypted file. `U` may not be combined with `P`.
 - **Entropy.** The link's `url` MUST include at least 256 bits of entropy, as the SHL specification requires, so it cannot be guessed. A server that names links by id draws each id from at least 32 random bytes.
 - **Retrieval.** Without `U`, the client POSTs `{recipient, passcode?}` to `url` and receives a *manifest*: a list of files, each with a `contentType` and either an `embedded` ciphertext or a `location` URL. A `location` must be valid for at most one hour. With `U`, the client sends `GET url?recipient=…` and receives the one file.
-- **Files.** Each file is a JSON Web Encryption (JWE) in compact serialization, with `alg: dir`, `enc: A256GCM`, encrypted directly under the link's key and optionally DEFLATE-compressed. Only three content types are defined:
+- **Files.** Each file is a JSON Web Encryption (JWE) in compact serialization, with `alg: dir`, `enc: A256GCM` and a `cty` header naming the content type, encrypted directly under the link's key and optionally DEFLATE-compressed. Only three content types are defined:
   - `application/smart-health-card`;
   - `application/fhir+json` (any FHIR resource, usually a Bundle);
   - `application/smart-api-access` (an OAuth token for a FHIR server).

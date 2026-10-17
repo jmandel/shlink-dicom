@@ -29,9 +29,9 @@ const check = (ok: boolean, what: string) => {
 const te = new TextEncoder();
 const td = new TextDecoder();
 
-/** Encrypt a FHIR Bundle JSON string as a compact SHL JWE (alg:dir, enc:A256GCM, zip:DEF). */
+/** Encrypt a FHIR Bundle JSON string as a compact SHL JWE (alg:dir, enc:A256GCM, zip:DEF, cty:application/fhir+json). */
 async function encryptBundleJwe(bundleJson: string, shlKey: Uint8Array, fixedIv?: Uint8Array): Promise<string> {
-  const headerB64 = b64urlEncode(te.encode(JSON.stringify({ alg: "dir", enc: "A256GCM", zip: "DEF" })));
+  const headerB64 = b64urlEncode(te.encode(JSON.stringify({ alg: "dir", enc: "A256GCM", zip: "DEF", cty: "application/fhir+json" })));
   const iv = fixedIv ?? crypto.getRandomValues(new Uint8Array(12));
   const compressed = new Uint8Array(deflateRawSync(te.encode(bundleJson)));
   const key = await crypto.subtle.importKey("raw", shlKey, "AES-GCM", false, ["encrypt"]);
@@ -44,13 +44,14 @@ async function encryptBundleJwe(bundleJson: string, shlKey: Uint8Array, fixedIv?
   return `${headerB64}..${b64urlEncode(iv)}.${b64urlEncode(ct)}.${b64urlEncode(tag)}`;
 }
 
-/** Decrypt a compact SHL JWE (alg:dir, enc:A256GCM, zip?:DEF). */
+/** Decrypt a compact SHL JWE of a FHIR Bundle (alg:dir, enc:A256GCM, zip?:DEF, cty:application/fhir+json). */
 async function decryptBundleJwe(jwe: string, shlKey: Uint8Array): Promise<string> {
   const parts = jwe.split(".");
   if (parts.length !== 5 || parts[1] !== "") throw new Error("invalid compact JWE");
   const [headerB64, , ivB64, ctB64, tagB64] = parts;
   const header = JSON.parse(td.decode(b64urlDecode(headerB64)));
   if (header.alg !== "dir" || header.enc !== "A256GCM") throw new Error("unsupported JWE alg/enc");
+  if (header.cty !== "application/fhir+json") throw new Error("JWE cty must be application/fhir+json");
   const iv = b64urlDecode(ivB64);
   const ct = b64urlDecode(ctB64);
   const tag = b64urlDecode(tagB64);
