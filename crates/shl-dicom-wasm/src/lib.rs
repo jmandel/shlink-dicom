@@ -83,3 +83,47 @@ pub fn offset_table_patch_from_fragments_wasm(
 pub fn is_uncompressed_image(transfer_syntax: &str, sop_class_uid: &str, len: f64) -> bool {
     shl_dicom_transcode::is_uncompressed_image(transfer_syntax, sop_class_uid, len as u64)
 }
+
+/// The share's grouping and order (`shl_dicom_core::order::group`), from a JSON array of
+/// `InstanceMeta` (`{studyUid, seriesUid, sopUid, studyDate?, studyTime?, seriesNumber?,
+/// instanceNumber?, sha256?}`): JSON `{studies: [{uid, series: [{uid, instances: [index]}]}],
+/// duplicates: [[index, keptIndex]], needSha256: [index]}`. When `needSha256` is not empty, call
+/// again with those instances' `sha256` filled in.
+#[wasm_bindgen]
+pub fn group_instances(metas_json: &str) -> Result<String, JsError> {
+    let metas: Vec<shl_dicom_core::order::InstanceMeta> = serde_json::from_str(metas_json).map_err(|e| JsError::new(&e.to_string()))?;
+    serde_json::to_string(&shl_dicom_core::order::group(&metas)).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// The owner Bundle (`shl_dicom_core::bundle::build_fhir_bundle`) from a JSON `BundleBuildInput`.
+#[wasm_bindgen]
+pub fn build_bundle(input_json: &str) -> Result<String, JsError> {
+    let input: shl_dicom_core::bundle::BundleBuildInput = serde_json::from_str(input_json).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(shl_dicom_core::bundle::build_fhir_bundle(&input).to_string())
+}
+
+/// A link's Bundle (`shl_dicom_core::bundle::subset_bundle`): the owner Bundle cut down to a JSON
+/// `LinkSelection` (`{studies: [id], looseReports: [id]}`). JSON `{bundle, allowedFiles}`.
+#[wasm_bindgen]
+pub fn subset_bundle(owner_json: &str, selection_json: &str, last_updated: &str) -> Result<String, JsError> {
+    let owner: serde_json::Value = serde_json::from_str(owner_json).map_err(|e| JsError::new(&e.to_string()))?;
+    let sel: shl_dicom_core::bundle::LinkSelection = serde_json::from_str(selection_json).map_err(|e| JsError::new(&e.to_string()))?;
+    let link = shl_dicom_core::bundle::subset_bundle(&owner, &sel, last_updated).map_err(|e| JsError::new(&e.to_string()))?;
+    serde_json::to_string(&link).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// A bare data set wrapped in Part 10 as the packer stores it
+/// (`shl_dicom_core::dicom_io::wrap_bare_data_set`); `undefined` when the bytes are already Part 10
+/// or do not start like a data set. Throws with the reason when they start like one but cannot
+/// be read.
+#[wasm_bindgen]
+pub fn wrap_bare_data_set(raw: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
+    shl_dicom_core::dicom_io::wrap_bare_data_set(raw).map_err(|e| JsError::new(&e))
+}
+
+/// Whether a file starting with `prefix` is a bare data set to wrap
+/// (`shl_dicom_core::dicom_io::looks_like_bare_data_set`), so a caller reads the whole file only then.
+#[wasm_bindgen]
+pub fn looks_like_bare_data_set(prefix: &[u8]) -> bool {
+    shl_dicom_core::dicom_io::looks_like_bare_data_set(prefix)
+}

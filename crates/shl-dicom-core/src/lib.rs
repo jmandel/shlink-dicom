@@ -3,6 +3,7 @@ pub mod crypto;
 pub mod dicom_io;
 pub mod jwe;
 pub mod offset_tables;
+pub mod order;
 pub mod packer;
 pub mod range;
 pub mod shl;

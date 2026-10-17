@@ -9,6 +9,7 @@
 import { readDicomHeader, type DicomHeader } from "../../core/dicom-header";
 import { formatPersonName, modalityName } from "../../core/format";
 import { BlobBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
+import { shlWasm } from "./shl-wasm";
 import type { Stager } from "./stage";
 
 export interface Instance {
@@ -34,9 +35,13 @@ export interface SeriesModel {
 }
 
 export interface PatientInfo {
+  /** The name as the Share page shows it. */
   name: string | null;
   birthDate: string | null;
   identifier: { system?: string; value: string }[];
+  /** For the Bundle: the DICOM Patient's Name (PN, family^given^…) or a FHIR source's HumanName. */
+  pn?: string | null;
+  humanName?: any;
 }
 
 export interface StudyModel {
@@ -100,7 +105,6 @@ export class Collection {
   received = new Map<string, number>();
   /** Where the patient details came from: "dicom" until a FHIR source sets them. */
   patientSource: "dicom" | "fhir" = "dicom";
-  private seen = new Set<string>();
 
   get seriesCount() {
     let n = 0;
@@ -114,13 +118,23 @@ export class Collection {
 
   /** Adds one file; DICOMDIR and non-DICOM files are skipped and recorded. Reads only its header. */
   async add(name: string, data: Bytes | Uint8Array) {
-    const src = data instanceof Uint8Array ? new MemBytes(data) : data;
+    let src = data instanceof Uint8Array ? new MemBytes(data) : data;
     const base = name.split(/[\\/]/).pop() ?? name;
     if (base.toUpperCase() === "DICOMDIR") return this.skip(name, "DICOMDIR (an index, not an image)");
     let head = await src.read(0, Math.min(src.size, HEADER_READS[0]));
     if (head.length < 132 || head[128] !== 0x44 || head[129] !== 0x49 || head[130] !== 0x43 || head[131] !== 0x4d) {
       if (/^\./.test(base) || /\.(txt|htm|html|inf|exe|ini|pdf|xml|jpg|png|js|css|ico|dll)$/i.test(base)) return this.skip(name, "not a DICOM file");
-      return this.skip(name, "not a DICOM Part 10 file");
+      // A bare data set is wrapped in Part 10 as the packer does (spec/README.md §11.1 step 3).
+      if (!shlWasm().looks_like_bare_data_set(head)) return this.skip(name, "not a DICOM file (no DICM preamble)");
+      let wrapped: Uint8Array | undefined;
+      try {
+        wrapped = shlWasm().wrap_bare_data_set(await src.read(0, src.size));
+      } catch (x) {
+        return this.skip(name, `unreadable DICOM: ${(x as Error).message}`);
+      }
+      if (!wrapped) return this.skip(name, "not a DICOM file (no DICM preamble)");
+      src = new MemBytes(wrapped);
+      head = await src.read(0, Math.min(src.size, HEADER_READS[0]));
     }
     let h: DicomHeader | null = null;
     for (const n of HEADER_READS) {
@@ -144,18 +158,13 @@ export class Collection {
     if (h.sopClassUid === DICOMDIR_SOP) return this.skip(name, "DICOMDIR (an index, not an image)");
     if (!h.sopInstanceUid) return this.skip(name, "no SOP Instance UID");
     if (!h.studyInstanceUid || !h.seriesInstanceUid) return this.skip(name, "no Study or Series Instance UID");
-    if (this.seen.has(h.sopInstanceUid)) {
-      this.duplicates++;
-      return;
-    }
-    this.seen.add(h.sopInstanceUid);
     let st = this.studies.get(h.studyInstanceUid);
     if (!st) {
       st = {
         uid: h.studyInstanceUid,
-        description: h.studyDescription || null,
-        started: dicomDate(h.studyDate, h.studyTime),
-        accession: h.accessionNumber || null,
+        description: null,
+        started: null,
+        accession: null,
         series: [],
         include: true,
         reports: [],
@@ -180,30 +189,82 @@ export class Collection {
     if (h.transferSyntax) se.transferSyntaxes.add(h.transferSyntax);
     this.instanceCount++;
     this.bytes += src.size;
-    if (this.patientSource === "dicom" && !this.patient.name && h.patientName) {
-      this.patient = {
-        name: formatPersonName(h.patientName) || null,
-        birthDate: dicomDate(h.patientBirthDate, ""),
-        identifier: h.patientId ? [{ value: h.patientId }] : [],
-      };
-    }
   }
 
   skip(name: string, reason: string) {
     this.skipped.push({ name, reason });
   }
 
-  /** Sorts series by number and instances by Instance Number, then SOP Instance UID (§11.1 step 4). */
-  finish() {
-    for (const st of this.studies.values()) {
-      st.series.sort((a, b) => (a.number ?? 1e9) - (b.number ?? 1e9) || a.uid.localeCompare(b.uid));
-      for (const se of st.series) {
-        se.instances.sort(
-          (a, b) => (a.number ?? 2 ** 31) - (b.number ?? 2 ** 31) || a.h.sopInstanceUid.localeCompare(b.h.sopInstanceUid),
-        );
-      }
+  /**
+   * Groups and orders the instances with the packer's rule (shl_dicom_core::order through
+   * shl-dicom-wasm; spec/README.md §11.1 step 4): studies newest first, series by number, instances
+   * by Instance Number, one copy per SOP Instance UID (the others are skipped, with the reason).
+   * Study-level values a source did not give and, for DICOM, the patient come from the first
+   * instance in that order that has them. Needs loadShlWasm first.
+   */
+  async finish() {
+    const all: Instance[] = [];
+    for (const st of this.studies.values()) for (const se of st.series) all.push(...se.instances);
+    const metas = all.map((i) => ({
+      studyUid: i.h.studyInstanceUid,
+      seriesUid: i.h.seriesInstanceUid,
+      sopUid: i.h.sopInstanceUid,
+      studyDate: i.h.studyDate || null,
+      studyTime: i.h.studyTime || null,
+      seriesNumber: toInt(i.h.seriesNumber),
+      instanceNumber: i.number,
+      sha256: null as string | null,
+    }));
+    const group = () => JSON.parse(shlWasm().group_instances(JSON.stringify(metas))) as Grouped;
+    let g = group();
+    if (g.needSha256.length) {
+      for (const i of g.needSha256) metas[i].sha256 = await sha256Hex(await all[i].src.read(0, all[i].src.size));
+      g = group();
     }
+    for (const [i] of g.duplicates) {
+      this.skip(all[i].name, "duplicate SOP Instance UID");
+      this.duplicates++;
+      this.instanceCount--;
+      this.bytes -= all[i].src.size;
+    }
+    const studies = new Map<string, StudyModel>();
+    for (const gs of g.studies) {
+      const st = this.studies.get(gs.uid)!;
+      st.series = gs.series.map((gse) => {
+        const se = st.series.find((s) => s.uid === gse.uid)!;
+        se.instances = gse.instances.map((i) => all[i]);
+        const nums = se.instances.map((i) => toInt(i.h.seriesNumber)).filter((n): n is number => n != null);
+        se.number = nums.length ? Math.min(...nums) : null;
+        se.bytes = se.instances.reduce((a, i) => a + i.src.size, 0);
+        se.transferSyntaxes = new Set(se.instances.map((i) => i.h.transferSyntax).filter(Boolean));
+        return se;
+      });
+      const first = (f: (h: DicomHeader) => string) => st.series.flatMap((se) => se.instances).map((i) => f(i.h)?.trim()).find(Boolean) ?? "";
+      // Values a source gave (the portal's or the link's ImagingStudy) stay.
+      st.description ??= first((h) => h.studyDescription) || null;
+      st.started ??= dicomDate(first((h) => h.studyDate), "");
+      st.accession ??= first((h) => h.accessionNumber) || null;
+      if (this.patientSource === "dicom" && !this.patient.pn) {
+        const pn = first((h) => h.patientName);
+        if (pn) {
+          const id = first((h) => h.patientId);
+          this.patient = { name: formatPersonName(pn) || null, pn, birthDate: dicomDate(first((h) => h.patientBirthDate), ""), identifier: id ? [{ value: id }] : [] };
+        }
+      }
+      studies.set(gs.uid, st);
+    }
+    this.studies = studies;
   }
+}
+
+interface Grouped {
+  studies: { uid: string; series: { uid: string; instances: number[] }[] }[];
+  duplicates: [number, number][];
+  needSha256: number[];
+}
+
+async function sha256Hex(b: Uint8Array): Promise<string> {
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", b as BufferSource))].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
 function toInt(s: string): number | null {

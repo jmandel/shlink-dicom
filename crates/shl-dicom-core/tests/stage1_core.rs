@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use shl_dicom_core::{
     bundle::{
-        build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput, InstanceBuildInput,
+        build_fhir_bundle, human_name_from_pn, parse_study_index, subset_bundle, BundleBuildInput, InstanceBuildInput, LinkSelection, PatientInput, Reencoded,
         LinkedFileInput, SeriesBuildInput, StudyBuildInput, EXT_LINKED_FILE, PROFILE_URL,
     },
     crypto::{b64url_decode, decode_key_32, decrypt_range, encrypt_file},
@@ -380,7 +380,8 @@ fn test_pack_and_lossless_roundtrip() {
     // A link Bundle with one study.
     let first_file_id = packed.index.studies[0].files[0].file_id.clone();
     let link_shl_key = [0x55u8; 32];
-    let link_out = build_link_bundle(&packed.owner_bundle_json, &[first_file_id.clone()], &link_shl_key, "2026-10-14T16:05:00Z").unwrap();
+    let sel = LinkSelection { studies: vec!["study-1".into()], loose_reports: vec![] };
+    let link_out = build_link_bundle(&packed.owner_bundle_json, Some(&sel), &link_shl_key, "2026-10-14T16:05:00Z").unwrap();
     assert_eq!(link_out.allowed_files, vec![format!("{first_file_id}.bin")]);
     let dec_link_bundle = decrypt_bundle_jwe(&link_out.bundle_jwe, &link_shl_key).unwrap();
     let link_index = parse_study_index(&dec_link_bundle).unwrap();
@@ -406,11 +407,11 @@ fn build_input(series_override: Option<LinkedFileInput>) -> BundleBuildInput {
     let study_file = LinkedFileInput { file_id: "AAAAAAAAAAAAAAAAAAAAAA".into(), key_b64: "A".repeat(43) };
     BundleBuildInput {
         last_updated: "2026-10-15T00:00:00Z".into(),
-        patient_name: None,
-        patient_id: None,
-        patient_birth_date: None,
+        patient: PatientInput::default(),
+        loose_reports: vec![],
         studies: vec![StudyBuildInput {
-            id: "study-1".into(),
+            reports: vec![],
+            reencoded: None,
             study_instance_uid: "2.25.9".into(),
             description: None,
             started: None,
@@ -448,20 +449,11 @@ fn test_linked_file_default_and_override() {
     assert_eq!(st.files.iter().map(|f| f.plaintext_length).collect::<Vec<_>>(), vec![150_007, 30_000]);
     assert_eq!((st.series[2].first_record, st.series[2].last_record), (2, 2));
 
-    // Subset: only the added file. The study-level linked-file goes with the series it names.
-    let only_b = subset_fhir_bundle(&bundle, std::slice::from_ref(&added.file_id), "2026-10-15T01:00:00Z").unwrap();
-    let st_b = &only_b["entry"][1]["resource"];
-    assert!(st_b.get("extension").is_none(), "key of an unshared file left in the link Bundle");
-    assert_eq!(st_b["numberOfSeries"], 1);
-    let ib = parse_study_index(only_b.to_string().as_bytes()).unwrap();
-    assert_eq!(ib.studies[0].files.len(), 1);
-    assert_eq!(ib.studies[0].series[0].uid, "2.25.9.2");
-
-    // Subset: only the study file keeps both of its series, at the same offsets.
-    let only_a = subset_fhir_bundle(&bundle, &["AAAAAAAAAAAAAAAAAAAAAA".into()], "2026-10-15T01:00:00Z").unwrap();
-    let ia = parse_study_index(only_a.to_string().as_bytes()).unwrap();
-    let at: Vec<(&str, u64)> = ia.studies[0].series.iter().map(|s| (s.uid.as_str(), s.offset)).collect();
-    assert_eq!(at, vec![("2.25.9.1", 0), ("2.25.9.3", 150_000)]);
+    // A link carries the study whole: both of its files.
+    let link = subset_bundle(&bundle, &LinkSelection { studies: vec!["study-1".into()], loose_reports: vec![] }, "2026-10-15T01:00:00Z").unwrap();
+    assert_eq!(link.allowed_files, vec!["AAAAAAAAAAAAAAAAAAAAAA.bin", "BBBBBBBBBBBBBBBBBBBBBB.bin"]);
+    assert_eq!(link.bundle["entry"][1]["resource"], bundle["entry"][1]["resource"]);
+    assert!(subset_bundle(&bundle, &LinkSelection { studies: vec!["study-9".into()], loose_reports: vec![] }, "x").is_err());
 }
 
 #[test]
@@ -522,8 +514,9 @@ fn test_unused_study_file_and_key_conflict() {
     let bundle = build_fhir_bundle(&input);
     let st = &parse_study_index(bundle.to_string().as_bytes()).unwrap().studies[0];
     assert_eq!(st.files.iter().map(|f| f.file_id.as_str()).collect::<Vec<_>>(), vec!["BBBBBBBBBBBBBBBBBBBBBB"]);
-    let sub = subset_fhir_bundle(&bundle, std::slice::from_ref(&b_file.file_id), "2026-10-15T01:00:00Z").unwrap();
-    assert!(sub["entry"][1]["resource"].get("extension").is_none(), "unused study-level key left in the link Bundle");
+    let sub = subset_bundle(&bundle, &LinkSelection { studies: vec!["study-1".into()], loose_reports: vec![] }, "2026-10-15T01:00:00Z").unwrap();
+    assert!(sub.bundle["entry"][1]["resource"].get("extension").is_none(), "unused study-level key left in the link Bundle");
+    assert_eq!(sub.allowed_files, vec!["BBBBBBBBBBBBBBBBBBBBBB.bin"]);
 
     // Every series names the study's file itself, with another key than the study gives.
     let mut clash = build_fhir_bundle(&build_input(None));
@@ -536,42 +529,68 @@ fn test_unused_study_file_and_key_conflict() {
     assert!(parse_study_index(clash.to_string().as_bytes()).is_err(), "study file given two keys accepted");
 }
 
-/// A link Bundle keeps the DiagnosticReports of the studies it keeps, and those that name no study.
+/// A link carries the reports of the studies it carries, and a report that names no study only
+/// when the sharer picked it.
 #[test]
 fn test_subset_reports_follow_studies() {
     let mut input = build_input(None);
     let mut second = input.studies[0].clone();
-    second.id = "study-2".into();
     second.study_instance_uid = "2.25.10".into();
     second.file = LinkedFileInput { file_id: "CCCCCCCCCCCCCCCCCCCCCC".into(), key_b64: format!("{}A", "C".repeat(42)) };
     for se in second.series.iter_mut() {
         se.file = None;
     }
+    let report = |text: &str| serde_json::json!({ "resourceType": "DiagnosticReport", "status": "final", "conclusion": text, "contained": [{}] });
+    input.studies[0].reports = vec![report("first")];
+    second.reports = vec![report("second")];
     input.studies.push(second);
-    let mut bundle = build_fhir_bundle(&input);
-    let url2 = bundle["entry"][2]["fullUrl"].as_str().unwrap().to_string();
-    let entries = bundle["entry"].as_array_mut().unwrap();
-    let report = |id: &str, refs: serde_json::Value| serde_json::json!({ "fullUrl": format!("urn:uuid:{id}"), "resource": { "resourceType": "DiagnosticReport", "id": id, "status": "final", "imagingStudy": refs } });
-    entries.push(report("r1", serde_json::json!([{ "reference": "ImagingStudy/study-1" }])));
-    entries.push(report("r2", serde_json::json!([{ "reference": url2 }])));
-    entries.push(report("r3", serde_json::json!([])));
-    let sub = subset_fhir_bundle(&bundle, &["AAAAAAAAAAAAAAAAAAAAAA".into()], "2026-10-15T01:00:00Z").unwrap();
-    let ids: Vec<&str> = sub["entry"].as_array().unwrap().iter().filter_map(|e| e["resource"]["id"].as_str()).collect();
-    assert_eq!(ids, vec!["p1", "study-1", "r1", "r3"]);
+    input.loose_reports = vec![report("loose")];
+    let bundle = build_fhir_bundle(&input);
+    let ids = |b: &serde_json::Value| b["entry"].as_array().unwrap().iter().filter_map(|e| e["resource"]["id"].as_str().map(String::from)).collect::<Vec<_>>();
+    assert_eq!(ids(&bundle), ["p1", "study-1", "report-1", "study-2", "report-2", "report-3"]);
+    // Kept elements only, the Bundle's Patient, and the study by fullUrl and UID.
+    let r1 = &bundle["entry"][2]["resource"];
+    assert!(r1.get("contained").is_none());
+    assert_eq!(r1["subject"]["reference"], "Patient/p1");
+    assert_eq!(r1["imagingStudy"][0]["reference"], bundle["entry"][1]["fullUrl"]);
+    assert_eq!(r1["imagingStudy"][0]["identifier"]["value"], "urn:oid:2.25.9");
+    assert!(bundle["entry"][5]["resource"].get("imagingStudy").is_none());
+
+    let sel = |loose: &[&str]| LinkSelection { studies: vec!["study-1".into()], loose_reports: loose.iter().map(|s| s.to_string()).collect() };
+    let without = subset_bundle(&bundle, &sel(&[]), "2026-10-15T01:00:00Z").unwrap();
+    assert_eq!(ids(&without.bundle), ["p1", "study-1", "report-1"]);
+    let with = subset_bundle(&bundle, &sel(&["report-3"]), "2026-10-15T01:00:00Z").unwrap();
+    assert_eq!(ids(&with.bundle), ["p1", "study-1", "report-1", "report-3"]);
+    // Everything: every study and every report.
+    let all = subset_bundle(&bundle, &LinkSelection::everything(&bundle), "2026-10-15T01:00:00Z").unwrap();
+    assert_eq!(ids(&all.bundle), ids(&bundle));
 }
 
-/// The owner Bundle's Provenance (the Share page's note of lossless re-encoding) never goes into a
-/// link's Bundle, for a subset or for everything.
+/// The owner Bundle's Provenance (a note of lossless re-encoding) never goes into a link's Bundle.
 #[test]
 fn test_subset_leaves_out_provenance() {
-    let mut bundle = build_fhir_bundle(&build_input(None));
-    let study_url = bundle["entry"][1]["fullUrl"].clone();
-    bundle["entry"].as_array_mut().unwrap().push(serde_json::json!({
-        "fullUrl": "urn:uuid:00000000-0000-4000-8000-000000000001",
-        "resource": { "resourceType": "Provenance", "target": [{ "reference": study_url }], "recorded": "2026-10-15T00:00:00Z", "agent": [{ "who": { "display": "test" } }] }
-    }));
-    for files in [vec![], vec!["AAAAAAAAAAAAAAAAAAAAAA".to_string()]] {
-        let sub = subset_fhir_bundle(&bundle, &files, "2026-10-15T01:00:00Z").unwrap();
-        assert!(sub["entry"].as_array().unwrap().iter().all(|e| e["resource"]["resourceType"] != "Provenance"), "Provenance in a link Bundle ({} files)", files.len());
+    let mut input = build_input(None);
+    input.studies[0].reencoded = Some(Reencoded { images: 3, of: 4, encodings: vec!["JPEG Lossless".into()], agent: "test".into() });
+    let bundle = build_fhir_bundle(&input);
+    let prov = &bundle["entry"][2]["resource"];
+    assert_eq!(prov["resourceType"], "Provenance");
+    assert_eq!(prov["target"][0]["reference"], bundle["entry"][1]["fullUrl"]);
+    assert!(prov["activity"]["text"].as_str().unwrap().starts_with("3 of 4 images were compressed without loss when shared (JPEG Lossless)"));
+    for sel in [LinkSelection::everything(&bundle), LinkSelection { studies: vec!["study-1".into()], loose_reports: vec![] }] {
+        let sub = subset_bundle(&bundle, &sel, "2026-10-15T01:00:00Z").unwrap();
+        assert!(sub.bundle["entry"].as_array().unwrap().iter().all(|e| e["resource"]["resourceType"] != "Provenance"));
     }
+}
+
+/// A DICOM PN becomes a FHIR HumanName by its components.
+#[test]
+fn test_patient_name_from_pn() {
+    let n = human_name_from_pn("DE LA CRUZ^MARIA^JOSE^DR^JR=ignored").unwrap();
+    assert_eq!(n["family"], "DE LA CRUZ");
+    assert_eq!(n["given"], serde_json::json!(["MARIA", "JOSE"]));
+    assert_eq!((n["prefix"][0].as_str(), n["suffix"][0].as_str()), (Some("DR"), Some("JR")));
+    assert_eq!(n["text"], "Maria Jose De La Cruz");
+    assert_eq!(human_name_from_pn("Example^Josh").unwrap()["text"], "Josh Example");
+    assert_eq!(human_name_from_pn("Josh Example").unwrap(), serde_json::json!({ "text": "Josh Example" }));
+    assert!(human_name_from_pn(" ").is_none());
 }

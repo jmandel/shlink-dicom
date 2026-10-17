@@ -10,6 +10,7 @@ import { Collection, expand, plainStudyTitle, studyCounts, studyModalities } fro
 import { BlobBytes } from "../share/lib/bytes";
 import { memoryStager } from "../share/lib/stage";
 import { ctSeries, dxImage } from "./synthetic";
+import { useShlWasm } from "./shl-wasm-bun";
 
 function walk(p: string): string[] {
   if (!statSync(p).isDirectory()) return [p];
@@ -17,10 +18,11 @@ function walk(p: string): string[] {
 }
 
 export async function expectations(paths: string[]) {
+  await useShlWasm();
   const col = new Collection();
   const stager = memoryStager();
   for (const p of paths) for (const f of walk(p)) for await (const e of expand(f, new BlobBytes(Bun.file(f)), stager)) await col.add(e.name, e.src);
-  col.finish();
+  await col.finish();
   const studies = col.list().map((s) => ({ title: plainStudyTitle(s.description, studyModalities(s)), uid: s.uid, ...studyCounts(s) }));
   return { files: paths, studies, series: col.seriesCount, images: col.instanceCount, bytes: col.bytes };
 }

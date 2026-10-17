@@ -13,7 +13,7 @@ import { drawThumbnail } from "../core/render";
 import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
-import { buildBundle, ciphertextSize, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
+import { buildBundle, ciphertextSize, looseReports, planStudyFiles, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import { loadShlWasm } from "./lib/shl-wasm";
 import {
@@ -399,7 +399,8 @@ function renderReview() {
   const box = $("rv-studies");
   reportBoxes.clear();
   box.replaceChildren(...studies.map(studyCard), ...[looseReportsCard()].filter(Boolean) as HTMLElement[]);
-  const skipped = col.skipped.length;
+  // Duplicates are in col.skipped too, with their reason; they get their own count here.
+  const skipped = col.skipped.length - col.duplicates;
   $("rv-skipped").textContent = [
     skipped ? `${plural(skipped, "file")} skipped (not DICOM images, or DICOMDIR)` : "",
     col.duplicates ? `${plural(col.duplicates, "duplicate image")} left out` : "",
@@ -938,7 +939,8 @@ async function runUpload(p: Pending) {
       if (pending) pending.owner = owner;
     }
     const studyIds = owner.entry.filter((e: any) => e.resource.resourceType === "ImagingStudy").map((e: any) => e.resource.id);
-    const { bundle, allowedFiles } = subsetBundle(owner, studyIds);
+    // The reports without a study that the owner Bundle holds are the ones the sharer included.
+    const { bundle, allowedFiles } = subsetBundle(owner, studyIds, looseReports(owner).map((r: any) => r.id));
     let link = (await persist(() => api.getShare(), onConn)).links[0];
     link ??= await persist(() => api.createLink({ label: job.recipient, passcode: job.passcode, exp: job.exp, longLived: job.longLived, allowedFiles }), onConn);
     const made = link;
@@ -1047,7 +1049,7 @@ async function resumeJob(job: UploadJob, files?: File[]) {
     if (job.source.kind === "files") await loadFiles(await sameFiles(job, files ?? []), c, st, on);
     else if (job.source.kind === "portal") {
       for (const [k, src] of (await st.list()).entries()) await c.add(`staged/${k}`, src);
-      c.finish();
+      await c.finish();
     } else await loadLink(await openShare(job.source.link!, { recipient: "Share page (re-share)" }), c, on);
     // The same bytes as before: each re-encoded image from its staged copy (or encoded again and checked).
     if (job.compress) {

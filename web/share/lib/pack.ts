@@ -1,15 +1,13 @@
 // Packing on the device (spec/README.md §8, §9, §11.1): one random file id and one random 32-byte key
 // per study, the study's Part 10 files laid end to end (series by series, in Bundle order) and
-// encrypted in 65,520-byte records with AES-256-GCM (nonce = record index), and the FHIR Bundle
-// that lists them, with linked-file on each ImagingStudy.
+// encrypted in 65,520-byte records with AES-256-GCM (nonce = record index). The FHIR Bundle that
+// lists them, and each link's subset of it, come from the packer's Rust builder (shl-dicom-wasm).
 import { b64urlDecode, b64urlEncode } from "../../core/b64";
 import { ConcatBytes } from "./bytes";
-import { EXT_INSTANCE_LENGTH, EXT_LINKED_FILE, PROFILE_URL } from "../../core/bundle";
 import { randomKeyB64 } from "../../core/jwe";
 import { RECORD_PLAINTEXT, TAG, recordCount, recordNonce } from "../../core/range";
 import type { Collection, Instance, StudyModel } from "./ingest";
-
-const ACSN = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0203", code: "ACSN" }] };
+import { shlWasm } from "./shl-wasm";
 
 /** One study's encrypted file. */
 export interface PackedFile {
@@ -78,120 +76,55 @@ export async function encryptFile(p: PackedFile): Promise<Uint8Array> {
   return out;
 }
 
-const DR_KEEP = ["status", "category", "code", "effectiveDateTime", "effectivePeriod", "issued", "conclusion", "conclusionCode", "presentedForm", "text", "identifier"];
-
-/**
- * Copies the kept DiagnosticReport elements into `dr`. Attachments keep their inline data only:
- * a `url` would point recipients at the portal (or wherever the source said), so it is dropped,
- * and an attachment with no data left is left out.
- */
-function keepReport(r: any, dr: any) {
-  for (const k of DR_KEEP) if (r[k] !== undefined) dr[k] = r[k];
-  if (Array.isArray(dr.presentedForm)) {
-    const forms = dr.presentedForm.filter((a: any) => a?.data).map(({ url: _url, ...a }: any) => a);
-    if (forms.length) dr.presentedForm = forms;
-    else delete dr.presentedForm;
-  }
-}
-
-/**
- * The owner Bundle: Patient, one ImagingStudy per included study (ids study-1…), and the studies'
- * DiagnosticReports. Each report's imagingStudy points at its packed ImagingStudy in this Bundle
- * (by fullUrl) and names the study by UID; each ImagingStudy carries the Study Instance UID and the
- * accession number, so a report can be matched either way.
- */
-export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated = new Date().toISOString()): any {
-  const patient: any = { resourceType: "Patient", id: "p1" };
-  if (col.patient.name) {
-    const parts = col.patient.name.split(" ");
-    patient.name = [{ text: col.patient.name, family: parts.length > 1 ? parts[parts.length - 1] : parts[0], ...(parts.length > 1 ? { given: parts.slice(0, -1) } : {}) }];
-  }
-  if (col.patient.birthDate) patient.birthDate = col.patient.birthDate;
-  if (col.patient.identifier.length) patient.identifier = col.patient.identifier;
-  const entry: any[] = [{ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: patient }];
-  let reportN = 0;
-  packed.forEach((p, si) => {
-    const st = p.study;
-    const id = `study-${si + 1}`;
-    // Same order as p.instances, so offsets in the file follow the Bundle (§8.1).
-    const series = st.series.map((se) => ({
-      uid: se.uid,
-      ...(se.number != null ? { number: se.number } : {}),
-      modality: { system: "http://dicom.nema.org/resources/ontology/DCM", code: se.modality || "OT" },
-      ...(se.description ? { description: se.description } : {}),
-      numberOfInstances: se.instances.length,
-      instance: se.instances.map((inst) => ({
-        extension: [{ url: EXT_INSTANCE_LENGTH, valueDecimal: inst.src.size }],
-        uid: inst.h.sopInstanceUid,
-        sopClass: { system: "urn:ietf:rfc:3986", code: `urn:oid:${inst.h.sopClassUid}` },
-        ...(inst.number != null ? { number: inst.number } : {}),
-      })),
-    }));
-    const res: any = {
-      resourceType: "ImagingStudy",
-      id,
-      meta: { profile: [PROFILE_URL] },
-      extension: [{ url: EXT_LINKED_FILE, extension: [{ url: "id", valueString: p.fileId }, { url: "key", valueString: p.key }] }],
-      status: "available",
-      identifier: [
-        { system: "urn:dicom:uid", value: `urn:oid:${st.uid}` },
-        ...(st.accession ? [{ type: ACSN, value: st.accession }] : []),
-      ],
-      subject: { reference: "Patient/p1" },
-      ...(st.started ? { started: st.started } : {}),
-      numberOfSeries: series.length,
-      numberOfInstances: series.reduce((a, s) => a + s.numberOfInstances, 0),
-      ...(st.description ? { description: st.description } : {}),
-      series,
-    };
-    const studyUrl = "urn:uuid:" + crypto.randomUUID();
-    entry.push({ fullUrl: studyUrl, resource: res });
-    // For the owner page only (links leave it out): images this device re-encoded without loss.
-    const reencoded = p.instances.filter((i) => i.reencoded);
-    if (reencoded.length) {
-      const names = [...new Set(reencoded.map((i) => TS_LOSSLESS[i.h.transferSyntax] ?? "lossless"))].join(" and ");
-      entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: reencodingProvenance(studyUrl, reencoded.length, p.instances.length, names, lastUpdated) });
-    }
-    for (const { resource: r } of st.reports.filter((x) => x.include)) {
-      const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
-      keepReport(r, dr);
-      dr.subject = { reference: "Patient/p1" };
-      dr.imagingStudy = [{ reference: studyUrl, identifier: { system: "urn:dicom:uid", value: `urn:oid:${st.uid}` } }];
-      entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
-    }
-  });
-  // Reports that name no study, when the person included them: no imagingStudy.
-  for (const { resource: r } of col.looseReports.filter((x) => x.include)) {
-    const dr: any = { resourceType: "DiagnosticReport", id: `report-${++reportN}` };
-    keepReport(r, dr);
-    dr.subject = { reference: "Patient/p1" };
-    entry.push({ fullUrl: "urn:uuid:" + crypto.randomUUID(), resource: dr });
-  }
-  return { resourceType: "Bundle", meta: { lastUpdated }, type: "collection", entry };
-}
-
-/** Activity text of the owner Bundle's re-encoding note, which the owner page shows as it is. */
-export const REENCODED_TEXT = (n: number, of: number, encoding: string) =>
-  `${n} of ${of} images were compressed without loss when shared (${encoding}): pixel-identical to the files they came from, not the same bytes.`;
-
 /** Names of the lossless transfer syntaxes the Share page writes. */
 const TS_LOSSLESS: Record<string, string> = { "1.2.840.10008.1.2.4.70": "JPEG Lossless", "1.2.840.10008.1.2.4.90": "JPEG 2000 Lossless" };
 
 /**
- * A Provenance saying the Share page re-encoded some of a study's images (spec/README.md §11.1). It
- * is in the owner Bundle only; subsetBundle leaves it out of every link's Bundle.
+ * The owner Bundle, built by the packer's one builder (shl_dicom_core::bundle::build_fhir_bundle,
+ * through shl-dicom-wasm): Patient, then for each packed study its ImagingStudy (study-1…), a
+ * Provenance when this device re-encoded some of its images, and its included reports; then the
+ * included reports that name no study. Needs loadShlWasm first.
  */
-function reencodingProvenance(studyUrl: string, n: number, of: number, encoding: string, recorded: string): any {
-  return {
-    resourceType: "Provenance",
-    target: [{ reference: studyUrl }],
-    recorded,
-    activity: {
-      coding: [{ system: "http://terminology.hl7.org/CodeSystem/v3-DataOperation", code: "TRANSFORM" }],
-      text: REENCODED_TEXT(n, of, encoding),
+export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated = new Date().toISOString()): any {
+  const p = col.patient;
+  const input = {
+    lastUpdated,
+    patient: {
+      dicomName: p.pn ?? null,
+      fhirName: p.humanName ?? (p.pn ? null : p.name ? { text: p.name } : null),
+      birthDate: p.birthDate,
+      identifiers: p.identifier,
     },
-    agent: [{ who: { display: "shlink-dicom Share page" } }],
+    // Same order as each file's instances, so offsets in the file follow the Bundle (§8.1).
+    studies: packed.map(({ study: st, instances, fileId, key }) => {
+      const reencoded = instances.filter((i) => i.reencoded);
+      return {
+        studyInstanceUid: st.uid,
+        description: st.description,
+        started: st.started,
+        accession: st.accession,
+        file: { fileId, keyB64: key },
+        series: st.series.map((se) => ({
+          uid: se.uid,
+          number: se.number,
+          modality: se.modality || "OT",
+          description: se.description || null,
+          instances: se.instances.map((i) => ({ uid: i.h.sopInstanceUid, sopClassUid: i.h.sopClassUid, number: i.number, length: i.src.size })),
+        })),
+        reports: st.reports.filter((x) => x.include).map((x) => x.resource),
+        reencoded: reencoded.length
+          ? {
+              images: reencoded.length,
+              of: instances.length,
+              encodings: [...new Set(reencoded.map((i) => TS_LOSSLESS[i.h.transferSyntax] ?? "lossless"))],
+              agent: "shlink-dicom Share page",
+            }
+          : null,
+      };
+    }),
+    looseReports: col.looseReports.filter((x) => x.include).map((x) => x.resource),
   };
+  return JSON.parse(shlWasm().build_bundle(JSON.stringify(input)));
 }
 
 /** The owner page's note for a study: its re-encoding Provenance's text, if any. */
@@ -201,50 +134,18 @@ export function reencodingNote(owner: any, studyId: string): string | null {
   return prov?.resource.activity?.text ?? null;
 }
 
-const linkedFileId = (el: any): string | undefined =>
-  (el?.extension ?? []).find((x: any) => x.url === EXT_LINKED_FILE)?.extension?.find((x: any) => x.url === "id")?.valueString;
-
 /**
- * The file ids an ImagingStudy's series use (each series' own linked-file, else the study's, as
- * core/bundle.ts resolves them), and the study without a study-level linked-file none of its series
- * use, so a link carries no key for a file it does not serve (spec/README.md §8.1).
+ * A link's Bundle (shl_dicom_core::bundle::subset_bundle, through shl-dicom-wasm): the owner
+ * Bundle cut down to whole studies (by ImagingStudy id) with their reports, plus the reports that
+ * name no study which the sharer picked (by DiagnosticReport id). Returns the Bundle and the
+ * `{fileId}.bin` names it needs. Needs loadShlWasm first.
  */
-function studyFiles(study: any): { ids: string[]; study: any } {
-  const studyId = linkedFileId(study);
-  const ids: string[] = [];
-  for (const se of study.series ?? []) {
-    const id = linkedFileId(se) ?? studyId;
-    if (id && !ids.includes(id)) ids.push(id);
-  }
-  if (!studyId || ids.includes(studyId)) return { ids, study };
-  const { extension, ...rest } = study;
-  const others = (extension ?? []).filter((x: any) => x.url !== EXT_LINKED_FILE);
-  return { ids, study: others.length ? { ...rest, extension: others } : rest };
+export function subsetBundle(owner: any, studyIds: string[], looseReportIds: string[] = []): { bundle: any; allowedFiles: string[] } {
+  const sel = JSON.stringify({ studies: studyIds, looseReports: looseReportIds });
+  return JSON.parse(shlWasm().subset_bundle(JSON.stringify(owner), sel, new Date().toISOString()));
 }
 
-/**
- * A link's Bundle: the owner Bundle cut down to whole studies (by ImagingStudy id), with the
- * reports that refer to them. Returns the Bundle and the `{fileId}.bin` names it needs.
- */
-export function subsetBundle(owner: any, studyIds: string[]): { bundle: any; allowedFiles: string[] } {
-  const keep = new Set(studyIds);
-  const keepUrls = new Set(
-    (owner.entry ?? []).filter((e: any) => e.resource?.resourceType === "ImagingStudy" && keep.has(e.resource.id)).map((e: any) => e.fullUrl),
-  );
-  const entry: any[] = [];
-  const files: string[] = [];
-  for (const e of owner.entry ?? []) {
-    const r = e.resource;
-    if (r?.resourceType === "ImagingStudy") {
-      if (!keep.has(r.id)) continue;
-      const used = studyFiles(r);
-      files.push(...used.ids.map((id) => `${id}.bin`));
-      entry.push(used.study === r ? e : { ...e, resource: used.study });
-    } else if (r?.resourceType === "DiagnosticReport") {
-      const refs = (r.imagingStudy ?? []).map((x: any) => String(x.reference ?? ""));
-      // A report goes with the studies it names; one that names none goes with every link.
-      if (!refs.length || refs.some((ref: string) => keepUrls.has(ref) || keep.has(ref.replace(/^.*ImagingStudy\//, "")))) entry.push(e);
-    } else if (r?.resourceType !== "Provenance") entry.push(e);
-  }
-  return { bundle: { ...owner, meta: { ...(owner.meta ?? {}), lastUpdated: new Date().toISOString() }, entry }, allowedFiles: files };
+/** DiagnosticReports in a Bundle that name no study: the ones a link carries only when picked. */
+export function looseReports(bundle: any): any[] {
+  return (bundle.entry ?? []).map((e: any) => e.resource).filter((r: any) => r?.resourceType === "DiagnosticReport" && !(r.imagingStudy ?? []).length);
 }

@@ -125,6 +125,15 @@ export class ShareApi {
   async putLinkBundle(lid: string, jwe: string): Promise<LinkResource> {
     return (await this.req("PUT", `${this.s}/links/${lid}/bundle.jwe`, jwe, "application/jose")).json();
   }
+  /** A link's Bundle JWE as stored, for its owner; null when the link has none. */
+  async getLinkBundle(lid: string): Promise<string | null> {
+    try {
+      return await (await this.req("GET", `${this.s}/links/${lid}/bundle`)).text();
+    } catch (x) {
+      if (x instanceof ApiError && x.status === 404) return null;
+      throw x;
+    }
+  }
   async patchLink(lid: string, patch: { label?: string | null; exp?: number | null; online?: boolean; allowedFiles?: string[] }): Promise<LinkResource> {
     return (await this.req("PATCH", `${this.s}/links/${lid}`, patch)).json();
   }
@@ -301,6 +310,12 @@ export async function shlinkFor(link: LinkResource, ownerKey: string, viewerPref
 export async function publishLinkBundle(api: ShareApi, ownerKey: string, lid: string, bundle: any): Promise<LinkResource> {
   const jwe = await encryptJwe(utf8(JSON.stringify(bundle)), await linkKey(ownerKey, lid));
   return api.putLinkBundle(lid, jwe);
+}
+
+/** A link's Bundle, decrypted with its key; null when the link has none. */
+export async function readLinkBundle(api: ShareApi, ownerKey: string, lid: string): Promise<any | null> {
+  const jwe = await api.getLinkBundle(lid);
+  return jwe === null ? null : JSON.parse(fromUtf8(await decryptJwe(jwe, await linkKey(ownerKey, lid))));
 }
 
 export async function readOwnerBundle(api: ShareApi, ownerKey: string): Promise<any> {

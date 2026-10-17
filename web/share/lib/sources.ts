@@ -54,7 +54,7 @@ export async function loadFiles(files: File[], col: Collection, stager: Stager, 
     read += f.size;
     say(0, name);
   }
-  col.finish();
+  await col.finish();
 }
 
 /** One series of a shared link as a byte source: Range reads, verified and decrypted on demand. */
@@ -84,7 +84,8 @@ class LinkSeriesBytes implements Bytes {
 export async function loadLink(share: OpenShare, col: Collection, on: OnProgress) {
   const idx = share.index;
   if (idx.patient.name) {
-    col.patient = { name: idx.patient.name, birthDate: idx.patient.birthDate, identifier: idx.patient.id ? [{ value: idx.patient.id }] : [] };
+    const humanName = (idx.bundle.entry ?? []).find((e: any) => e.resource?.resourceType === "Patient")?.resource.name?.[0] ?? { text: idx.patient.name };
+    col.patient = { name: idx.patient.name, humanName, birthDate: idx.patient.birthDate, identifier: idx.patient.id ? [{ value: idx.patient.id }] : [] };
     col.patientSource = "fhir";
   }
   for (const st of idx.studies) {
@@ -126,7 +127,7 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
     .map((e: any) => e.resource)
     .filter((r: any) => r?.resourceType === "DiagnosticReport" && !linked.has(r.id))
     .map((resource: any) => ({ resource, include: false, from: "link" as const }));
-  col.finish();
+  await col.finish();
 }
 
 function blankHeader(): DicomHeader {
@@ -196,6 +197,7 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
     const n = p.name?.[0];
     col.patient = {
       name: n?.text ?? ([...(n?.given ?? []), n?.family].filter(Boolean).join(" ") || null),
+      humanName: n ?? null,
       birthDate: p.birthDate ?? null,
       identifier: (p.identifier ?? []).filter((i: any) => i.value).map((i: any) => ({ ...(i.system ? { system: i.system } : {}), value: i.value })),
     };
@@ -278,5 +280,5 @@ export async function loadPortal(sess: PortalSession, col: Collection, stager: S
     on(col, { doing: `Downloading ${plural(others.length, "other report")}`, expected });
     col.looseReports = (await Promise.all(others.map((r) => S.inlineAttachments(r, tok)))).map((resource) => ({ resource, include: false, from: "portal" as const }));
   }
-  col.finish();
+  await col.finish();
 }

@@ -5,10 +5,11 @@ import { loadConfig, siteUrl, type SiteConfig } from "../core/config";
 import { formatBytes, plural, formatDate } from "../core/format";
 import { parseStudyIndex, type StudyEntry, type StudyIndex } from "../core/bundle";
 import {
-  ApiError, ShareApi, forgetShare, manageUrl, parseManageHash, publishLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor,
+  ApiError, ShareApi, forgetShare, manageUrl, parseManageHash, publishLinkBundle, readLinkBundle, readOwnerBundle, saveShare, savedShares, shlinkFor,
   type AccessEvent, type LinkResource, type OwnerCredential, type ShareResource,
 } from "./lib/api";
-import { reencodingNote, subsetBundle } from "./lib/pack";
+import { looseReports, reencodingNote, subsetBundle } from "./lib/pack";
+import { loadShlWasm } from "./lib/shl-wasm";
 import { plainStudyTitle, studyDisplayDate } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, when, dateOnly, expiryFieldset, expiryFrom, SERVER_MAX_DAYS } from "./lib/ui";
 
@@ -56,7 +57,7 @@ function confirmBox(title: string, text: string, ok: string): Promise<boolean> {
   cred = c;
   api = new ShareApi(cfg.apiBase, cred);
   try {
-    [share, owner] = await Promise.all([api.getShare(), readOwnerBundle(api, cred.ownerKey)]);
+    [share, owner] = await Promise.all([api.getShare(), readOwnerBundle(api, cred.ownerKey), loadShlWasm()]);
   } catch (x) {
     const e = x as ApiError;
     main.replaceChildren(
@@ -266,9 +267,39 @@ function studyChecks(name: string, checked: (s: StudyEntry) => boolean): HTMLEle
 }
 const checkedStudies = (root: HTMLElement, name: string) => [...root.querySelectorAll<HTMLInputElement>(`input[name=${name}]:checked`)].map((x) => x.value);
 
+/** A report's name for a checkbox: its code, else its attachment's title, with its date. */
+function reportName(r: any): string {
+  const name = r.code?.text ?? r.code?.coding?.[0]?.display ?? r.presentedForm?.[0]?.title ?? "Report";
+  const d = r.effectiveDateTime ?? r.effectivePeriod?.start ?? r.issued;
+  return d ? `${name} · ${formatDate(d)}` : name;
+}
+
+/**
+ * The reports that name no study: a link carries one only when it is ticked
+ * (shl_dicom_core::bundle::subset_bundle). `picked` are the ones the link carries now; null while
+ * that is unknown, when the boxes are disabled. Nothing when the share has none.
+ */
+function looseReportChecks(name: string, picked: Set<string> | null = new Set()): HTMLElement | null {
+  const loose = looseReports(owner);
+  if (!loose.length) return null;
+  return h(
+    "fieldset",
+    { class: "field", "data-loose": name },
+    h("legend", null, "Reports without a study"),
+    loose.map((r) =>
+      h("label", { class: "check-row" }, h("input", { type: "checkbox", name, value: r.id, checked: !!picked?.has(r.id), disabled: picked === null }), h("span", { class: "box", "aria-hidden": "true" }), h("span", null, reportName(r))),
+    ),
+    h("p", { class: "hint" }, "These name none of the studies, so the link carries only the ones you tick."),
+  );
+}
+
 function fillStudiesPanel(panel: HTMLElement, l: LinkResource) {
   const have = new Set(linkStudies(l).map((s) => s.id));
   const err = h("p", { class: "error hidden", role: "alert" });
+  // Which reports without a study the link carries now, from its own Bundle. Until that is
+  // known the form cannot be saved, since saving would drop them.
+  const loose = looseReports(owner);
+  let known = !loose.length;
   const form = h(
     "form",
     { class: "inline-form", onsubmit: async (e: Event) => {
@@ -279,7 +310,12 @@ function fillStudiesPanel(panel: HTMLElement, l: LinkResource) {
         err.classList.remove("hidden");
         return;
       }
-      const { bundle, allowedFiles } = subsetBundle(owner, ids);
+      if (!known) {
+        err.textContent = "Still reading which reports this link carries. Try again in a moment.";
+        err.classList.remove("hidden");
+        return;
+      }
+      const { bundle, allowedFiles } = subsetBundle(owner, ids, checkedStudies(form, `cr-${l.id}`));
       try {
         // Publish order (PLAN.md §5.2): files the new Bundle needs are allowed first, the Bundle is
         // replaced, then files it no longer needs are removed.
@@ -297,11 +333,25 @@ function fillStudiesPanel(panel: HTMLElement, l: LinkResource) {
       }
     } },
     studyChecks(`cs-${l.id}`, (s) => have.has(s.id)),
+    looseReportChecks(`cr-${l.id}`, known ? new Set() : null),
     h("p", { class: "hint" }, "The recipient keeps the same link. A viewer that already has it open sees the change when it reloads."),
     h("button", { class: "btn btn-primary", type: "submit" }, "Save"),
     err,
   ) as HTMLFormElement;
   panel.replaceChildren(form);
+  if (known) return;
+  const save = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+  save.disabled = true;
+  const note = h("p", { class: "hint" }, "Reading which reports this link carries…");
+  form.querySelector(`[data-loose="cr-${l.id}"]`)?.append(note);
+  readLinkBundle(api, cred.ownerKey, l.id)
+    .then((b) => {
+      const picked = new Set(b ? looseReports(b).map((r: any) => r.id) : []);
+      form.querySelector(`[data-loose="cr-${l.id}"]`)?.replaceWith(looseReportChecks(`cr-${l.id}`, picked)!);
+      known = true;
+      save.disabled = false;
+    })
+    .catch((x) => (note.textContent = `Couldn't read the link's Bundle: ${(x as Error).message}`));
 }
 
 // ---------------------------------------------------------------------------------- actions
@@ -390,7 +440,7 @@ function toggleNewLink() {
       btn.disabled = true;
       try {
         await ensureShareLasts(exp);
-        const { bundle, allowedFiles } = subsetBundle(owner, ids);
+        const { bundle, allowedFiles } = subsetBundle(owner, ids, checkedStudies(form, "nl-report"));
         let link = await api.createLink({ label: recipient.value.trim() || null, passcode: pass.value, exp, longLived: updates.checked, allowedFiles });
         link = await publishLinkBundle(api, cred.ownerKey, link.id, bundle);
         share = await api.getShare();
@@ -409,6 +459,7 @@ function toggleNewLink() {
     h("p", { class: "hint" }, "It uses the files already uploaded, with its own key, so nothing is encrypted or uploaded again."),
     h("div", { class: "field" }, h("label", { for: "nl-recipient" }, "Who is it for?"), recipient),
     studyChecks("nl-study", () => true),
+    looseReportChecks("nl-report"),
     expiryFieldset("nl-exp", "1w"),
     h("label", { class: "toggle-row" }, h("span", { class: "switch" }, updates, h("span", { class: "track", "aria-hidden": "true" })), h("span", null, h("strong", null, "Allow updates"), h("span", { class: "hint" }, "You can change which studies this link shows later."))),
     h("div", { class: "field" }, h("label", { for: "nl-pass" }, "Passcode (optional)"), pass, h("p", { class: "hint" }, "Send it separately. After 5 wrong tries the link stops working.")),

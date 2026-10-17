@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::{
     bundle::{
-        build_fhir_bundle, parse_study_index, subset_fhir_bundle, BundleBuildInput,
-        InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
+        build_fhir_bundle, parse_study_index, subset_bundle, BundleBuildInput, InstanceBuildInput, LinkSelection,
+        LinkedFileInput, PatientInput, SeriesBuildInput, StudyBuildInput, StudyIndex,
     },
+    order::{group, InstanceMeta, DUPLICATE_REASON},
     crypto::{b64url_encode, encrypt_file_stream, random_bytes, ReadChain},
     range::ciphertext_length,
     dicom_io::{extract_dicom_from_tar_gz, extract_dicom_from_zip, parse_dicom_bytes, ParsedDicomInstance, Skipped},
@@ -33,6 +34,8 @@ pub struct PackedStudySet {
     pub owner_bundle_json: String,
     pub index: StudyIndex,
     pub files: Vec<PackedStudyFile>,
+    /// Files not packed, with the reason: those `ingest_*` skipped, and duplicate copies.
+    pub skipped: Vec<Skipped>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,130 +143,40 @@ impl IngestSession {
         &self.instances
     }
 
-    /// Groups ingested DICOM instances by `(StudyInstanceUID, SeriesInstanceUID)`, orders
-    /// each study's series by `(SeriesNumber, SeriesInstanceUID)` and each series by
-    /// `(InstanceNumber, SOPInstanceUID)`, encrypts each study into one `{fileId}.bin` with a
-    /// fresh 16-byte `fileId` and 32-byte `key` (spec/README.md §11.1), and builds the owner's
-    /// FHIR R4 Bundle.
-    pub fn pack(self, last_updated: &str) -> Result<PackedStudySet> {
+    /// Groups and orders the ingested instances ([`plan_share`]: studies newest first, one copy
+    /// per SOP Instance UID; the copies left out go to `skipped`), encrypts each study into one
+    /// `{fileId}.bin` with a fresh 16-byte `fileId` and 32-byte `key` (spec/README.md §11.1),
+    /// and builds the owner's FHIR R4 Bundle.
+    pub fn pack(mut self, last_updated: &str) -> Result<PackedStudySet> {
         if self.instances.is_empty() {
             let n = self.skipped.len();
             return Err(Error::Dicom(format!("no DICOM instances ingested ({n} file(s) skipped)")));
         }
-
-        let study_files = self.study_files;
-        let mut patient_name = None;
-        let mut patient_id = None;
-        let mut patient_birth_date = None;
-
-        // Group by StudyInstanceUID -> SeriesInstanceUID -> Vec<ParsedDicomInstance>
-        let mut studies_map: BTreeMap<String, BTreeMap<String, Vec<ParsedDicomInstance>>> =
-            BTreeMap::new();
-
-        for inst in self.instances {
-            if patient_name.is_none() {
-                patient_name = inst.patient_name.clone();
+        let mut offset_tables_added = 0usize;
+        if self.add_offset_tables {
+            for inst in self.instances.iter_mut() {
+                let (bytes, changed) = add_offset_table(std::mem::take(&mut inst.bytes));
+                inst.bytes = bytes;
+                offset_tables_added += changed as usize;
             }
-            if patient_id.is_none() {
-                patient_id = inst.patient_id.clone();
-            }
-            if patient_birth_date.is_none() {
-                patient_birth_date = inst.patient_birth_date.clone();
-            }
-            studies_map
-                .entry(inst.study_instance_uid.clone())
-                .or_default()
-                .entry(inst.series_instance_uid.clone())
-                .or_default()
-                .push(inst);
+        }
+        let insts = &self.instances;
+        let plan = plan_share(insts, |i| insts[i].bytes.len() as u64, |i| sha256_hex(&insts[i].bytes));
+        for &i in &plan.duplicates {
+            self.skipped.push(Skipped { name: insts[i].source_name.clone(), reason: DUPLICATE_REASON.into() });
         }
 
         let mut study_inputs = Vec::new();
         let mut files = Vec::new();
-        let add_tables = self.add_offset_tables;
-        let mut offset_tables_added = 0usize;
-
-        for (study_idx, (study_uid, series_map)) in studies_map.into_iter().enumerate() {
-            let mut study_desc = None;
-            let mut study_date = None;
-            let mut accession: Option<String> = None;
-            let mut series_inputs = Vec::new();
-
-            // Each series' instances, kept for the study's plaintext once the series are ordered.
-            let mut series_plain: Vec<(String, Vec<ParsedDicomInstance>)> = Vec::new();
-            for (series_uid, mut insts) in series_map {
-                let series_uid_key = series_uid.clone();
-                // Deduplicate by SOPInstanceUID in case the archive had duplicate files
-                insts.sort_by(|a, b| {
-                    let num_cmp = a
-                        .instance_number
-                        .unwrap_or(i32::MAX)
-                        .cmp(&b.instance_number.unwrap_or(i32::MAX));
-                    num_cmp.then_with(|| a.sop_instance_uid.cmp(&b.sop_instance_uid))
-                });
-                insts.dedup_by(|a, b| a.sop_instance_uid == b.sop_instance_uid);
-                if add_tables {
-                    for inst in insts.iter_mut() {
-                        let (bytes, changed) = add_offset_table(std::mem::take(&mut inst.bytes));
-                        inst.bytes = bytes;
-                        offset_tables_added += changed as usize;
-                    }
-                }
-
-                let first = &insts[0];
-                if study_desc.is_none() {
-                    study_desc = first.study_description.clone();
-                }
-                if study_date.is_none() {
-                    study_date = first.study_date.clone();
-                }
-                if accession.is_none() {
-                    accession = first.accession_number.clone();
-                }
-
-                let mut inst_inputs = Vec::with_capacity(insts.len());
-                for inst in &insts {
-                    inst_inputs.push(InstanceBuildInput {
-                        uid: inst.sop_instance_uid.clone(),
-                        sop_class_uid: inst.sop_class_uid.clone(),
-                        number: inst.instance_number,
-                        length: inst.bytes.len() as u64,
-                    });
-                }
-
-                series_inputs.push(SeriesBuildInput {
-                    uid: series_uid,
-                    number: first.series_number,
-                    modality: first.modality.clone(),
-                    description: first.series_description.clone(),
-                    file: None,
-                    instances: inst_inputs,
-                });
-                series_plain.push((series_uid_key, insts));
-            }
-
-            series_inputs.sort_by(|a, b| {
-                a.number
-                    .unwrap_or(i32::MAX)
-                    .cmp(&b.number.unwrap_or(i32::MAX))
-                    .then_with(|| a.uid.cmp(&b.uid))
-            });
-
-            // The study's file: its series in that order, each series' instances end to end,
-            // encrypted record by record straight from the instances (no copy of the plaintext).
-            let parts: Vec<&[u8]> = series_inputs
-                .iter()
-                .flat_map(|se| {
-                    let (_, insts) = series_plain.iter().find(|(uid, _)| uid == &se.uid).expect("series");
-                    insts.iter().map(|i| i.bytes.as_slice())
-                })
-                .collect();
+        for (mut study, order) in plan.studies {
+            // The study's file: its instances in Bundle order, end to end, encrypted record by
+            // record straight from the instances (no copy of the plaintext).
+            let parts: Vec<&[u8]> = order.iter().map(|&i| insts[i].bytes.as_slice()).collect();
             let total_pt_len: usize = parts.iter().map(|p| p.len()).sum();
-            let (file_id, key) = match &study_files {
+            let uid = study.study_instance_uid.clone();
+            let (file_id, key) = match &self.study_files {
                 Some(given) => {
-                    let f = given
-                        .get(&study_uid)
-                        .ok_or_else(|| Error::Dicom(format!("no file id and key given for study {study_uid}")))?;
+                    let f = given.get(&uid).ok_or_else(|| Error::Dicom(format!("no file id and key given for study {uid}")))?;
                     (f.file_id.clone(), f.key)
                 }
                 None => (b64url_encode(&random_bytes::<16>()?), random_bytes::<32>()?),
@@ -271,89 +184,137 @@ impl IngestSession {
             let key_b64 = b64url_encode(&key);
             let mut ciphertext = Vec::with_capacity(ciphertext_length(total_pt_len as u64) as usize);
             encrypt_file_stream(ReadChain::new(parts.into_iter().map(Ok)), &mut ciphertext, &key)?;
-            drop(series_plain);
-            files.push(PackedStudyFile {
-                file_id: file_id.clone(),
-                key_b64: key_b64.clone(),
-                study_uid: study_uid.clone(),
-                plaintext_len: total_pt_len as u64,
-                ciphertext,
-            });
-
-            study_inputs.push(StudyBuildInput {
-                id: format!("study-{}", study_idx + 1),
-                study_instance_uid: study_uid,
-                description: study_desc,
-                started: study_date,
-                accession,
-                note: None,
-                file: LinkedFileInput { file_id, key_b64 },
-                series: series_inputs,
-            });
-        }
-
-        // Order multi-slice volumetric studies first so the primary study is shown first
-        study_inputs.sort_by(|a, b| {
-            let count_a: usize = a.series.iter().map(|s| s.instances.len()).sum();
-            let count_b: usize = b.series.iter().map(|s| s.instances.len()).sum();
-            count_b
-                .cmp(&count_a)
-                .then_with(|| a.study_instance_uid.cmp(&b.study_instance_uid))
-        });
-        for (i, st) in study_inputs.iter_mut().enumerate() {
-            st.id = format!("study-{}", i + 1);
+            files.push(PackedStudyFile { file_id: file_id.clone(), key_b64: key_b64.clone(), study_uid: uid, plaintext_len: total_pt_len as u64, ciphertext });
+            study.file = LinkedFileInput { file_id, key_b64 };
+            study_inputs.push(study);
         }
 
         let new_bundle = build_fhir_bundle(&BundleBuildInput {
             last_updated: last_updated.to_string(),
-            patient_name,
-            patient_id,
-            patient_birth_date,
+            patient: plan.patient,
             studies: study_inputs,
+            loose_reports: Vec::new(),
         });
-
-        let owner_bundle_json =
-            serde_json::to_string(&new_bundle).map_err(|e| Error::Json(e.to_string()))?;
+        let owner_bundle_json = serde_json::to_string(&new_bundle).map_err(|e| Error::Json(e.to_string()))?;
         let index = parse_study_index(owner_bundle_json.as_bytes())?;
-
-        Ok(PackedStudySet {
-            offset_tables_added,
-            owner_bundle_json,
-            index,
-            files,
-        })
+        Ok(PackedStudySet { offset_tables_added, owner_bundle_json, index, files, skipped: self.skipped })
     }
 }
 
-/// Builds a link-specific Bundle (`bundle.jwe`) from the owner's full Bundle JSON,
-/// filtering to `selected_file_ids` (or including every file if `selected_file_ids` is empty).
+/// A share planned from its instances' headers (`order::group`): the patient, each study's
+/// Bundle input (its `file` still empty) with its instances (indices) in file order, and the
+/// duplicate copies left out.
+pub struct SharePlan {
+    pub patient: PatientInput,
+    pub studies: Vec<(StudyBuildInput, Vec<usize>)>,
+    pub duplicates: Vec<usize>,
+}
+
+/// Plans a share from `headers`; `len(i)` is instance i's length as packed, and `sha256(i)` the
+/// SHA-256 (hex) of its bytes, asked for only to choose between two copies of one SOP Instance
+/// UID at the same place. The patient and each study-level value come from the first instance,
+/// in order, that has it.
+pub fn plan_share(headers: &[ParsedDicomInstance], len: impl Fn(usize) -> u64, mut sha256: impl FnMut(usize) -> String) -> SharePlan {
+    let mut metas: Vec<InstanceMeta> = headers.iter().map(instance_meta).collect();
+    let mut grouped = group(&metas);
+    if !grouped.need_sha256.is_empty() {
+        for &i in &grouped.need_sha256 {
+            metas[i].sha256 = Some(sha256(i));
+        }
+        grouped = group(&metas);
+    }
+    let text = |v: &Option<String>| v.clone().filter(|v| !v.trim().is_empty());
+    let mut patient = PatientInput::default();
+    let mut studies = Vec::new();
+    for gs in grouped.studies {
+        let order: Vec<usize> = gs.series.iter().flat_map(|se| se.instances.iter().copied()).collect();
+        let first = |f: fn(&ParsedDicomInstance) -> &Option<String>| order.iter().find_map(|&i| text(f(&headers[i])));
+        if patient.dicom_name.is_none() {
+            patient.dicom_name = first(|h| &h.patient_name);
+        }
+        if patient.identifiers.is_empty() {
+            if let Some(id) = first(|h| &h.patient_id) {
+                patient.identifiers.push(serde_json::json!({ "value": id }));
+            }
+        }
+        if patient.birth_date.is_none() {
+            patient.birth_date = first(|h| &h.patient_birth_date);
+        }
+        let series = gs
+            .series
+            .iter()
+            .map(|se| {
+                let hs = || se.instances.iter().map(|&i| &headers[i]);
+                SeriesBuildInput {
+                    uid: se.uid.clone(),
+                    number: hs().filter_map(|h| h.series_number).min(),
+                    modality: hs().find_map(|h| text(&h.modality)),
+                    description: hs().find_map(|h| text(&h.series_description)),
+                    file: None,
+                    instances: se
+                        .instances
+                        .iter()
+                        .map(|&i| InstanceBuildInput { uid: headers[i].sop_instance_uid.clone(), sop_class_uid: headers[i].sop_class_uid.clone(), number: headers[i].instance_number, length: len(i) })
+                        .collect(),
+                }
+            })
+            .collect();
+        let study = StudyBuildInput {
+            study_instance_uid: gs.uid.clone(),
+            description: first(|h| &h.study_description),
+            started: first(|h| &h.study_date),
+            accession: first(|h| &h.accession_number),
+            note: None,
+            file: LinkedFileInput { file_id: String::new(), key_b64: String::new() },
+            series,
+            reports: Vec::new(),
+            reencoded: None,
+        };
+        studies.push((study, order));
+    }
+    SharePlan { patient, studies, duplicates: grouped.duplicates.iter().map(|&(i, _)| i).collect() }
+}
+
+/// What `order::group` reads from an ingested instance.
+pub fn instance_meta(i: &ParsedDicomInstance) -> InstanceMeta {
+    InstanceMeta {
+        study_uid: i.study_instance_uid.clone(),
+        series_uid: i.series_instance_uid.clone(),
+        sop_uid: i.sop_instance_uid.clone(),
+        study_date: i.study_date.clone(),
+        study_time: i.study_time.clone(),
+        series_number: i.series_number,
+        instance_number: i.instance_number,
+        sha256: None,
+    }
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Builds a link's Bundle (`bundle.jwe`) from the owner's Bundle JSON: the selected studies and
+/// picked reports (`subset_bundle`), or everything when `selection` is None.
 pub fn build_link_bundle(
     owner_bundle_json: &str,
-    selected_file_ids: &[String],
+    selection: Option<&LinkSelection>,
     shl_key: &[u8; 32],
     last_updated: &str,
 ) -> Result<LinkBundleOutput> {
-    let owner_val: Value =
-        serde_json::from_str(owner_bundle_json).map_err(|e| Error::Json(e.to_string()))?;
-    let link_bundle_val = subset_fhir_bundle(&owner_val, selected_file_ids, last_updated)?;
-    let bundle_json =
-        serde_json::to_string(&link_bundle_val).map_err(|e| Error::Json(e.to_string()))?;
-    let parsed_index = parse_study_index(bundle_json.as_bytes())?;
-
-    let mut allowed_files = Vec::new();
-    for st in &parsed_index.studies {
-        for f in &st.files {
-            allowed_files.push(format!("{}.bin", f.file_id));
+    let owner_val: Value = serde_json::from_str(owner_bundle_json).map_err(|e| Error::Json(e.to_string()))?;
+    let everything;
+    let sel = match selection {
+        Some(s) => s,
+        None => {
+            everything = LinkSelection::everything(&owner_val);
+            &everything
         }
-    }
-
+    };
+    let link = subset_bundle(&owner_val, sel, last_updated)?;
+    let bundle_json = serde_json::to_string(&link.bundle).map_err(|e| Error::Json(e.to_string()))?;
     let bundle_jwe = encrypt_bundle_jwe(bundle_json.as_bytes(), shl_key)?;
-    Ok(LinkBundleOutput {
-        shl_key_b64: b64url_encode(shl_key),
-        bundle_json,
-        bundle_jwe,
-        allowed_files,
-    })
+    Ok(LinkBundleOutput { shl_key_b64: b64url_encode(shl_key), bundle_json, bundle_jwe, allowed_files: link.allowed_files })
 }
 
 #[cfg(test)]

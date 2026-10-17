@@ -133,7 +133,7 @@ pub fn run_pack_cli(
         None => random_bytes::<32>().map_err(|e| e.to_string())?,
     };
     let mut link_out =
-        build_link_bundle(&packed.owner_bundle_json, &[], &shl_key, &now_iso).map_err(|e| e.to_string())?;
+        build_link_bundle(&packed.owner_bundle_json, None, &shl_key, &now_iso).map_err(|e| e.to_string())?;
     if let Some(k) = &keys {
         // The same Bundle under the same key and IV gives the same bundle.jwe. The caller checks
         // the Bundle is unchanged before publishing (a different Bundle needs a new IV).

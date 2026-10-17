@@ -102,6 +102,8 @@ The SHL resolves to one `application/fhir+json` file whose plaintext is a FHIR R
 - one or more `ImagingStudy` resources, one per shared study;
 - optionally, `DiagnosticReport` resources (for example the radiology report), referring to the `ImagingStudy` through `DiagnosticReport.imagingStudy`.
 
+A report that refers to a shared study goes in the Bundle with that study. A report that names no study goes in a link's Bundle only when the sharer chose it for that link; a link carrying some of the patient's studies does not pick up the others' unrelated reports.
+
 ### 8.1 ImagingStudy
 
 Standard R4 `ImagingStudy`, with these rules:
@@ -302,7 +304,7 @@ A long-lived link may gain studies, series or instances (for example a new prior
 3. Handle broken data explicitly:
    - **Missing UID.** A file without a Series Instance UID, which DICOM requires but some exporters omit, is either rejected or placed in a series of its own with a newly generated UID. That choice is recorded in the Bundle, for example in `series.description`.
    - **Bare data set.** A file that is a bare data set without Part 10 wrapping is given the Part 10 preamble and file meta header. Apart from lossless compression (below), this is the only change a sharer makes to file bytes.
-4. Order each study's series by Series Number, then by Series Instance UID; order each series' instances by Instance Number, then by SOP Instance UID for ties or missing numbers.
+4. Order the studies by Study Date and Study Time, newest first, then by Study Instance UID, with undated studies last; order each study's series by Series Number, then by Series Instance UID; order each series' instances by Instance Number, then by SOP Instance UID for ties or missing numbers. Missing numbers sort last, and UIDs compare byte by byte. Keep one copy of each SOP Instance UID: the first in this order, or, between two copies at the same place, the one whose bytes have the smaller SHA-256. The order then depends only on the files, not on the order they were read in, so two sharers packing the same files list them alike.
 5. For each study:
    - draw a random 16-byte file id and a random 32-byte file key;
    - concatenate the files, series by series, in that order;

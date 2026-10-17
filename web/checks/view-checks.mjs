@@ -80,7 +80,7 @@ async function waitOverview(page) {
   await page.waitForSelector("#screen-overview:not(.hidden)", { timeout: 20000 });
   await page.waitForFunction(() => window.__view?.marks["first-thumb"], null, { timeout: 20000 });
 }
-async function openFirstStudy(page, idx = 0) {
+async function openStudy(page, idx = 0) {
   await page.locator(".study-open").nth(idx).click();
   await page.waitForFunction(() => window.__view?.marks["first-slice"], null, { timeout: 20000 });
   await page.waitForTimeout(600);
@@ -114,7 +114,7 @@ async function flowPublic(dev) {
   check(`${label}: every study listed`, nStudies === F.sample.studies, `${nStudies} of ${F.sample.studies}`);
   const kicker = await page.textContent("#top-title");
   check(`${label}: "Shared with you" line`, kicker.startsWith(`Shared with you · ${F.sample.label}`), kicker);
-  await openFirstStudy(page, F.sample.mriStudy);
+  await openStudy(page, F.sample.mriStudy);
   const s = await state(page);
   const seriesName = await page.locator('.series-btn[aria-current="true"] .s-name').textContent();
   check(`${label}: opens on largest axial series`, seriesName === "T2 FSE AX", seriesName);
@@ -257,7 +257,7 @@ async function flowPasscode(dev) {
     let posts = 0, failed = 0;
     page.on("request", (r) => r.method() === "POST" && /\/shl\//.test(r.url()) && posts++);
     await page.route(/\/cap\/.*\.bin/, (r) => (failed++ === 0 ? r.fulfill({ status: 404, body: "Not Found" }) : r.continue()));
-    await openFirstStudy(page);
+    await openStudy(page, F.sample.mriStudy);
     check(`${label}: expired /cap/ prefix → re-resolve and retry`, posts === 1 && failed > 1, `manifest POSTs after open: ${posts}`);
     check(`${label}: viewer draws through /cap/`, true);
     check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
@@ -274,7 +274,7 @@ async function flowPasscode(dev) {
   await page.click("#btn-passcode");
   await waitOverview(page);
   check(`${label}: right passcode opens the overview`, true);
-  await openFirstStudy(page);
+  await openStudy(page, F.sample.mriStudy);
   check(`${label}: viewer draws through /cap/`, true);
   check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
   await context.close();
@@ -288,7 +288,7 @@ async function flowSubset(dev) {
   const titles = await page.locator(".study-title").allTextContents();
   check(`${label}: only the wrist study`, titles.length === 1, titles.join(", "));
   await page.screenshot({ path: `${SHOTS}${dev}-subset-overview.png` });
-  await openFirstStudy(page);
+  await openStudy(page);
   await page.screenshot({ path: `${SHOTS}${dev}-subset-viewer.png` });
   check(`${label}: no console errors`, errors.length === 0, errors.join(" | "));
   await context.close();
@@ -379,7 +379,7 @@ async function flowCt(dev) {
   const { context, page, errors } = await newPage(dev);
   await page.goto(viewUrl(F.perfLink));
   await waitOverview(page);
-  await openFirstStudy(page);
+  await openStudy(page, F.perfCtStudy);
   const opts = await page.locator("#preset option").allTextContents();
   check(`${label}: CT window presets`, opts.join(",") === "Auto,Soft tissue,Lung,Bone,Brain", opts.join(", "));
   await pickPreset(page, "lung");
@@ -389,7 +389,7 @@ async function flowCt(dev) {
   await page.screenshot({ path: `${SHOTS}${dev}-ct-lung.png` });
   await layoutChecks(page, `${label} viewer`, dev);
   await page.click("#btn-back");
-  await page.locator(".study-open").nth(1).click();
+  await page.locator(".study-open").nth(F.perfDxStudy).click();
   await page.waitForFunction(() => /2048/.test(document.querySelector("#hud-tr").textContent));
   const dxOpts = await page.locator("#preset option").count();
   check(`${label}: no preset menu for DX (Auto only)`, !(await offered(page, "preset")), `${dxOpts} option(s)`);
@@ -529,8 +529,8 @@ async function prefetchLoad(link, studyIdx, want) {
 async function perf() {
   const out = {};
   const runs = (n, f) => Promise.resolve().then(async () => { const a = []; for (let k = 0; k < n; k++) a.push(await f()); return a; });
-  out["prefetch-mri-t2-20"] = await runs(3, () => prefetchLoad(F.publicLink, 0, 20));
-  out["prefetch-ct-100"] = await runs(3, () => prefetchLoad(F.perfLink, 0, 100));
+  out["prefetch-mri-t2-20"] = await runs(3, () => prefetchLoad(F.publicLink, F.sample.mriStudy, 20));
+  out["prefetch-ct-100"] = await runs(3, () => prefetchLoad(F.perfLink, F.perfCtStudy, 100));
   if (process.env.PREFETCH_ONLY) {
     console.log(JSON.stringify(out, null, 2));
     writeFileSync("/tmp/view-perf.json", JSON.stringify(out, null, 2));
@@ -544,7 +544,7 @@ async function perf() {
       await page.goto(viewUrl(F.publicLink));
       await page.waitForSelector(".study-open");
       const tClick = await page.evaluate(() => performance.now());
-      await page.locator(".study-open").first().click();
+      await page.locator(".study-open").nth(F.sample.mriStudy).click();
       await page.waitForFunction(() => window.__view.marks["first-slice"], null, { timeout: 20000 });
       const m = await page.evaluate(() => ({ ...window.__view.marks, nav: performance.getEntriesByType("navigation")[0].toJSON() }));
       runs.push({
@@ -568,7 +568,7 @@ async function perf() {
     await page.goto(viewUrl(F.perfLink, `?renderer=${renderer}`));
     await waitOverview(page);
     const studies = await page.locator(".study-title").allTextContents();
-    await page.locator(".study-open").first().click();
+    await page.locator(".study-open").nth(F.perfCtStudy).click();
     await page.waitForFunction(() => window.__view.marks["first-slice"]);
     const info = await page.evaluate(() => ({ s: window.__viewHooks.state(), hud: document.querySelector("#hud-tr").textContent }));
     // Wait for prefetch to decode every slice.
@@ -612,8 +612,8 @@ async function perf() {
     const wl512 = await wl();
     // Switch to the DX study.
     await page.click("#btn-back");
-    await page.locator(".study-open").nth(1).click();
-    await page.waitForFunction(() => window.__viewHooks.state().studyIdx === 1);
+    await page.locator(".study-open").nth(F.perfDxStudy).click();
+    await page.waitForFunction((dx) => window.__viewHooks.state().studyIdx === dx, F.perfDxStudy);
     await page.waitForFunction(() => /2048/.test(document.querySelector("#hud-tr").textContent));
     await page.waitForTimeout(500);
     const wl2048 = await wl();

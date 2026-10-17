@@ -1,14 +1,12 @@
 // Test helper: share files on a server the way the Share page does (web/share/lib), from Bun.
 //   const s = await packAndShare(base, files, { addOffsetTables });
 //   const link = await s.mint(s.bundle, { label: "…" });
-import { readFileSync } from "node:fs";
 import { encodeShlink, encryptJwe, parseStudyIndex, randomKeyB64 } from "../core/index";
 import { Collection } from "../share/lib/ingest";
 import { buildBundle, encryptFile, planStudyFiles } from "../share/lib/pack";
 import { addOffsetTables } from "../share/lib/offset-tables";
-import { initSync } from "../../crates/shl-dicom-wasm/pkg/shl_dicom_wasm.js";
+import { useShlWasm } from "./shl-wasm-bun";
 
-const root = new URL("../../", import.meta.url).pathname;
 
 export interface SharedFixture {
   sid: string;
@@ -69,13 +67,13 @@ export async function packAndShare(
   files: { name: string; bytes: Uint8Array }[],
   o: { addOffsetTables?: boolean } = {},
 ): Promise<SharedFixture> {
+  await useShlWasm();
   const col = new Collection();
   for (const f of files) await col.add(f.name, f.bytes);
-  col.finish();
+  await col.finish();
   const studies = col.list();
   let tablesAdded = 0;
   if (o.addOffsetTables) {
-    initSync({ module: readFileSync(`${root}crates/shl-dicom-wasm/pkg/shl_dicom_wasm_bg.wasm`) });
     tablesAdded = await addOffsetTables(studies.flatMap((s) => s.series));
   }
   const packed = planStudyFiles(studies);

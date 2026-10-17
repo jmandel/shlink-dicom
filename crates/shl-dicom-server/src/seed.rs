@@ -103,7 +103,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
             return Err(e);
         }
     };
-    let owner_bundle_json = add_sample_reports(&samples_dir, &packed.owner_bundle_json)?;
+    let owner_bundle_json = packed.owner_bundle_json.clone();
     let conn_arc = state.open_share_db(&sid).ok_or("failed to open the sample's database")?;
     {
         let conn = conn_arc.lock().unwrap();
@@ -123,7 +123,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
     let key_u = random_bytes::<32>().unwrap();
     let bundle_u = build_link_bundle(
         &owner_bundle_json,
-        &[],
+        None,
         &key_u,
         "2026-10-14T16:00:00Z",
     )
@@ -146,7 +146,7 @@ pub fn seed_sample(state: &AppState) -> Result<SeedReport, String> {
     let key_p = random_bytes::<32>().unwrap();
     let bundle_p = build_link_bundle(
         &owner_bundle_json,
-        &[],
+        None,
         &key_p,
         "2026-10-14T16:00:00Z",
     )
@@ -311,51 +311,6 @@ fn insert_seeded_link(
     }
     state.register_link_in_catalog(sid, lid)?;
     Ok(())
-}
-
-/// Adds the DiagnosticReports in `samples/reports.json` (`[{ studyInstanceUid, report }]`, written by
-/// deploy/sample-reports.ts) to the owner Bundle, each pointed at its ImagingStudy and the Bundle's Patient.
-fn add_sample_reports(samples_dir: &std::path::Path, bundle_json: &str) -> Result<String, String> {
-    let Ok(text) = std::fs::read_to_string(samples_dir.join("reports.json")) else {
-        return Ok(bundle_json.to_string());
-    };
-    let reports: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| format!("reports.json: {e}"))?;
-    let mut bundle: serde_json::Value = serde_json::from_str(bundle_json).map_err(|e| e.to_string())?;
-    let entries = bundle["entry"].as_array().cloned().unwrap_or_default();
-    let patient_url = entries
-        .iter()
-        .find(|e| e["resource"]["resourceType"] == "Patient")
-        .and_then(|e| e["fullUrl"].as_str())
-        .unwrap_or_default()
-        .to_string();
-    // The packed ImagingStudy for a Study Instance UID: its fullUrl.
-    let study_url = |uid: &str| {
-        let want = format!("urn:oid:{uid}");
-        entries.iter().find_map(|e| {
-            let r = &e["resource"];
-            let hit = r["resourceType"] == "ImagingStudy"
-                && r["identifier"].as_array().is_some_and(|ids| ids.iter().any(|i| i["value"] == want.as_str()));
-            hit.then(|| e["fullUrl"].as_str().map(String::from)).flatten()
-        })
-    };
-    let mut added = Vec::new();
-    for (n, item) in reports.iter().enumerate() {
-        let Some(uid) = item["studyInstanceUid"].as_str() else { continue };
-        let Some(url) = study_url(uid) else { continue };
-        let mut r = item["report"].clone();
-        r["id"] = serde_json::json!(format!("report-{}", n + 1));
-        r["subject"] = serde_json::json!({ "reference": patient_url });
-        // Points at the packed ImagingStudy in this Bundle, and names the study by UID.
-        r["imagingStudy"] = serde_json::json!([{
-            "reference": url,
-            "identifier": { "system": "urn:dicom:uid", "value": format!("urn:oid:{uid}") },
-        }]);
-        added.push(serde_json::json!({ "fullUrl": shl_dicom_core::bundle::random_urn_uuid(), "resource": r }));
-    }
-    if let Some(arr) = bundle["entry"].as_array_mut() {
-        arr.extend(added);
-    }
-    serde_json::to_string(&bundle).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

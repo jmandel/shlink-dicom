@@ -55,6 +55,7 @@ pub struct ParsedDicomInstance {
     pub series_description: Option<String>,
     pub study_description: Option<String>,
     pub study_date: Option<String>,
+    pub study_time: Option<String>,
     pub accession_number: Option<String>,
     pub patient_name: Option<String>,
     pub patient_id: Option<String>,
@@ -253,6 +254,22 @@ fn get_i32_tag(obj: &InMemDicomObject, tag: Tag) -> Option<i32> {
     obj.element(tag).ok().and_then(|e| e.to_int::<i32>().ok())
 }
 
+/// Whether a file that starts with `prefix` (at least 132 bytes, or the whole file) is a bare data
+/// set to wrap: not Part 10, and starting like a data set.
+pub fn looks_like_bare_data_set(prefix: &[u8]) -> bool {
+    !has_part10_magic(prefix) && looks_like_bare_dicom(prefix)
+}
+
+/// `raw` as the packer stores it when it is a bare data set: wrapped in Part 10 (spec §11.1
+/// step 3; the data set's bytes follow unchanged). None when `raw` already is Part 10 or does not
+/// start like a data set. The Share page calls this through shl-dicom-wasm.
+pub fn wrap_bare_data_set(raw: &[u8]) -> std::result::Result<Option<Vec<u8>>, String> {
+    if has_part10_magic(raw) || !looks_like_bare_dicom(raw) {
+        return Ok(None);
+    }
+    wrap_bare(raw).map(|(_, bytes)| Some(bytes))
+}
+
 /// Parses a DICOM Part 10 byte buffer (or bare dataset, wrapping it in Part 10 if needed).
 /// `Err` carries the reason a file is not ingested: not DICOM, a `DICOMDIR` index, or unreadable.
 pub fn parse_dicom_bytes(source_name: &str, raw_bytes: Vec<u8>) -> std::result::Result<ParsedDicomInstance, String> {
@@ -365,6 +382,7 @@ fn parsed_from_object(
         study_description: get_str_tag(&file_obj, tags::STUDY_DESCRIPTION),
         accession_number: get_str_tag(&file_obj, tags::ACCESSION_NUMBER),
         study_date: get_str_tag(&file_obj, tags::STUDY_DATE),
+        study_time: get_str_tag(&file_obj, tags::STUDY_TIME),
         patient_name: get_str_tag(&file_obj, tags::PATIENT_NAME),
         patient_id: get_str_tag(&file_obj, tags::PATIENT_ID),
         patient_birth_date: get_str_tag(&file_obj, tags::PATIENT_BIRTH_DATE),

@@ -97,43 +97,108 @@ pub struct InstanceSummary {
     pub last_record: u64,
 }
 
-#[derive(Debug, Clone)]
+/// Everything an owner Bundle is built from (spec/README.md §8, §11.1). The CLI's pack, the
+/// server's seed and the Share page (through shl-dicom-wasm, as JSON) all build it with
+/// [`build_fhir_bundle`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct BundleBuildInput {
     pub last_updated: String,
-    pub patient_name: Option<String>,
-    pub patient_id: Option<String>,
-    pub patient_birth_date: Option<String>,
+    pub patient: PatientInput,
+    /// In Bundle order (see `order`); each gets the id `study-{n}`.
     pub studies: Vec<StudyBuildInput>,
+    /// DiagnosticReports that name no study, as their source gave them. A link carries one only
+    /// when the sharer picks it (`LinkSelection`).
+    pub loose_reports: Vec<Value>,
 }
 
-#[derive(Debug, Clone)]
+/// The patient, from DICOM or from a FHIR source.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PatientInput {
+    /// Patient's Name (0010,0010) as DICOM PN: family^given^middle^prefix^suffix.
+    pub dicom_name: Option<String>,
+    /// A FHIR HumanName from a FHIR source, used as it is (instead of `dicom_name`).
+    pub fhir_name: Option<Value>,
+    /// DICOM DA (YYYYMMDD) or FHIR date.
+    pub birth_date: Option<String>,
+    /// FHIR Identifiers (a DICOM Patient ID is `{"value": id}`).
+    pub identifiers: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StudyBuildInput {
-    pub id: String,
     pub study_instance_uid: String,
+    #[serde(default)]
     pub description: Option<String>,
+    /// Study Date (DA) or an ISO date.
+    #[serde(default)]
     pub started: Option<String>,
     /// Accession Number (0008,0050), written as an ImagingStudy identifier of type ACSN.
+    #[serde(default)]
     pub accession: Option<String>,
+    #[serde(default)]
     pub note: Option<String>,
     /// The study's file, written as `linked-file` on the ImagingStudy.
     pub file: LinkedFileInput,
     pub series: Vec<SeriesBuildInput>,
+    /// The study's DiagnosticReports, as their source gave them.
+    #[serde(default)]
+    pub reports: Vec<Value>,
+    /// Images the packer re-encoded without loss, for the owner's Provenance (links leave it out).
+    #[serde(default)]
+    pub reencoded: Option<Reencoded>,
 }
 
+/// A note that some of a study's images were re-encoded without loss (spec/README.md §11.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reencoded {
+    pub images: usize,
+    pub of: usize,
+    /// The encodings' names ("JPEG Lossless", "JPEG 2000 Lossless").
+    pub encodings: Vec<String>,
+    /// Who re-encoded them ("shlink-dicom Share page").
+    pub agent: String,
+}
+
+/// The Provenance text the owner page shows for a study's re-encoded images.
+pub fn reencoded_text(r: &Reencoded) -> String {
+    format!(
+        "{} of {} images were compressed without loss when shared ({}): pixel-identical to the files they came from, not the same bytes.",
+        r.images,
+        r.of,
+        r.encodings.join(" and ")
+    )
+}
+
+/// DiagnosticReport elements a Bundle keeps from a report's source; the rest (contained
+/// resources, references into the source system) do not travel.
+const REPORT_KEEP: [&str; 11] = [
+    "status", "category", "code", "effectiveDateTime", "effectivePeriod", "issued", "conclusion", "conclusionCode", "presentedForm", "text", "identifier",
+];
+
 /// A `linked-file`: the file id and its base64url key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkedFileInput {
     pub file_id: String,
     pub key_b64: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SeriesBuildInput {
     pub uid: String,
+    #[serde(default)]
     pub number: Option<i32>,
+    #[serde(default)]
     pub modality: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
     /// A file of the series' own (a series added to the study later); None for the study's file.
+    #[serde(default)]
     pub file: Option<LinkedFileInput>,
     pub instances: Vec<InstanceBuildInput>,
 }
@@ -148,10 +213,12 @@ fn linked_file_json(f: &LinkedFileInput) -> Value {
     }])
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstanceBuildInput {
     pub uid: String,
     pub sop_class_uid: String,
+    #[serde(default)]
     pub number: Option<i32>,
     pub length: u64,
 }
@@ -167,6 +234,88 @@ fn format_dicom_date(d: &str) -> Option<String> {
     }
 }
 
+/// A DICOM PN (first component group: family^given^middle^prefix^suffix) as a FHIR HumanName.
+/// `text` is the name as people read it: given and middle names, then the family name, each word
+/// capitalised ("DOE^JOHN^Q" -> "John Q Doe"); the components keep their own case.
+pub fn human_name_from_pn(pn: &str) -> Option<Value> {
+    let group = pn.split('=').next().unwrap_or("").trim();
+    if group.is_empty() {
+        return None;
+    }
+    if !group.contains('^') {
+        return Some(json!({ "text": group }));
+    }
+    let c: Vec<&str> = group.split('^').map(str::trim).collect();
+    let at = |i: usize| c.get(i).copied().filter(|s| !s.is_empty());
+    let title = |w: &str| {
+        w.split(' ')
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let mut ch = t.chars();
+                ch.next().map(|f| f.to_uppercase().chain(ch.flat_map(char::to_lowercase)).collect::<String>()).unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let given: Vec<&str> = [at(1), at(2)].into_iter().flatten().collect();
+    let shown: Vec<String> = given.iter().map(|g| title(g)).chain(at(0).map(title)).collect();
+    let mut name = json!({ "text": shown.join(" ") });
+    if let Some(f) = at(0) {
+        name["family"] = json!(f);
+    }
+    if !given.is_empty() {
+        name["given"] = json!(given);
+    }
+    if let Some(p) = at(3) {
+        name["prefix"] = json!([p]);
+    }
+    if let Some(sx) = at(4) {
+        name["suffix"] = json!([sx]);
+    }
+    Some(name)
+}
+
+/// A report as a Bundle carries it: the kept elements, the Bundle's Patient, and (for a study's
+/// report) the study it belongs to, by fullUrl and by Study Instance UID.
+fn report_entry(source: &Value, id: String, study: Option<(&str, &str)>) -> Value {
+    let mut dr = json!({ "resourceType": "DiagnosticReport", "id": id });
+    for k in REPORT_KEEP {
+        if let Some(v) = source.get(k) {
+            dr[k] = v.clone();
+        }
+    }
+    // Attachments keep their inline data only: a `url` would point recipients at the source system
+    // (a portal, or wherever the source said), so it is dropped, and an attachment with no data is
+    // left out.
+    if let Some(forms) = dr.get("presentedForm").and_then(Value::as_array) {
+        let kept: Vec<Value> = forms
+            .iter()
+            .filter(|a| a.get("data").is_some_and(|d| !d.is_null()))
+            .map(|a| {
+                let mut a = a.clone();
+                if let Some(o) = a.as_object_mut() {
+                    o.remove("url");
+                }
+                a
+            })
+            .collect();
+        let o = dr.as_object_mut().unwrap();
+        if kept.is_empty() {
+            o.remove("presentedForm");
+        } else {
+            o.insert("presentedForm".into(), Value::Array(kept));
+        }
+    }
+    dr["subject"] = json!({ "reference": "Patient/p1" });
+    if let Some((url, uid)) = study {
+        dr["imagingStudy"] = json!([{ "reference": url, "identifier": { "system": "urn:dicom:uid", "value": format!("urn:oid:{uid}") } }]);
+    }
+    json!({ "fullUrl": random_urn_uuid(), "resource": dr })
+}
+
+/// The owner Bundle: Patient, then for each study its ImagingStudy (id `study-{n}`), a
+/// Provenance when images were re-encoded, and its reports (ids `report-{n}`); then the reports
+/// that name no study.
 pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
     let mut entries = Vec::new();
 
@@ -174,20 +323,14 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
         "resourceType": "Patient",
         "id": "p1",
     });
-    if let Some(ref name) = input.patient_name {
-        let parts: Vec<&str> = name.split('^').collect();
-        let family = parts.first().copied().unwrap_or(name.as_str());
-        let given: Vec<&str> = parts.iter().skip(1).copied().filter(|s| !s.is_empty()).collect();
-        if given.is_empty() {
-            patient["name"] = json!([{ "text": name, "family": family }]);
-        } else {
-            patient["name"] = json!([{ "text": name, "family": family, "given": given }]);
-        }
+    let p = &input.patient;
+    if let Some(name) = p.fhir_name.clone().or_else(|| p.dicom_name.as_deref().and_then(human_name_from_pn)) {
+        patient["name"] = json!([name]);
     }
-    if let Some(ref pid) = input.patient_id {
-        patient["identifier"] = json!([{ "value": pid }]);
+    if !p.identifiers.is_empty() {
+        patient["identifier"] = json!(p.identifiers);
     }
-    if let Some(ref dob) = input.patient_birth_date.as_deref().and_then(format_dicom_date) {
+    if let Some(ref dob) = p.birth_date.as_deref().and_then(format_dicom_date) {
         patient["birthDate"] = json!(dob);
     }
 
@@ -196,7 +339,8 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
         "resource": patient,
     }));
 
-    for study in input.studies.iter() {
+    let mut report_n = 0;
+    for (study_n, study) in input.studies.iter().enumerate() {
         let total_instances: usize = study.series.iter().map(|se| se.instances.len()).sum();
         let series_json: Vec<Value> = study
             .series
@@ -259,7 +403,7 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
         };
         let mut study_res = json!({
             "resourceType": "ImagingStudy",
-            "id": study.id,
+            "id": format!("study-{}", study_n + 1),
             "meta": {
                 "profile": [PROFILE_URL]
             },
@@ -290,10 +434,35 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
             }));
         }
 
+        let study_url = random_urn_uuid();
         entries.push(json!({
-            "fullUrl": random_urn_uuid(),
+            "fullUrl": study_url,
             "resource": study_res,
         }));
+        if let Some(r) = study.reencoded.as_ref().filter(|r| r.images > 0) {
+            entries.push(json!({
+                "fullUrl": random_urn_uuid(),
+                "resource": {
+                    "resourceType": "Provenance",
+                    "target": [{ "reference": study_url }],
+                    "recorded": input.last_updated,
+                    "activity": {
+                        "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/v3-DataOperation", "code": "TRANSFORM" }],
+                        "text": reencoded_text(r),
+                    },
+                    "agent": [{ "who": { "display": r.agent } }],
+                },
+            }));
+        }
+        let uid = study.study_instance_uid.trim_start_matches("urn:oid:");
+        for r in &study.reports {
+            report_n += 1;
+            entries.push(report_entry(r, format!("report-{report_n}"), Some((&study_url, uid))));
+        }
+    }
+    for r in &input.loose_reports {
+        report_n += 1;
+        entries.push(report_entry(r, format!("report-{report_n}"), None));
     }
 
     json!({
@@ -306,144 +475,123 @@ pub fn build_fhir_bundle(input: &BundleBuildInput) -> Value {
     })
 }
 
-/// Builds a link-specific FHIR R4 Bundle from an owner's full Bundle by keeping only the series
-/// whose file (their own `linked-file`, else the study's) is in `selected_file_ids`, or everything
-/// if `selected_file_ids` is empty. A file is kept or dropped whole, so a link never carries the
-/// key of a file holding series it does not list. Updates `numberOfSeries` and
-/// `numberOfInstances`, drops a study-level `linked-file` that no kept series uses, and adds a
-/// partial-study `note` if series were dropped.
-pub fn subset_fhir_bundle(
-    owner_bundle: &Value,
-    selected_file_ids: &[String],
-    last_updated: &str,
-) -> Result<Value> {
-    if selected_file_ids.is_empty() {
-        let mut cloned = owner_bundle.clone();
-        cloned["meta"]["lastUpdated"] = json!(last_updated);
-        // Provenance is the owner's record (the Share page's re-encoding note); links leave it out.
-        if let Some(entries) = cloned.get_mut("entry").and_then(Value::as_array_mut) {
-            entries.retain(|e| e["resource"]["resourceType"] != "Provenance");
-        }
-        return Ok(cloned);
-    }
+/// What a link carries (spec/README.md §8.2): whole studies, by ImagingStudy id, and the reports
+/// that name no study which the sharer picked, by DiagnosticReport id. A study's reports go with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LinkSelection {
+    pub studies: Vec<String>,
+    pub loose_reports: Vec<String>,
+}
 
-    let entries = owner_bundle
+impl LinkSelection {
+    /// Every study and every report of `owner`.
+    pub fn everything(owner: &Value) -> Self {
+        let mut sel = Self::default();
+        for e in owner.get("entry").and_then(Value::as_array).into_iter().flatten() {
+            let r = &e["resource"];
+            let id = r["id"].as_str().unwrap_or_default().to_string();
+            match r["resourceType"].as_str() {
+                Some("ImagingStudy") => sel.studies.push(id),
+                Some("DiagnosticReport") if report_refs(r).is_empty() => sel.loose_reports.push(id),
+                _ => {}
+            }
+        }
+        sel
+    }
+}
+
+/// A link's Bundle and the files it needs (`{fileId}.bin`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkBundle {
+    pub bundle: Value,
+    pub allowed_files: Vec<String>,
+}
+
+fn report_refs(r: &Value) -> Vec<&str> {
+    r.get("imagingStudy")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.get("reference").and_then(Value::as_str)).collect())
+        .unwrap_or_default()
+}
+
+/// The link's Bundle: the owner Bundle cut down to the selected studies, whole, with their
+/// reports and the picked reports that name no study, and without the owner's Provenance. A
+/// study keeps a study-level `linked-file` only when one of its series uses it, so a link carries
+/// no key for a file it does not serve.
+pub fn subset_bundle(owner: &Value, sel: &LinkSelection, last_updated: &str) -> Result<LinkBundle> {
+    let entries = owner
         .get("entry")
         .and_then(Value::as_array)
         .ok_or_else(|| Error::InvalidBundle("owner Bundle missing entry array".into()))?;
-
-    // ImagingStudy entries kept (by fullUrl and id), so DiagnosticReports can follow them.
-    let mut kept_urls: Vec<String> = Vec::new();
-    let mut kept_ids: Vec<String> = Vec::new();
-    let mut new_entries = Vec::new();
-    let mut reports = Vec::new();
-    for entry in entries {
-        let Some(res) = entry.get("resource") else {
-            continue;
-        };
-        let res_type = res.get("resourceType").and_then(Value::as_str).unwrap_or("");
-        if res_type == "DiagnosticReport" {
-            // Decided once the kept studies are known; the slot keeps the Bundle's order.
-            reports.push((new_entries.len(), entry));
-            new_entries.push(Value::Null);
-            continue;
+    let is = |e: &Value, t: &str| e["resource"]["resourceType"] == t;
+    let kept: Vec<&Value> = entries.iter().filter(|e| is(e, "ImagingStudy") && sel.studies.iter().any(|id| e["resource"]["id"] == id.as_str())).collect();
+    for id in &sel.studies {
+        if !kept.iter().any(|e| e["resource"]["id"] == id.as_str()) {
+            return Err(Error::InvalidBundle(format!("no ImagingStudy {id} in the owner Bundle")));
         }
-        // Provenance is the owner's record (the Share page's re-encoding note); links leave it out.
-        if res_type == "Provenance" {
-            continue;
-        }
-        if res_type != "ImagingStudy" {
-            new_entries.push(entry.clone());
-            continue;
-        }
-
-        let Some(series_arr) = res.get("series").and_then(Value::as_array) else {
-            continue;
-        };
-        let study_file = extract_linked_file(res)?;
-        let orig_series_count = series_arr.len();
-        let mut kept_series = Vec::new();
-        let mut kept_instances = 0usize;
-        let mut study_file_used = false;
-
-        for se in series_arr {
-            let own = extract_linked_file(se)?;
-            let Some((fid, _)) = own.as_ref().or(study_file.as_ref()) else {
-                continue;
-            };
-            if selected_file_ids.iter().any(|s| s == fid) {
-                study_file_used |= own.is_none();
-                kept_instances += se
-                    .get("instance")
-                    .and_then(Value::as_array)
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                kept_series.push(se.clone());
+    }
+    let kept_urls: Vec<&str> = kept.iter().filter_map(|e| e["fullUrl"].as_str()).collect();
+    let mut out = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for e in entries {
+        let r = &e["resource"];
+        match r["resourceType"].as_str() {
+            Some("ImagingStudy") => {
+                if !kept.iter().any(|k| std::ptr::eq(*k, e)) {
+                    continue;
+                }
+                let study_file = extract_linked_file(r)?;
+                let mut study_file_used = false;
+                for se in r["series"].as_array().into_iter().flatten() {
+                    let own = extract_linked_file(se)?;
+                    study_file_used |= own.is_none();
+                    if let Some((id, _)) = own.or_else(|| study_file.clone()) {
+                        let name = format!("{id}.bin");
+                        if !files.contains(&name) {
+                            files.push(name);
+                        }
+                    }
+                }
+                let mut e = e.clone();
+                if !study_file_used {
+                    let res = &mut e["resource"];
+                    if let Some(exts) = res.get_mut("extension").and_then(Value::as_array_mut) {
+                        exts.retain(|x| x.get("url").and_then(Value::as_str) != Some(EXT_LINKED_FILE));
+                        if exts.is_empty() {
+                            res.as_object_mut().unwrap().remove("extension");
+                        }
+                    }
+                }
+                out.push(e);
             }
-        }
-
-        if kept_series.is_empty() {
-            continue;
-        }
-
-        let mut new_study = res.clone();
-        new_study["numberOfSeries"] = json!(kept_series.len());
-        new_study["numberOfInstances"] = json!(kept_instances);
-        new_study["series"] = json!(kept_series);
-        if !study_file_used {
-            if let Some(exts) = new_study.get_mut("extension").and_then(Value::as_array_mut) {
-                exts.retain(|e| e.get("url").and_then(Value::as_str) != Some(EXT_LINKED_FILE));
-                if exts.is_empty() {
-                    new_study.as_object_mut().unwrap().remove("extension");
+            Some("DiagnosticReport") => {
+                let refs = report_refs(r);
+                let keep = if refs.is_empty() {
+                    sel.loose_reports.iter().any(|id| r["id"] == id.as_str())
+                } else {
+                    refs.iter().any(|x| {
+                        kept_urls.contains(x)
+                            || x.rsplit_once("ImagingStudy/").is_some_and(|(_, id)| sel.studies.iter().any(|s| s == id))
+                    })
+                };
+                if keep {
+                    out.push(e.clone());
                 }
             }
-        }
-        if kept_series.len() < orig_series_count {
-            new_study["note"] = json!([{
-                "text": format!(
-                    "Partial study: {} of {} series shared in this link.",
-                    kept_series.len(),
-                    orig_series_count
-                )
-            }]);
-        }
-
-        if let Some(u) = entry.get("fullUrl").and_then(Value::as_str) {
-            kept_urls.push(u.to_string());
-        }
-        if let Some(id) = res.get("id").and_then(Value::as_str) {
-            kept_ids.push(id.to_string());
-        }
-        let mut new_entry = entry.clone();
-        new_entry["resource"] = new_study;
-        new_entries.push(new_entry);
-    }
-    // A DiagnosticReport goes with the studies it refers to (by fullUrl or "ImagingStudy/<id>"); one
-    // that refers to none goes with every link (as web/share/lib/pack.ts subsetBundle does).
-    for (slot, entry) in reports {
-        let refs: Vec<&str> = entry["resource"]
-            .get("imagingStudy")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|r| r.get("reference").and_then(Value::as_str)).collect())
-            .unwrap_or_default();
-        let keep = refs.is_empty()
-            || refs.iter().any(|r| {
-                kept_urls.iter().any(|u| u == r) || r.rsplit_once("ImagingStudy/").is_some_and(|(_, id)| kept_ids.iter().any(|k| k == id))
-            });
-        if keep {
-            new_entries[slot] = entry.clone();
+            // The owner's record of re-encoding; links leave it out.
+            Some("Provenance") => {}
+            _ => out.push(e.clone()),
         }
     }
-    new_entries.retain(|e| !e.is_null());
-
-    Ok(json!({
-        "resourceType": "Bundle",
-        "meta": {
-            "lastUpdated": last_updated,
-        },
-        "type": "collection",
-        "entry": new_entries,
-    }))
+    let mut bundle = owner.clone();
+    if !bundle["meta"].is_object() {
+        bundle["meta"] = json!({});
+    }
+    bundle["meta"]["lastUpdated"] = json!(last_updated);
+    bundle["entry"] = json!(out);
+    Ok(LinkBundle { bundle, allowed_files: files })
 }
 
 pub fn parse_study_index(bundle_json: &[u8]) -> Result<StudyIndex> {
