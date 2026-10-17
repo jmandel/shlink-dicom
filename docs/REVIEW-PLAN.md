@@ -98,6 +98,43 @@ A second outside review (17 Oct) looked at sharing that is interrupted, resumed 
 | E4 | Reload during a compressing upload: attached and portal reports lost; a link source's report choices reset, sharing reports the sharer left out | Partly (compressing uploads), worse than stated | Save the final report selection in the job; portal resume keeps the portal's Patient | JPEG XL agent |
 | E5 | Opening Share in another tab deletes this tab's staged files; one saved job per browser | Confirmed | Web Lock per staging session; jobs keyed per share | JPEG XL agent |
 
+## DeepSeek max review
+
+Verified against main 5ae64fb (`/media/barracuda/pireview/verify-dsmax/`). 15 of 33 repeat items above; one refuted (sandbox consent, same area as SRV-13). New:
+
+| Id | Finding | Severity | Fix | Owner |
+|---|---|---|---|---|
+| cl-D1 | A declined re-encode detaches an in-memory source; the Bundle gets `instance-length: 0` and the link can't be opened | High | Copy before transferring to the worker; the builder refuses length ≤ 0 | JPEG XL agent; decoder agent (builder) |
+| cr-D1 | `pack` writes the plaintext `bundle.json` with every file key into `--out` | High | Write it only where `--bundle-json` says; fix the help text | Server agent |
+| cr-D3 / cl-D4 | Receiver reads whole bodies (Bundle, manifest, a `200` to a range request, a `206` without progress) before any limit | Medium | One capped stream reader | JPEG XL agent |
+| cr-D5 | Manifest entry picked without its `contentType` (SHL 1..1) | Medium | Pick the `application/fhir+json` entry with a `location` | JPEG XL agent |
+| cr-D6 | `U` with `P`, and `v` > 1, accepted (SHL SHALL NOT / SHOULD NOT) | Medium | Refuse both, browser and Rust | JPEG XL agent; decoder agent |
+| cl-D6 | Slide total pixel matrix sizes tile arrays without a bound | Medium | Refuse more than 2^22 tiles | JPEG XL agent |
+| sv-S3 | Concurrent appends exceed the share quota (3.5× measured) | Medium | Reserve bytes per chunk under the share lock | Server agent |
+| sv-S7 | Unauthenticated 32 MiB bodies, no concurrency limit | Medium | Small limits on those routes; a concurrency limit | Server agent |
+| sv-S11 | Capability tokens written to the access log and shown on Manage | Medium | Log the path without the token; scrub old rows | Server agent |
+| cl-D3 | Archive members inflated into staging without a cap | Low | Cap | JPEG XL agent |
+| cr-D7 | Link-Bundle PUT can reuse the stored Bundle's IV | Low (backstop) | Refuse an equal IV | Server agent |
+| cr-D8 | Rust `instance-length` unbounded, unchecked adds | Low | Cap; checked adds | Decoder agent |
+| sv-S9 | Release tag pattern not anchored in the bootstraps | Low | Anchor it | Server agent |
+| sv-S13 / S14 | Sandbox builds whole studies in memory; capability map unbounded | Low | Stream parts; reuse and bound | Server agent |
+
+Already fixed on pending branches: browser Deflated cap and annotation lengths (`reader-hardening`), bare data sets in the browser (dd-b).
+
+## Outside review: codec test harness
+
+Verified (`/media/barracuda/pireview/verify-codec/`). Owner: decoder agent, after dd-b. Each fix shows the check now catches a deliberately broken input.
+
+| Id | Finding | Severity | Fix |
+|---|---|---|---|
+| C1 | Transcoding writes the VOI LUT Descriptor as US when the rescaled range is signed: −1024 reads as 64512 (PS3.3 C.11.2.1.1); the self-check compares bytes, not VR | Medium–High | Resolve from the rescale range or decline; self-check compares VR |
+| C2 | Encoder thread pools turn a worker panic into silently missing frames | High | Propagate panics; threaded = serial tests at both thresholds |
+| C3 | Four JPEG fixtures tolerate errors of 137–192 (dcmtk, which the colour ruling rejects); a solid-gray image passes | Medium | Tolerances 4, 4, 3, 3; constant images must fail every lossy case |
+| C4 | Malformed-file checker accepts exit 1, 127 and wrapper-reported crashes as refusals | Medium | No shell; only 2 passes |
+| C5 | Browser oracle check passes truncated ranges and exits 0 on failures | Medium | Expected length from the plan; nonzero exit |
+| C6 | Encoder corpus gate passes an empty run or an encoder that declines everything | Medium | Baseline of expected outcomes |
+| C7 | Mutation test pairs each seed with one target only | Low | Seed × target |
+
 ## Not fixing
 
 | Claim | Why |
