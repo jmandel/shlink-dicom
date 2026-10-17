@@ -27,11 +27,9 @@ jobs:
       - uses: actions/checkout@v7
 
       # Toolchain, wasm modules and web app: shared with the release workflows (.github/actions/).
-      # The packer is native x86-64-v3 code (.cargo/config.toml).
       - uses: ./.github/actions/toolchain
         with:
           cache-key: pages
-          native: "true"
       - uses: ./.github/actions/wasm
       - uses: ./.github/actions/web
 

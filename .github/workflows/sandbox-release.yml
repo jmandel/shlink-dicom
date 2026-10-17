@@ -115,7 +115,7 @@ jobs:
         with:
           prefix: sandbox
           tag: ${{ steps.pack.outputs.tag }}
-          name: imaging-sandbox-${{ steps.pack.outputs.tag }}
+          names: imaging-sandbox-${{ steps.pack.outputs.tag }}
           dir: ${{ runner.temp }}/release
           product: Imaging sandbox
           notes: "The SMART Imaging Access sandbox at ${{ github.sha }}: code only. Install with deploy/bootstrap-sandbox.sh ${{ steps.pack.outputs.tag }} (imaging-sandbox/README.md, Deploying)."

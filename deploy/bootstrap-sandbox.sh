@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs or updates the SMART Imaging Access sandbox on a VM from a release that CI built
-# (.github/workflows/sandbox-release.yml). Needs only curl, unzip, tar and sudo: no git checkout,
-# no Rust, no dcmtk, no Python. Runs from a web terminal or as a first-boot setup script:
+# (.github/workflows/sandbox-release.yml), on x86_64 or aarch64 Linux. Needs only curl, unzip, tar
+# and sudo: no git checkout, no Rust, no dcmtk, no Python. Runs from a web terminal or as a
+# first-boot setup script:
 #
 #   curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-sandbox.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/jmandel/shlink-dicom/main/deploy/bootstrap-sandbox.sh | bash -s sandbox-1a2b3c4
@@ -30,10 +31,15 @@ PORT="${PORT:-8000}"
 BASE_URL="${BASE_URL:-https://smart-imaging-sandbox.exe.xyz}"
 SHARE_ORIGIN="${SHARE_ORIGIN:-https://shlink-dicom.exe.xyz}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
-# The same pinned Bun as deploy/bootstrap-shlink-dicom.sh.
+# Bun, pinned, for this architecture (the same block as in deploy/bootstrap-shlink-dicom.sh).
 BUN_VERSION="1.4.3"
-BUN_SHA256_X64="3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18"
-BUN_SHA256_X64_BASELINE="1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b"
+case "$(uname -m)" in
+  x86_64)
+    if grep -qw avx2 /proc/cpuinfo; then BUN_BUILD=bun-linux-x64; BUN_SHA256=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
+    else BUN_BUILD=bun-linux-x64-baseline; BUN_SHA256=1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b; fi ;;
+  aarch64 | arm64) BUN_BUILD=bun-linux-aarch64; BUN_SHA256=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21 ;;
+  *) echo "no pinned Bun for $(uname -m) (x86_64 and aarch64 Linux are supported)" >&2; exit 1 ;;
+esac
 BUN="$ROOT/bun/bun-$BUN_VERSION"
 RELEASES="https://github.com/$REPO/releases/download"
 
@@ -54,12 +60,11 @@ $SUDO chown "$(id -u):$(id -g)" "$ROOT" "$ROOT/releases" "$ROOT/sources" "$ROOT/
 
 # 1. Bun, the only runtime.
 if [ ! -x "$BUN" ]; then
-  if grep -qw avx2 /proc/cpuinfo; then t=bun-linux-x64; want="$BUN_SHA256_X64"; else t=bun-linux-x64-baseline; want="$BUN_SHA256_X64_BASELINE"; fi
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/$t.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$t.zip"
-  echo "$want  $tmp/$t.zip" | sha256sum -c --quiet
-  unzip -q "$tmp/$t.zip" -d "$tmp"
-  install -m 755 "$tmp/$t/bun" "$BUN"
+  curl -fsSL -o "$tmp/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$BUN_BUILD.zip"
+  echo "$BUN_SHA256  $tmp/bun.zip" | sha256sum -c --quiet
+  unzip -q "$tmp/bun.zip" -d "$tmp"
+  install -m 755 "$tmp/$BUN_BUILD/bun" "$BUN"
   rm -rf "$tmp"
 fi
 echo "bun $("$BUN" --version)"

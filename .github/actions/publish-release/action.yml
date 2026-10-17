@@ -1,6 +1,6 @@
 name: Publish a release
 description: >
-  Publishes <prefix>-<shortsha> with the packed tarball, its .sha256 and its manifest. On main, also
+  Publishes <prefix>-<shortsha> with the packed tarballs, their .sha256 files and manifests. On main, also
   points the <prefix>-latest release's latest.json at it and keeps the last few <prefix>- releases.
   All are pre-releases, so none is labelled the repository's Latest. Needs contents: write.
 inputs:
@@ -9,11 +9,11 @@ inputs:
     required: true
   tag:
     required: true
-  name:
-    description: The tarball's base name, without .tar.gz (as deploy/lib/pack-release.ts writes it).
+  names:
+    description: The tarballs' base names, without .tar.gz, space-separated (one per build, as deploy/lib/pack-release.ts writes them).
     required: true
   dir:
-    description: Directory holding <name>.tar.gz, <name>.tar.gz.sha256 and <name>.json.
+    description: Directory holding each <name>.tar.gz, <name>.tar.gz.sha256 and <name>.json.
     required: true
   product:
     description: "What the release is, for titles: \"<product> <tag>\" and \"<product>: latest\"."
@@ -31,13 +31,14 @@ runs:
         GH_TOKEN: ${{ github.token }}
         PREFIX: ${{ inputs.prefix }}
         TAG: ${{ inputs.tag }}
-        NAME: ${{ inputs.name }}
+        NAMES: ${{ inputs.names }}
         DIR: ${{ inputs.dir }}
         PRODUCT: ${{ inputs.product }}
         NOTES: ${{ inputs.notes }}
         KEEP: ${{ inputs.keep }}
       run: |
-        files=("$DIR/$NAME.tar.gz" "$DIR/$NAME.tar.gz.sha256" "$DIR/$NAME.json")
+        files=()
+        for n in $NAMES; do files+=("$DIR/$n.tar.gz" "$DIR/$n.tar.gz.sha256" "$DIR/$n.json"); done
         if gh release view "$TAG" > /dev/null 2>&1; then
           gh release upload "$TAG" "${files[@]}" --clobber
         else
@@ -49,8 +50,10 @@ runs:
           echo "not main ($GITHUB_REF): $PREFIX-latest unchanged, nothing pruned"
           exit 0
         fi
-        sha="$(cut -d' ' -f1 "$DIR/$NAME.tar.gz.sha256")"
-        printf '{"tag":"%s","commit":"%s","sha256":"%s"}\n' "$TAG" "$GITHUB_SHA" "$sha" > "$DIR/latest.json"
+        # latest.json: the tag, the commit, and each tarball's SHA-256.
+        assets=""
+        for n in $NAMES; do assets="$assets${assets:+,}\"$n.tar.gz\":\"$(cut -d' ' -f1 "$DIR/$n.tar.gz.sha256")\""; done
+        printf '{"tag":"%s","commit":"%s","assets":{%s}}\n' "$TAG" "$GITHUB_SHA" "$assets" > "$DIR/latest.json"
         # Pre-releases, the pointer and the releases alike, so GitHub labels none of them the
         # repository's Latest.
         if ! gh release view "$PREFIX-latest" > /dev/null 2>&1; then
