@@ -71,6 +71,30 @@ All changes are in `src/scan.rs`, `src/bits.rs` and the output path of `src/lib.
 | **One interleaved sample buffer.** It replaces per-component planes and the per-sample `match` in the output loop. ILV 2 rows are copied straight across, and the output is a single width conversion. | Cine: 32.4M → 28.8M cycles; RGB: 806M → 793M. |
 | **Specialisations.** `LOSSLESS` is a const generic (NEAR = 0 drops the step multiply and the near-lossless wrap). Run mode and run interruption stay generic. | |
 
+## Track T7: colour and wasm
+
+[Performance plan, T7](../../../docs/PERF-PLAN.md#t7-jpeg-ls-colour-ilv-2). Before any change, on main built for x86-64-v3 (16 October 2026, load about 3–4). Native: one frame, minimum over runs of `examples/bench` against CharLS 2.4 through pyjpegls. wasm: our bench module's codec stage in Node 24 (`--no-liftoff`), against `@cornerstonejs/codec-charls` `decode()` in Node; ms per frame.
+
+| Case | Native: ours / CharLS | wasm: ours / Cornerstone CharLS |
+|---|---|---|
+| RGB cine 640×480 (ILV 2) | 6.24 / 6.19 (1.01) | 7.8–7.9 / 7.25–7.36 (1.06–1.09) |
+| RGB 768×512 (ILV 2) | 15.3 / 16.7 (0.91) | 18.7–21.4 / 20.9–21.0 (0.89–1.02) |
+| DX 2048² u12 | – | 69.3–76.5 / 59.4 (1.17–1.29) |
+| DX 2048² u12 NEAR 3 | – | 71.6–73.6 / 63.9 (1.12–1.15) |
+| CT 512² u16 | – | 2.52–2.83 / 2.51–2.58 (0.98–1.13) |
+| CR 1841×1955 15-bit | – | 88–91 / 103 (0.86–0.88) |
+| CT 128² s16 | – | 0.31 / 0.42 (0.75) |
+
+The native x86-64-v3 build had already brought ILV 2 colour to CharLS's speed. The gap left is wasm, mostly grey 12-bit. A wasm profile of DX 2048² puts the time on the serial chain: context load, `k` (two `clz`), the Golomb table, the context update. The hottest instructions are the context loads that follow the previous sample's store to the same context.
+
+Rejected (wasm cycles in Node, minimum of 4–5 alternating rounds; outputs unchanged):
+
+- **C as i32.** With A, B, C and N all i64, LLVM pairs the B and C updates of `bias_update` into `i64x2` compares and selects, which V8 compiles to moves between general and vector registers. Making C an i32 removes them and 2% of instructions (DX 2048² 966M → 947M, cine 3,404M → 3,335M), but cycles rose 1% and 2.6%.
+- **Context fields in separate arrays,** so that no store covers two fields: instructions +10%, cycles +10–12%.
+- **Run mode out of line in wasm** (`run_length` and `ri_sample` not inlined, so the line decoders' hot loop is smaller for V8's register allocator). One A/B showed −9% on DX 2048² and −7% on cine. A repeat with 5 rounds showed +0.7% and +6%, and the codec times were equal. Instructions +1.4% and −2%. The cycle counts in Node varied by up to 10% between runs at load 2–4, which is larger than the effect.
+
+**T7 stops here:** three changes in a row did not give 3%. The next idea is to start the next sample's context load and `k` before the current Golomb code is consumed, when the two contexts differ. It needs a second path for the common case where they are the same, and the gain cannot be measured reliably at the machine's current load.
+
 ## Not done, and why
 
 - **i32 context variables.** A can exceed 2^31 when an LSE segment sets RESET near 65535, so A would need to stay i64. Splitting the fields gives no clear instruction saving.
