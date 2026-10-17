@@ -135,6 +135,8 @@ Resolved 15 Oct:
 
 ## Next-step queue (in order once their inputs exist)
 
+- **16 Oct, 19:20: static GitHub Pages demo** (agent acb1873c8bf73c54c, worktree ../shlink-dicom-pages, branch pages-demo). One X-ray study plus the MRI, packed in Actions from my-health-data at a pinned commit, with a stable link (key and file ids committed; the workflow fails if the inputs or plaintext change, so keys are never reused), /view copy, and a / entry page. Pages isn't enabled on the repo yet; the coordinator enables it (build type workflow) at merge. Open question for Josh: the Pages path is /shlink-dicom/ (the repo name); he wrote /shl-dicom/.
+
 - **16 Oct, about 11:00: performance phase 2 planned** ([PERF-PLAN.md](PERF-PLAN.md), 854ad43). T0 (measurement, stale PERF pages, regression check, small-HTJ2K wasm slowdown) went to the decoder agent a4b3a594727c938f4 on branch perf-t0; it does its quiet full run only once e2e-perf's timing matrices stop. T6 continues in a26e1d2aaf1165705. Next: T1/T3/T4 (decoder agent), T2 (encoder agent a5b9622823f9139f4); at most two benchmarking agents at once.
 
 - **16 Oct, about 10:45: three branches landed and deployed (f522017).**
