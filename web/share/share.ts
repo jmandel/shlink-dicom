@@ -13,7 +13,7 @@ import { drawThumbnail } from "../core/render";
 import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, sharePatient, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
-import { buildBundle, ciphertextSize, looseReports, planStudyFiles, relinkFile, subsetBundle, type PackedFile } from "./lib/pack";
+import { applyChoices, buildBundle, ciphertextSize, looseReports, planStudyFiles, relinkFile, subsetBundle, type PackedFile } from "./lib/pack";
 import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
 import { loadShlWasm } from "./lib/shl-wasm";
 import {
@@ -757,6 +757,7 @@ async function upload() {
     source: sourceInfo,
     addOffsetTables: !$("rv-offsets-row").classList.contains("hidden") && $<HTMLInputElement>("rv-offsets").checked,
     samePatient: col.samePatient,
+    patientSource: col.patientSource,
     compress: null,
     recipient: $<HTMLInputElement>("in-recipient").value.trim() || null,
     hasPasscode: !!$<HTMLInputElement>("in-pass").value,
@@ -804,13 +805,11 @@ async function upload() {
       early,
       async (api, sid, token) => {
         // Nothing to compress: the owner Bundle first; with the manage credential it is all a reload
-        // needs to continue. Compressing: the files' sizes come later, so the saved job's plan is.
-        let owner: any = null;
-        if (!streaming) {
-          owner = buildBundle(col, packed);
-          const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner)), ownerKey);
-          await persist(() => api.putOwner(ownerJwe), early);
-        }
+        // needs to continue. Compressing: the files' sizes come later, so the saved job's plan says
+        // what the files are, and a draft of the owner Bundle what the person chose.
+        const owner: any = streaming ? null : buildBundle(col, packed);
+        const ownerJwe = await encryptJwe(utf8(JSON.stringify(owner ?? buildBundle(col, packed))), ownerKey);
+        await persist(() => api.putOwner(ownerJwe), early);
         if (job.source.kind === "files") {
           $("up-tech").textContent = "Noting which files these are, to continue after a reload";
           job.source = { ...job.source, files: await ids! };
@@ -1111,8 +1110,10 @@ async function resumeJob(job: UploadJob, files?: File[], link?: string) {
   $("up-main").textContent = "Reading the files again";
   setBar("up-bar-wrap", undefined, undefined);
   try {
-    // Compressed on the way: no owner Bundle until the files are up; the job's plan says what they are.
-    const owner = job.plan ? null : await readOwnerBundle(api, job.ownerKey);
+    // Compressed on the way: the owner Bundle is a draft until the files are up (what the person
+    // chose); the job's plan says what the files are.
+    const stored = await readOwnerBundle(api, job.ownerKey);
+    const owner = job.plan ? null : stored;
     await loadShlWasm();
     const c = new Collection();
     c.samePatient = !!job.samePatient;
@@ -1149,6 +1150,7 @@ async function resumeJob(job: UploadJob, files?: File[], link?: string) {
       }
     }
     if (job.addOffsetTables) await addOffsetTables(c.list().flatMap((x) => x.series));
+    if (job.plan) applyChoices(c, stored, job.patientSource ?? "dicom");
     await runUpload({ job, api, owner, packed: job.plan ? planFromJob(job.plan, c) : planFromOwner(owner, c), col: c });
   } catch (x) {
     // Back to the notice, saying what was wrong, so the person can choose again.

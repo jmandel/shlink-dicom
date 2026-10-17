@@ -355,6 +355,8 @@ export interface UploadJob {
   addOffsetTables: boolean;
   /** The sharer said files naming different people are one person's (lib/ingest.ts sharePatient). */
   samePatient?: boolean;
+  /** Where the patient came from: a FHIR source's Patient is in the stored owner Bundle (applyChoices). */
+  patientSource?: "dicom" | "fhir";
   /**
    * Uncompressed images re-encoded without loss before packing (lib/compress.ts): the encoding, the
    * staging session holding the re-encoded files, and each one's staged file and SHA-256.

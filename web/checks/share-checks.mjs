@@ -389,6 +389,9 @@ async function flowJ2kResume(dev) {
   await page.setInputFiles("#in-files", files);
   await page.waitForSelector("#s-review:not(.hidden)", { timeout: 120000 });
   await chooseJ2k(page, P);
+  // A report attached by the sharer: kept through the reload (it is in no file read again).
+  await page.locator(".study").first().locator("input[type=file]").setInputFiles({ name: "resume-note.txt", mimeType: "text/plain", buffer: Buffer.from("Read before the reload.") });
+  await page.waitForFunction(() => [...document.querySelectorAll(".report-line")].some((e) => e.textContent.includes("resume-note")), null, { timeout: 10000 });
   await page.click("#rv-next");
   // With a passcode: the link is made with it when the share is, and the saved job never holds it.
   const PASS = "7319-resume";
@@ -415,7 +418,58 @@ async function flowJ2kResume(dev) {
   const v = verify(result.shlink, [NET_DIR], PASS, ["--pixels"]);
   sameContent(P, v, files.length, "the files", { reencoded: files.length });
   check(`${P}: the resumed link asks for the passcode it was made with`, verifyFails(result.shlink), "opened without the passcode");
+  check(`${P}: the report attached before the reload is in the link`, v.reports.length === 1 && /resume-note/.test(v.reports[0].title), JSON.stringify(v.reports.map((r) => r.title)));
   check(`${P}: the resumed share is all JPEG 2000 Lossless`, v.pixelReport?.transferSyntaxes?.["1.2.840.10008.1.2.4.90"] === files.length, JSON.stringify(v.pixelReport?.transferSyntaxes));
+  await noErrors(P, errors);
+  await context.close();
+}
+
+/**
+ * A reload part-way through a portal upload: the link still has the portal's Patient, its study
+ * descriptions and the reports chosen (one left out stays out), not what the staged files say.
+ */
+async function flowPortalResume(dev) {
+  const P = `portal-resume/${dev}`;
+  const { context, page, errors } = await newPage(dev, { allowErrors: [/interrupted|ERR_ABORTED|net::ERR/i] });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Network.enable");
+  await page.goto(`${BASE}/share`);
+  await page.click("[data-src=portal]");
+  await Promise.all([page.waitForURL((u) => u.host === new URL(PORTAL).host && u.pathname.includes("/auth")), page.click("#portal-form button[type=submit]")]);
+  await page.locator("input[name=patient]").first().check();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.waitForSelector("input[name=study]");
+  await Promise.all([page.waitForURL(/\/share\/smart-callback\//), page.getByRole("button", { name: "Allow" }).click()]);
+  await page.waitForSelector("#s-review:not(.hidden)", { timeout: 600000 });
+  // Only the largest study that has reports, so the upload is long enough to reload part-way.
+  const all = await cards(page);
+  const pick = all.map((c, i) => [c, i]).filter(([c]) => c.reports >= 1).sort((x, y) => y[0].mb - x[0].mb)[0][1];
+  for (const [i] of all.entries()) if (i !== pick) await page.locator(".study").nth(i).locator(".study-head .switch-label").click();
+  const study = page.locator(".study").nth(pick);
+  const nReports = all[pick].reports;
+  if (nReports > 1) await study.locator(".report-row .switch-label").first().click();
+  const want = await page.evaluate(() => {
+    const c = window.__share.collection;
+    const st = c.list().filter((s) => s.include);
+    return { patient: c.patient.name, descriptions: st.map((s) => s.description), reports: st.flatMap((s) => s.reports.filter((r) => r.include)).length };
+  });
+  await page.click("#rv-next");
+  await page.waitForSelector("#s-who:not(.hidden)");
+  await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 1 << 19 });
+  await page.click("#who-form button[type=submit]");
+  await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 20, null, { timeout: 600000, polling: 100 });
+  await page.reload().catch(() => page.goto(`${BASE}/share`));
+  await page.waitForSelector("#resume:not(.hidden)", { timeout: 30000 });
+  await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  await page.click("#resume-continue");
+  await page.waitForSelector("#s-done:not(.hidden), #up-error:not(.hidden)", { timeout: 900000 });
+  if (await page.locator("#up-error:not(.hidden)").count()) throw new Error(`upload failed: ${await page.textContent("#up-error-text")}`);
+  const result = await page.evaluate(() => window.__share.result);
+  made.push(result.manage);
+  const v = verify(result.shlink);
+  check(`${P}: the link has the portal's Patient after the reload`, v.patient === want.patient, `${v.patient} (want ${want.patient})`);
+  check(`${P}: the link has the portal's study descriptions after the reload`, JSON.stringify(v.studies.map((s) => s.description ?? null)) === JSON.stringify(want.descriptions), `${JSON.stringify(v.studies.map((s) => s.description))} (want ${JSON.stringify(want.descriptions)})`);
+  check(`${P}: the reports chosen before the reload, and only those, are in the link`, v.reports.length === want.reports, `${v.reports.length} (want ${want.reports} of ${nReports})`);
   await noErrors(P, errors);
   await context.close();
 }
@@ -1243,6 +1297,7 @@ for (const dev of Object.keys(DEVICES)) {
     let files;
     if (!only || only === "files" || only === "manage") files = await flowFiles(dev);
     if (!only || only === "portal") await flowPortal(dev);
+    if (!only || only === "portal" || only === "portal-resume") await flowPortalResume(dev);
     if (!only || only === "reshare") await flowReshare(dev);
     if (!only || only === "exact") await flowExact(dev);
     if (!only || only === "cd") await flowCd(dev);

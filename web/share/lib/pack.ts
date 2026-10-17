@@ -151,6 +151,50 @@ export function buildBundle(col: Collection, packed: PackedFile[], lastUpdated =
   return JSON.parse(shlWasm().build_bundle(JSON.stringify(input)));
 }
 
+const uidOf = (identifiers: any[] | undefined) => (identifiers ?? []).find((i: any) => i.system === "urn:dicom:uid")?.value?.replace(/^urn:oid:/, "");
+
+/**
+ * Puts what an owner Bundle says the person chose back on a collection read again after a reload
+ * (the Share page stores one, from buildBundle, before files compressed on the way are uploaded):
+ * each study's description, start and accession, the reports left in (those left out are not in
+ * the Bundle), and, for a FHIR source, its Patient.
+ */
+export function applyChoices(col: Collection, owner: any, patientSource: "dicom" | "fhir") {
+  const res = (owner.entry ?? []).map((e: any) => e.resource);
+  const pt = res.find((r: any) => r?.resourceType === "Patient");
+  if (patientSource === "fhir" && pt) {
+    const n = pt.name?.[0];
+    col.patientSource = "fhir";
+    col.patient = {
+      name: n?.text ?? ([...(n?.given ?? []), n?.family].filter(Boolean).join(" ") || null),
+      birthDate: pt.birthDate ?? null,
+      identifier: pt.identifier ?? [],
+      ...(n ? { humanName: n } : {}),
+    };
+  }
+  const byUrl = new Map<string, StudyModel>();
+  for (const e of owner.entry ?? []) {
+    const r = e.resource;
+    if (r?.resourceType !== "ImagingStudy") continue;
+    const st = col.studies.get(uidOf(r.identifier) ?? "");
+    if (!st) continue;
+    byUrl.set(e.fullUrl, st);
+    st.description = r.description ?? null;
+    st.started = r.started ?? null;
+    st.accession = (r.identifier ?? []).find((i: any) => i.type?.coding?.some((c: any) => c.code === "ACSN"))?.value ?? null;
+    st.reports = [];
+  }
+  col.looseReports = [];
+  for (const r of res) {
+    if (r?.resourceType !== "DiagnosticReport") continue;
+    const { id: _id, subject: _s, imagingStudy, ...rest } = r;
+    const st = imagingStudy?.length ? byUrl.get(imagingStudy[0].reference) : undefined;
+    const item = { resource: rest, include: true, from: "portal" as const };
+    if (st) st.reports.push(item);
+    else if (!imagingStudy?.length) col.looseReports.push(item);
+  }
+}
+
 /** The owner page's note for a study: its re-encoding Provenance's text, if any. */
 export function reencodingNote(owner: any, studyId: string): string | null {
   const url = (owner.entry ?? []).find((e: any) => e.resource?.resourceType === "ImagingStudy" && e.resource.id === studyId)?.fullUrl;
