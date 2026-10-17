@@ -295,6 +295,32 @@ pub fn parse_dicom_header_reader<R: std::io::Read>(source_name: &str, reader: R)
     parsed_from_object(source_name, &file_obj, Vec::new(), false)
 }
 
+/// The header of the DICOM file at `path` (read up to Pixel Data), for packers that stream files
+/// from disk. A file that is not Part 10 goes through [`parse_dicom_bytes`]: a bare data set is
+/// wrapped in Part 10 (spec §11.1 step 3) and the file at `path` rewritten with the wrapped bytes,
+/// so the seed packs what the CLI's pack and the Share page would. The returned `bytes` are empty.
+pub fn parse_dicom_file_header(source_name: &str, path: &std::path::Path) -> std::result::Result<ParsedDicomInstance, String> {
+    if let Some(reason) = non_dicom_name(source_name) {
+        return Err(reason);
+    }
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut head = Vec::with_capacity(132);
+    (&mut f).take(132).read_to_end(&mut head).map_err(|e| e.to_string())?;
+    if has_part10_magic(&head) {
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        return parse_dicom_header_reader(source_name, std::io::BufReader::with_capacity(64 << 10, f));
+    }
+    drop(f);
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut parsed = parse_dicom_bytes(source_name, raw)?;
+    if parsed.was_bare_wrapped {
+        std::fs::write(path, &parsed.bytes).map_err(|e| e.to_string())?;
+    }
+    parsed.bytes = Vec::new();
+    Ok(parsed)
+}
+
 fn parsed_from_object(
     source_name: &str,
     file_obj: &FileDicomObject<InMemDicomObject>,
@@ -483,6 +509,28 @@ mod tests {
             let h = parse_dicom_header_reader("slide.dcm", Cursor::new(&b)).unwrap();
             assert_eq!(h.sop_instance_uid, "1.2.3.4.5.6");
         }
+    }
+
+    #[test]
+    fn a_bare_file_on_disk_is_wrapped_in_place() {
+        let part10 = synthetic(3, &[1], false);
+        let meta_len = u32::from_le_bytes(part10[140..144].try_into().unwrap()) as usize;
+        let bare = part10[144 + meta_len..].to_vec();
+        let dir = std::env::temp_dir().join(format!("shl-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("slide.dcm");
+        std::fs::write(&path, &bare).unwrap();
+        let h = parse_dicom_file_header("slide.dcm", &path).unwrap();
+        let wrapped = std::fs::read(&path).unwrap();
+        assert!(h.was_bare_wrapped && h.bytes.is_empty());
+        assert_eq!(&wrapped[128..132], b"DICM");
+        assert!(wrapped.ends_with(&bare));
+        assert_eq!(h.sop_instance_uid, "1.2.3.4.5.6");
+        // A Part 10 file is read in place, unchanged.
+        std::fs::write(&path, &part10).unwrap();
+        assert!(!parse_dicom_file_header("slide.dcm", &path).unwrap().was_bare_wrapped);
+        assert_eq!(std::fs::read(&path).unwrap(), part10);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::{
 use shl_dicom_core::{
     bundle::{build_fhir_bundle, BundleBuildInput, InstanceBuildInput, LinkedFileInput, SeriesBuildInput, StudyBuildInput},
     crypto::{b64url_encode, encrypt_file_stream, random_bytes, ReadChain},
-    dicom_io::{parse_dicom_header_reader, ParsedDicomInstance, Skipped},
+    dicom_io::{parse_dicom_file_header, ParsedDicomInstance, Skipped},
     offset_tables::add_offset_table_to_file,
 };
 use shl_dicom_transcode::is_uncompressed_image;
@@ -46,13 +46,6 @@ pub struct PackedSample {
     pub offset_tables_added: usize,
     /// Archive members that are not DICOM instances, with the reason.
     pub skipped: Vec<Skipped>,
-}
-
-/// The instance's header, read from its file up to Pixel Data; `Err` gives the reason for anything
-/// that isn't a Part 10 DICOM instance.
-fn parse_header(path: &Path, name: &str) -> Result<ParsedDicomInstance, String> {
-    let f = File::open(path).map_err(|e| e.to_string())?;
-    parse_dicom_header_reader(name, BufReader::with_capacity(64 << 10, f))
 }
 
 /// Native transfer syntaxes never take an offset table, so their files are not read again
@@ -93,11 +86,13 @@ pub fn pack_samples(state: &AppState, sid: &str, samples_dir: &Path, scratch: &P
                 let path = scratch.join(format!("{n:08}"));
                 n += 1;
                 let mut out = BufWriter::new(File::create(&path).map_err(|e| e.to_string())?);
-                let len = std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
                 drop(out);
-                match parse_header(&path, &name) {
+                // A bare data set is wrapped in Part 10 in place, so the length is read afterwards.
+                match parse_dicom_file_header(&name, &path) {
                     Ok(h) => {
+                        let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
                         // Uncompressed images become JPEG Lossless SV1 (pixel-identical); encapsulated
                         // multi-frame instances without a frame offset table get one; the rest stay as they are.
                         let mut len = if is_uncompressed_image(&h.transfer_syntax_uid, &h.sop_class_uid, len) { compress_file(&path, &mut compression)? } else { len };
