@@ -1,0 +1,20 @@
+name: Web app
+description: >
+  The site in dist/web (web/build.ts): viewer-kit's decoder, then the pages. Needs the toolchain and
+  wasm actions first.
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v6
+      with:
+        path: |
+          ~/.bun/install/cache
+          codecs/mpeg2-wasm/dist/ffmpeg-*.tar.xz
+        key: web-inputs-${{ hashFiles('bun.lock', 'codecs/mpeg2-wasm/ffmpeg-source.json') }}
+        restore-keys: web-inputs-
+    - name: Web app
+      shell: bash
+      run: |
+        bun viewer-kit/scripts/build.mjs
+        bun install --frozen-lockfile
+        bun web/build.ts > /dev/null

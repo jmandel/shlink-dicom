@@ -20,6 +20,8 @@ on:
       - codec-corpus/pyproject.toml
       - codec-corpus/uv.lock
       - .github/workflows/sandbox-release.yml
+      - .github/actions/**
+      - deploy/lib/pack-release.ts
   workflow_dispatch:
 
 permissions:
@@ -30,8 +32,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: "1.4.3"
-  WASM_BINDGEN_VERSION: "0.2.128"
   UV_VERSION: "0.13.1"
   KEEP_RELEASES: "5"
   CARGO_TERM_COLOR: never
@@ -40,49 +40,28 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: oven-sh/setup-bun@v2
+      # Toolchain and wasm modules: shared with the other workflows (.github/actions/).
+      - uses: ./.github/actions/toolchain
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          cache-key: sandbox
+      - uses: ./.github/actions/wasm
 
-      - name: Rust, wasm-bindgen, uv, and the checks' tools
+      - name: uv, and the checks' tools
         run: |
-          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
-          rustup default stable
-          t="wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl"
-          curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$t.tar.gz" \
-            | tar -xz -C "$HOME/.cargo/bin" --strip-components=1 "$t/wasm-bindgen"
           curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
           # data-check's slide checks (dcmdump, dcmj2pnm) and PDF check (qpdf); verification only.
           sudo apt-get update -qq && sudo apt-get install -y -qq dcmtk qpdf
-          cargo --version; wasm-bindgen --version; uv --version
+          uv --version
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-            codecs/target
-          key: sandbox-cargo-${{ hashFiles('Cargo.lock', 'codecs/Cargo.lock') }}
-          restore-keys: sandbox-cargo-
-
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             imaging-sandbox/build/sources
             ~/.cache/uv
           key: sandbox-inputs-${{ hashFiles('imaging-sandbox/data/studies.json', 'codec-corpus/uv.lock') }}
           restore-keys: sandbox-inputs-
-
-      - name: Wasm modules
-        run: |
-          cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-wasm
-          wasm-bindgen --target web --out-dir crates/shl-dicom-wasm/pkg target/wasm32-unknown-unknown/release/shl_dicom_wasm.wasm
-          (cd codecs && cargo build -q --release --target wasm32-unknown-unknown -p shl-dicom-transcode-wasm)
-          wasm-bindgen --target web --out-dir codecs/shl-dicom-transcode-wasm/pkg codecs/target/wasm32-unknown-unknown/release/shl_dicom_transcode_wasm.wasm
 
       - name: Dataset and compressed copies
         working-directory: imaging-sandbox
@@ -132,32 +111,12 @@ jobs:
           grep -q '"token_endpoint"' "$RUNNER_TEMP/smart.json"
           head -8 "$RUNNER_TEMP/server.log"
 
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${{ steps.pack.outputs.tag }}"
-          dir="$RUNNER_TEMP/release"
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" "$dir"/imaging-sandbox-"$tag".* --clobber
-          else
-            gh release create "$tag" "$dir"/imaging-sandbox-"$tag".* --target "$GITHUB_SHA" --latest=false \
-              --title "Imaging sandbox $tag" \
-              --notes "The SMART Imaging Access sandbox at ${GITHUB_SHA}: code only. Install with deploy/bootstrap-sandbox.sh $tag (imaging-sandbox/README.md, Deploying)."
-          fi
-          sha="$(cut -d' ' -f1 "$dir/imaging-sandbox-$tag.tar.gz.sha256")"
-          printf '{"tag":"%s","commit":"%s","sha256":"%s"}\n' "$tag" "$GITHUB_SHA" "$sha" > "$dir/latest.json"
-          if ! gh release view sandbox-latest > /dev/null 2>&1; then
-            gh release create sandbox-latest --target "$GITHUB_SHA" --latest=false --prerelease --title "Imaging sandbox: latest" \
-              --notes "latest.json names the current sandbox release; deploy/bootstrap-sandbox.sh reads it."
-          fi
-          gh release upload sandbox-latest "$dir/latest.json" --clobber
-          echo "published $tag: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
-
-      - name: Keep the last ${{ env.KEEP_RELEASES }} releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release list --limit 200 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | test("^sandbox-[0-9a-f]+$"))] | sort_by(.createdAt) | reverse | .[env.KEEP_RELEASES | tonumber:] | .[].tagName' \
-            | while read -r t; do echo "deleting $t"; gh release delete "$t" --yes --cleanup-tag; done
+      - uses: ./.github/actions/publish-release
+        with:
+          prefix: sandbox
+          tag: ${{ steps.pack.outputs.tag }}
+          name: imaging-sandbox-${{ steps.pack.outputs.tag }}
+          dir: ${{ runner.temp }}/release
+          product: Imaging sandbox
+          notes: "The SMART Imaging Access sandbox at ${{ github.sha }}: code only. Install with deploy/bootstrap-sandbox.sh ${{ steps.pack.outputs.tag }} (imaging-sandbox/README.md, Deploying)."
+          keep: ${{ env.KEEP_RELEASES }}
