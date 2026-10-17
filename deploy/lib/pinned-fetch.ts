@@ -36,11 +36,24 @@ export async function fetchPinned(f: PinnedFile, o: FetchOptions): Promise<Uint8
     }
   }
   o.log?.(`${f.name}: downloading ${f.url}`);
-  const res = await fetch(f.url);
-  if (!res.ok) throw new Error(`download ${f.url}: HTTP ${res.status}`);
-  const b = new Uint8Array(await res.arrayBuffer());
+  const b = await download(f.url);
   if (f.sha256 && sha256Hex(b) !== f.sha256) throw new Error(`${f.name}: SHA-256 ${sha256Hex(b)} does not match the pinned ${f.sha256} (${f.url})`);
   mkdirSync(dirname(join(o.keep, f.name)), { recursive: true });
   writeFileSync(join(o.keep, f.name), b);
   return b;
+}
+
+/** GET with retries: a stalled or failed download (one of many in parallel) is tried again. */
+async function download(url: string, attempts = 4): Promise<Uint8Array> {
+  for (let i = 1; ; i++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(180_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (e) {
+      if (i >= attempts) throw new Error(`download ${url}: ${(e as Error).message} (${attempts} attempts)`);
+      console.error(`download ${url}: ${(e as Error).message}; trying again (${i + 1} of ${attempts})`);
+      await Bun.sleep(2000 * i);
+    }
+  }
 }
