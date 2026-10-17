@@ -53,7 +53,7 @@ jobs:
           ls -l "$out"
           test "$(ls "$out"/*.bin | wc -l)" -ge 1 && test -s "$out/bundle.jwe"
 
-      - name: Test vector (reference receiver): regenerates fixtures/golden, which must not change
+      - name: Test vector (reference receiver), with fixtures/golden unchanged
         run: |
           bun reference/test-vector.ts
           git diff --exit-code -- fixtures/
