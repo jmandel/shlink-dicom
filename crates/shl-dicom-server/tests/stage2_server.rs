@@ -2333,8 +2333,9 @@ async fn test_links_per_share_and_bundle_size_are_capped() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Uploads started at once can't together promise more than the share's byte limit.
-#[tokio::test]
+/// Uploads started at once on a multi-threaded server, round after round, can't together promise
+/// more than the share's byte limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_uploads_stay_within_the_byte_limit() {
     let dir = temp_data_dir("concurrent_quota");
     let state = AppState::with_store(
@@ -2345,22 +2346,24 @@ async fn test_concurrent_uploads_stay_within_the_byte_limit() {
     .unwrap();
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
-    let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
-    let sid = created["share"]["id"].as_str().unwrap().to_string();
-    let token = created["controlToken"].as_str().unwrap().to_string();
-    let starts = (0..16u8).map(|k| {
-        let r = client
-            .put(format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[100 + k; 16])))
-            .bearer_auth(&token)
-            .header("Upload-Complete", "?0")
-            .header("Upload-Length", (3u64 << 20).to_string())
-            .send();
-        tokio::spawn(async move { r.await.unwrap().status() })
-    });
-    let statuses: Vec<StatusCode> = futures_util::future::join_all(starts).await.into_iter().map(|r| r.unwrap()).collect();
-    let ok = statuses.iter().filter(|s| **s == StatusCode::CREATED).count();
-    assert_eq!(ok, 3, "{statuses:?}");
-    assert!(statuses.iter().all(|s| *s == StatusCode::CREATED || *s == StatusCode::PAYLOAD_TOO_LARGE), "{statuses:?}");
+    for round in 0..20 {
+        let created: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
+        let sid = created["share"]["id"].as_str().unwrap().to_string();
+        let token = created["controlToken"].as_str().unwrap().to_string();
+        let starts = (0..16u8).map(|k| {
+            let r = client
+                .put(format!("{base}/api/shares/{sid}/files/{}.bin", b64url_encode(&[100 + k; 16])))
+                .bearer_auth(&token)
+                .header("Upload-Complete", "?0")
+                .header("Upload-Length", (3u64 << 20).to_string())
+                .send();
+            tokio::spawn(async move { r.await.unwrap().status() })
+        });
+        let statuses: Vec<StatusCode> = futures_util::future::join_all(starts).await.into_iter().map(|r| r.unwrap()).collect();
+        let ok = statuses.iter().filter(|s| **s == StatusCode::CREATED).count();
+        assert_eq!(ok, 3, "round {round}: {statuses:?}");
+        assert!(statuses.iter().all(|s| *s == StatusCode::CREATED || *s == StatusCode::PAYLOAD_TOO_LARGE), "{statuses:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
