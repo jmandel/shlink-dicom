@@ -49,7 +49,7 @@ Walking (`FragmentWalker`) is sequential. It keeps what it learns for the page s
 
 The coarsest level and the minimap come first, and pan and zoom are handled on the next frame throughout. A slide with a level that has no offset table carries one line under its title: "This slide has no frame offset table, so the viewer has to read ahead to find tiles. Adding tables when sharing avoids this." 
 
-A fragment starts a new frame when it begins with a codestream start marker: SOI for JPEG and JPEG-LS, SOC or a JP2 signature box for JPEG 2000 and HTJ2K. So frames split over several fragments are handled. Every other syntax is treated as one fragment per frame.
+A fragment starts a new frame when it begins with a codestream start marker: SOI for JPEG and JPEG-LS, SOC or a JP2 signature box for JPEG 2000 and HTJ2K, and the codestream signature (FF 0A) or container signature box for JPEG XL. So frames split over several fragments are handled. Every other syntax is treated as one fragment per frame.
 
 **Reads.** `SeriesReader` (`web/core/wsi-source.ts`) does the reading:
 - **Record cache.** It caches verified, decrypted 64 KiB records, with a 64 MiB budget.
@@ -266,7 +266,7 @@ The worst case, the bottom-right tile, reads the whole base level: 1.05 GB for l
 How it works:
 - **Which table.** It writes a Basic Offset Table, or an Extended Offset Table (offsets and lengths, inserted before Pixel Data) when an offset passes 4 GiB. The EOT case needs one fragment per frame, as PS3.5 A.4 requires. It never writes both tables.
 - **What changes.** Fragment bytes are unchanged; only the bytes before the first fragment item change. The instance's length in the Bundle is its new length.
-- **When it declines.** It leaves an instance alone when frame boundaries are ambiguous. Boundaries come from codestream start markers that must count exactly Number of Frames, or from exactly one fragment per frame.
+- **When it declines.** It leaves an instance alone when frame boundaries are ambiguous. Boundaries come from codestream start markers (the same ones the viewer uses) that must count exactly Number of Frames, or from exactly one fragment per frame. The decoder splits frames by the same rule.
 
 **What it costs and saves:**
 

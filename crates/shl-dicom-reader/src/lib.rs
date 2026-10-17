@@ -96,6 +96,21 @@ pub fn parse_index(bundle: &[u8]) -> Result<String, JsError> {
     read_index(bundle).map_err(thrown)
 }
 
+/// Whether frames of this transfer syntax are found by codestream start markers
+/// (`shl_dicom_decode::syntax::frame_start_test`): JPEG, JPEG-LS, JPEG 2000, HTJ2K and JPEG XL.
+/// When false, each fragment is one frame.
+#[wasm_bindgen]
+pub fn has_frame_start_marker(transfer_syntax: &str) -> bool {
+    shl_dicom_decode::syntax::frame_start_test(transfer_syntax).is_some()
+}
+
+/// Whether a fragment whose value starts with `head` (its first 8 bytes, or all of it when
+/// shorter) starts a frame. Always true for syntaxes without start markers.
+#[wasm_bindgen]
+pub fn is_frame_start(transfer_syntax: &str, head: &[u8]) -> bool {
+    shl_dicom_decode::syntax::frame_start_test(transfer_syntax).is_none_or(|test| test(head))
+}
+
 /// Writes JSON without building a value tree first (the index of a large study has thousands of
 /// instances).
 struct Out(String);

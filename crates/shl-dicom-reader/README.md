@@ -22,6 +22,8 @@ All are synchronous once the module is instantiated. On failure each throws an e
 | `decrypt_bundle(jwe, key)` | The Bundle's UTF-8 JSON bytes. |
 | `parse_index(bundleBytes)` | JSON: the study index in the viewer's shape (web/core/bundle.ts `StudyIndex` without `bundle`; series name their file by `fileId`; report attachments carry `dataB64`). |
 | `open_bundle(jwe, key)` | `{index, bundle}`: `decrypt_bundle` then `parse_index` in one call, for a worker. |
+| `has_frame_start_marker(transferSyntax)` | Whether frames of this syntax are found by codestream start markers (JPEG, JPEG-LS, JPEG 2000, HTJ2K, JPEG XL); when false, each fragment is a frame. Never throws. |
+| `is_frame_start(transferSyntax, head)` | Whether a fragment whose value starts with `head` (its first 8 bytes) starts a frame: the rule the packer's offset tables and the decoder use. Never throws. |
 
 ## Error codes
 

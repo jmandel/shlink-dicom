@@ -28,3 +28,17 @@ fn golden_cases() {
     }
     assert!(failed.is_empty(), "{} of {} cases fail:\n{}", failed.len(), cases.len(), failed.join("\n"));
 }
+
+#[test]
+fn frame_starts_follow_the_packer_rule() {
+    use shl_dicom_reader::{has_frame_start_marker, is_frame_start};
+    let jpeg = "1.2.840.10008.1.2.4.50";
+    let j2k = "1.2.840.10008.1.2.4.90";
+    let jxl = "1.2.840.10008.1.2.4.112";
+    let rle = "1.2.840.10008.1.2.5";
+    assert!(is_frame_start(jpeg, &[0xFF, 0xD8, 0xFF, 0xE0]) && !is_frame_start(jpeg, &[0x11, 0x22]));
+    assert!(is_frame_start(j2k, &[0xFF, 0x4F, 0xFF, 0x51]) && is_frame_start(j2k, b"\0\0\0\x0CjP  "));
+    assert!(!is_frame_start(j2k, b"\0\0\0\x0CJXL "));
+    assert!(is_frame_start(jxl, &[0xFF, 0x0A, 0x00]) && is_frame_start(jxl, b"\0\0\0\x0CJXL ") && !is_frame_start(jxl, &[0xFF, 0xD8]));
+    assert!(has_frame_start_marker(jxl) && !has_frame_start_marker(rle) && is_frame_start(rle, &[1, 2, 3]));
+}
