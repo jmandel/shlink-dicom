@@ -218,7 +218,9 @@ async fn main() {
         }
         Commands::Seed { data_dir, store } => {
             let t0 = std::time::Instant::now();
-            let state = AppState::with_store(&data_dir, Quotas::default(), store.store(&data_dir)).expect("failed to initialize AppState");
+            // The service keeps running on this data directory while the seed works (the bootstrap
+            // restarts it afterwards), so the seed runs none of the startup sweeps.
+            let state = AppState::alongside_server(&data_dir, Quotas::default(), store.store(&data_dir)).expect("failed to initialize AppState");
             let result = seed_sample(&state);
             // The earlier sample's files, if any, leave the store now.
             state.empty_trash().await;

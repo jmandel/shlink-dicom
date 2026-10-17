@@ -2146,3 +2146,16 @@ async fn test_a_clone_never_names_a_released_blob() {
     assert!(!blob_exists(&state, &key).await, "the blob left the store, and no share names it");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The seed's state (alongside a running server) runs no startup sweep: a share the server is
+/// creating (its file before its catalog row) is left alone.
+#[tokio::test]
+async fn test_the_seeds_state_runs_no_startup_sweep() {
+    let dir = temp_data_dir("seed_no_sweep");
+    let state = test_state(&dir);
+    let pending = b64url_encode(&[8u8; 16]);
+    std::fs::write(state.share_db_path(&pending), b"").unwrap();
+    let _seed = AppState::alongside_server(&dir, shl_dicom_server::state::Quotas::default(), test_store(&dir)).unwrap();
+    assert!(state.share_db_path(&pending).exists(), "the seed's state swept a share being created");
+    let _ = std::fs::remove_dir_all(&dir);
+}

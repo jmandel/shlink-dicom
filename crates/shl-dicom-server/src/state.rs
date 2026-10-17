@@ -254,7 +254,20 @@ impl AppState {
         Self::with_store(data_dir, quotas, Arc::new(LocalFsStore { root }))
     }
 
+    /// The server's state, after the startup sweeps (orphan files and links, expired shares, stale
+    /// uploads), which assume no other process is using the data directory.
     pub fn with_store(data_dir: impl AsRef<Path>, quotas: Quotas, store: Arc<dyn BlobStore>) -> Result<Self, String> {
+        let state = Self::alongside_server(data_dir, quotas, store)?;
+        state.run_sweep()?;
+        state.sweep_orphan_files();
+        state.sweep_stale_uploads();
+        Ok(state)
+    }
+
+    /// The state without the startup sweeps, for `seed`, which runs while the server is serving
+    /// the same data directory. There the orphan scan would take a share the server is creating
+    /// (its file is written before its catalog row) for a crash's leftover and delete it.
+    pub fn alongside_server(data_dir: impl AsRef<Path>, quotas: Quotas, store: Arc<dyn BlobStore>) -> Result<Self, String> {
         let data_dir = data_dir.as_ref().to_path_buf();
         let shares_dir = data_dir.join("shares");
         std::fs::create_dir_all(&shares_dir)
@@ -297,9 +310,6 @@ impl AppState {
                 })
                 .map_err(|e| format!("access-log thread: {e}"))?;
         }
-        state.run_sweep()?;
-        state.sweep_orphan_files();
-        state.sweep_stale_uploads();
         Ok(state)
     }
 
