@@ -14,16 +14,39 @@ import { toDicomJson } from "./dicom.ts";
 
 interface Capability { id: string; grantId: string; studyUID: string; exp: number; }
 
+// Capabilities kept at most; past this the oldest go first.
+export const MAX_CAPABILITIES = 10_000;
+
 export class CapabilityStore {
   private caps = new Map<string, Capability>();
+  // grant id + study UID -> capability id: one capability per consent and study, reused while it
+  // has at least half its lifetime left, so repeated searches don't each add one.
+  private byGrantStudy = new Map<string, string>();
   constructor(private cfg: Config) {}
 
+  get size() { return this.caps.size; }
+
   issue(tok: ValidatedToken, studyUID: string): string {
+    const now = Math.floor(Date.now() / 1000);
+    const key = `${tok.grant.id} ${studyUID}`;
+    const known = this.caps.get(this.byGrantStudy.get(key) ?? "");
+    if (known && known.exp - now >= this.cfg.capabilityTtl / 2) return known.id;
     const id = Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("base64url");
-    const exp = Math.floor(Date.now() / 1000) + this.cfg.capabilityTtl;
-    this.caps.set(id, { id, grantId: tok.grant.id, studyUID, exp });
-    for (const [k, c] of this.caps) if (c.exp < Date.now() / 1000 - 3600) this.caps.delete(k);
+    this.caps.set(id, { id, grantId: tok.grant.id, studyUID, exp: now + this.cfg.capabilityTtl });
+    this.byGrantStudy.set(key, id);
+    for (const [k, c] of this.caps) if (c.exp < now - 3600) this.drop(k, c);
+    // Oldest first (a Map keeps insertion order).
+    for (const [k, c] of this.caps) {
+      if (this.caps.size <= MAX_CAPABILITIES) break;
+      this.drop(k, c);
+    }
     return id;
+  }
+
+  private drop(id: string, c: Capability) {
+    this.caps.delete(id);
+    const key = `${c.grantId} ${c.studyUID}`;
+    if (this.byGrantStudy.get(key) === id) this.byGrantStudy.delete(key);
   }
 
   get(id: string): Capability | undefined {
@@ -78,7 +101,7 @@ function dicomPreferences(accept: MediaRange[]): { prefs: Preference[]; missing:
   return { prefs: prefs.filter((p) => p.q > 0).sort((a, b) => b.q - a.q || a.order - b.order), missing };
 }
 
-interface Part { instance: Instance; ts: string; size: number; body: Uint8Array; file?: string }
+export interface Part { instance: Instance; ts: string; size: number; body: Uint8Array; file?: string }
 
 // The part to send for one instance, or null if no preference can be met.
 function choose(i: Instance, prefs: Preference[]): Part | null {
@@ -101,26 +124,42 @@ function qOf(m: MediaRange): number {
   return Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1) : 1;
 }
 
-function multipart(parts: Part[], locate: (i: Instance) => string): Response {
+// The multipart response, streamed part by part: a compressed copy is read from disk only when
+// its part is sent, so a whole study is never held in memory at once. The response is chunked
+// (each part has its Content-Length); a copy that no longer has its recorded size ends the stream
+// with an error.
+export function multipart(parts: Part[], locate: (i: Instance) => string): Response {
   const boundary = `sandbox-${crypto.randomUUID()}`;
   const enc = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for (const p of parts) {
-    const head = enc.encode(
-      `--${boundary}\r\nContent-Type: application/dicom; transfer-syntax=${p.ts}\r\nContent-Length: ${p.size}\r\nContent-Location: ${locate(p.instance)}\r\n\r\n`,
-    );
-    chunks.push(head, p.body, enc.encode("\r\n"));
-    length += head.byteLength + p.size + 2;
-  }
+  const heads = parts.map((p) =>
+    enc.encode(`--${boundary}\r\nContent-Type: application/dicom; transfer-syntax=${p.ts}\r\nContent-Length: ${p.size}\r\nContent-Location: ${locate(p.instance)}\r\n\r\n`),
+  );
+  const crlf = enc.encode("\r\n");
   const tail = enc.encode(`--${boundary}--\r\n`);
-  chunks.push(tail);
-  length += tail.byteLength;
-  return new Response(new Blob(chunks as BlobPart[]), {
+  let k = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(c) {
+      if (k === parts.length) {
+        c.enqueue(tail);
+        c.close();
+        return;
+      }
+      const p = parts[k];
+      const bytes = p.file ? await Bun.file(p.file).bytes() : p.body;
+      if (bytes.byteLength !== p.size) {
+        c.error(new Error(`a compressed copy changed on disk: ${p.file}`));
+        return;
+      }
+      c.enqueue(heads[k]);
+      c.enqueue(bytes);
+      c.enqueue(crlf);
+      k++;
+    },
+  });
+  return new Response(body, {
     status: 200,
     headers: {
       "content-type": `multipart/related; type="application/dicom"; boundary=${boundary}`,
-      "content-length": String(length),
       "cache-control": "no-store",
     },
   });
@@ -218,12 +257,9 @@ export async function handleWado(cfg: Config, store: Store, caps: CapabilityStor
     }
     parts.push(p);
   }
-  // Copies are read from disk when sent.
+  // Copies are read from disk as their parts are sent; one that changed is refused up front.
   for (const p of parts) {
-    if (p.file) {
-      p.body = await Bun.file(p.file).bytes();
-      if (p.body.byteLength !== p.size) return wadoError(500, "a compressed copy changed on disk");
-    }
+    if (p.file && Bun.file(p.file).size !== p.size) return wadoError(500, "a compressed copy changed on disk");
   }
   return multipart(parts, locate);
 }

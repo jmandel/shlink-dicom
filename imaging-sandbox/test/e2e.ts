@@ -311,8 +311,9 @@ async function main() {
     check("q weights win over header order (*;q=0.3, J2K;q=0.6, SV1;q=0.9 gives SV1)", byQ.status === 200 && byQ.parts.every((p) => asWanted(p, SV1)));
     const tie = await get(`${base}/wado-rs/studies/${ct}`, [range(J2K), range(SV1), range("*")].join(", "));
     check("equal weights follow header order (J2K, SV1, * gives J2K)", tie.status === 200 && tie.parts.every((p) => asWanted(p, J2K)));
-    check(`multipart Content-Length is exact (SV1 ${(ctSv1.body.byteLength / 1e6).toFixed(1)} MB, J2K ${(ctJ2k.body.byteLength / 1e6).toFixed(1)} MB, stored ${(ctStored.body.byteLength / 1e6).toFixed(1)} MB)`,
-      [ctSv1, ctJ2k, ctStored].every((r) => r.length === r.body.byteLength) && ctSv1.body.byteLength < ctStored.body.byteLength / 2 && ctJ2k.body.byteLength < ctSv1.body.byteLength);
+    check(`multipart responses are streamed, sizes in order (SV1 ${(ctSv1.body.byteLength / 1e6).toFixed(1)} MB, J2K ${(ctJ2k.body.byteLength / 1e6).toFixed(1)} MB, stored ${(ctStored.body.byteLength / 1e6).toFixed(1)} MB)`,
+      // Streamed part by part (chunked; each part carries its own Content-Length).
+      [ctSv1, ctJ2k, ctStored].every((r) => r.length === 0 || r.length === r.body.byteLength) && ctSv1.body.byteLength < ctStored.body.byteLength / 2 && ctJ2k.body.byteLength < ctSv1.body.byteLength);
 
     const mixed = await get(`${base}/wado-rs/studies/${slideUID}`, [range(SV1), range("*", 0.5)].join(", "));
     const byType = mixed.parts.map((p) => [tsOf(p), tsInFile(p)]);
