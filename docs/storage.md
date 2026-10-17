@@ -285,7 +285,7 @@ Server settings, from `serve` (and `seed`) flags or the environment.
 | `--max-share-files` | `SHL_MAX_SHARE_FILES` | 0 (no limit) | Encrypted files one share may hold |
 | `--max-shares` | `SHL_MAX_SHARES` | 256 | Shares at once, not counting the sample; 0 for no limit |
 | `--max-chunk-bytes` | `SHL_MAX_CHUNK_BYTES` | `64M` | Largest append (`Upload-Limit: max-append-size`) |
-| `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 | Lifetime of a passcode link's capability URL |
+| `--cap-ttl-secs` | `SHL_CAP_TTL_SECS` | 3600 | Lifetime of a passcode link's capability URL, at most 3600 (the SHL spec's limit) |
 
 JSON and JWE request bodies are capped at 32 MiB, and a Bundle (`owner.jwe` or a link's `bundle.jwe`) at 16 MiB. A share may have 100 links. File bodies stream to the staged file and have no body cap.
 

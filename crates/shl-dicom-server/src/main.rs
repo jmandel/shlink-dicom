@@ -172,7 +172,7 @@ enum Commands {
         /// Largest upload chunk (for example 64M)
         #[arg(long, env = "SHL_MAX_CHUNK_BYTES", default_value = "64M", value_parser = parse_size)]
         max_chunk_bytes: u64,
-        /// Lifetime of a passcode link's capability URL, in seconds
+        /// Lifetime of a passcode link's capability URL, in seconds (at most 3600)
         #[arg(long, env = "SHL_CAP_TTL_SECS", default_value_t = 3600)]
         cap_ttl_secs: i64,
         #[command(flatten)]

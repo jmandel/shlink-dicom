@@ -37,6 +37,8 @@ impl Default for Quotas {
 
 pub const DEFAULT_SANDBOX_TTL_SECS: i64 = 24 * 3600; // 24 hours
 pub const DEFAULT_CAP_TTL_SECS: i64 = 3600; // 1 hour
+/// Longest a capability URL lives, whatever `--cap-ttl-secs` says.
+pub const MAX_CAP_TTL_SECS: i64 = 3600;
 /// Longest lifetime a sharer may ask for with `POST /api/shares` or `PATCH /api/shares/{sid}`.
 pub const MAX_SHARE_TTL_SECS: i64 = 31 * 24 * 3600;
 pub const DEFAULT_PASSCODE_ATTEMPTS: i64 = 5;
@@ -635,7 +637,8 @@ impl AppState {
     pub fn mint_cap(&self, lid: &str, ttl_secs: i64) -> Result<String, String> {
         let token_bytes = random_bytes::<32>().map_err(|e| e.to_string())?;
         let token = b64url_encode(&token_bytes);
-        let expires_at = now_unix() + ttl_secs;
+        // The SHL spec caps a manifest's location URLs at one hour, whatever the setting.
+        let expires_at = now_unix() + ttl_secs.clamp(1, MAX_CAP_TTL_SECS);
         let cat = self.catalog.lock().unwrap();
         cat.execute(
             "INSERT INTO caps (token, lid, expires_at) VALUES (?1, ?2, ?3)",
@@ -1293,6 +1296,20 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::ct_eq;
+
+    #[test]
+    fn a_cap_lives_at_most_an_hour() {
+        let dir = std::env::temp_dir().join(format!("cap_ttl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = super::AppState::new(&dir).unwrap();
+        let (sid, _) = state.create_share(false, None).unwrap();
+        let lid = "c".repeat(22);
+        state.register_link_in_catalog(&sid, &lid).unwrap();
+        let t = state.mint_cap(&lid, 7 * 24 * 3600).unwrap();
+        let exp: i64 = state.catalog.lock().unwrap().query_row("SELECT expires_at FROM caps WHERE token = ?1", [t], |r| r.get(0)).unwrap();
+        assert!(exp <= super::now_unix() + super::MAX_CAP_TTL_SECS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_expired_share_loses_its_event_channel() {
