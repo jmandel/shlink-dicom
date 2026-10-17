@@ -53,7 +53,9 @@ class InWorker implements Backend {
   private seq = 0;
   private pending = new Map<number, [(v: any) => void, (e: unknown) => void]>();
   constructor() {
-    this.w = new Worker(assetUrl("reader-worker.js"), { type: "module" });
+    // The page may have started it already (web/view/index.html), with its module loading.
+    const early = (globalThis as { __shlReader?: Worker }).__shlReader;
+    this.w = early ?? new Worker(assetUrl("reader-worker.js"), { type: "module" });
     this.w.onmessage = (ev) => {
       const { id, value, error } = ev.data;
       const p = this.pending.get(id);
@@ -66,7 +68,7 @@ class InWorker implements Backend {
       for (const [, f] of this.pending.values()) f(new ReaderError("internal", ev.message || "the link reader failed to start"));
       this.pending.clear();
     };
-    this.w.postMessage({ init: assetUrl("shl_dicom_reader_bg.wasm") });
+    if (!early) this.w.postMessage({ init: assetUrl("shl_dicom_reader_bg.wasm") });
   }
   call(c: Call) {
     const id = ++this.seq;

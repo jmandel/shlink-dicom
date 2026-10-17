@@ -184,6 +184,8 @@ for (const f of new Bun.Glob("**/*.html").scanSync({ cwd: out })) {
     const links = [...staticDeps(entry[2])].map((c) => `<link rel="modulepreload" href="${entry[1]}${c}" />`).join("\n  ");
     if (links) html = html.replace(/(\s*)<link rel="stylesheet"/, `$1${links}$1<link rel="stylesheet"`);
   }
+  // The link reader's worker inline in the viewer's page (web/view/index.html), so it starts with the page.
+  html = html.replace('/*reader-worker*/ ""', () => JSON.stringify(readFileSync(`${assets}/reader-worker.js`, "utf8")).replace(/<\//g, "<\\/"));
   const next = html.replace(/((?:\.\.\/)*assets\/)([A-Za-z0-9_.\/-]+\.(?:js|mjs|css|wasm))(?=["'])/g, (m, pre, name) => (hashOf(name) && !name.startsWith("chunk-") ? `${pre}${name}?v=${hashOf(name)}` : m));
   await Bun.write(path, next);
 }

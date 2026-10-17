@@ -21,12 +21,22 @@
         window.__shlBundle.res.catch(function () {});
       } catch (e) {}
     })();
+    // The link reader (web/core/reader.ts) in its worker, started now: its module loads while the
+    // viewer's code and the Bundle download.
+    (function () {
+      try {
+        if (location.hash.indexOf("shlink:/") < 0) return;
+        // The build puts the worker's code here (web/build.ts), so it starts without a request.
+        var code = /*reader-worker*/ "";
+        var w = code ? new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })), { type: "module" }) : new Worker("../assets/reader-worker.js", { type: "module" });
+        w.postMessage({ init: new URL("../assets/shl_dicom_reader_bg.wasm", location.href).href });
+        window.__shlReader = w;
+      } catch (e) {}
+    })();
   </script>
   <link rel="modulepreload" href="../assets/view.js" />
   <link rel="preload" href="../assets/shl_dicom_decode.wasm" as="fetch" type="application/wasm" crossorigin />
   <link rel="preload" href="../assets/decoder-worker.js" as="fetch" crossorigin />
-  <link rel="preload" href="../assets/reader-worker.js" as="fetch" crossorigin />
-  <link rel="preload" href="../assets/shl_dicom_reader_bg.wasm" as="fetch" type="application/wasm" crossorigin />
   <link rel="stylesheet" href="../assets/base.css" />
   <link rel="stylesheet" href="../assets/view.css" />
 </head>
