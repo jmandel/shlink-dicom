@@ -374,6 +374,21 @@ async function flowJ2k(dev) {
 }
 
 /** JPEG 2000 with a reload part-way through the upload: it continues with the staged JPEG 2000 files. */
+/** Waits until the upload is `pct` % along; fails at once with the page's message if it fails first. */
+async function uploadedPast(page, pct, timeout = 600000) {
+  const h = await page.waitForFunction(
+    (pct) => {
+      const err = document.getElementById("up-error");
+      if (err && !err.classList.contains("hidden")) return { error: document.getElementById("up-error-text")?.textContent ?? "failed" };
+      return /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > pct && { ok: true };
+    },
+    pct,
+    { timeout, polling: 100 },
+  );
+  const r = await h.jsonValue();
+  if (r.error) throw new Error(`upload failed before the reload: ${r.error}`);
+}
+
 async function flowJ2kResume(dev) {
   const P = `j2k-resume/${dev}`;
   execFileSync("bun", [`${ROOT}web/checks/share-big.ts`, NET_DIR, "200", "512"], { cwd: ROOT, encoding: "utf8" });
@@ -397,7 +412,7 @@ async function flowJ2kResume(dev) {
   const PASS = "7319-resume";
   await page.fill("#in-pass", PASS);
   await page.click("#who-form button[type=submit]");
-  await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 30, null, { timeout: 600000, polling: 100 });
+  await uploadedPast(page, 30);
   const before = await page.textContent("#up-main");
   const saved = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("shl-dicom-upload-job:")).map((k) => localStorage.getItem(k)).join("") ?? "");
   const job = JSON.parse(saved || "{}");
@@ -457,7 +472,7 @@ async function flowPortalResume(dev) {
   await page.waitForSelector("#s-who:not(.hidden)");
   await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 20, downloadThroughput: -1, uploadThroughput: 1 << 19 });
   await page.click("#who-form button[type=submit]");
-  await page.waitForFunction(() => /^(Compressed and u|U)ploaded/.test(document.getElementById("up-main")?.textContent ?? "") && parseFloat(document.getElementById("up-bar")?.style.width ?? "0") > 20, null, { timeout: 600000, polling: 100 });
+  await uploadedPast(page, 20);
   await page.reload().catch(() => page.goto(`${BASE}/share`));
   await page.waitForSelector("#resume:not(.hidden)", { timeout: 30000 });
   await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
@@ -1301,10 +1316,8 @@ for (const dev of Object.keys(DEVICES)) {
     if (!only || only === "reshare") await flowReshare(dev);
     if (!only || only === "exact") await flowExact(dev);
     if (!only || only === "cd") await flowCd(dev);
-    if (!only || only === "j2k") {
-      await flowJ2k(dev);
-      await flowJ2kResume(dev);
-    }
+    if (!only || only === "j2k") await flowJ2k(dev);
+    if (!only || only === "j2k" || only === "j2k-resume") await flowJ2kResume(dev);
     if (files && (!only || only === "manage")) await flowManage(dev, files);
     if (!only || only === "slide") await flowSlide(dev);
     if (!only || only === "sample") await flowSample(dev);
