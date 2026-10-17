@@ -572,8 +572,13 @@ async fn drain(stream: &mut (impl futures_util::Stream<Item = Result<bytes::Byte
 /// uploads of known length at their length, and uploads of unknown length at what has arrived.
 fn share_bytes_in_use(state: &AppState, sid: &str, except: &str) -> u64 {
     let Some(c) = state.open_share_db(sid) else { return 0 };
+    let conn = c.lock().unwrap();
+    bytes_in_use(&conn, state, sid, except)
+}
+
+/// [`share_bytes_in_use`] on a share database already locked.
+fn bytes_in_use(conn: &rusqlite::Connection, state: &AppState, sid: &str, except: &str) -> u64 {
     let (files, known, unknown): (i64, i64, Vec<(String, i64)>) = {
-        let conn = c.lock().unwrap();
         let files = conn.query_row("SELECT COALESCE(SUM(size), 0) FROM files", [], |r| r.get(0)).unwrap_or(0);
         let known = conn
             .query_row("SELECT COALESCE(SUM(size), 0) FROM uploads WHERE size >= 0 AND file_id != ?1", params![except], |r| r.get(0))
@@ -683,9 +688,14 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: Option<
     } else {
         None
     };
-    let bytes = share_bytes_in_use(state, sid, file_id);
+    // Usage is counted and the upload recorded in one IMMEDIATE transaction under the share's
+    // lock, so uploads started at once can't each see room for themselves.
     let conn_arc = state.open_share_db(sid).ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
-    let conn = conn_arc.lock().unwrap();
+    let mut guard = conn_arc.lock().unwrap();
+    let conn = guard
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let bytes = bytes_in_use(&conn, state, sid, file_id);
     let files: i64 = conn
         .query_row("SELECT (SELECT COUNT(*) FROM files) + (SELECT COUNT(*) FROM uploads)", [], |r| r.get(0))
         .unwrap_or(0);
@@ -709,6 +719,7 @@ async fn start_upload(state: &AppState, sid: &str, file_id: &str, total: Option<
         params![file_id, key, total.map_or(UNKNOWN_LENGTH, |t| t as i64), upload_id, now_unix()],
     )
     .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    conn.commit().map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = std::fs::create_dir_all(state.staging_dir(sid));
     Ok(())
 }
