@@ -12,19 +12,13 @@
 //!   instance without decoding the others (`shl_dicom_decode::decode_frames`), so frames of one
 //!   instance can be decoded in parallel by several wasm instances.
 //!
-//! The DICOM reader is the decoder's own `parse.rs`, compiled into this crate by path (it is a
-//! private module of `shl-dicom-decode`).
+//! The DICOM reader is the decoder's own (`shl_dicom_decode::parse`).
 //!
 //! On wasm32 the crate exports a small C ABI (`vk_*`, see the `exports` module); no wasm-bindgen.
 
 use std::fmt::Write as _;
 
-// parse.rs names the transfer syntax table as `crate::syntax`.
-use shl_dicom_decode::syntax;
-
-#[path = "../../shl-dicom-decode/src/parse.rs"]
-#[allow(dead_code, unused_imports, clippy::all)]
-mod parse;
+use shl_dicom_decode::parse;
 
 pub use shl_dicom_decode::{decode_file, decode_file_scaled, Canonical, Error};
 

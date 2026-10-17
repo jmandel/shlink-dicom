@@ -73,6 +73,9 @@ struct Header {
     ts: String,
     frames: usize,
     has_eot: bool,
+    /// Extended Offset Table values, when the instance has one.
+    #[allow(dead_code)] // read by frames_of (tests)
+    eot: Vec<u64>,
     has_7fe0_group_length: bool,
     /// Start of the top-level Pixel Data element header.
     pixel_tag_pos: usize,
@@ -137,66 +140,65 @@ pub(crate) fn skip_undefined(b: &[u8], mut p: usize, explicit: bool, depth: u32)
     }
 }
 
-const VIDEO_TS: &[&str] = &[
-    "1.2.840.10008.1.2.4.100", "1.2.840.10008.1.2.4.100.1", "1.2.840.10008.1.2.4.101", "1.2.840.10008.1.2.4.101.1",
-    "1.2.840.10008.1.2.4.102", "1.2.840.10008.1.2.4.102.1", "1.2.840.10008.1.2.4.103", "1.2.840.10008.1.2.4.103.1",
-    "1.2.840.10008.1.2.4.104", "1.2.840.10008.1.2.4.104.1", "1.2.840.10008.1.2.4.105", "1.2.840.10008.1.2.4.105.1",
-    "1.2.840.10008.1.2.4.106", "1.2.840.10008.1.2.4.106.1", "1.2.840.10008.1.2.4.107", "1.2.840.10008.1.2.4.108",
-];
-
+/// The header of an encapsulated instance up to its Basic Offset Table item, read with the
+/// decoder's walker (`shl_dicom_decode::parse::walk`). None for native and video syntaxes, a
+/// defined-length Pixel Data, or a prefix too short to reach the BOT item.
 fn scan_header(b: &[u8]) -> Option<Header> {
+    use shl_dicom_decode::{parse, syntax};
     if b.get(128..132)? != b"DICM" {
         return None;
     }
-    let mut p = 132;
-    let mut ts = String::new();
-    while u16le(b, p)? == 0x0002 {
-        let (tag, _, vo, len) = read_el(b, p, true)?;
-        if len == UNDEF {
-            return None;
-        }
-        let end = vo.checked_add(len as usize)?;
-        if tag == 0x0002_0010 {
-            ts = String::from_utf8_lossy(b.get(vo..end)?).trim_end_matches(['\0', ' ']).to_string();
-        }
-        p = end;
-    }
+    let (ts, start) = parse::read_meta(b, 132).ok()?;
+    let ts = ts.unwrap_or_default();
     // Implicit VR, big endian and deflated data sets are never encapsulated-and-rewritable here.
-    if matches!(ts.as_str(), "1.2.840.10008.1.2" | "1.2.840.10008.1.2.1" | "1.2.840.10008.1.2.2" | "1.2.840.10008.1.2.1.99" | "")
-        || VIDEO_TS.contains(&ts.as_str())
-    {
+    if ts.is_empty() || syntax::is_native(&ts) || syntax::kind(&ts) == Some(syntax::Kind::Video) {
         return None;
     }
-    let mut frames = 1usize;
-    let mut has_eot = false;
-    let mut has_gl = false;
-    loop {
-        let (tag, vr, vo, len) = read_el(b, p, true)?;
-        if tag == PIXEL_DATA {
-            if len != UNDEF {
-                return None; // native or malformed
-            }
-            let (bt, _, bvo, blen) = read_el(b, vo, true)?;
-            if bt != ITEM || blen == UNDEF {
-                return None;
-            }
-            let _ = bvo;
-            return Some(Header { ts, frames, has_eot, has_7fe0_group_length: has_gl, pixel_tag_pos: p, bot_pos: vo, bot_len: blen });
-        }
-        if tag > PIXEL_DATA {
-            return None;
-        }
-        match tag {
-            NUMBER_OF_FRAMES if len != UNDEF => {
-                let s = String::from_utf8_lossy(b.get(vo..vo.checked_add(len as usize)?)?).to_string();
-                frames = s.trim_matches(['\0', ' ']).split('\\').next()?.trim().parse::<usize>().unwrap_or(1).max(1);
-            }
-            EOT_TAG | EOT_LENGTHS_TAG => has_eot = true,
-            0x7FE0_0000 => has_gl = true,
-            _ => {}
-        }
-        p = if len == UNDEF { skip_undefined(b, vo, &vr != b"UN", 1)? } else { vo.checked_add(len as usize)? };
+    struct Scan<'a> {
+        frames: usize,
+        has_eot: bool,
+        eot: &'a [u8],
+        has_gl: bool,
+        pixel: Option<(usize, bool)>,
     }
+    impl<'a> parse::Visitor<'a> for Scan<'a> {
+        fn element(&mut self, e: &parse::Element<'a>) -> parse::Step {
+            match (e.tag, e.value) {
+                (PIXEL_DATA, v) => {
+                    self.pixel = Some((e.pos, v.is_none()));
+                    return parse::Step::Stop;
+                }
+                (NUMBER_OF_FRAMES, Some(v)) => {
+                    let s = String::from_utf8_lossy(v).to_string();
+                    self.frames = s.trim_matches(['\0', ' ']).split('\\').next().and_then(|f| f.trim().parse::<usize>().ok()).unwrap_or(1).max(1);
+                }
+                (EOT_TAG, Some(v)) => (self.has_eot, self.eot) = (true, v),
+                (EOT_LENGTHS_TAG, _) => self.has_eot = true,
+                (0x7FE0_0000, _) => self.has_gl = true,
+                _ => {}
+            }
+            if e.value.is_none() { parse::Step::Skip } else { parse::Step::Next }
+        }
+    }
+    let ds = b.get(start..)?;
+    let mut scan = Scan { frames: 1, has_eot: false, eot: &[], has_gl: false, pixel: None };
+    parse::walk(ds, parse::Syntax { explicit: true, little: true }, &|_| false, &mut scan).ok()?;
+    let (pos, undefined) = scan.pixel?;
+    if !undefined {
+        return None; // native or malformed
+    }
+    let pixel_tag_pos = start + pos;
+    // Pixel Data (OB/OW, undefined length) then its first item, the Basic Offset Table.
+    let bot_pos = pixel_tag_pos + 12;
+    if tag_at(b, bot_pos)? != ITEM {
+        return None;
+    }
+    let bot_len = u32le(b, bot_pos + 4)?;
+    if bot_len == UNDEF {
+        return None;
+    }
+    let eot = scan.eot.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+    Some(Header { ts, frames: scan.frames, has_eot: scan.has_eot, eot, has_7fe0_group_length: scan.has_gl, pixel_tag_pos, bot_pos, bot_len })
 }
 
 /// What the instance needs, from its header. Reads only up to the BOT item.
@@ -435,24 +437,7 @@ pub(crate) fn frames_of(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
                 return frames_of(&rewritten);
             }
             None if h.has_eot => {
-                // Find the EOT values.
-                let mut q = 132;
-                while u16le(bytes, q)? == 0x0002 {
-                    let (_, _, vo, len) = read_el(bytes, q, true)?;
-                    q = vo + len as usize;
-                }
-                let mut eot = Vec::new();
-                loop {
-                    let (tag, vr, vo, len) = read_el(bytes, q, true)?;
-                    if tag == EOT_TAG {
-                        eot = (0..len as usize / 8).map(|i| u64::from_le_bytes(bytes[vo + 8 * i..vo + 8 * i + 8].try_into().unwrap()) as usize).collect();
-                    }
-                    if tag == PIXEL_DATA {
-                        break;
-                    }
-                    q = if len == UNDEF { skip_undefined(bytes, vo, &vr != b"UN", 1)? } else { vo + len as usize };
-                }
-                eot.iter().map(|o| first_item + o).collect()
+                h.eot.iter().map(|&o| first_item + o as usize).collect()
             }
             None => frags.iter().map(|f| f.0).collect(),
         }

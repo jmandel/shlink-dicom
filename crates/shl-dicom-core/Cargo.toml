@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 # IMPLEMENTATION_CLASS_UID, written in the file meta of a wrapped bare data set.
 shl-dicom-transcode = { path = "../../codecs/shl-dicom-transcode" }
+# The DICOM reader (parse::walk) and the transfer syntax table.
+shl-dicom-decode = { path = "../../codecs/shl-dicom-decode", default-features = false }
 aes-gcm = "0.10"
 base64 = "0.22"
 dicom-core = "0.7"

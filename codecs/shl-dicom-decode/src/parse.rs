@@ -290,7 +290,7 @@ fn guess_syntax(ds: &[u8]) -> Syntax {
 /// The meta header ends at the first element that is not in group 0002 or whose tag does not
 /// increase. A second copy of group 0002 after it (fo-dicom #1376) belongs to the data set, which
 /// may not contain group 0002 (PS3.10 7.1); it is skipped there, as dcmtk skips it.
-fn read_meta(bytes: &[u8], start: usize) -> Result<(Option<String>, usize), Error> {
+pub fn read_meta(bytes: &[u8], start: usize) -> Result<(Option<String>, usize), Error> {
     let mut c = Cursor::new(bytes);
     c.pos = start;
     let mut ts = None;

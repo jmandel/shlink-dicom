@@ -14,7 +14,9 @@
 mod encaps;
 mod float;
 mod infer;
-mod parse;
+/// The DICOM reader: file meta, transfer syntax, the element walker ([`parse::walk`]) and the
+/// Image Pixel attributes. shl-dicom-decode-wasm, the transcoder and shl-dicom-core read with it.
+pub mod parse;
 mod pixel;
 mod retired;
 mod scale;
