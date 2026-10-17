@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Imaging over SMART Health Links, on GitHub Pages</title>
+  <meta name="description" content="A SMART Health Link to a brain MRI and wrist X-rays, served as static files from GitHub Pages, with the shlink-dicom viewer." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5fbf'/><path d='M9 9h14v14H9z' fill='none' stroke='white' stroke-width='2.5'/><circle cx='16' cy='16' r='3.5' fill='white'/></svg>" />
+  <link rel="stylesheet" href="assets/base.css" />
+  <link rel="stylesheet" href="assets/pages.css" />
+</head>
+<body>
+  <main class="pages">
+    <header>
+      <h1>A SMART Health Link to imaging, served by GitHub Pages</h1>
+      <p class="lede">shlink-dicom is my draft profile for sharing complete DICOM imaging studies through SMART Health Links. This copy of its viewer and the demo link below are plain files on GitHub Pages. No code of mine runs on the server; it only has to answer byte-range requests.</p>
+    </header>
+
+    <section aria-labelledby="h-why">
+      <h2 id="h-why">Why imaging needs more than one encrypted file</h2>
+      <p>A standard SMART Health Link opens one encrypted file (a JWE) holding a FHIR Bundle. For imaging that is a poor fit: a JWE is base64url-encoded, which adds a third to its size, and its one authentication tag comes at the very end, so nothing in it can be checked or shown until all of it has arrived.</p>
+      <p>In shlink-dicom the link and the Bundle stay standard. The Bundle’s ImagingStudy lists every DICOM instance with its length in bytes and names an encrypted file for the study: its DICOM files laid end to end, sealed in 64 KiB records that each carry their own tag. A viewer can fetch one slice with one Range request and check it as it arrives, from any host that serves byte ranges.</p>
+    </section>
+
+    <section class="card demo" aria-labelledby="h-demo">
+      <div class="demo-text">
+        <h2 id="h-demo">The demo link</h2>
+        <p>Josh Example’s brain MRI (2020) and left wrist X-rays (2012). They are real images of me, de-identified and published in my <a href="https://github.com/jmandel/my-health-data/tree/master/imaging">health-data repository</a>.</p>
+        <ul class="facts">
+          <li>Brain MRI: {{MRI_SERIES}} series, {{MRI_INSTANCES}} images, {{MRI_MB}} MB encrypted</li>
+          <li>Wrist X-rays: {{XR_SERIES}} views, {{XR_MB}} MB encrypted</li>
+        </ul>
+        <p><a class="btn btn-primary" href="{{VIEWER_LINK}}">Open in the viewer</a></p>
+        <details class="link-text">
+          <summary>The link</summary>
+          <code>{{LINK}}</code>
+          <p class="small muted">Opened in the viewer, the link follows <code>view/#</code>. Browsers never send the part after <code>#</code> to the server, so the key stays with you.</p>
+        </details>
+      </div>
+      <figure class="qr">
+        {{QR}}
+        <figcaption class="small muted">Scan to open on a phone</figcaption>
+      </figure>
+    </section>
+
+    <section aria-labelledby="h-trace">
+      <h2 id="h-trace">One slice, from link to pixels</h2>
+      <ol class="trace">
+        <li>The viewer reads the key from the link, after the <code>#</code>.</li>
+        <li>It fetches <code>demo-links/bundle.jwe</code> ({{BUNDLE_KB}} KB) and decrypts it with that key. Inside is an ordinary FHIR R4 Bundle, with an ImagingStudy for each study.</li>
+        <li>For slice {{SLICE_N}} of MRI series {{SLICE_SERIES}}, it adds up the lengths of the images listed before it. The slice starts at byte {{SLICE_OFFSET}} of the study’s DICOM bytes and lies in records {{SLICE_RECORDS}} of the file’s {{MRI_RECORDS}}.</li>
+        <li>It sends one request for <code>demo-links/{{MRI_FILE}}</code> with <code>Range: {{SLICE_RANGE}}</code>. GitHub Pages answers <code>206 Partial Content</code> with those {{SLICE_RECORD_COUNT}} records.</li>
+        <li>It checks each record’s AES-256-GCM tag before using its bytes, then decodes and draws the slice. A record that fails the check is not shown.</li>
+      </ol>
+      <p class="small muted">The specification covers <a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#93-locating-and-authenticating-byte-ranges">locating records</a>, <a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#10-fetch-contract">what a host must do</a> and <a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md#appendix-c-hosting-notes">notes on GitHub Pages</a>.</p>
+    </section>
+
+    <section aria-labelledby="h-full">
+      <h2 id="h-full">What the full demo adds</h2>
+      <p><a href="https://shlink-dicom.exe.xyz">shlink-dicom.exe.xyz</a> runs the project’s server, and has what this copy leaves out:</p>
+      <ul>
+        <li><a href="https://shlink-dicom.exe.xyz/sample">A larger sample</a>: this MRI and these X-rays plus an abdominal CT, right hand and wrist X-rays and a lung pathology slide, with a report for each study.</li>
+        <li><a href="https://shlink-dicom.exe.xyz/share">Sharing your own studies</a> from a folder, a CD or a provider, with passcodes, expiry, open counts and revocation.</li>
+        <li>The <a href="https://smart-imaging-sandbox.exe.xyz">SMART Imaging sandbox</a>, a test provider to share from.</li>
+        <li><a href="https://shlink-dicom.exe.xyz/how">How it works</a>, which follows the sample link step by step, with a switch that flips a bit in transit.</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="h-build">
+      <h2 id="h-build">How this site is built</h2>
+      <p>A <a href="https://github.com/jmandel/shlink-dicom/blob/main/.github/workflows/pages.yml">GitHub Actions workflow</a> builds the viewer, fetches the DICOM files from my-health-data at commit <a href="https://github.com/jmandel/my-health-data/tree/{{SOURCE_COMMIT}}/imaging"><code>{{SOURCE_COMMIT_SHORT}}</code></a>, re-encodes the uncompressed images as lossless JPEG as the full demo does, and packs them with the project’s packer. The keys are committed in <a href="https://github.com/jmandel/shlink-dicom/blob/main/pages/demo-link.json">pages/demo-link.json</a>, so every deploy makes the same files and the link does not change. The build fails if the input or the packed bytes differ from the hashes recorded there.</p>
+    </section>
+
+    <section aria-labelledby="h-code">
+      <h2 id="h-code">Code and specification</h2>
+      <ul>
+        <li><a href="https://github.com/jmandel/shlink-dicom/blob/main/spec/README.md">The shlink-dicom specification</a> (draft)</li>
+        <li><a href="https://github.com/jmandel/shlink-dicom">Code</a>: the packer, the server, the viewer and its decoders</li>
+        <li><a href="https://joshuamandel.com/blog/posts/smart-health-links-for-imaging/">SMART Health Links for Imaging, Too</a>, my post on why and how I built it with AI coding agents</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

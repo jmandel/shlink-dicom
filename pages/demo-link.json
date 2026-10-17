@@ -1,0 +1,126 @@
+{
+  "_comment": [
+    "The GitHub Pages demo link (pages/build.ts, .github/workflows/pages.yml). Every build packs the same",
+    "input with these keys, so the link and its files never change, and fails if an input file, a study",
+    "file's plaintext or ciphertext, the Bundle or the link differs from what is recorded here.",
+    "A file key must never encrypt different bytes (spec/README.md section 13). To change the input or",
+    "siteUrl, edit source or siteUrl and run `bun pages/build.ts --new-keys`: it draws a new link key,",
+    "Bundle IV, file ids and file keys, and records them with the new hashes. The link then changes.",
+    "These keys are public: the link itself carries the link key, and the Bundle carries the file keys."
+  ],
+  "siteUrl": "https://joshuamandel.com/shlink-dicom/",
+  "label": "Josh Example: brain MRI and left wrist X-rays",
+  "link": "shlink:/eyJ1cmwiOiJodHRwczovL2pvc2h1YW1hbmRlbC5jb20vc2hsaW5rLWRpY29tL2RlbW8tbGlua3MvYnVuZGxlLmp3ZSIsImtleSI6IkNoa3duempLT20ycmFvUTUzdm1tc25XbnZpX1BtZUdnSWJxNG9tYzM2ajgiLCJmbGFnIjoiVSIsImxhYmVsIjoiSm9zaCBFeGFtcGxlOiBicmFpbiBNUkkgYW5kIGxlZnQgd3Jpc3QgWC1yYXlzIiwidiI6MX0",
+  "shlKey": "ChkwnzjKOm2raoQ53vmmsnWnvi_PmeGgIbq4omc36j8",
+  "bundleIv": "5MW7gKQgOLwfbDKT",
+  "lastUpdated": "2026-10-17T00:27:59Z",
+  "bundleSha256": "c8b7723cda24b511d1b88396a48d53338cabf84ff0a228caca935d5f4145a75c",
+  "source": {
+    "repo": "jmandel/my-health-data",
+    "commit": "2fcaa95f9169c66bc4726e02bd08f01bd50c994b",
+    "files": [
+      {
+        "path": "imaging/mri-brain-2020/0003-4-SHOT-PG-DWI.tgz",
+        "sha256": "29a1db523460fb10c3df3e207c768b4cef4184e71224f1a7c773f01d7c72641e"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0004-4-SHOT-PG-DWI.tgz",
+        "sha256": "e1ff14471d70771eab5569bf5d2f45b23e2e8b9c5c5a9deb742e3312d76855ed"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0005-4-SHOT-PG-DWI.tgz",
+        "sha256": "af4d77555511cc0981d9aba9e414be485435da93de04b689cb92ca9dadace31f"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0006-4-SHOT-PG-DWI.tgz",
+        "sha256": "9408d7f9a63817a06c13c9c3725fbbff06ffb05fa5109e32a9831a57db566de7"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0007-DWI.tgz",
+        "sha256": "eb830881032444e7e28732ecb6b2f4867621c2d5995e5e238c0502d82d65a64d"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0008-ADC-MAP.tgz",
+        "sha256": "8f5c40b0691a0ddbbef9ebdd40cd170ae994dbb1c33bc6a09986cec9450b3feb"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0013-DWI.tgz",
+        "sha256": "434160f89284d2d9fa8c9edebdc59baa08c71fac0662526eff11c03001e6ba1a"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0014-ADC-MAP.tgz",
+        "sha256": "69cb4e3ae5f889468fb65081c38fec9807734e2cb6756c431af093f230334e36"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0015-T1-SE-SAG.tgz",
+        "sha256": "d3db87be14602acd445d26a036e906e82b6aa21a39894903dabcf070bb1b9522"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0016-T2-FSE-AX.tgz",
+        "sha256": "dae1d79136ebab6bb4f052557ad1c2acca7ef53a52241be99c74d858e5eed553"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0017-T1-SE-AX.tgz",
+        "sha256": "cc248d9821e8ce6e5c1285f813ba63f7865603078de47711abd73891348f763b"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0018-FLAIR-AX.tgz",
+        "sha256": "5cee5ad3ba8d9687a065c8fc0f48f390d3930f3631bd0153b718c4a287b874cf"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0019-T2-GE-AX.tgz",
+        "sha256": "2299f198fe7e2e314821c7b2a6bb24e66fa9cf873dbe903464256c849589c2bf"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0020-FLAIR-COR.tgz",
+        "sha256": "9dd6e5080ea5a0a258328d2ce39e5737b6626d6e0b208eef3fbb0425349b3b58"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0021-ViewportCapture-MR.tgz",
+        "sha256": "f0cb306217926e54fb1b0abd91fde27e947b588561b43667db9f0f2bf4486e81"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0022-ViewportCapture-MR.tgz",
+        "sha256": "7993446cd81387ad007df1e6e282569a7c1b140822e59e9b0e09256f6d896ca5"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0023-ViewportCapture-MR.tgz",
+        "sha256": "b91f61e1f7dca833d25b492333003b25aa0125cab3f24283cd8024936786c4fd"
+      },
+      {
+        "path": "imaging/mri-brain-2020/0024-ViewportCapture-MR.tgz",
+        "sha256": "dfbb7c1096d792b38e9fb453ffb7668b0d01adb07f94f9777c99b92fad0f987c"
+      },
+      {
+        "path": "imaging/xr-wrist-left-2012/0001-Wrist-PA.tgz",
+        "sha256": "1839496edf100346e85f1ea859dc16071f452eb13be3b1ef73296cf616ccf52c"
+      },
+      {
+        "path": "imaging/xr-wrist-left-2012/0002-Wrist-OBLI.tgz",
+        "sha256": "b397131becc0b247dabcf204b8502c45b219ffa3c0357374e154725c03b62b04"
+      },
+      {
+        "path": "imaging/xr-wrist-left-2012/0003-Wrist-LAT.tgz",
+        "sha256": "70f5ee8dd093b83d0d7fa4a1e0392a62a44aa56fcc74ac62ba561498765c917d"
+      }
+    ]
+  },
+  "studies": [
+    {
+      "description": "BRAIN 7/29/20",
+      "studyInstanceUid": "2.25.9484970591660716368284805196532855149",
+      "fileId": "lLbc1RwyjEqoFX8U97pyMA",
+      "key": "Xqau2kxPJMNAyH781_BhGkzgLz9qwrL8FPKp-WGeh24",
+      "plaintextSha256": "3710c046a3f66bd16517ddced7cca211f2167a216e95f753c9cd86760ba2e4ec",
+      "ciphertextSha256": "d59a4b1c98a5b6741ab11b96a5cff45fda1df02e4b306ed425fecb0f1246c063"
+    },
+    {
+      "description": "WRIST LEFT AP LAT & OBL",
+      "studyInstanceUid": "2.25.47343776404338541155855685162606855084",
+      "fileId": "FzDRgm12zrB9IpdEKztvmg",
+      "key": "PTtCN0wkveVDQGS0ob9ihrbvQAkxNr65cR2uFamcw80",
+      "plaintextSha256": "1ae191752c7af05c4cde92d1b5a6cfbc0ca6c6cb667a398c3be460d24024735f",
+      "ciphertextSha256": "7524e2ef2d998b4989a9ff9384f5e8e17dee583b1468e533f858a1b9195502fb"
+    }
+  ]
+}

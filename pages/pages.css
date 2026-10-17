@@ -1,0 +1,27 @@
+/* The GitHub Pages entry page (pages/index.html), on web/shared/base.css. */
+.pages {
+  max-width: 760px; margin: 0 auto;
+  padding: calc(28px + var(--safe-t)) calc(var(--gutter) + var(--safe-r)) calc(40px + var(--safe-b)) calc(var(--gutter) + var(--safe-l));
+}
+.pages h1 { font-size: clamp(1.6rem, 4.5vw, 2.2rem); letter-spacing: -0.01em; margin-bottom: 10px; }
+.pages h2 { font-size: 1.25rem; margin-top: 0; }
+.pages section { margin-top: 28px; }
+.pages p, .pages li { max-width: 68ch; }
+.pages ul, .pages ol { padding-left: 1.3em; }
+.pages li + li { margin-top: 6px; }
+.lede { font-size: 1.0625rem; color: var(--text-2); margin-bottom: 0; }
+.demo { padding: 20px; display: grid; gap: 16px 24px; grid-template-columns: 1fr auto; align-items: start; }
+.demo .facts { margin: 0 0 14px; }
+.demo .btn-primary { text-decoration: none; }
+.qr { margin: 0; text-align: center; }
+.qr svg { display: block; width: 188px; height: 188px; background: #fff; border-radius: var(--radius-sm); }
+.qr svg path, .qr svg rect[fill="black"] { fill: #000; }
+.qr figcaption { margin-top: 6px; }
+.link-text { margin-top: 12px; }
+.link-text summary { cursor: pointer; color: var(--text-2); }
+.link-text > code { display: block; margin-top: 8px; padding: 8px 10px; background: var(--surface-2); border-radius: var(--radius-sm); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.trace code, .pages p code { overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .demo { grid-template-columns: 1fr; }
+  .qr svg { margin: 0 auto; }
+}

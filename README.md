@@ -25,6 +25,7 @@ Full DICOM imaging studies shared through SMART Health Links (`shlink:/`). Each 
   - `web/checks/` scripted browser checks.
 - **`imaging-sandbox/`**: a SMART Imaging Access sandbox (FHIR, WADO-RS, SMART App Launch) serving a fictional patient's studies.
 - **`deploy/`**: bootstrap scripts that build and run the sandbox and the server on a fresh VM.
+- **`pages/`**: the static copy at [joshuamandel.com/shlink-dicom](https://joshuamandel.com/shlink-dicom/): the viewer and one demo link (the brain MRI and left wrist X-rays) served as plain files by GitHub Pages, built by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) with the keys recorded in [`pages/demo-link.json`](pages/demo-link.json).
 
 ## Build and run
 
@@ -54,4 +55,8 @@ node web/checks/view-checks.mjs      # with the server on :3333
 node web/checks/share-checks.mjs
 node web/how/checks.mjs
 cd imaging-sandbox && bun test/e2e.ts
+# the GitHub Pages copy, served as Pages serves it
+bun pages/build.ts --site-url http://localhost:8787/shlink-dicom/ --out dist/pages-local
+bun pages/checks/serve.ts dist/pages-local &
+node pages/checks/pages-checks.mjs
 ```
