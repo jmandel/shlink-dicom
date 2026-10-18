@@ -53,7 +53,7 @@ export type SlideLayer = AnnotationLayer | SegmentationLayer;
 
 /** One small read per instance: its header (Referenced Series, SOP Class, geometry). */
 async function headerOf(share: OpenShare, se: SeriesEntry, i: number) {
-  const reader = new SeriesReader(share.resolver, share.decryptor, se, { budgetBytes: 4 * 1024 * 1024 });
+  const reader = new SeriesReader(share.resolver, share.decryptor, se, { admission: share.admission, budgetBytes: 4 * 1024 * 1024 });
   const inst = se.instances[i];
   const n = Math.min(inst.length, 2 * RECORD_PLAINTEXT - (inst.offset % RECORD_PLAINTEXT));
   const bytes = await reader.read(inst.offset, inst.offset + n, { priority: Priority.Near, purpose: "header" });
@@ -98,7 +98,7 @@ export async function loadLayer(layer: SlideLayer, share: OpenShare, pool: Decod
   try {
     if (layer.kind === "annotations") {
       const se = layer.series;
-      const reader = new SeriesReader(share.resolver, share.decryptor, se, { budgetBytes: 8 * 1024 * 1024 });
+      const reader = new SeriesReader(share.resolver, share.decryptor, se, { admission: share.admission, budgetBytes: 8 * 1024 * 1024 });
       const groups: AnnotationGroup[] = [];
       let first: BulkAnnotations | null = null;
       for (const inst of se.instances) {

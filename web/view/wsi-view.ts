@@ -151,7 +151,7 @@ export function renderSlide(ctx: CanvasRenderingContext2D, ss: SlideSession, v: 
 }
 
 /** Draws the coarsest level into a thumbnail canvas (loads its tiles at Near priority). */
-export async function drawSlideThumbnail(canvas: HTMLCanvasElement, ss: SlideSession, signal?: AbortSignal) {
+export async function drawSlideThumbnail(canvas: HTMLCanvasElement, ss: SlideSession, signal?: AbortSignal, current = () => true) {
   signal?.throwIfAborted();
   const p = ss.pyramid;
   const k = p.levels.length - 1;
@@ -177,6 +177,7 @@ export async function drawSlideThumbnail(canvas: HTMLCanvasElement, ss: SlideSes
     signal?.removeEventListener("abort", stop);
   }
   signal?.throwIfAborted();
+  if (!current()) return;
   const W = canvas.width, H = canvas.height;
   const scale = Math.min(W / p.width, H / p.height);
   renderSlide(canvas.getContext("2d")!, ss, { cx: p.width / 2, cy: p.height / 2, scale, W, H, dpr: 1 }, k, d);

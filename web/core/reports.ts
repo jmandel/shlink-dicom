@@ -26,7 +26,7 @@ const relinked = new WeakMap<StudyIndex, ReportEntry["links"][]>();
 
 export function linkReports(index: StudyIndex): ReportLink[] {
   const again = relinked.get(index);
-  return index.reports.flatMap((report, i) => {
+  return index.reports.flatMap<ReportLink>((report, i) => {
     const links = again?.[i] ?? report.links;
     return links.length ? links.map((l) => ({ report, studyId: l.studyId, basis: l.basis })) : [{ report, studyId: null, basis: null }];
   });
