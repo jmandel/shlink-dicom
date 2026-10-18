@@ -4,6 +4,7 @@ import { parseStudyIndex, type StudyIndex } from "./bundle";
 import { WebCryptoDecryptor, type RecordDecryptor } from "./decrypt";
 import { InstanceLoader, type LoaderOptions } from "./loader";
 import { LinkResolver, type ResolverOptions } from "./resolver";
+import type { ExportJobs } from "./export-jobs";
 
 export interface OpenShareOptions extends ResolverOptions, LoaderOptions {
   passcode?: string;
@@ -12,6 +13,7 @@ export interface OpenShareOptions extends ResolverOptions, LoaderOptions {
 }
 
 export interface OpenShare {
+  admission?: ExportJobs;
   resolver: LinkResolver;
   index: StudyIndex;
   decryptor: RecordDecryptor;
@@ -32,5 +34,5 @@ export async function openShare(link: string | LinkResolver, o: OpenShareOptions
   const index = parseStudyIndex(opened.bundleBytes);
   const decryptor = o.decryptor ?? new WebCryptoDecryptor();
   const loader = new InstanceLoader(resolver, decryptor, o);
-  return { resolver, index, decryptor, loader, bundleBytes: opened.bundleBytes, openMs: performance.now() - t0 };
+  return { resolver, index, decryptor, loader, admission: o.admission, bundleBytes: opened.bundleBytes, openMs: performance.now() - t0 };
 }

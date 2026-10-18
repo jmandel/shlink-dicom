@@ -32,7 +32,8 @@ import { defaultView, frameOf, renderCpu, type Frame } from "../../viewer-kit/sr
 import { iccToSrgb, type IccTransform } from "../core/icc";
 import { drawThumbnail, Viewport } from "../core/render";
 import { presetsFor, type WindowPreset } from "../core/wl";
-import { exportBaseName, exportInstance, exportSize, exportZip, type ExportScope } from "../core/export";
+import { exportBaseName, exportInstance, exportSize, exportPlannedZip, planExport, sealExport, type ExportScope } from "../core/export";
+import { ExportJobs, type ExportJob, type FocusToken } from "../core/export-jobs";
 import { openSaveTarget, saveBlob } from "../core/save";
 import { isSlideSeries } from "../core/wsi";
 import { drawSlideThumbnail, slideHooks, slideSession, SlideView, type SlideSession } from "./wsi-view";
@@ -51,6 +52,7 @@ import { Measure, type Tool } from "./measure";
 import { GpuReformatter } from "../core/volume-gl";
 import { buildVolume, isAcquired, makeVolume, planeGrid, reformat, VolumeError, type Orientation, type Plane, type PlaneGrid, type PlaneSpec, type Slab, type SlabMode, type Volume } from "../core/volume";
 import { dot, frameStacks, geometryOf, normal } from "../core/geometry";
+import type { VolumeInput } from "../core/volume";
 import { refersTo } from "../core/derived";
 import { renderReports, reportHeading } from "./report-view";
 
@@ -66,6 +68,7 @@ const metrics = {
   drawLog: [] as [string, number, number][],
   renderer: "",
   slices: 0,
+  exports: [] as import("../core/export-jobs").ExportEvent[],
 };
 (globalThis as any).__view = metrics;
 const mark = (name: string) => {
@@ -110,6 +113,20 @@ let share: OpenShare | null = null;
 let images: ImageStore | null = null;
 let verifiedRecords = 0;
 let failedRecords = 0;
+const exportJobs = new ExportJobs((event) => { if (metrics.exports.length < 20000) metrics.exports.push(event); });
+
+/** These generations govern presentation only. Export preference never invalidates a view. */
+let viewGeneration = 0;
+let imageGeneration = 0;
+let volumeGeneration = 0;
+let navigationGeneration = 0;
+const thumbGenerations = new WeakMap<HTMLCanvasElement, number>();
+const inViewer = () => !$("screen-viewer").classList.contains("hidden");
+function browseIntent(reason: string) {
+  if (exportJobs.foreground.kind === "export") exportJobs.focusBrowse(reason);
+  if (openSheetId === "sheet-download" && $("sheet-download").classList.contains("nonmodal")) closeSheet();
+}
+function invalidateView() { viewGeneration++; imageGeneration++; volumeGeneration++; layerSeq++; }
 
 let studyIdx = -1;
 let seriesIdx = -1;
@@ -158,11 +175,13 @@ let cineFrame = 0;
 
 /** Cine: frame f of the image on screen. One multi-frame instance: its frames are the slices. */
 function showCineFrame(f: number) {
-  if (series().instances.length === 1) return showSlice(f);
+  if (series().instances.length === 1) return showSlice(f, false, false);
+  if (!inViewer() || !shown || shown.series !== series().id || shown.slice !== sliceIdx) return;
   const img = viewport?.image;
   if (!img) return;
   cineFrame = Math.min(f, img.frames - 1);
   viewport!.show(img, cineFrame, { windowCenter: wc, windowWidth: ww, zoom, panX, panY });
+  shown.frame = cineFrame;
 }
 
 const study = (): StudyEntry => share!.index.studies[studyIdx];
@@ -196,12 +215,19 @@ const tileOf = (c: HTMLCanvasElement) => tiles.get(c) ?? (tiles.set(c, new Thumb
  * icon (Icon Image Sequence) first when it has one; it ends drawn or with the reason it isn't.
  */
 async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority: number, signal?: AbortSignal, inst = thumbInstance(se)): Promise<void> {
+  const generation = (thumbGenerations.get(canvas) ?? 0) + 1;
+  thumbGenerations.set(canvas, generation);
+  const current = () => canvas.isConnected && !signal?.aborted && thumbGenerations.get(canvas) === generation;
   const tile = tileOf(canvas);
   try {
+    if (!current()) return;
     if (isSlideSeries(se)) {
       tile.status("Opening the slide");
-      await drawSlideThumbnail(canvas, await slideFor(se), signal);
-      return tile.drawn();
+      const session = await slideFor(se);
+      if (!current()) return;
+      await drawSlideThumbnail(canvas, session, signal, current);
+      if (current()) tile.drawn();
+      return;
     }
     const kind = kindOf(se);
     if (OBJECT_KINDS.has(kind) || DERIVED_KINDS.has(kind)) {
@@ -209,7 +235,8 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
       return tile.drawn();
     }
     // Video series get a drawn placeholder instead of a decode (video-view.ts).
-    if (mayHoldMedia(se) && (await media.drawThumb(canvas, se))) return tile.drawn();
+    if (mayHoldMedia(se) && (await media.drawThumb(canvas, se, current))) { if (current()) tile.drawn(); return; }
+    if (!current()) return;
     const plan = planInstances(se, inst);
     tile.progress(0, plan.ciphertextEnd - plan.ciphertextStart);
     const len = se.instances[inst].length;
@@ -217,6 +244,7 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
       // A larger file: its header may carry a ready-made icon, one small read away.
       void readInstanceBytes(share!, se, inst, 0, Math.min(len, RECORD_PLAINTEXT), { signal })
         .then((head) => {
+          if (!current()) return;
           const icon = canvas.dataset.drawn ? null : readIcon(head);
           if (icon) {
             drawIcon(canvas, icon);
@@ -225,13 +253,15 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
         })
         .catch(() => {});
     }
-    const img = await images!.get(se, inst, { priority, signal, scale: thumbScale(len, canvas.width), onProgress: (r, t) => tile.progress(r, t) });
+    const img = await images!.get(se, inst, { priority, signal, scale: thumbScale(len, canvas.width), onProgress: (r, t) => { if (current()) tile.progress(r, t); } });
     const h = await imageHeader(img)?.catch(() => null);
+    if (!current()) return;
     drawThumbnail(canvas, img, Math.floor(img.frames / 2), h?.ds);
     canvas.dataset.sop = se.instances[inst].uid;
     tile.drawn();
   } catch (e) {
     if ((e as any)?.name === "AbortError") throw e;
+    if (!current()) return;
     tile.failed(`Can't show this image: ${describeError(e).title.replace(/\.$/, "").toLowerCase()}`);
     throw e;
   }
@@ -348,7 +378,7 @@ function leaveObject() {
 let layers: Layers | null = null;
 let measure: Measure | null = null;
 /** The image on screen, for the layers. */
-let shown: { img: DecodedImage; frame: number; sop: string } | null = null;
+let shown: { img: DecodedImage; frame: number; sop: string; series: string; slice: number } | null = null;
 let layerSeq = 0;
 let frameOfRef: string | null = null;
 
@@ -564,7 +594,7 @@ function syncPresentationState() {
 async function labelVideo(se: SeriesEntry, label: HTMLElement) {
   try {
     const p = await probeInstance(share!, se, 0);
-    if (!p.video) return;
+    if (!p.video || !label.isConnected) return;
     const t = cineTiming(p.header);
     const secs = t.source ? Math.round(t.durations.reduce((a, b) => a + b, 0) / 1000) : 0;
     label.textContent = secs >= 1 ? `Video · ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}` : "Video";
@@ -583,9 +613,10 @@ async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
   const id = isSlideAnnotation(se) ? `ann:${se.id}` : `seg:${se.id}`;
   for (let k = 0; k < st.series.length; k++) {
     if (!isSlideSeries(st.series[k])) continue;
-    selectSeries(k);
+    selectSeries(k, false);
+    const generation = viewGeneration;
     for (let t = 0; t < 100; t++) {
-      if (series() !== st.series[k]) return; // the user moved on
+      if (generation !== viewGeneration || !inViewer() || series() !== st.series[k]) return;
       const ls = slideView?.layers ?? [];
       if (ls.some((l) => l.id === id)) {
         await slideView!.setLayer(id, true);
@@ -595,6 +626,7 @@ async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
       if (slideView?.active && (ls.length > 0 || t > 40)) break;
       await new Promise((r) => setTimeout(r, 200));
     }
+    if (generation !== viewGeneration || !inViewer() || study() !== st) return;
   }
   const back = st.series.indexOf(se);
   seriesIdx = back;
@@ -603,7 +635,9 @@ async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
 
 /** A segmentation, structure set or presentation state chosen in the series list: show the images it refers to, with it on. */
 async function showDerived(se: SeriesEntry) {
+  const generation = viewGeneration;
   await layers?.scan(share!.index.studies);
+  if (generation !== viewGeneration || !inViewer() || series() !== se) return;
   const l = layers?.layers.find((x) => x.series === se);
   let at: { study: number; series: number } | null = null;
   share!.index.studies.forEach((st, a) => st.series.forEach((x, b) => {
@@ -614,15 +648,15 @@ async function showDerived(se: SeriesEntry) {
     return;
   }
   const { study: ts, series: tse } = at as { study: number; series: number };
-  if (ts !== studyIdx) openStudy(ts);
-  selectSeries(tse);
+  if (ts !== studyIdx) openStudy(ts, true, false);
+  selectSeries(tse, false);
   if (l.kind === "pr") {
     // Open at the first image the state names (its frame, for a multi-frame image), then apply it.
     const target = share!.index.studies[ts].series[tse];
     const ref = l.ps!.images.find((r) => target.instances.some((x) => x.uid === r.sopInstance));
     if (ref) {
       const i = target.instances.findIndex((x) => x.uid === ref.sopInstance);
-      showSlice(target.instances.length === 1 && ref.frames.length ? sliceOfFrame(ref.frames[0] - 1) : i);
+      showSlice(target.instances.length === 1 && ref.frames.length ? sliceOfFrame(ref.frames[0] - 1) : i, false, false);
     }
     applyPresentationState(l);
   } else await layers!.toggle(l, true);
@@ -632,7 +666,8 @@ async function showDerived(se: SeriesEntry) {
 // ------------------------------------------------------------------------------------- reformats
 
 /** The reformatted view on screen: planes through the series' volume, sampled in patient space (volume.ts). */
-let mpr: { volume: Volume; orient: Orientation; grid: PlaneGrid; slab: Slab; first: DecodedImage; spec: PlaneSpec | null; ms: number; engine: "gpu" | "cpu"; frame: Frame | null } | null = null;
+type VolumeSource = { uid: string; volume: Volume; first: DecodedImage; gpu?: GpuReformatter | null };
+let mpr: { source: VolumeSource; volume: Volume; orient: Orientation; grid: PlaneGrid; slab: Slab; first: DecodedImage; spec: PlaneSpec | null; ms: number; engine: "gpu" | "cpu"; frame: Frame | null } | null = null;
 /**
  * Where planes are resampled: on the GPU when the viewer draws with WebGL2 (a 3D texture of the
  * volume, volume-gl.ts), else on the CPU. Both are held to the same oracle; checks can force one.
@@ -640,7 +675,17 @@ let mpr: { volume: Volume; orient: Orientation; grid: PlaneGrid; slab: Slab; fir
 let mprEngine: "auto" | "cpu" | "gpu" = "auto";
 let acquiredSlice = 0;
 /** The last volume built, by series UID (switching planes reuses it). */
-let lastVolume: { uid: string; volume: Volume; first: DecodedImage; gpu?: GpuReformatter | null } | null = null;
+let lastVolume: VolumeSource | null = null;
+
+function releaseVolume(v: VolumeSource | undefined | null) {
+  if (v && v !== lastVolume && v !== mpr?.source) { v.gpu?.destroy(); v.gpu = undefined; }
+}
+
+function clearMpr() {
+  const previous = mpr?.source;
+  mpr = null;
+  releaseVolume(previous);
+}
 
 /** The GPU path for the current volume (made on first use; null where it can't run). */
 function gpuFor(v: NonNullable<typeof lastVolume>): GpuReformatter | null {
@@ -670,17 +715,19 @@ function updatePlaneSelect(se: SeriesEntry) {
 }
 
 /** The series' volume: every slice decoded, with its header (counted on the stage while it loads). */
-async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: DecodedImage }> {
+async function seriesVolume(se: SeriesEntry, current: () => boolean): Promise<VolumeSource> {
   if (lastVolume?.uid === se.uid) return lastVolume;
-  const input = [];
+  const input: VolumeInput[] = [];
   let key = se.uid;
+  const imageStore = images!;
+  const at = se.instances.length === 1 ? sliceTarget(mpr ? acquiredSlice : sliceIdx).frame : 0;
+  const busy = (text: string, done?: number, total?: number) => { if (current()) stageBusy(text, done, total); };
   if (se.instances.length === 1) {
-    stageBusy("Loading the series");
-    const img = await images!.get(se, 0, { priority: Priority.Visible, onProgress: (r, t) => stageBusy(`Loading the series · ${formatBytes(r)} of ${formatBytes(t)}`, r, t) });
+    busy("Loading the series");
+    const img = await imageStore.get(se, 0, { priority: Priority.Visible, onProgress: (r, t) => busy(`Loading the series · ${formatBytes(r)} of ${formatBytes(t)}`, r, t) });
     const h = await imageHeader(img);
     // Several stacks in one instance: the volume is the stack of the frame on screen.
     const stacks = frameStacks(h!.ds, img.frames);
-    const at = sliceTarget(mpr ? acquiredSlice : sliceIdx).frame;
     const frames = stacks?.find((g) => g.includes(at)) ?? Array.from({ length: img.frames }, (_, f) => f);
     if (stacks) key = `${se.uid}#${frames[0]}`;
     if (lastVolume?.uid === key) return lastVolume;
@@ -688,17 +735,18 @@ async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: D
   } else {
     const n = se.instances.length;
     let done = 0;
-    const step = () => stageBusy(`Loading slices · ${done} of ${n}`, done, n);
+    const step = () => busy(`Loading slices · ${done} of ${n}`, done, n);
     step();
-    const imgs = await Promise.all(se.instances.map((_, i) => images!.get(se, i, { priority: Priority.Visible }).then((im) => (done++, step(), im))));
+    const imgs = await Promise.all(se.instances.map((_, i) => imageStore.get(se, i, { priority: Priority.Visible }).then((im) => (done++, step(), im))));
     for (const img of imgs) {
       const ds = (await imageHeader(img))!.ds;
       input.push({ img, frame: 0, geom: geometryOf(ds, null), rescale: rescaleOf(ds, 0) });
     }
   }
   const volume = buildVolume(input);
-  lastVolume?.gpu?.destroy();
+  const previous = lastVolume;
   lastVolume = { uid: key, volume, first: input[0].img };
+  releaseVolume(previous);
   return lastVolume;
 }
 
@@ -707,33 +755,42 @@ async function seriesVolume(se: SeriesEntry): Promise<{ volume: Volume; first: D
  * slab), or the stored images for "". The plane the slices were acquired in, untilted, is the
  * stored images themselves.
  */
-async function enterMpr(plane: Plane | "", opts: { turn?: number; tilt?: number; slab?: Slab } = {}) {
+async function enterMpr(plane: Plane | "", opts: { turn?: number; tilt?: number; slab?: Slab } = {}, intent = true) {
+  if (intent) browseIntent("volume");
+  const generation = viewGeneration, request = ++volumeGeneration;
+  imageGeneration++;
   const se = series();
+  const current = () => generation === viewGeneration && request === volumeGeneration && inViewer() && series() === se;
   const sel = $<HTMLSelectElement>("view-plane");
   if (!plane) {
     $("btn-plane-opts").classList.add("hidden");
     if (mpr) {
-      mpr = null;
+      clearMpr();
       sliceCount = se.instances.length === 1 ? sliceCount : se.instances.length;
       $<HTMLInputElement>("slice").max = String(sliceCount - 1);
-      showSlice(acquiredSlice);
+      showSlice(acquiredSlice, false, false);
+    } else {
+      showSlice(sliceIdx, false, false);
     }
     return;
   }
   try {
-    const { volume, first } = await seriesVolume(se);
-    if (series() !== se) return;
+    const source = await seriesVolume(se, current);
+    const { volume, first } = source;
+    if (!current()) return;
     const orient: Orientation = { plane, turn: opts.turn ?? 0, tilt: opts.tilt ?? 0 };
     const slab = opts.slab ?? mpr?.slab ?? { thickness: 0, mode: "mip" };
     if (isAcquired(volume, orient) && !(slab.thickness > 0)) {
       sel.value = "";
-      return enterMpr("");
+      return enterMpr("", {}, false);
     }
     const grid = planeGrid(volume, orient);
     // Keep the same depth through the volume when the plane changes angle.
     const frac = mpr && mpr.orient.plane === plane ? sliceIdx / Math.max(1, mpr.grid.count - 1) : 0.5;
     if (!mpr) acquiredSlice = sliceIdx;
-    mpr = { volume, orient, grid, slab, first, spec: null, ms: 0, engine: "cpu", frame: null };
+    const previous = mpr?.source;
+    mpr = { source, volume, orient, grid, slab, first, spec: null, ms: 0, engine: "cpu", frame: null };
+    releaseVolume(previous);
     sel.value = plane;
     $("btn-plane-opts").classList.remove("hidden");
     sliceCount = grid.count;
@@ -741,11 +798,12 @@ async function enterMpr(plane: Plane | "", opts: { turn?: number; tilt?: number;
     $<HTMLInputElement>("slice").disabled = false;
     showMpr(Math.round(frac * (grid.count - 1)));
   } catch (e) {
+    if (!current()) return;
     sel.value = "";
     $("stage-msg").textContent = e instanceof VolumeError ? `These images can't be reformatted: ${e.message}.` : `Reformatting failed: ${(e as Error).message}`;
     $("stage-msg").classList.remove("hidden");
   } finally {
-    $("stage-busy").classList.add("hidden");
+    if (current()) $("stage-busy").classList.add("hidden");
   }
 }
 
@@ -766,7 +824,7 @@ function showMpr(i: number) {
   const t0 = performance.now();
   // A slab is many planes: the GPU wins even when it is a software one.
   const useGpu = mprEngine === "gpu" || (mprEngine === "auto" && (viewport?.kind === "webgl2" || m.slab.thickness > 0));
-  const gpu = useGpu && lastVolume?.volume === m.volume ? gpuFor(lastVolume) : null;
+  const gpu = useGpu ? gpuFor(m.source) : null;
   const onGpu = gpu?.reformat(m.grid, sliceIdx, m.slab) ?? null;
   const { frame, pixelSpacing, spec } = onGpu ?? reformat(m.volume, m.grid, sliceIdx, m.slab);
   m.ms = performance.now() - t0;
@@ -881,6 +939,7 @@ async function open(passcode?: string) {
   try {
     share = await openShare(resolver!, {
       passcode,
+      admission: exportJobs,
       // Records are verified and decrypted in the decoder workers, not on this thread.
       decryptor: new PoolDecryptor(poolPromise),
       onRecords: (_f, a, b, state) => {
@@ -1255,6 +1314,10 @@ function studyReports(): ReportLink[] {
 }
 
 function showOverview() {
+  browseIntent("overview");
+  navigationGeneration++;
+  invalidateView();
+  clearMpr();
   show("overview");
   document.body.classList.add("scrolling");
   $("top-kicker").textContent = "";
@@ -1270,10 +1333,12 @@ function showOverview() {
 
 // ------------------------------------------------------------------------------------- viewer
 
-function openStudy(si: number, push = true) {
+function openStudy(si: number, push = true, intent = true) {
+  if (intent) browseIntent("study");
+  const generation = ++navigationGeneration;
   if (!images) {
     // The decoder is still starting.
-    void imagesReady?.then(() => openStudy(si, push), () => {});
+    void imagesReady?.then(() => { if (generation === navigationGeneration) openStudy(si, push, false); }, () => {});
     return;
   }
   if (push) history.pushState({ screen: "viewer", study: si }, "");
@@ -1281,7 +1346,7 @@ function openStudy(si: number, push = true) {
   window.scrollTo(0, 0);
   studyIdx = si;
   seriesIdx = -1;
-  mpr = null;
+  clearMpr();
   stopOverviewWork(si);
   studyAbort.abort();
   studyAbort = new AbortController();
@@ -1322,7 +1387,7 @@ function openStudy(si: number, push = true) {
   // Series thumbnails come after a study's first image; a study opened later gets them now.
   if (metrics.marks["first-slice"]) setTimeout(loadStripThumbs, 300);
   buildStrip();
-  selectSeries(pickInitialSeries(study()));
+  selectSeries(pickInitialSeries(study()), false);
 }
 
 function buildStrip() {
@@ -1361,9 +1426,13 @@ function loadStripThumbs() {
   });
 }
 
-function selectSeries(k: number) {
+function selectSeries(k: number, intent = true) {
+  if (intent) browseIntent("series");
   if (k === seriesIdx && shownKey.startsWith(series()?.id ?? "-")) return;
   if (k === seriesIdx && slideView?.active && slideView.ss?.src.series === series()) return;
+  invalidateView();
+  const generation = viewGeneration;
+  const initialImageGeneration = imageGeneration;
   seriesAbort.abort();
   seriesAbort = new AbortController();
   const prevSeries = seriesIdx >= 0 ? study()?.series[seriesIdx]?.id : undefined;
@@ -1391,8 +1460,9 @@ function selectSeries(k: number) {
   }
   // Video series play in video-view.ts; a series that may hold video is probed first.
   const m = media.select(se, () => {
+    if (generation !== viewGeneration || !inViewer()) return;
     shownKey = "";
-    selectSeries(k);
+    selectSeries(k, false);
   });
   if (m) {
     leaveSlide();
@@ -1429,7 +1499,7 @@ function selectSeries(k: number) {
   shown = null;
   layers?.clear();
   updateLayersButton();
-  mpr = null;
+  clearMpr();
   updatePlaneSelect(se);
   sliceCount = se.instances.length;
   frameOrder = null;
@@ -1456,28 +1526,30 @@ function selectSeries(k: number) {
     images!
       .frameStream(se, 0, { priority: Priority.Visible })
       .then(async (fs) => {
-        if (series() !== se || shownKey || mpr) return;
+        if (generation !== viewGeneration || initialImageGeneration !== imageGeneration || !inViewer() || series() !== se || shownKey || mpr) return;
         if (fs) {
           const ds = (await parseHeader(fs.header).catch(() => null))?.ds ?? null;
-          if (series() !== se || shownKey || mpr) return;
+          if (generation !== viewGeneration || initialImageGeneration !== imageGeneration || !inViewer() || series() !== se || shownKey || mpr) return;
           sliceCount = fs.frames;
           frameOrder = spatialFrameOrder(ds, fs.frames);
           fs.setOrder(frameOrder);
           slider.max = String(sliceCount - 1);
           slider.disabled = false;
         }
-        showSlice(Math.floor(sliceCount / 2), true);
+        showSlice(Math.floor(sliceCount / 2), true, false);
       })
       .catch((e) => {
-        if ((e as any)?.name !== "AbortError" && series() === se) showSlice(0, true);
+        if ((e as any)?.name !== "AbortError" && generation === viewGeneration && initialImageGeneration === imageGeneration && inViewer() && series() === se) showSlice(0, true, false);
       });
     return;
   }
-  showSlice(Math.floor(sliceCount / 2), true);
+  showSlice(Math.floor(sliceCount / 2), true, false);
 }
 
 /** Opens a whole-slide series in the tiled view. */
 function showSlide(se: SeriesEntry) {
+  const generation = viewGeneration;
+  const current = () => generation === viewGeneration && inViewer() && series() === se;
   const t0 = performance.now();
   shownKey = "";
   slideView ??= new SlideView($("stage"));
@@ -1490,7 +1562,7 @@ function showSlide(se: SeriesEntry) {
   $("btn-label").classList.add("hidden");
   slideFor(se)
     .then((ss) => {
-      if (series() !== se) return;
+      if (!current()) return;
       $("stage-busy").classList.add("hidden");
       const p = ss.pyramid;
       $("hud-tl").textContent = `${se.description ?? "Slide"}\n${p.width.toLocaleString()} × ${p.height.toLocaleString()} · ${p.levels.length} levels`;
@@ -1505,7 +1577,7 @@ function showSlide(se: SeriesEntry) {
       }
     })
     .catch((e) => {
-      if (series() !== se) return;
+      if (!current()) return;
       sliceError(e);
     });
 }
@@ -1535,12 +1607,13 @@ async function openLabelSheet() {
     box.append(fig);
     ss.image(inst)
       .then((bmp) => {
+        if (!c.isConnected || slideView?.ss !== ss || openSheetId !== "sheet-label") return;
         c.width = bmp.width;
         c.height = bmp.height;
         c.getContext("2d")!.drawImage(bmp, 0, 0);
         cap.textContent = `${caption} · ${bmp.width} × ${bmp.height}`;
       })
-      .catch((e) => (cap.textContent = `${caption}: could not be shown (${(e as Error).message})`));
+      .catch((e) => { if (c.isConnected && slideView?.ss === ss && openSheetId === "sheet-label") cap.textContent = `${caption}: could not be shown (${(e as Error).message})`; });
   }
 }
 
@@ -1581,13 +1654,18 @@ function sliceOfFrame(f: number): number {
   return i >= 0 ? i : f;
 }
 
-function showSlice(i: number, startPrefetch = false) {
+function showSlice(i: number, startPrefetch = false, intent = true) {
+  if (intent) browseIntent("slice");
   const se = series();
   if (mpr) {
     showMpr(i);
     return;
   }
+  const generation = viewGeneration, request = ++imageGeneration;
+  volumeGeneration++;
   sliceIdx = Math.max(0, Math.min(sliceCount - 1, i));
+  const wantedSlice = sliceIdx;
+  const current = () => generation === viewGeneration && request === imageGeneration && inViewer() && series() === se && sliceIdx === wantedSlice && !mpr;
   const slider = $<HTMLInputElement>("slice");
   slider.value = String(sliceIdx);
   $("slice-label").textContent = `${sliceIdx + 1} / ${sliceCount}`;
@@ -1597,25 +1675,21 @@ function showSlice(i: number, startPrefetch = false) {
   const img = single ? images!.peekFrame(se, inst, frame) : images!.peek(se, inst);
   $("stage-msg").classList.add("hidden");
   if (img) {
-    draw(img, frame);
+    draw(img, frame, current);
   } else {
-    const want = { series: se.id, slice: sliceIdx };
     const plan = planInstances(se, inst);
     const total = plan.ciphertextEnd - plan.ciphertextStart;
     const progress = (r: number, t: number) => {
-      if (series()?.id === want.series && sliceIdx === want.slice) stageBusy(`Loading the image · ${formatBytes(r)} of ${formatBytes(t)}`, r, t);
+      if (current()) stageBusy(`Loading the image · ${formatBytes(r)} of ${formatBytes(t)}`, r, t);
     };
     progress(0, total);
     (single ? images!.getFrame(se, inst, frame, { priority: Priority.Visible, onProgress: progress }) : images!.get(se, inst, { priority: Priority.Visible, onProgress: progress }))
       .then((im) => {
-        if (series()?.id !== want.series || mpr) return;
-        const now = sliceTarget(sliceIdx);
-        if (sliceIdx === want.slice) draw(im, now.frame);
-        else if (single ? images!.peekFrame(series(), now.inst, now.frame) : images!.peek(series(), now.inst)) showSlice(sliceIdx);
+        if (current()) draw(im, frame, current);
       })
       .catch((e) => {
         if ((e as any)?.name === "AbortError") return;
-        if (series()?.id !== want.series || sliceIdx !== want.slice) return;
+        if (!current()) return;
         sliceError(e);
       });
   }
@@ -1654,13 +1728,16 @@ function sliceError(e: unknown) {
   msg.classList.remove("hidden");
 }
 
-function draw(img: DecodedImage, frame: number) {
+function draw(img: DecodedImage, frame: number, guard?: () => boolean) {
   const se = series();
+  const generation = viewGeneration, request = imageGeneration;
+  const current = guard ?? (() => generation === viewGeneration && request === imageGeneration && inViewer() && series() === se && !mpr);
+  if (!current() || (!guard && shown?.img === img && shown.slice !== sliceIdx)) return;
   $("stage-busy").classList.add("hidden");
   // The display transform needs the header (its LUTs, windows, shape): draw once it is read.
   const hp = img.header && !imageHeaderNow(img) ? imageHeader(img) : null;
   if (hp) {
-    void hp.then(() => draw(img, frame), () => draw(img, frame));
+    void hp.then(() => { if (current()) draw(img, frame, current); }, () => { if (current()) draw(img, frame, current); });
     return;
   }
   // Single multi-frame instance: its frames become the slices, in spatial order.
@@ -1671,14 +1748,14 @@ function draw(img: DecodedImage, frame: number) {
     slider.max = String(sliceCount - 1);
     slider.disabled = false;
     if (frame === 0) {
-      showSlice(Math.floor(sliceCount / 2));
+      showSlice(Math.floor(sliceCount / 2), false, false);
       return;
     }
   }
   const k = Math.min(frame, img.frames - 1);
   if (autoWw === 0) initialDisplay(img, k);
   viewport!.show(img, k, { ...displayView(img, k), zoom, panX, panY }, displayFrame(img, k));
-  shown = { img, frame: Math.min(frame, img.frames - 1), sop: se.instances[sliceTarget(sliceIdx).inst].uid };
+  shown = { img, frame: Math.min(frame, img.frames - 1), sop: se.instances[sliceTarget(sliceIdx).inst].uid, series: se.id, slice: sliceIdx };
   syncPresentationState();
   const t = iccs.get(img);
   iccInUse = t ? t.description || "embedded profile" : "";
@@ -1744,7 +1821,7 @@ function updateHud(img?: DecodedImage) {
   // One image and one frame: nothing to step through.
   $("toolbar").classList.toggle("single", sliceCount <= 1);
   const im = img ?? viewport?.image;
-  $("hud-tl").textContent = `${se.description ?? modalityName(se.modality)}\n${se.modality ?? ""} · ${sliceIdx + 1}/${sliceCount}`;
+  $("hud-tl").textContent = `${se.description ?? modalityName(se.modality)}\n${se.modality ?? ""} · ${(shown?.series === se.id ? shown.slice : sliceIdx) + 1}/${sliceCount}`;
   const wl = im?.float ? `W ${formatValue(ww)} L ${formatValue(wc)}` : `W ${Math.round(ww)} L ${Math.round(wc)}`;
   $("hud-tr").textContent = im ? `${im.columns}×${im.rows}\n${wl}` : "";
   const z = zoom > 1.01 || zoom < 0.99 ? `${zoom.toFixed(1)}×` : "";
@@ -2187,7 +2264,10 @@ function wireGestures() {
 // ------------------------------------------------------------------------------------- sheets
 
 let openSheetId: string | null = null;
-let exportAbort: AbortController | null = null;
+let downloadJobId: number | null = null;
+let downloadFocusToken: FocusToken | undefined;
+const jobRows = new Map<number, { root: HTMLElement; open: HTMLButtonElement; title: HTMLElement; status: HTMLElement; action: HTMLButtonElement }>();
+exportJobs.subscribe(renderDownloads);
 
 function openSheet(id: string) {
   closeSheet();
@@ -2199,7 +2279,10 @@ function openSheet(id: string) {
 
 function closeSheet() {
   if (!openSheetId) return;
-  if (exportAbort) return; // finish or cancel the download first
+  if (openSheetId === "sheet-download" && downloadFocusToken) {
+    exportJobs.retireFocus(downloadFocusToken);
+    downloadFocusToken = undefined;
+  }
   $(openSheetId).classList.add("hidden");
   $("sheet-backdrop").classList.add("hidden");
   openSheetId = null;
@@ -2217,12 +2300,15 @@ interface DownloadChoice {
 
 /** The stored instance on screen, or why there is none (a reformat, a slide). Null with no series open. */
 function instanceOnScreen(): { se: SeriesEntry; i: number } | { reason: string } | null {
+  if (!inViewer()) return null;
   const se = studyIdx >= 0 && seriesIdx >= 0 ? study()?.series[seriesIdx] : undefined;
   if (!se) return null;
   if (objectView?.active && objectView.series === se) return { se, i: objectView.index };
   if (mpr) return { reason: "Reformatted in the viewer; not a stored image." };
   if (isSlideSeries(se)) return { reason: "A slide is stored as several files, one per magnification; the series has them all." };
-  const { inst } = sliceTarget(sliceIdx);
+  if (shownKey === `${se.id}/media`) return { se, i: 0 };
+  if (!shown || shown.series !== se.id) return { reason: "The image is still loading." };
+  const inst = se.instances.findIndex((i) => i.uid === shown!.sop);
   return inst >= 0 && inst < se.instances.length ? { se, i: inst } : null;
 }
 
@@ -2279,6 +2365,9 @@ function downloadDefault() {
 
 /** The download menu: every choice with its size. `list` false opens it straight on the progress of a choice. */
 function openDownloadSheet(list = true, forStudy?: StudyEntry) {
+  downloadJobId = null;
+  $("sheet-download").classList.remove("nonmodal");
+  $("sheet-download").setAttribute("aria-modal", "true");
   const opts = $("dl-options");
   opts.textContent = "";
   $("dl-progress").classList.add("hidden");
@@ -2308,52 +2397,118 @@ function setDownloadProgress(bytes: number, total: number, text: string) {
   $("dl-status").textContent = text;
 }
 
-async function runZip(scope: ExportScope) {
-  const name = (scope.kind === "all" ? "shared-imaging" : exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined)) + ".zip";
-  // Ask for the file first, while the click still counts as a user gesture.
-  const target = await openSaveTarget(name, "application/zip", ".zip");
-  if (!target) return;
-  exportAbort = new AbortController();
+function jobStatus(job: ExportJob): string {
+  if (job.phase === "completed") return `Saved ${job.name}`;
+  if (job.phase === "cancelled") return "Cancelled.";
+  if (job.phase === "failed") return `The download stopped: ${describeError(job.error).title}.`;
+  if (job.phase === "planning") return "Preparing download…";
+  const p = job.progress;
+  return `${job.phase === "finalizing" ? "Finishing" : "Saving"} · ${formatBytes(p.bytes)} of ${formatBytes(p.totalBytes)} · ${plural(p.files, "file")} saved`;
+}
+
+/** Each progress entry owns its DOM. A late result never selects a job or opens a panel. */
+function renderDownloads() {
+  const host = $("download-jobs");
+  for (const [id, row] of jobRows) {
+    if (!exportJobs.jobs.has(id)) { row.root.remove(); jobRows.delete(id); }
+  }
+  for (const job of exportJobs.jobs.values()) {
+    let row = jobRows.get(job.id);
+    if (!row) {
+      const root = el("div", "download-job");
+      root.dataset.jobId = String(job.id);
+      const open = el("button", "btn btn-ghost download-job-open"), title = el("strong"), status = el("span");
+      open.type = "button";
+      open.append(title, status);
+      open.addEventListener("click", () => showDownloadJob(job));
+      const action = el("button", "btn btn-ghost");
+      action.type = "button";
+      action.addEventListener("click", () => job.terminal ? exportJobs.forget(job.id) : job.cancel());
+      root.append(open, action);
+      host.append(root);
+      jobRows.set(job.id, row = { root, open, title, status, action });
+    }
+    row.title.textContent = job.name;
+    row.status.textContent = jobStatus(job);
+    row.root.setAttribute("aria-current", String(exportJobs.focused === job));
+    row.open.setAttribute("aria-label", `${job.terminal ? "View" : "Focus"} download: ${job.name}`);
+    row.action.textContent = job.terminal ? "Dismiss" : "Cancel";
+    row.action.disabled = job.terminal && !job.cleanupComplete;
+  }
+  host.classList.toggle("hidden", !exportJobs.jobs.size);
+  const selected = downloadJobId === null ? undefined : exportJobs.jobs.get(downloadJobId);
+  if (selected) {
+    setDownloadProgress(selected.progress.bytes, selected.progress.totalBytes, jobStatus(selected));
+    $("btn-dl-cancel").classList.toggle("hidden", selected.terminal);
+  }
+}
+
+function showDownloadJob(job: ExportJob, focus = true) {
+  if (openSheetId !== "sheet-download") openSheet("sheet-download");
+  downloadJobId = job.id;
+  if (focus) downloadFocusToken = exportJobs.focusExport(job.id);
+  else {
+    const f = exportJobs.foreground;
+    downloadFocusToken = f.kind === "export" && f.jobId === job.id ? { jobId: job.id, epoch: f.epoch } : undefined;
+  }
   $("dl-options").classList.add("hidden");
   $("dl-progress").classList.remove("hidden");
-  $("btn-dl-cancel").classList.remove("hidden");
-  const status = $("dl-status");
+  $("sheet-download").classList.add("nonmodal");
+  $("sheet-download").setAttribute("aria-modal", "false");
+  $("sheet-backdrop").classList.add("hidden");
+  renderDownloads();
+}
+
+async function runZip(scope: ExportScope) {
+  const source = share!;
+  const name = (scope.kind === "all" ? "shared-imaging" : exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined)) + ".zip";
+  const job = exportJobs.create(name);
+  // Invoke the picker while the click is still user-initiated. Capture source and job before await.
+  const targetPromise = openSaveTarget(name, "application/zip", ".zip");
+  showDownloadJob(job, false);
   try {
-    await exportZip(
-      scope,
-      share!.loader,
-      target,
-      (p) => setDownloadProgress(p.bytes, p.totalBytes, `Saving · ${formatBytes(p.bytes)} of ${formatBytes(p.totalBytes)} · ${plural(p.files, "file")} saved`),
-      exportAbort.signal,
-    );
-    status.textContent = `Saved ${name}`;
+    const target = await targetPromise;
+    if (!target) { job.cancel(); return; }
+    const sink = job.ownWriter(target);
+    job.check();
+    const plan = planExport(scope);
+    if (!sealExport(job, source.loader, plan)) return;
+    await exportPlannedZip(plan, source.loader, sink, (p) => job.update(p), job.signal, job);
+    job.complete();
     (globalThis as any).__view.lastExport = name;
   } catch (e) {
-    status.textContent = (e as any)?.name === "AbortError" ? "Cancelled." : `The download stopped: ${describeError(e).title}.`;
+    job.fail(e);
   } finally {
-    exportAbort = null;
-    $("btn-dl-cancel").classList.add("hidden");
+    await job.cleanedUp();
   }
 }
 
 async function runOne(se: SeriesEntry, i: number) {
+  const source = share!, plan = planInstances(se, i);
   const name = `${se.instances[i].uid}.dcm`;
-  const target = await openSaveTarget(name, "application/dicom", ".dcm");
-  if (!target) return;
-  $("dl-options").classList.add("hidden");
-  $("dl-progress").classList.remove("hidden");
-  $("btn-dl-cancel").classList.add("hidden");
-  const plan = planInstances(se, i);
-  const total = plan.ciphertextEnd - plan.ciphertextStart;
-  setDownloadProgress(0, total, `Saving · ${formatBytes(0)} of ${formatBytes(total)}`);
+  const job = exportJobs.create(name);
+  const targetPromise = openSaveTarget(name, "application/dicom", ".dcm");
+  showDownloadJob(job, false);
   try {
-    const bytes = await exportInstance(share!.loader, se, i, (r, t) => setDownloadProgress(r, t, `Saving · ${formatBytes(r)} of ${formatBytes(t)}`));
-    await target.write(bytes);
-    await target.close();
-    setDownloadProgress(total, total, `Saved ${name}`);
+    const target = await targetPromise;
+    if (!target) { job.cancel(); return; }
+    const sink = job.ownWriter(target);
+    job.check();
+    job.seal(source.resolver, [{ file: se.file, lo: plan.firstRecord, hi: plan.lastRecord + 1 }]);
+    job.require(source.resolver, se.file, plan.firstRecord, plan.lastRecord + 1);
+    job.running();
+    const total = plan.ciphertextEnd - plan.ciphertextStart;
+    const bytes = await exportInstance(source.loader, se, i, (r, t) => job.update({ bytes: r, totalBytes: t, files: 0, totalFiles: 1 }), job.signal);
+    job.finalizing();
+    await sink.write(bytes);
+    job.update({ bytes: total, totalBytes: total, files: 1, totalFiles: 1 });
+    await sink.close();
+    job.complete();
+    (globalThis as any).__view.lastExport = name;
   } catch (e) {
-    await target.abort(e).catch(() => {});
-    $("dl-status").textContent = `The download stopped: ${describeError(e).title}.`;
+    job.fail(e);
+  } finally {
+    await job.cleanedUp();
   }
 }
 
@@ -2637,22 +2792,32 @@ function wireStatic() {
   });
   $("sheet-backdrop").addEventListener("click", closeSheet);
   document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeSheet));
-  $("btn-dl-cancel").addEventListener("click", () => exportAbort?.abort());
+  $("btn-dl-cancel").addEventListener("click", () => { if (downloadJobId !== null) exportJobs.jobs.get(downloadJobId)?.cancel(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeSheet();
     else if (e.key === "?" && !(e.target as Element | null)?.closest?.("input, select, textarea") && !$("screen-viewer").classList.contains("hidden")) openGestures();
   });
   wireGestures();
+  // Actual interaction changes foreground preference. Async rendering never does.
+  for (const type of ["pointerdown", "wheel", "keydown", "input", "change"] as const) {
+    document.addEventListener(type, (e) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (!target || target.closest("#sheet-download, #download-jobs")) return;
+      if (target.closest("#screen-viewer, #screen-overview, #btn-back, #report-panel") || (type === "keydown" && inViewer() && !openSheetId)) browseIntent(type);
+    }, { capture: true, passive: true });
+  }
 }
 
 function closeSheetForce() {
-  exportAbort?.abort();
-  exportAbort = null;
+  browseIntent("navigation");
   closeSheet();
 }
 
 // Expose a few hooks for scripted checks (no behaviour depends on them).
 (globalThis as any).__viewHooks = {
+  exportState: () => ({ foreground: exportJobs.foreground, gateVersion: exportJobs.gateVersion, jobs: [...exportJobs.jobs.values()].map((j) => ({ id: j.id, name: j.name, phase: j.phase, cleanupComplete: j.cleanupComplete, progress: j.progress })) }),
+  focusExport: (id: number) => exportJobs.focusExport(id),
+  cancelExport: (id: number) => exportJobs.jobs.get(id)?.cancel(),
   state: () => ({ studyIdx, seriesIdx, sliceIdx, sliceCount, wc, ww, zoom, panX, panY, presetId, renderer: viewport?.kind }),
   showSlice,
   setWindow,
@@ -2802,7 +2967,8 @@ function closeSheetForce() {
     return {
       study: studyIdx >= 0 ? study()?.studyInstanceUid ?? null : null,
       series: studyIdx >= 0 && seriesIdx >= 0 ? study()?.series[seriesIdx]?.uid ?? null : null,
-      onScreen: on && "reason" in on ? { reason: on.reason } : on ? { uid: on.se.instances[on.i].uid, frame: objectView?.active ? 0 : sliceTarget(sliceIdx).frame } : null,
+      onScreen: on && "reason" in on ? { reason: on.reason } : on ? { uid: on.se.instances[on.i].uid, frame: objectView?.active ? 0 : shown?.frame ?? 0 } : null,
+      desired: inViewer() && studyIdx >= 0 && seriesIdx >= 0 ? { series: series().id, slice: sliceIdx, ...(mpr ? { plane: mpr.orient.plane } : sliceTarget(sliceIdx)) } : null,
       mpr: mpr?.orient.plane ?? null,
     };
   },

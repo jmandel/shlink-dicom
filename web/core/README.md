@@ -108,6 +108,7 @@ Helpers: `seriesKey(series)` imports the key of the series' file once per file a
 **`new InstanceLoader(resolver, decryptor, opts?)`** fetches ciphertext through one priority queue.
 
 Options:
+- `admission`: an optional `ExportJobs` coordinator. Only new physical imaging reads are gated; cached records, shared in-flight reads and decoding remain available;
 - `concurrency`: requests in flight, default 6;
 - `cacheBytes`: instance ciphertext kept for re-use (a thumbnail and the full image start from the same bytes), default 96 MiB;
 - `onRecords(fileId, first, last, "fetching" | "verified" | "failed")`: records of a file, for record maps and the trust count;
@@ -118,7 +119,7 @@ Methods:
 - `instance(series, i, o)` returns one verified, decrypted Part 10 file (through the decryptor).
 - `run(series, plan, o)` returns the instances of a multi-instance plan from one Range read, verified and decrypted. It is used by downloads and is not cached.
 - `report(plan, state)` records a verify outcome from a decryptor running elsewhere (ImageStore's worker jobs).
-- `cancelQueued((seriesId, priority) => boolean)` drops queued requests, for example the prefetch of a series the user has left (`seriesId` is `SeriesEntry.id`).
+- `cancelQueued((seriesId, priority) => boolean)` drops queued requests, for example the prefetch of a series the user has left (`seriesId` is `SeriesEntry.id`). A span with a surviving `durable` export owner is retained, including a cached read joined by that owner.
 - `bytesFetched`.
 
 `FetchPriority` is `{ Visible: 0, Near: 1, Prefetch: 2, Background: 3 }`, the same numbers as viewer-kit's `Priority`.
@@ -189,22 +190,32 @@ An enhanced CT or MR, an ultrasound cine or a tomosynthesis is one instance of t
 
 **Thumbnails before the image.** `readIcon(head)` (`icon.ts`) reads the Icon Image Sequence from a file's first bytes (8-bit grey, RGB or palette).
 
-### Downloads: `export.ts`, `zip.ts`, `dicomdir.ts`, `dicom-header.ts`, `save.ts`
+### Downloads: `export-jobs.ts`, `export.ts`, `zip.ts`, `dicomdir.ts`, `dicom-header.ts`, `save.ts`
 
 **ZIPs.** `exportZip({ kind: "all" | "study" | "series", … }, loader, sink, onProgress?, signal?)` writes a stored ZIP:
 - `DICOM/ST000001/SE000001/IM000001`… are the shared files, byte for byte (one ST folder per study);
 - `DICOMDIR` holds PATIENT → STUDY → SERIES → IMAGE records.
 
-Series are read in runs of up to 8 MiB, so memory stays bounded. ZIP64 records are added past 4 GiB.
+Series are read in runs targeting 8 MiB, with three runs read ahead; an instance larger than the target forms its own run. This limits the number of source runs held ahead, but the Blob save fallback still retains the complete ZIP. ZIP64 records are added past 4 GiB.
+
+**Jobs and foreground preference.** `ExportJobs` owns independent jobs and one foreground choice, `{ epoch, kind, jobId? }`. The viewer's ZIP and single-image downloads capture their source and job before awaiting the save picker. Closing progress or navigating returns foreground preference to browsing; it does not cancel the job. Opening an active job's progress selects it again. Only an explicit Cancel aborts that job. Jobs survive navigation within the page, not reload or browser exit.
+
+`planExport(scope)` snapshots the complete inventory and its range plans. `sealExport(job, loader, plan)` seals the union of their half-open record intervals, keyed by resolver namespace and the parsed file/key identity. `exportPlannedZip` consumes that exact plan and checks each source acquisition against it. Planning leaves admission open. A selected, sealed, nonterminal job admits any original request overlapping its union. The loader checks both the seed and each proposed merge member before reserving capacity; held requests remain queued and consume no slot. Gate changes wake all waiting loader and WSI reader pumps. FrameStream already uses the ordinary loader. Priorities, merge limits, read-ahead, caches and browsing preparation are unchanged.
+
+Progress belongs to each job. Source verification is a diagnostic milestone; successful admission preference lasts through ZIP finalization and `sink.close()`. Completion of a resumed job releases it by job identity, whereas dismissal of old progress compares both job identity and focus epoch. Failure or cancellation makes the job terminal and wakes readers before asynchronous abort/cleanup, which remains owned by the job. One consumer's cancellation cannot abort a shared read with another surviving owner.
+
+The viewer uses separate generations for navigation, image presentation, volume presentation and each thumbnail canvas. Late work may populate its existing cache, but can update an output only while it still owns that output. The displayed image identity is recorded separately from the requested slice, including for “This image” downloads.
 
 **Other exports:**
-- `exportInstance(loader, series, i, onProgress?)` returns one instance's bytes;
+- `exportInstance(loader, series, i, onProgress?, signal?)` returns one instance's bytes;
 - `exportSize(scope)` and `exportBaseName(study, series?)` give the size and a file name;
 - `readDicomHeader(bytes)` reads the DICOMDIR attributes from a Part 10 header;
 - `buildDicomdir(entries)` builds the DICOMDIR;
 - `ZipWriter` writes the ZIP.
 
 **Saving.** `openSaveTarget(name, mime, ext)` streams to a file with `showSaveFilePicker` where the browser has it, and otherwise collects a Blob and saves it with a link. Call it first in the click handler, before any other `await`. It returns null if the user cancels.
+
+**Checks.** `bun test test/export-jobs.test.ts test/bundle.test.ts` exercises interval identity, admission, ownership, terminal wakeups, failures and ZIP/source behavior. With the public demo served locally, `BASE=http://127.0.0.1:8080 node web/checks/export-job-checks.mjs` checks presentation races, progress dismissal/resumption, a complete study export across navigation and resumption, concurrent jobs, cancellation during the picker, and writer failures. `CHECK_OUT` selects its output directory, `CHECK_CASE` selects one named case, and `CHROMIUM` can override the Chromium executable. These are correctness checks, not performance benchmarks.
 
 ### Configuration and samples: `config.ts`, `samples.ts`, `format.ts`
 
