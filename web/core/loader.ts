@@ -19,7 +19,7 @@ import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
 import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, type RangePlan } from "./range";
 import type { LinkResolver } from "./resolver";
-import type { ExportJobs } from "./export-jobs";
+import { AdmissionWakeup, type ReadAdmission } from "./read-admission";
 
 /** Same values as viewer-kit's Priority: lower runs first. */
 export const FetchPriority = { Visible: 0, Near: 1, Prefetch: 2, Background: 3 } as const;
@@ -38,7 +38,7 @@ export const BULK_BYTES = 1 << 20;
 
 export interface LoaderOptions {
   /** Admission preference only; cache, shared readers and running requests bypass it. */
-  admission?: ExportJobs;
+  admission?: ReadAdmission;
   /** Range requests in flight at once (default 6). Prefetch and background reads leave two of them free. */
   concurrency?: number;
   /** Ciphertext records kept for re-use (default 96 MiB). */
@@ -111,7 +111,7 @@ const root = (s: Span): Span => (s.into ? root(s.into) : s);
 
 export class InstanceLoader {
   readonly concurrency: number;
-  readonly admission?: ExportJobs;
+  readonly admission?: ReadAdmission;
   /** Ciphertext bytes received so far. */
   bytesFetched = 0;
   private queue: Span[] = [];
@@ -124,8 +124,7 @@ export class InstanceLoader {
   private cached = new Map<string, Uint8Array>();
   private cachedBytes = 0;
   private budget: number;
-  private gateSubscription?: () => void;
-  private pumpRequested = false;
+  private admissionWakeup: AdmissionWakeup;
 
   constructor(
     readonly resolver: LinkResolver,
@@ -135,6 +134,7 @@ export class InstanceLoader {
     this.concurrency = opts.concurrency ?? 6;
     this.budget = opts.cacheBytes ?? 96 * 1024 * 1024;
     this.admission = opts.admission;
+    this.admissionWakeup = new AdmissionWakeup(this.admission, () => this.pump());
   }
 
   /** Reports a decrypt outcome for a plan's records (decryptors running elsewhere call this). */
@@ -194,7 +194,7 @@ export class InstanceLoader {
       this.drop(s, abortError());
       return false;
     });
-    this.watchGate();
+    this.admissionWakeup.update(this.queue.length > 0);
   }
 
   private async decrypt(series: SeriesEntry, plan: RangePlan, ct: Uint8Array): Promise<Uint8Array> {
@@ -282,7 +282,7 @@ export class InstanceLoader {
           this.drop(r, abortError());
         }
       }
-      this.watchGate();
+      this.admissionWakeup.update(this.queue.length > 0);
     };
     let progress: (() => void) | null = null;
     if (o.onProgress) {
@@ -367,22 +367,8 @@ export class InstanceLoader {
     return this.admission?.allows(this.resolver, s.series.file, s.first, s.last + 1) ?? true;
   }
 
-  /** Subscribe only while queued: an obsolete reader cannot stay retained by the coordinator. */
-  private watchGate() {
-    if (this.queue.length && this.admission && !this.gateSubscription) {
-      this.gateSubscription = this.admission.subscribeGate(() => {
-        if (this.pumpRequested) return;
-        this.pumpRequested = true;
-        queueMicrotask(() => { this.pumpRequested = false; this.pump(); });
-      });
-    } else if (!this.queue.length && this.gateSubscription) {
-      this.gateSubscription();
-      this.gateSubscription = undefined;
-    }
-  }
-
   private pump() {
-    this.watchGate();
+    this.admissionWakeup.update(this.queue.length > 0);
     try {
       while (this.queue.length) {
         let best = -1;
@@ -408,7 +394,7 @@ export class InstanceLoader {
           this.pump();
         });
       }
-    } finally { this.watchGate(); }
+    } finally { this.admissionWakeup.update(this.queue.length > 0); }
   }
 
   /** Queued spans of the same series next to `s` in its file join it. */

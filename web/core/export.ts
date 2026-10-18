@@ -1,12 +1,12 @@
 // "Download originals": the shared DICOM files, byte for byte, as a ZIP with a DICOMDIR (a series,
-// a study or every study shared), or one .dcm file. Series are read in runs of a few MB, so memory stays bounded and
-// bytes reach the save target as they are verified.
+// a study or every study shared), or one .dcm file. A few source runs are read ahead; the
+// save target determines whether output streams to disk or is retained in a Blob.
 import type { SeriesEntry, StudyEntry } from "./bundle";
 import { buildDicomdir, type DicomdirEntry } from "./dicomdir";
 import { readDicomHeader } from "./dicom-header";
 import { FetchPriority, type InstanceLoader } from "./loader";
-import { planRuns, type RangePlan } from "./range";
-import type { ExportJob } from "./export-jobs";
+import { planInstances, planRuns, type RangePlan } from "./range";
+import { ExportExecution } from "./export-execution";
 
 /** Runs (of up to 8 MiB) read ahead of the one being written. */
 const READ_AHEAD = 3;
@@ -51,10 +51,6 @@ export function planExport(scope: ExportScope): ExportPlan {
   return Object.freeze({ total: Object.freeze({ files, bytes }), runs: Object.freeze(runs) });
 }
 
-export function sealExport(job: ExportJob, loader: InstanceLoader, plan: ExportPlan): boolean {
-  return job.seal(loader.resolver, plan.runs.map((r) => ({ file: r.series.file, lo: r.plan.firstRecord, hi: r.plan.lastRecord + 1 })));
-}
-
 /** Bytes and file count an export will contain (before the DICOMDIR). */
 export function exportSize(scope: ExportScope): { files: number; bytes: number } {
   const list = scopeStudies(scope).flat();
@@ -76,104 +72,79 @@ export async function exportZip(
   onProgress?: (p: ExportProgress) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  return exportPlannedZip(planExport(scope), loader, sink, onProgress, signal);
+  const plan = planExport(scope);
+  const execution = new ExportExecution(0, "archive.zip");
+  return execution.run(sink, (task, owned) => writePlannedZip(plan, loader, owned, task, onProgress), signal);
 }
 
-/** The caller owns a job across planning, execution and cleanup. Headless callers can omit it. */
-export async function exportPlannedZip(
+/** Format the archive. The execution owns failure, read-ahead cancellation and writer cleanup. */
+export async function writePlannedZip(
   plan: ExportPlan,
   loader: InstanceLoader,
   sink: ByteSink,
+  execution: ExportExecution,
   onProgress?: (p: ExportProgress) => void,
-  signal?: AbortSignal,
-  job?: ExportJob,
 ): Promise<void> {
-  const total = plan.total;
+  execution.seal(loader.resolver, plan.runs.map((r) => ({ file: r.series.file, lo: r.plan.firstRecord, hi: r.plan.lastRecord + 1 })));
   const zip = new ZipWriter(sink);
   const dir: DicomdirEntry[] = [];
-  const progress: ExportProgress = { files: 0, totalFiles: total.files, bytes: 0, totalBytes: total.bytes };
-  const controller = new AbortController();
-  const reads = new Set<Promise<Uint8Array[]>>();
-  let failed = false, failure: unknown;
-  let abortSink: Promise<void> | undefined;
-  const stop = (error: unknown) => {
-    if (failed) return;
-    failed = true;
-    failure = error;
-    job?.fail(error); // terminal + gate release before any asynchronous cleanup
-    controller.abort(error);
-    abortSink = Promise.resolve().then(() => sink.abort(error)).catch(() => {});
+  const progress: ExportProgress = { files: 0, totalFiles: plan.total.files, bytes: 0, totalBytes: plan.total.bytes };
+  const report = () => { execution.update(progress); onProgress?.(progress); };
+  report();
+  const runs = plan.runs;
+  const ahead: (Promise<Uint8Array[]> | undefined)[] = [];
+  let verifiedRuns = 0;
+  const start = (k: number) => {
+    if (k >= runs.length || ahead[k]) return;
+    const run = runs[k];
+    ahead[k] = execution.read(loader.resolver, { file: run.series.file, lo: run.plan.firstRecord, hi: run.plan.lastRecord + 1 },
+      (signal) => loader.run(run.series, run.plan, { priority: FetchPriority.Background, signal, durable: true }),
+      () => { if (++verifiedRuns === runs.length) execution.sourcesVerified(); });
   };
-  const cancelled = () => stop(signal?.reason ?? new DOMException("export cancelled", "AbortError"));
-  signal?.addEventListener("abort", cancelled, { once: true });
-  const check = () => {
-    if (failed) throw failure;
-    if (signal?.aborted) { cancelled(); throw failure; }
-    job?.check();
-  };
-  try {
-    check();
-    onProgress?.(progress);
-    // Every run in order. A few are read ahead (fetched and verified) while earlier ones are
-    // written, so the connection stays busy while the ZIP is written.
-    const runs = plan.runs;
-    const ahead: (Promise<Uint8Array[]> | undefined)[] = [];
-    let verifiedRuns = 0;
-    const start = (k: number) => {
-      if (k >= runs.length || ahead[k]) return;
-      check();
-      const run = runs[k];
-      job?.require(loader.resolver, run.series.file, run.plan.firstRecord, run.plan.lastRecord + 1);
-      ahead[k] = loader.run(run.series, run.plan, { priority: FetchPriority.Background, signal: controller.signal, durable: true }).then((files) => {
-        check();
-        if (++verifiedRuns === runs.length) job?.finalizing();
-        return files;
-      });
-      const reading = ahead[k]!;
-      reads.add(reading);
-      reading.then(() => reads.delete(reading), (e) => { reads.delete(reading); stop(e); });
-    };
-    job?.running();
-    if (!runs.length) job?.finalizing();
-    for (let k = 0; k < runs.length; k++) {
-      check();
-      for (let j = k; j < k + READ_AHEAD; j++) start(j);
-      const { t, s, plan } = runs[k];
-      const files = await ahead[k]!;
-      delete ahead[k];
-      for (let n = 0; n < files.length; n++) {
-        check();
-        const i = plan.firstInstance + n;
-        const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
-        await zip.add(id.join("/"), files[n]);
-        try {
-          dir.push({ fileId: id, header: await readDicomHeader(files[n]) });
-        } catch {
-          // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
-        }
-        progress.files++;
-        progress.bytes += files[n].byteLength;
-        onProgress?.(progress);
+  if (!runs.length) execution.sourcesVerified();
+  for (let k = 0; k < runs.length; k++) {
+    execution.check();
+    for (let j = k; j < k + READ_AHEAD; j++) start(j);
+    const { t, s, plan } = runs[k];
+    const files = await ahead[k]!;
+    delete ahead[k];
+    for (let n = 0; n < files.length; n++) {
+      execution.check();
+      const i = plan.firstInstance + n;
+      const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
+      await zip.add(id.join("/"), files[n]);
+      try {
+        dir.push({ fileId: id, header: await readDicomHeader(files[n]) });
+      } catch {
+        // Not Part 10: stored in the ZIP but left out of the DICOMDIR.
       }
+      progress.files++;
+      progress.bytes += files[n].byteLength;
+      report();
     }
-    check();
-    await zip.add("DICOMDIR", buildDicomdir(dir));
-    check();
-    await zip.finish();
-    check();
-  } catch (e) {
-    stop(e);
-    throw e;
-  } finally {
-    signal?.removeEventListener("abort", cancelled);
-    await Promise.allSettled(reads);
-    await abortSink;
   }
+  execution.check();
+  await zip.add("DICOMDIR", buildDicomdir(dir));
+  await zip.finish();
 }
 
-/** One instance's bytes, for "This image". */
+/** One instance's verified bytes, for callers that do not need a save target. */
 export function exportInstance(loader: InstanceLoader, series: SeriesEntry, i: number, onProgress?: (received: number, total: number) => void, signal?: AbortSignal): Promise<Uint8Array> {
   return loader.instance(series, i, { priority: FetchPriority.Visible, onProgress, signal, durable: true });
+}
+
+/** The single-image formatter uses the same execution owner as a ZIP. */
+export async function writeInstance(loader: InstanceLoader, series: SeriesEntry, i: number, sink: ByteSink, execution: ExportExecution): Promise<void> {
+  const plan = planInstances(series, i);
+  const range = { file: series.file, lo: plan.firstRecord, hi: plan.lastRecord + 1 };
+  execution.seal(loader.resolver, [range]);
+  const total = plan.ciphertextEnd - plan.ciphertextStart;
+  const bytes = await execution.read(loader.resolver, range,
+    (signal) => exportInstance(loader, series, i, (bytes, totalBytes) => execution.update({ bytes, totalBytes, files: 0, totalFiles: 1 }), signal),
+    () => execution.sourcesVerified());
+  await sink.write(bytes);
+  execution.update({ bytes: total, totalBytes: total, files: 1, totalFiles: 1 });
+  await sink.close();
 }
 
 /** A file name such as "brain-mri-2020-07-29" from a study's description and date. */

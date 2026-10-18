@@ -4,7 +4,7 @@ import { parseStudyIndex, type StudyIndex } from "./bundle";
 import { WebCryptoDecryptor, type RecordDecryptor } from "./decrypt";
 import { InstanceLoader, type LoaderOptions } from "./loader";
 import { LinkResolver, type ResolverOptions } from "./resolver";
-import type { ExportJobs } from "./export-jobs";
+import type { ReadAdmission } from "./read-admission";
 
 export interface OpenShareOptions extends ResolverOptions, LoaderOptions {
   passcode?: string;
@@ -13,7 +13,7 @@ export interface OpenShareOptions extends ResolverOptions, LoaderOptions {
 }
 
 export interface OpenShare {
-  admission?: ExportJobs;
+  admission?: ReadAdmission;
   resolver: LinkResolver;
   index: StudyIndex;
   decryptor: RecordDecryptor;

@@ -18,7 +18,7 @@ import type { RecordDecryptor } from "./decrypt";
 import { planBytes, RECORD_CIPHERTEXT, RECORD_PLAINTEXT } from "./range";
 import type { LinkResolver } from "./resolver";
 import type { RecordState } from "./loader";
-import type { ExportJobs } from "./export-jobs";
+import { AdmissionWakeup, type ReadAdmission } from "./read-admission";
 import {
   buildPyramid,
   FragmentWalker,
@@ -92,15 +92,14 @@ export class SeriesReader implements ByteSource {
   private queue: Job[] = [];
   private running = 0;
   private seq = 0;
-  private gateSubscription?: () => void;
-  private pumpRequested = false;
+  private admissionWakeup: AdmissionWakeup;
 
   constructor(
     readonly resolver: LinkResolver,
     readonly decryptor: RecordDecryptor,
     readonly series: SeriesEntry,
     private o: {
-      admission?: ExportJobs;
+      admission?: ReadAdmission;
       concurrency?: number;
       /** Plaintext bytes of records kept (default 64 MiB). */
       budgetBytes?: number;
@@ -108,7 +107,9 @@ export class SeriesReader implements ByteSource {
       maxRun?: number;
       onRecords?: (fileId: string, first: number, last: number, s: RecordState) => void;
     } = {},
-  ) {}
+  ) {
+    this.admissionWakeup = new AdmissionWakeup(o.admission, () => this.pump());
+  }
 
   /** Requests queued or running. */
   get busy(): boolean {
@@ -221,24 +222,11 @@ export class SeriesReader implements ByteSource {
     this.queue.splice(i, 1);
     for (let r = job.first; r <= job.last; r++) if (this.pending.get(r) === job) this.pending.delete(r);
     job.reject(abortError());
-    this.watchGate();
-  }
-
-  private watchGate() {
-    if (this.queue.length && this.o.admission && !this.gateSubscription) {
-      this.gateSubscription = this.o.admission.subscribeGate(() => {
-        if (this.pumpRequested) return;
-        this.pumpRequested = true;
-        queueMicrotask(() => { this.pumpRequested = false; this.pump(); });
-      });
-    } else if (!this.queue.length && this.gateSubscription) {
-      this.gateSubscription();
-      this.gateSubscription = undefined;
-    }
+    this.admissionWakeup.update(this.queue.length > 0);
   }
 
   private pump() {
-    this.watchGate();
+    this.admissionWakeup.update(this.queue.length > 0);
     try {
       const conc = this.o.concurrency ?? 6;
       while (this.running < conc && this.queue.length) {
@@ -257,7 +245,7 @@ export class SeriesReader implements ByteSource {
           this.pump();
         });
       }
-    } finally { this.watchGate(); }
+    } finally { this.admissionWakeup.update(this.queue.length > 0); }
   }
 
   private async run(job: Job) {
@@ -317,7 +305,7 @@ export class SeriesReader implements ByteSource {
 // ------------------------------------------------------------------------------------- slide
 
 export interface SlideShare {
-  admission?: ExportJobs;
+  admission?: ReadAdmission;
   resolver: LinkResolver;
   decryptor: RecordDecryptor;
   index: { bundle: any };

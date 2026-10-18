@@ -32,8 +32,10 @@ import { defaultView, frameOf, renderCpu, type Frame } from "../../viewer-kit/sr
 import { iccToSrgb, type IccTransform } from "../core/icc";
 import { drawThumbnail, Viewport } from "../core/render";
 import { presetsFor, type WindowPreset } from "../core/wl";
-import { exportBaseName, exportInstance, exportSize, exportPlannedZip, planExport, sealExport, type ExportScope } from "../core/export";
-import { ExportJobs, type ExportJob, type FocusToken } from "../core/export-jobs";
+import { exportBaseName, exportSize, writePlannedZip, writeInstance, planExport, type ExportScope } from "../core/export";
+import { ExportJobs } from "../core/export-jobs";
+import { DownloadsController, type DownloadChoice } from "./downloads";
+import { LatestOperation, ViewSession, type ViewOperation } from "./view-session";
 import { openSaveTarget, saveBlob } from "../core/save";
 import { isSlideSeries } from "../core/wsi";
 import { drawSlideThumbnail, slideHooks, slideSession, SlideView, type SlideSession } from "./wsi-view";
@@ -115,18 +117,15 @@ let verifiedRecords = 0;
 let failedRecords = 0;
 const exportJobs = new ExportJobs((event) => { if (metrics.exports.length < 20000) metrics.exports.push(event); });
 
-/** These generations govern presentation only. Export preference never invalidates a view. */
-let viewGeneration = 0;
-let imageGeneration = 0;
-let volumeGeneration = 0;
-let navigationGeneration = 0;
-const thumbGenerations = new WeakMap<HTMLCanvasElement, number>();
+/** Presentation ownership is independent of read cancellation and export preference. */
+const viewSession = new ViewSession();
+const navigationOperations = new LatestOperation();
+const thumbOperations = new WeakMap<HTMLCanvasElement, LatestOperation>();
 const inViewer = () => !$("screen-viewer").classList.contains("hidden");
 function browseIntent(reason: string) {
-  if (exportJobs.foreground.kind === "export") exportJobs.focusBrowse(reason);
-  if (openSheetId === "sheet-download" && $("sheet-download").classList.contains("nonmodal")) closeSheet();
+  downloads.browse(reason);
 }
-function invalidateView() { viewGeneration++; imageGeneration++; volumeGeneration++; layerSeq++; }
+function invalidateView() { viewSession.reset(); layerSeq++; }
 
 let studyIdx = -1;
 let seriesIdx = -1;
@@ -151,7 +150,7 @@ let studyAbort = new AbortController();
  * which joins the loads already running.
  */
 let overviewAborts: { study: number | null; ac: AbortController }[] = [];
-let overviewGeneration = 0;
+const overviewOperations = new LatestOperation();
 /** The ImageStore, once the decoder pool has started. */
 let imagesReady: Promise<ImageStore> | null = null;
 let overviewWork: (() => void) | null = null;
@@ -216,9 +215,10 @@ const tileOf = (c: HTMLCanvasElement) => tiles.get(c) ?? (tiles.set(c, new Thumb
  * icon (Icon Image Sequence) first when it has one; it ends drawn or with the reason it isn't.
  */
 async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority: number, signal?: AbortSignal, inst = thumbInstance(se)): Promise<void> {
-  const generation = (thumbGenerations.get(canvas) ?? 0) + 1;
-  thumbGenerations.set(canvas, generation);
-  const current = () => canvas.isConnected && !signal?.aborted && thumbGenerations.get(canvas) === generation;
+  let target = thumbOperations.get(canvas);
+  if (!target) thumbOperations.set(canvas, target = new LatestOperation());
+  const operation = target.begin(() => canvas.isConnected && !signal?.aborted);
+  const current = operation.current;
   const tile = tileOf(canvas);
   try {
     if (!current()) return;
@@ -227,7 +227,7 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
       const session = await slideFor(se);
       if (!current()) return;
       await drawSlideThumbnail(canvas, session, signal, current);
-      if (current()) tile.drawn();
+      operation.commit(() => tile.drawn());
       return;
     }
     const kind = kindOf(se);
@@ -254,7 +254,7 @@ async function seriesThumb(canvas: HTMLCanvasElement, se: SeriesEntry, priority:
         })
         .catch(() => {});
     }
-    const img = await images!.get(se, inst, { priority, signal, scale: thumbScale(len, canvas.width), onProgress: (r, t) => { if (current()) tile.progress(r, t); } });
+    const img = await images!.get(se, inst, { priority, signal, scale: thumbScale(len, canvas.width), onProgress: (r, t) => { operation.commit(() => tile.progress(r, t)); } });
     const h = await imageHeader(img)?.catch(() => null);
     if (!current()) return;
     drawThumbnail(canvas, img, Math.floor(img.frames / 2), h?.ds);
@@ -615,9 +615,9 @@ async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
   for (let k = 0; k < st.series.length; k++) {
     if (!isSlideSeries(st.series[k])) continue;
     selectSeries(k, false);
-    const generation = viewGeneration;
+    const operation = viewSession.capture(() => inViewer() && series() === st.series[k]);
     for (let t = 0; t < 100; t++) {
-      if (generation !== viewGeneration || !inViewer() || series() !== st.series[k]) return;
+      if (!operation.current()) return;
       const ls = slideView?.layers ?? [];
       if (ls.some((l) => l.id === id)) {
         await slideView!.setLayer(id, true);
@@ -627,7 +627,7 @@ async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
       if (slideView?.active && (ls.length > 0 || t > 40)) break;
       await new Promise((r) => setTimeout(r, 200));
     }
-    if (generation !== viewGeneration || !inViewer() || study() !== st) return;
+    if (!operation.current() || study() !== st) return;
   }
   const back = st.series.indexOf(se);
   seriesIdx = back;
@@ -636,9 +636,9 @@ async function showOnSlide(se: SeriesEntry, kind: ObjectKind) {
 
 /** A segmentation, structure set or presentation state chosen in the series list: show the images it refers to, with it on. */
 async function showDerived(se: SeriesEntry) {
-  const generation = viewGeneration;
+  const operation = viewSession.capture(() => inViewer() && series() === se);
   await layers?.scan(share!.index.studies);
-  if (generation !== viewGeneration || !inViewer() || series() !== se) return;
+  if (!operation.current()) return;
   const l = layers?.layers.find((x) => x.series === se);
   let at: { study: number; series: number } | null = null;
   share!.index.studies.forEach((st, a) => st.series.forEach((x, b) => {
@@ -758,10 +758,9 @@ async function seriesVolume(se: SeriesEntry, current: () => boolean): Promise<Vo
  */
 async function enterMpr(plane: Plane | "", opts: { turn?: number; tilt?: number; slab?: Slab } = {}, intent = true) {
   if (intent) browseIntent("volume");
-  const generation = viewGeneration, request = ++volumeGeneration;
-  imageGeneration++;
   const se = series();
-  const current = () => generation === viewGeneration && request === volumeGeneration && inViewer() && series() === se;
+  const operation = viewSession.beginPresentation(() => inViewer() && series() === se);
+  const current = operation.current;
   const sel = $<HTMLSelectElement>("view-plane");
   if (!plane) {
     $("btn-plane-opts").classList.add("hidden");
@@ -804,7 +803,7 @@ async function enterMpr(plane: Plane | "", opts: { turn?: number; tilt?: number;
     $("stage-msg").textContent = e instanceof VolumeError ? `These images can't be reformatted: ${e.message}.` : `Reformatting failed: ${(e as Error).message}`;
     $("stage-msg").classList.remove("hidden");
   } finally {
-    if (current()) $("stage-busy").classList.add("hidden");
+    operation.commit(() => $("stage-busy").classList.add("hidden"));
   }
 }
 
@@ -1066,7 +1065,7 @@ function showPasteScreen() {
 // ------------------------------------------------------------------------------------- overview
 
 function renderOverview() {
-  const generation = ++overviewGeneration;
+  const render = overviewOperations.begin();
   const idx = share!.index;
   $("ov-patient").textContent = patientLine();
   const meta: string[] = [];
@@ -1143,13 +1142,13 @@ function renderOverview() {
     overviewAborts.push({ study: null, ac });
     const signal = ac.signal;
     void imagesReady?.then(() => {
-      if (!signal.aborted && generation === overviewGeneration) work(signal);
+      if (!signal.aborted) render.commit(() => work(signal));
     }, () => {});
   };
   const work = (signal: AbortSignal) => {
     // A metadata refresh replaces the cards. Existing reads may finish for shared consumers,
     // but only the current cards may advance their thumbnail sequence or start prefetch.
-    const current = () => !signal.aborted && generation === overviewGeneration;
+    const operation = render.withGuard(() => !signal.aborted);
     // Each thumbnail can be stopped on its own (opening a study keeps that study's).
     const card = (study: number) => {
       const ac = new AbortController();
@@ -1158,9 +1157,9 @@ function renderOverview() {
     };
     const first = small.map((x) => x.run(card(x.study))().catch(() => {}));
     let chain: Promise<unknown> = Promise.allSettled(first);
-    const rest = big.map((b) => (chain = chain.then(() => (current() ? b.run(card(b.study))().catch(() => {}) : undefined))));
+    const rest = big.map((b) => (chain = chain.then(() => operation.start(() => b.run(card(b.study))().catch(() => {})))));
     void Promise.allSettled([...first, ...rest]).then(() => {
-      if (current()) after.forEach((f) => void f(signal).catch(() => {}));
+      operation.commit(() => after.forEach((f) => void f(signal).catch(() => {})));
     });
   };
   // Shown already (a second render, once accessions or times are known): its own thumbnails now.
@@ -1320,7 +1319,7 @@ function studyReports(): ReportLink[] {
 
 function showOverview() {
   browseIntent("overview");
-  navigationGeneration++;
+  navigationOperations.invalidate();
   invalidateView();
   clearMpr();
   show("overview");
@@ -1340,10 +1339,10 @@ function showOverview() {
 
 function openStudy(si: number, push = true, intent = true) {
   if (intent) browseIntent("study");
-  const generation = ++navigationGeneration;
+  const navigation = navigationOperations.begin();
   if (!images) {
     // The decoder is still starting.
-    void imagesReady?.then(() => { if (generation === navigationGeneration) openStudy(si, push, false); }, () => {});
+    void imagesReady?.then(() => navigation.commit(() => openStudy(si, push, false)), () => {});
     return;
   }
   if (push) history.pushState({ screen: "viewer", study: si }, "");
@@ -1436,8 +1435,8 @@ function selectSeries(k: number, intent = true) {
   if (k === seriesIdx && shownKey.startsWith(series()?.id ?? "-")) return;
   if (k === seriesIdx && slideView?.active && slideView.ss?.src.series === series()) return;
   invalidateView();
-  const generation = viewGeneration;
-  const initialImageGeneration = imageGeneration;
+  const operation = viewSession.capture(inViewer);
+  const initialPresentation = viewSession.capturePresentation(() => inViewer() && series() === se);
   seriesAbort.abort();
   seriesAbort = new AbortController();
   const prevSeries = seriesIdx >= 0 ? study()?.series[seriesIdx]?.id : undefined;
@@ -1465,7 +1464,7 @@ function selectSeries(k: number, intent = true) {
   }
   // Video series play in video-view.ts; a series that may hold video is probed first.
   const m = media.select(se, () => {
-    if (generation !== viewGeneration || !inViewer()) return;
+    if (!operation.current()) return;
     shownKey = "";
     selectSeries(k, false);
   });
@@ -1531,10 +1530,10 @@ function selectSeries(k: number, intent = true) {
     images!
       .frameStream(se, 0, { priority: Priority.Visible })
       .then(async (fs) => {
-        if (generation !== viewGeneration || initialImageGeneration !== imageGeneration || !inViewer() || series() !== se || shownKey || mpr) return;
+        if (!initialPresentation.current() || shownKey || mpr) return;
         if (fs) {
           const ds = (await parseHeader(fs.header).catch(() => null))?.ds ?? null;
-          if (generation !== viewGeneration || initialImageGeneration !== imageGeneration || !inViewer() || series() !== se || shownKey || mpr) return;
+          if (!initialPresentation.current() || shownKey || mpr) return;
           sliceCount = fs.frames;
           frameOrder = spatialFrameOrder(ds, fs.frames);
           fs.setOrder(frameOrder);
@@ -1544,7 +1543,7 @@ function selectSeries(k: number, intent = true) {
         showSlice(Math.floor(sliceCount / 2), true, false);
       })
       .catch((e) => {
-        if ((e as any)?.name !== "AbortError" && generation === viewGeneration && initialImageGeneration === imageGeneration && inViewer() && series() === se) showSlice(0, true, false);
+        if ((e as any)?.name !== "AbortError") initialPresentation.commit(() => showSlice(0, true, false));
       });
     return;
   }
@@ -1553,8 +1552,8 @@ function selectSeries(k: number, intent = true) {
 
 /** Opens a whole-slide series in the tiled view. */
 function showSlide(se: SeriesEntry) {
-  const generation = viewGeneration;
-  const current = () => generation === viewGeneration && inViewer() && series() === se;
+  const operation = viewSession.capture(() => inViewer() && series() === se);
+  const current = operation.current;
   const t0 = performance.now();
   shownKey = "";
   slideView ??= new SlideView($("stage"));
@@ -1666,11 +1665,9 @@ function showSlice(i: number, startPrefetch = false, intent = true) {
     showMpr(i);
     return;
   }
-  const generation = viewGeneration, request = ++imageGeneration;
-  volumeGeneration++;
   sliceIdx = Math.max(0, Math.min(sliceCount - 1, i));
   const wantedSlice = sliceIdx;
-  const current = () => generation === viewGeneration && request === imageGeneration && inViewer() && series() === se && sliceIdx === wantedSlice && !mpr;
+  const operation = viewSession.beginPresentation(() => inViewer() && series() === se && sliceIdx === wantedSlice && !mpr);
   const slider = $<HTMLInputElement>("slice");
   slider.value = String(sliceIdx);
   $("slice-label").textContent = `${sliceIdx + 1} / ${sliceCount}`;
@@ -1680,22 +1677,21 @@ function showSlice(i: number, startPrefetch = false, intent = true) {
   const img = single ? images!.peekFrame(se, inst, frame) : images!.peek(se, inst);
   $("stage-msg").classList.add("hidden");
   if (img) {
-    draw(img, frame, current);
+    draw(img, frame, operation);
   } else {
     const plan = planInstances(se, inst);
     const total = plan.ciphertextEnd - plan.ciphertextStart;
     const progress = (r: number, t: number) => {
-      if (current()) stageBusy(`Loading the image · ${formatBytes(r)} of ${formatBytes(t)}`, r, t);
+      operation.commit(() => stageBusy(`Loading the image · ${formatBytes(r)} of ${formatBytes(t)}`, r, t));
     };
     progress(0, total);
     (single ? images!.getFrame(se, inst, frame, { priority: Priority.Visible, onProgress: progress }) : images!.get(se, inst, { priority: Priority.Visible, onProgress: progress }))
       .then((im) => {
-        if (current()) draw(im, frame, current);
+        operation.commit(() => draw(im, frame, operation));
       })
       .catch((e) => {
         if ((e as any)?.name === "AbortError") return;
-        if (!current()) return;
-        sliceError(e);
+        operation.commit(() => sliceError(e));
       });
   }
   if (startPrefetch) prefetch();
@@ -1733,16 +1729,17 @@ function sliceError(e: unknown) {
   msg.classList.remove("hidden");
 }
 
-function draw(img: DecodedImage, frame: number, guard?: () => boolean) {
+function draw(img: DecodedImage, frame: number, guard?: ViewOperation) {
   const se = series();
-  const generation = viewGeneration, request = imageGeneration;
-  const current = guard ?? (() => generation === viewGeneration && request === imageGeneration && inViewer() && series() === se && !mpr);
+  const operation = guard ?? viewSession.capturePresentation(() => inViewer() && series() === se && !mpr);
+  const current = operation.current;
   if (!current() || (!guard && shown?.img === img && shown.slice !== sliceIdx)) return;
   $("stage-busy").classList.add("hidden");
   // The display transform needs the header (its LUTs, windows, shape): draw once it is read.
   const hp = img.header && !imageHeaderNow(img) ? imageHeader(img) : null;
   if (hp) {
-    void hp.then(() => { if (current()) draw(img, frame, current); }, () => { if (current()) draw(img, frame, current); });
+    const resume = () => operation.commit(() => draw(img, frame, operation));
+    void hp.then(resume, resume);
     return;
   }
   // Single multi-frame instance: its frames become the slices, in spatial order.
@@ -2269,10 +2266,9 @@ function wireGestures() {
 // ------------------------------------------------------------------------------------- sheets
 
 let openSheetId: string | null = null;
-let downloadJobId: number | null = null;
-let downloadFocusToken: FocusToken | undefined;
-const jobRows = new Map<number, { root: HTMLElement; open: HTMLButtonElement; title: HTMLElement; status: HTMLElement; action: HTMLButtonElement }>();
-exportJobs.subscribe(renderDownloads);
+const downloads = new DownloadsController(exportJobs, {
+  open: () => openSheet("sheet-download"), close: closeSheet, isOpen: () => openSheetId === "sheet-download",
+}, (error) => describeError(error).title);
 
 function openSheet(id: string) {
   closeSheet();
@@ -2284,23 +2280,10 @@ function openSheet(id: string) {
 
 function closeSheet() {
   if (!openSheetId) return;
-  if (openSheetId === "sheet-download" && downloadFocusToken) {
-    exportJobs.retireFocus(downloadFocusToken);
-    downloadFocusToken = undefined;
-  }
+  if (openSheetId === "sheet-download") downloads.closed();
   $(openSheetId).classList.add("hidden");
   $("sheet-backdrop").classList.add("hidden");
   openSheetId = null;
-}
-
-interface DownloadChoice {
-  id: "image" | "series" | "study" | "all";
-  title: string;
-  detail: string;
-  bytes: number;
-  /** Why the choice is not available here (shown greyed out). */
-  disabled?: string;
-  run: () => void;
 }
 
 /** The stored instance on screen, or why there is none (a reformat, a slide). Null with no series open. */
@@ -2370,151 +2353,27 @@ function downloadDefault() {
 
 /** The download menu: every choice with its size. `list` false opens it straight on the progress of a choice. */
 function openDownloadSheet(list = true, forStudy?: StudyEntry) {
-  downloadJobId = null;
-  $("sheet-download").classList.remove("nonmodal");
-  $("sheet-download").setAttribute("aria-modal", "true");
-  const opts = $("dl-options");
-  opts.textContent = "";
-  $("dl-progress").classList.add("hidden");
-  opts.classList.toggle("hidden", !list);
-  for (const c of downloadChoices(forStudy).choices) {
-    const b = el("button", "dl-option");
-    b.type = "button";
-    b.dataset.choice = c.id;
-    if (c.disabled) {
-      b.disabled = true;
-      b.dataset.reason = c.disabled;
-    } else b.dataset.bytes = String(c.bytes);
-    b.append(el("strong", undefined, c.title), el("span", undefined, c.detail));
-    b.addEventListener("click", c.run);
-    opts.append(b);
-  }
-  openSheet("sheet-download");
+  downloads.showChoices(downloadChoices(forStudy).choices, list);
 }
 
-/** The download bar: bytes written against the total, with the text that says so. */
-function setDownloadProgress(bytes: number, total: number, text: string) {
-  const track = $("dl-track");
-  track.setAttribute("aria-valuemax", String(total));
-  track.setAttribute("aria-valuenow", String(bytes));
-  track.setAttribute("aria-valuetext", `${formatBytes(bytes)} of ${formatBytes(total)}`);
-  $("dl-bar").style.width = `${(100 * bytes) / Math.max(1, total)}%`;
-  $("dl-status").textContent = text;
-}
-
-function jobStatus(job: ExportJob): string {
-  if (job.phase === "completed") return `Saved ${job.name}`;
-  if (job.phase === "cancelled") return "Cancelled.";
-  if (job.phase === "failed") return `The download stopped: ${describeError(job.error).title}.`;
-  if (job.phase === "planning") return "Preparing download…";
-  const p = job.progress;
-  return `${job.phase === "finalizing" ? "Finishing" : "Saving"} · ${formatBytes(p.bytes)} of ${formatBytes(p.totalBytes)} · ${plural(p.files, "file")} saved`;
-}
-
-/** Each progress entry owns its DOM. A late result never selects a job or opens a panel. */
-function renderDownloads() {
-  const host = $("download-jobs");
-  for (const [id, row] of jobRows) {
-    if (!exportJobs.jobs.has(id)) { row.root.remove(); jobRows.delete(id); }
-  }
-  for (const job of exportJobs.jobs.values()) {
-    let row = jobRows.get(job.id);
-    if (!row) {
-      const root = el("div", "download-job");
-      root.dataset.jobId = String(job.id);
-      const open = el("button", "btn btn-ghost download-job-open"), title = el("strong"), status = el("span");
-      open.type = "button";
-      open.append(title, status);
-      open.addEventListener("click", () => showDownloadJob(job));
-      const action = el("button", "btn btn-ghost");
-      action.type = "button";
-      action.addEventListener("click", () => job.terminal ? exportJobs.forget(job.id) : job.cancel());
-      root.append(open, action);
-      host.append(root);
-      jobRows.set(job.id, row = { root, open, title, status, action });
-    }
-    row.title.textContent = job.name;
-    row.status.textContent = jobStatus(job);
-    row.root.setAttribute("aria-current", String(exportJobs.focused === job));
-    row.open.setAttribute("aria-label", `${job.terminal ? "View" : "Focus"} download: ${job.name}`);
-    row.action.textContent = job.terminal ? "Dismiss" : "Cancel";
-    row.action.disabled = job.terminal && !job.cleanupComplete;
-  }
-  host.classList.toggle("hidden", !exportJobs.jobs.size);
-  const selected = downloadJobId === null ? undefined : exportJobs.jobs.get(downloadJobId);
-  if (selected) {
-    setDownloadProgress(selected.progress.bytes, selected.progress.totalBytes, jobStatus(selected));
-    $("btn-dl-cancel").classList.toggle("hidden", selected.terminal);
-  }
-}
-
-function showDownloadJob(job: ExportJob, focus = true) {
-  if (openSheetId !== "sheet-download") openSheet("sheet-download");
-  downloadJobId = job.id;
-  if (focus) downloadFocusToken = exportJobs.focusExport(job.id);
-  else {
-    const f = exportJobs.foreground;
-    downloadFocusToken = f.kind === "export" && f.jobId === job.id ? { jobId: job.id, epoch: f.epoch } : undefined;
-  }
-  $("dl-options").classList.add("hidden");
-  $("dl-progress").classList.remove("hidden");
-  $("sheet-download").classList.add("nonmodal");
-  $("sheet-download").setAttribute("aria-modal", "false");
-  $("sheet-backdrop").classList.add("hidden");
-  renderDownloads();
-}
-
-async function runZip(scope: ExportScope) {
+function runZip(scope: ExportScope) {
   const source = share!;
   const name = (scope.kind === "all" ? "shared-imaging" : exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined)) + ".zip";
   const job = exportJobs.create(name);
-  // Invoke the picker while the click is still user-initiated. Capture source and job before await.
-  const targetPromise = openSaveTarget(name, "application/zip", ".zip");
-  showDownloadJob(job, false);
-  try {
-    const target = await targetPromise;
-    if (!target) { job.cancel(); return; }
-    const sink = job.ownWriter(target);
-    job.check();
-    const plan = planExport(scope);
-    if (!sealExport(job, source.loader, plan)) return;
-    await exportPlannedZip(plan, source.loader, sink, (p) => job.update(p), job.signal, job);
-    job.complete();
-    (globalThis as any).__view.lastExport = name;
-  } catch (e) {
-    job.fail(e);
-  } finally {
-    await job.cleanedUp();
-  }
+  // The picker runs in the user gesture. The execution owns its result, even after cancellation.
+  const target = openSaveTarget(name, "application/zip", ".zip");
+  downloads.show(job.id, false);
+  return job.run(target, (task, sink) => writePlannedZip(planExport(scope), source.loader, sink, task))
+    .then(() => { (globalThis as any).__view.lastExport = name; }, () => {}); // failures are rendered from job state
 }
 
-async function runOne(se: SeriesEntry, i: number) {
-  const source = share!, plan = planInstances(se, i);
-  const name = `${se.instances[i].uid}.dcm`;
+function runOne(se: SeriesEntry, i: number) {
+  const source = share!, name = `${se.instances[i].uid}.dcm`;
   const job = exportJobs.create(name);
-  const targetPromise = openSaveTarget(name, "application/dicom", ".dcm");
-  showDownloadJob(job, false);
-  try {
-    const target = await targetPromise;
-    if (!target) { job.cancel(); return; }
-    const sink = job.ownWriter(target);
-    job.check();
-    job.seal(source.resolver, [{ file: se.file, lo: plan.firstRecord, hi: plan.lastRecord + 1 }]);
-    job.require(source.resolver, se.file, plan.firstRecord, plan.lastRecord + 1);
-    job.running();
-    const total = plan.ciphertextEnd - plan.ciphertextStart;
-    const bytes = await exportInstance(source.loader, se, i, (r, t) => job.update({ bytes: r, totalBytes: t, files: 0, totalFiles: 1 }), job.signal);
-    job.finalizing();
-    await sink.write(bytes);
-    job.update({ bytes: total, totalBytes: total, files: 1, totalFiles: 1 });
-    await sink.close();
-    job.complete();
-    (globalThis as any).__view.lastExport = name;
-  } catch (e) {
-    job.fail(e);
-  } finally {
-    await job.cleanedUp();
-  }
+  const target = openSaveTarget(name, "application/dicom", ".dcm");
+  downloads.show(job.id, false);
+  return job.run(target, (task, sink) => writeInstance(source.loader, se, i, sink, task))
+    .then(() => { (globalThis as any).__view.lastExport = name; }, () => {});
 }
 
 // ------------------------------------------------------------------------------------- narrow screens
@@ -2550,8 +2409,6 @@ function openMoreSheet() {
       const n = exportSize({ kind: "all", studies });
       if (studies.length)
         item("Download everything shared", `${plural(studies.length, "study", "studies")} · ${formatBytes(n.bytes)} · ZIP with DICOMDIR`, () => {
-          openSheet("sheet-download");
-          $("dl-options").classList.add("hidden");
           void runZip({ kind: "all", studies });
         });
     }
@@ -2797,7 +2654,6 @@ function wireStatic() {
   });
   $("sheet-backdrop").addEventListener("click", closeSheet);
   document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closeSheet));
-  $("btn-dl-cancel").addEventListener("click", () => { if (downloadJobId !== null) exportJobs.jobs.get(downloadJobId)?.cancel(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeSheet();
     else if (e.key === "?" && !(e.target as Element | null)?.closest?.("input, select, textarea") && !$("screen-viewer").classList.contains("hidden")) openGestures();
@@ -2820,9 +2676,9 @@ function closeSheetForce() {
 
 // Expose a few hooks for scripted checks (no behaviour depends on them).
 (globalThis as any).__viewHooks = {
-  exportState: () => ({ foreground: exportJobs.foreground, gateVersion: exportJobs.gateVersion, jobs: [...exportJobs.jobs.values()].map((j) => ({ id: j.id, name: j.name, phase: j.phase, cleanupComplete: j.cleanupComplete, progress: j.progress })) }),
+  exportState: () => ({ foreground: exportJobs.foreground, gateVersion: exportJobs.gateVersion, jobs: exportJobs.list() }),
   focusExport: (id: number) => exportJobs.focusExport(id),
-  cancelExport: (id: number) => exportJobs.jobs.get(id)?.cancel(),
+  cancelExport: (id: number) => exportJobs.cancel(id),
   state: () => ({ studyIdx, seriesIdx, sliceIdx, sliceCount, wc, ww, zoom, panX, panY, presetId, renderer: viewport?.kind }),
   showSlice,
   setWindow,

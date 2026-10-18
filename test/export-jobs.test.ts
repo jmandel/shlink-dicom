@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ExportJobs, ExportScopeRecords } from "../web/core/export-jobs";
-import { exportPlannedZip, planExport, sealExport } from "../web/core/export";
+import { writePlannedZip, planExport } from "../web/core/export";
 import { FetchPriority, InstanceLoader } from "../web/core/loader";
 import { SeriesReader } from "../web/core/wsi-source";
 import { LoaderBytes } from "../web/core/frames";
@@ -55,25 +55,25 @@ describe("export scope and focus", () => {
     expect(h.jobs.allows(h.resolver, b.file, 0, 1)).toBe(false);
   });
 
-  test("old UI tokens cannot release a resumed job; actual completion can", () => {
+  test("old UI tokens cannot release a resumed job; actual completion can", async () => {
     const h = harness(), a = series("a"), j = focus(h, a, 0, 10);
     const old = h.jobs.focusExport(j.id)!;
     h.jobs.focusBrowse();
     const resumed = h.jobs.focusExport(j.id)!;
     h.jobs.retireFocus(old);
     expect(h.jobs.foreground).toEqual({ kind: "export", jobId: j.id, epoch: resumed.epoch });
-    j.complete();
+    await j.run({ write: async () => {}, close: async () => {}, abort: async () => {} }, async (task, sink) => { task.sourcesVerified(); await sink.close(); });
     expect(h.jobs.foreground.kind).toBe("browse");
     expect(h.jobs.focusExport(j.id)).toBeUndefined();
   });
 
-  test("only one job defines admission; A finishing cannot alter B", () => {
+  test("only one job defines admission; A finishing cannot alter B", async () => {
     const h = harness(), a = series("a"), b = series("b");
     const first = focus(h, a, 0, 10), second = focus(h, b, 0, 10);
     expect(h.jobs.allows(h.resolver, a.file, 0, 1)).toBe(false);
     const before = h.jobs.foreground;
-    first.fail(new Error("late"));
-    first.complete();
+    await expect(first.run({ write: async () => {}, close: async () => {}, abort: async () => {} }, async () => { throw new Error("late"); })).rejects.toThrow("late");
+    first.cancel();
     expect(h.jobs.foreground).toBe(before);
     expect(second.terminal).toBe(false);
   });
@@ -81,8 +81,8 @@ describe("export scope and focus", () => {
   test("cancel before planning finishes prevents sealing and reads", () => {
     const h = harness(), a = series("a"), j = h.jobs.create("a");
     j.cancel();
-    expect(j.seal(h.resolver, [{ file: a.file, lo: 0, hi: 10 }])).toBe(false);
-    expect(() => j.require(h.resolver, a.file, 0, 1)).toThrow();
+    expect(() => j.seal(h.resolver, [{ file: a.file, lo: 0, hi: 10 }])).toThrow();
+    expect(() => j.read(h.resolver, { file: a.file, lo: 0, hi: 1 }, async () => new Uint8Array())).toThrow();
     expect(h.jobs.foreground.kind).toBe("browse");
   });
 });
@@ -143,7 +143,7 @@ describe("ordinary and WSI admission", () => {
     expect(h.calls.length).toBe(2);
     expect([h.calls[1].plan.firstRecord, h.calls[1].plan.lastRecord]).toEqual([1, 1]);
     h.calls[1].finish(); await yes;
-    job.complete(); await turn();
+    job.cancel(); await turn();
     expect(h.calls.length).toBe(3);
     h.calls[2].finish(); await no;
   });
@@ -156,7 +156,7 @@ describe("ordinary and WSI admission", () => {
     navigation.abort();
     h.loader.cancelQueued(() => true);
     expect(await prefetch).toBe("AbortError");
-    blocker.complete(); await turn();
+    blocker.cancel(); await turn();
     expect(h.calls.length).toBe(1);
     h.calls[0].finish(); await archive;
   });
@@ -177,7 +177,7 @@ describe("ordinary and WSI admission", () => {
     const reader = new SeriesReader(h.resolver as any, h.decryptor, b, { admission: h.jobs });
     const waiting = reader.read(0, PT, { signal: ac.signal }).catch((e) => e.name);
     ac.abort(); expect(await waiting).toBe("AbortError");
-    job.complete(); await turn();
+    job.cancel(); await turn();
     expect(reader.queued).toBe(0);
     expect(h.calls.length).toBe(0);
   });
@@ -227,35 +227,37 @@ describe("ordinary and WSI admission", () => {
 describe("planned streaming export", () => {
   for (const failure of ["fetch", "authentication", "close"] as const) test(`${failure} failure is terminal, releases every pump and never succeeds`, async () => {
     const h = harness(), a = series("a", 1), b = series("b"), plan = planExport({ kind: "series", study: {} as any, series: a });
-    const job = h.jobs.create("a.zip"); sealExport(job, h.loader, plan);
+    const job = h.jobs.create("a.zip");
+    let aborts = 0, finish!: () => void;
+    const sink = { write: async () => {}, close: async () => { throw new Error("close"); }, abort: async () => { aborts++; } };
+    const loader = { resolver: h.resolver, run: () => new Promise<Uint8Array[]>((resolve, reject) => {
+      finish = () => failure === "close" ? resolve([new Uint8Array([1, 2, 3])]) : reject(new Error(failure));
+    }) };
+    const writing = job.run(sink, (task, owned) => writePlannedZip(plan, loader as any, owned, task)).catch((e) => e.message);
+    await turn();
     const ordinary = h.loader.instance(b, 0);
     const reader = new SeriesReader(h.resolver as any, h.decryptor, b, { admission: h.jobs });
     const slide = reader.read(PT, 2 * PT);
-    let aborts = 0;
-    const sink = job.ownWriter({ write: async () => {}, close: async () => { throw new Error("close"); }, abort: async () => { aborts++; } });
-    const loader = { resolver: h.resolver, run: async () => {
-      if (failure !== "close") throw new Error(failure);
-      return [new Uint8Array([1, 2, 3])];
-    } };
-    await expect(exportPlannedZip(plan, loader as any, sink, undefined, job.signal, job)).rejects.toThrow(failure);
-    await job.cleanedUp(); await turn();
+    expect(h.calls.length).toBe(0);
+    finish(); expect(await writing).toBe(failure); await turn();
     expect(job.phase).toBe("failed");
+    expect(job.snapshot.cleanupComplete).toBe(true);
     expect(h.jobs.foreground.kind).toBe("browse");
     expect(h.calls.length).toBe(2);
     h.calls.forEach((c) => c.finish()); await Promise.all([ordinary, slide]);
     expect(aborts).toBe(1);
-    job.complete(); expect(job.phase).toBe("failed");
+    job.cancel(); expect(job.phase).toBe("failed");
   });
 
   test("complete future scope is sealed, including objects outside the first series", () => {
     const h = harness(), a = series("a", 200), b = series("b", 2);
     const plan = planExport({ kind: "study", study: { series: [a, b] } as any });
     const job = h.jobs.create("all.zip");
-    sealExport(job, h.loader, plan);
+    job.seal(h.resolver, plan.runs.map((r) => ({ file: r.series.file, lo: r.plan.firstRecord, hi: r.plan.lastRecord + 1 })));
     expect(plan.runs.length).toBe(3);
     expect(plan.total.files).toBe(202);
-    job.require(h.resolver, b.file, 1, 2);
-    expect(() => job.require(h.resolver, b.file, 1, 3)).toThrow("outside");
+    expect(job.scope!.contains(h.resolver, b.file, 1, 2)).toBe(true);
+    expect(job.scope!.contains(h.resolver, b.file, 1, 3)).toBe(false);
     a.instances.pop();
     expect(plan.total.files).toBe(202);
     expect(plan.runs[1].series.instances.length).toBe(200);
@@ -264,7 +266,7 @@ describe("planned streaming export", () => {
 
   test("write failure releases gate before slow cleanup and aborts all read-ahead", async () => {
     const h = harness(), a = series("a", 400), b = series("b"), plan = planExport({ kind: "series", study: {} as any, series: a });
-    const job = h.jobs.create("a.zip"); sealExport(job, h.loader, plan);
+    const job = h.jobs.create("a.zip");
     const signals: AbortSignal[] = [];
     const loader = { resolver: h.resolver, run: async (_s: any, p: RangePlan, o: any) => {
       signals.push(o.signal);
@@ -272,34 +274,33 @@ describe("planned streaming export", () => {
       return Array.from({ length: p.lastInstance - p.firstInstance + 1 }, () => new Uint8Array(32));
     } };
     let finishAbort!: () => void, aborts = 0;
-    const sink = job.ownWriter({ write: async () => { throw new Error("disk"); }, close: async () => {}, abort: () => { aborts++; return new Promise<void>((r) => finishAbort = r); } });
-    const writing = exportPlannedZip(plan, loader as any, sink, undefined, job.signal, job).catch((e) => e.message);
+    const sink = { write: async () => { throw new Error("disk"); }, close: async () => {}, abort: () => { aborts++; return new Promise<void>((r) => finishAbort = r); } };
+    const writing = job.run(sink, (task, owned) => writePlannedZip(plan, loader as any, owned, task)).catch((e) => e.message);
     await turn();
     expect(job.phase).toBe("failed");
     expect(h.jobs.allows(h.resolver, b.file, 0, 1)).toBe(true);
     expect(signals.length).toBe(3);
     expect(signals.every((s) => s.aborted)).toBe(true);
     expect(aborts).toBe(1);
-    expect(job.cleanupComplete).toBe(false);
+    expect(job.snapshot.cleanupComplete).toBe(false);
     finishAbort();
     expect(await writing).toBe("disk");
-    await job.cleanedUp();
-    expect(job.cleanupComplete).toBe(true);
+    expect(job.snapshot.cleanupComplete).toBe(true);
   });
 
-  test("verified source barrier retains gate through sink close and explicit completion", async () => {
+  test("verified source barrier retains gate through sink close and execution completion", async () => {
     const h = harness(), a = series("a", 1), b = series("b"), plan = planExport({ kind: "series", study: {} as any, series: a });
-    const job = h.jobs.create("a.zip"); sealExport(job, h.loader, plan);
+    const job = h.jobs.create("a.zip");
     let finishClose!: () => void;
     const chunks: Uint8Array[] = [];
-    const sink = job.ownWriter({ write: async (c) => { chunks.push(c); }, close: () => new Promise<void>((r) => finishClose = r), abort: async () => {} });
+    const sink = { write: async (c: Uint8Array) => { chunks.push(c); }, close: () => new Promise<void>((r) => finishClose = r), abort: async () => {} };
     const loader = { resolver: h.resolver, run: async () => [new Uint8Array([1, 2, 3])] };
-    const writing = exportPlannedZip(plan, loader as any, sink, (p) => job.update(p), job.signal, job);
+    const writing = job.run(sink, (task, owned) => writePlannedZip(plan, loader as any, owned, task));
     await turn();
     expect(job.phase).toBe("finalizing");
     expect(h.jobs.allows(h.resolver, b.file, 0, 1)).toBe(false);
     expect(chunks.some((c) => c.length === 3 && c[2] === 3)).toBe(true);
-    finishClose(); await writing; job.complete(); await job.cleanedUp();
+    finishClose(); await writing;
     expect(job.phase).toBe("completed");
     expect(h.jobs.allows(h.resolver, b.file, 0, 1)).toBe(true);
   });
