@@ -74,6 +74,8 @@
     </button>
   </header>
 
+  <aside id="download-jobs" class="download-jobs hidden" aria-label="Downloads"></aside>
+
   <main id="main">
     <section id="screen-loading" class="screen center-screen" aria-live="polite">
       <div class="spinner" aria-hidden="true"></div>
@@ -186,6 +188,7 @@
     <div id="dl-progress" class="dl-progress hidden" aria-live="polite">
       <div id="dl-track" class="bar" role="progressbar" aria-valuemin="0" aria-label="Download"><div id="dl-bar" class="bar-fill"></div></div>
       <p id="dl-status" class="small"></p>
+      <p class="small muted">You can close this panel and keep browsing while the download continues.</p>
       <button id="btn-dl-cancel" class="btn" type="button">Cancel</button>
     </div>
     <button class="btn btn-ghost sheet-close" type="button" data-close>Close</button>

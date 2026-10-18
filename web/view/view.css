@@ -238,6 +238,14 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .dl-option strong { font-weight: 650; }
 .dl-option span { font-size: 0.8125rem; color: var(--text-3); overflow-wrap: anywhere; }
 .dl-progress { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.download-jobs { display: flex; gap: 8px; flex: none; overflow-x: auto; padding: 4px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.download-job { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 0 0 auto; }
+.download-job-open { display: flex; flex-direction: column; align-items: flex-start; max-width: 260px; gap: 0; text-align: left; }
+.download-job-open strong, .download-job-open span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.download-job-open strong { font-size: 0.75rem; font-weight: 600; }
+.download-job-open span { font-size: 0.75rem; color: var(--text-3); }
+.download-job[aria-current="true"] .download-job-open { border-color: var(--accent); }
+#sheet-download.nonmodal { pointer-events: auto; }
 .bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
 .bar-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
 .trust-facts { margin: 8px 0 12px; display: grid; gap: 12px; }

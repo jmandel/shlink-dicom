@@ -565,9 +565,10 @@ export class MediaController {
    * Thumbnail of a series that may hold video: a video gets a drawn placeholder (decoding a frame
    * would mean downloading the stream). Resolves false for an image, which the caller draws.
    */
-  async drawThumb(canvas: HTMLCanvasElement, series: SeriesEntry): Promise<boolean> {
+  async drawThumb(canvas: HTMLCanvasElement, series: SeriesEntry, current = () => true): Promise<boolean> {
     const p = await this.probe(series, 0).catch(() => null);
     if (!p?.video) return false;
+    if (!current()) return true;
     const g = canvas.getContext("2d")!;
     const w = canvas.width, h = canvas.height;
     g.fillStyle = "#1b1d22";

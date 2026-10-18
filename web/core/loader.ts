@@ -19,6 +19,7 @@ import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
 import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCiphertextLength, type RangePlan } from "./range";
 import type { LinkResolver } from "./resolver";
+import { AdmissionWakeup, type ReadAdmission } from "./read-admission";
 
 /** Same values as viewer-kit's Priority: lower runs first. */
 export const FetchPriority = { Visible: 0, Near: 1, Prefetch: 2, Background: 3 } as const;
@@ -39,6 +40,8 @@ export const BULK_BYTES = 1 << 20;
 export const MAX_READ_BYTES = 2 ** 31;
 
 export interface LoaderOptions {
+  /** Admission preference only; cache, shared readers and running requests bypass it. */
+  admission?: ReadAdmission;
   /** Range requests in flight at once (default 6). Prefetch and background reads leave two of them free. */
   concurrency?: number;
   /** Ciphertext records kept for re-use (default 96 MiB). */
@@ -52,6 +55,8 @@ export interface LoaderOptions {
 export interface LoadOptions {
   priority?: number;
   signal?: AbortSignal;
+  /** A committed export survives navigation's queued-prefetch cleanup. */
+  durable?: boolean;
   /** Ciphertext bytes received so far, against the instance's ciphertext length. */
   onProgress?: (received: number, total: number) => void;
 }
@@ -75,6 +80,7 @@ interface Span {
   seq: number;
   /** Requests waiting on this span (or a span merged into it). */
   refs: number;
+  durableRefs: number;
   running: boolean;
   /** Keep its records in the cache. */
   cache: boolean;
@@ -108,6 +114,7 @@ const root = (s: Span): Span => (s.into ? root(s.into) : s);
 
 export class InstanceLoader {
   readonly concurrency: number;
+  readonly admission?: ReadAdmission;
   /** Ciphertext bytes received so far. */
   bytesFetched = 0;
   private queue: Span[] = [];
@@ -120,6 +127,7 @@ export class InstanceLoader {
   private cached = new Map<string, Uint8Array>();
   private cachedBytes = 0;
   private budget: number;
+  private admissionWakeup: AdmissionWakeup;
 
   constructor(
     readonly resolver: LinkResolver,
@@ -128,6 +136,8 @@ export class InstanceLoader {
   ) {
     this.concurrency = opts.concurrency ?? 6;
     this.budget = opts.cacheBytes ?? 96 * 1024 * 1024;
+    this.admission = opts.admission;
+    this.admissionWakeup = new AdmissionWakeup(this.admission, () => this.pump());
   }
 
   /** Reports a decrypt outcome for a plan's records (decryptors running elsewhere call this). */
@@ -166,7 +176,7 @@ export class InstanceLoader {
    * downloads; what it fetches is not cached.
    */
   async run(series: SeriesEntry, plan: RangePlan, o: LoadOptions = {}): Promise<Uint8Array[]> {
-    const ct = await this.records(series, plan, { priority: o.priority ?? FetchPriority.Background, signal: o.signal, onProgress: o.onProgress }, false);
+    const ct = await this.records(series, plan, { ...o, priority: o.priority ?? FetchPriority.Background }, false);
     const bytes = await this.decrypt(series, plan, ct);
     const out: Uint8Array[] = [];
     const base = series.instances[plan.firstInstance].offset;
@@ -183,10 +193,11 @@ export class InstanceLoader {
    */
   cancelQueued(predicate: (seriesId: string, priority: number) => boolean) {
     this.queue = this.queue.filter((s) => {
-      if (!predicate(s.seriesId, s.priority)) return true;
+      if (!predicate(s.seriesId, s.priority) || s.durableRefs > 0) return true;
       this.drop(s, abortError());
       return false;
     });
+    this.admissionWakeup.update(this.queue.length > 0);
   }
 
   private async decrypt(series: SeriesEntry, plan: RangePlan, ct: Uint8Array): Promise<Uint8Array> {
@@ -213,7 +224,7 @@ export class InstanceLoader {
     let missingFrom = -1;
     const addSpan = (a: number, b: number) => {
       const s: Span = {
-        fileId, seriesId: series.id, series, first: a, last: b, priority, seq: this.seq++, refs: 0, running: false, cache, received: 0,
+        fileId, seriesId: series.id, series, first: a, last: b, priority, seq: this.seq++, refs: 0, durableRefs: 0, running: false, cache, received: 0,
         waiting: new Map(), listeners: new Set(),
       };
       for (let r = a; r <= b; r++) {
@@ -251,7 +262,7 @@ export class InstanceLoader {
 
     const total = plan.ciphertextEnd - plan.ciphertextStart;
     const spans = [...used];
-    for (const s of spans) s.refs++;
+    for (const s of spans) { s.refs++; if (o.durable) s.durableRefs++; }
     let released = false;
     // This request no longer needs its spans: a queued span nobody needs is dropped, a running one
     // aborted (its records already here stay).
@@ -261,6 +272,7 @@ export class InstanceLoader {
       for (const s of spans) {
         const r = root(s);
         r.refs--;
+        if (o.durable) r.durableRefs--;
         if (r.refs > 0) continue;
         if (r.running) {
           if (!r.waiting.size) continue;
@@ -272,6 +284,7 @@ export class InstanceLoader {
           this.drop(r, abortError());
         }
       }
+      this.admissionWakeup.update(this.queue.length > 0);
     };
     let progress: (() => void) | null = null;
     if (o.onProgress) {
@@ -352,30 +365,38 @@ export class InstanceLoader {
     return s.priority >= FetchPriority.Prefetch;
   }
 
+  private allowed(s: Span): boolean {
+    return this.admission?.allows(this.resolver, s.series.file, s.first, s.last + 1) ?? true;
+  }
+
   private pump() {
-    while (this.queue.length) {
-      let best = -1;
-      for (let k = 0; k < this.queue.length; k++) {
-        const a = this.queue[k];
-        if (this.isBulk(a) && (this.runningBulk >= this.concurrency - 2 || (a.priority === FetchPriority.Prefetch && this.bulkPending() >= BULK_BYTES))) continue;
-        const b = best >= 0 ? this.queue[best] : null;
-        if (!b || a.priority < b.priority || (a.priority === b.priority && a.seq < b.seq)) best = k;
+    this.admissionWakeup.update(this.queue.length > 0);
+    try {
+      while (this.queue.length) {
+        let best = -1;
+        for (let k = 0; k < this.queue.length; k++) {
+          const a = this.queue[k];
+          if (!this.allowed(a)) continue;
+          if (this.isBulk(a) && (this.runningBulk >= this.concurrency - 2 || (a.priority === FetchPriority.Prefetch && this.bulkPending() >= BULK_BYTES))) continue;
+          const b = best >= 0 ? this.queue[best] : null;
+          if (!b || a.priority < b.priority || (a.priority === b.priority && a.seq < b.seq)) best = k;
+        }
+        if (best < 0) return;
+        // The image on screen may go past the limit by two: it never waits behind thumbnails and neighbours.
+        if (this.running >= this.concurrency + (this.queue[best].priority === FetchPriority.Visible ? 2 : 0)) return;
+        const span = this.queue.splice(best, 1)[0];
+        if (span.cache) this.merge(span);
+        span.running = true;
+        this.running++;
+        const bulk = this.isBulk(span);
+        if (bulk) this.runningBulk++, this.bulkSpans.add(span);
+        void this.runSpan(span).finally(() => {
+          this.running--;
+          if (bulk) this.runningBulk--, this.bulkSpans.delete(span);
+          this.pump();
+        });
       }
-      if (best < 0) return;
-      // The image on screen may go past the limit by two: it never waits behind thumbnails and neighbours.
-      if (this.running >= this.concurrency + (this.queue[best].priority === FetchPriority.Visible ? 2 : 0)) return;
-      const span = this.queue.splice(best, 1)[0];
-      if (span.cache) this.merge(span);
-      span.running = true;
-      this.running++;
-      const bulk = this.isBulk(span);
-      if (bulk) this.runningBulk++, this.bulkSpans.add(span);
-      void this.runSpan(span).finally(() => {
-        this.running--;
-        if (bulk) this.runningBulk--, this.bulkSpans.delete(span);
-        this.pump();
-      });
-    }
+    } finally { this.admissionWakeup.update(this.queue.length > 0); }
   }
 
   /** Queued spans of the same series next to `s` in its file join it. */
@@ -385,7 +406,7 @@ export class InstanceLoader {
       if (s.last - s.first + 1 >= most) return;
       const k = this.queue.findIndex(
         (q) =>
-          q.cache && q.fileId === s.fileId && q.seriesId === s.seriesId &&
+          this.allowed(q) && q.cache && q.fileId === s.fileId && q.seriesId === s.seriesId &&
           ((q.first === s.last + 1 && q.last - s.first + 1 <= most) ||
             // Before it only when at least as urgent: its bytes would arrive first.
             (q.last === s.first - 1 && q.priority <= s.priority && s.last - q.first + 1 <= most)),
@@ -396,6 +417,7 @@ export class InstanceLoader {
       s.first = Math.min(s.first, q.first);
       s.last = Math.max(s.last, q.last);
       s.refs += q.refs;
+      s.durableRefs += q.durableRefs;
       for (const [r, d] of q.waiting) {
         s.waiting.set(r, d);
         this.pending.set(`${s.fileId}:${r}`, s);

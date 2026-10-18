@@ -20,6 +20,7 @@ import type { LinkResolver } from "./resolver";
 import { FrameFiles } from "./frame-file";
 import { TS } from "./transfer-syntax";
 import type { RecordState } from "./loader";
+import { AdmissionWakeup, type ReadAdmission } from "./read-admission";
 import {
   buildPyramid,
   FragmentWalker,
@@ -94,12 +95,14 @@ export class SeriesReader implements ByteSource {
   private queue: Job[] = [];
   private running = 0;
   private seq = 0;
+  private admissionWakeup: AdmissionWakeup;
 
   constructor(
     readonly resolver: LinkResolver,
     readonly decryptor: RecordDecryptor,
     readonly series: SeriesEntry,
     private o: {
+      admission?: ReadAdmission;
       concurrency?: number;
       /** Plaintext bytes of records kept (default 64 MiB). */
       budgetBytes?: number;
@@ -107,7 +110,9 @@ export class SeriesReader implements ByteSource {
       maxRun?: number;
       onRecords?: (fileId: string, first: number, last: number, s: RecordState) => void;
     } = {},
-  ) {}
+  ) {
+    this.admissionWakeup = new AdmissionWakeup(o.admission, () => this.pump());
+  }
 
   /** Requests queued or running. */
   get busy(): boolean {
@@ -224,24 +229,30 @@ export class SeriesReader implements ByteSource {
     this.queue.splice(i, 1);
     for (let r = job.first; r <= job.last; r++) if (this.pending.get(r) === job) this.pending.delete(r);
     job.reject(abortError());
+    this.admissionWakeup.update(this.queue.length > 0);
   }
 
   private pump() {
-    const conc = this.o.concurrency ?? 6;
-    while (this.running < conc && this.queue.length) {
-      let best = 0;
-      for (let k = 1; k < this.queue.length; k++) {
-        const a = this.queue[k], b = this.queue[best];
-        if (a.priority < b.priority || (a.priority === b.priority && a.seq < b.seq)) best = k;
+    this.admissionWakeup.update(this.queue.length > 0);
+    try {
+      const conc = this.o.concurrency ?? 6;
+      while (this.running < conc && this.queue.length) {
+        let best = -1;
+        for (let k = 0; k < this.queue.length; k++) {
+          const a = this.queue[k], b = this.queue[best];
+          if (this.o.admission && !this.o.admission.allows(this.resolver, this.series.file, a.first, a.last + 1)) continue;
+          if (!b || a.priority < b.priority || (a.priority === b.priority && a.seq < b.seq)) best = k;
+        }
+        if (best < 0) return;
+        const job = this.queue.splice(best, 1)[0];
+        job.running = true;
+        this.running++;
+        void this.run(job).finally(() => {
+          this.running--;
+          this.pump();
+        });
       }
-      const job = this.queue.splice(best, 1)[0];
-      job.running = true;
-      this.running++;
-      void this.run(job).finally(() => {
-        this.running--;
-        this.pump();
-      });
-    }
+    } finally { this.admissionWakeup.update(this.queue.length > 0); }
   }
 
   private async run(job: Job) {
@@ -304,6 +315,7 @@ export class SeriesReader implements ByteSource {
 // ------------------------------------------------------------------------------------- slide
 
 export interface SlideShare {
+  admission?: ReadAdmission;
   resolver: LinkResolver;
   decryptor: RecordDecryptor;
   index: { bundle: any };
@@ -583,7 +595,7 @@ export class SlideSource extends FrameLocator {
     series: SeriesEntry,
     readonly opts: SlideSourceOptions,
   ) {
-    const reader = new SeriesReader(share.resolver, share.decryptor, series, { budgetBytes: opts.budgetBytes, onRecords: opts.onRecords });
+    const reader = new SeriesReader(share.resolver, share.decryptor, series, { admission: share.admission, budgetBytes: opts.budgetBytes, onRecords: opts.onRecords });
     super(series, reader, opts.signal);
     this.reader = reader;
   }
