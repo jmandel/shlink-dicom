@@ -151,6 +151,7 @@ let studyAbort = new AbortController();
  * which joins the loads already running.
  */
 let overviewAborts: { study: number | null; ac: AbortController }[] = [];
+let overviewGeneration = 0;
 /** The ImageStore, once the decoder pool has started. */
 let imagesReady: Promise<ImageStore> | null = null;
 let overviewWork: (() => void) | null = null;
@@ -1065,6 +1066,7 @@ function showPasteScreen() {
 // ------------------------------------------------------------------------------------- overview
 
 function renderOverview() {
+  const generation = ++overviewGeneration;
   const idx = share!.index;
   $("ov-patient").textContent = patientLine();
   const meta: string[] = [];
@@ -1141,10 +1143,13 @@ function renderOverview() {
     overviewAborts.push({ study: null, ac });
     const signal = ac.signal;
     void imagesReady?.then(() => {
-      if (!signal.aborted) work(signal);
+      if (!signal.aborted && generation === overviewGeneration) work(signal);
     }, () => {});
   };
   const work = (signal: AbortSignal) => {
+    // A metadata refresh replaces the cards. Existing reads may finish for shared consumers,
+    // but only the current cards may advance their thumbnail sequence or start prefetch.
+    const current = () => !signal.aborted && generation === overviewGeneration;
     // Each thumbnail can be stopped on its own (opening a study keeps that study's).
     const card = (study: number) => {
       const ac = new AbortController();
@@ -1153,9 +1158,9 @@ function renderOverview() {
     };
     const first = small.map((x) => x.run(card(x.study))().catch(() => {}));
     let chain: Promise<unknown> = Promise.allSettled(first);
-    const rest = big.map((b) => (chain = chain.then(() => (signal.aborted ? undefined : b.run(card(b.study))().catch(() => {})))));
+    const rest = big.map((b) => (chain = chain.then(() => (current() ? b.run(card(b.study))().catch(() => {}) : undefined))));
     void Promise.allSettled([...first, ...rest]).then(() => {
-      if (!signal.aborted) after.forEach((f) => void f(signal).catch(() => {}));
+      if (current()) after.forEach((f) => void f(signal).catch(() => {}));
     });
   };
   // Shown already (a second render, once accessions or times are known): its own thumbnails now.
