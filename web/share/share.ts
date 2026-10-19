@@ -34,7 +34,7 @@ import { secureUrl } from "./lib/smart";
 import type { Instance, SeriesModel } from "./lib/ingest";
 import { $, h, copyText, flash, qrSvg, ICONS, expiryFieldset, expiryFrom, dateOnly, SERVER_MAX_DAYS } from "./lib/ui";
 
-const STEP_NAMES = ["Add imaging", "Review", "Recipient", "Upload", "Send"];
+const STEP_NAMES = ["Add imaging", "Review", "Link settings", "Upload", "Send"];
 let cfg: SiteConfig;
 let col = new Collection();
 let sourceKind: "files" | "portal" | "link" | "sample" = "files";
@@ -807,7 +807,7 @@ async function upload() {
     // With a passcode, the link is made now, so the passcode is never saved for a reload.
     const { api, full, owner } = await startShare(
       new ShareApi(cfg.apiBase),
-      (sid, token) => new ShareApi(cfg.apiBase, { sid, token }),
+      (sid, token) => new ShareApi(cfg.apiBase, { sid, token, ownerKey }),
       { expiresAt, passcode, link: { label: job.recipient, exp: job.exp, longLived: job.longLived } },
       early,
       async (api, sid, token) => {
@@ -1027,7 +1027,7 @@ async function runUpload(p: Pending) {
     link = await persist(() => publishLinkBundle(api, job.ownerKey, made.id, bundle), onConn);
     const cred = { sid: job.sid, token: job.token, ownerKey: job.ownerKey };
     const shlink = await shlinkFor(link, job.ownerKey, cfg.viewerPrefix);
-    const saved = saveShare({ ...cred, title: `${job.title}${job.recipient ? ` · for ${job.recipient}` : ""}`, createdAt: job.startedAt, apiBase: cfg.apiBase });
+    const saved = saveShare({ ...cred, title: `${job.title}${job.recipient ? ` · ${job.recipient}` : ""}`, createdAt: job.startedAt, apiBase: cfg.apiBase });
     clearJob(job.sid);
     releaseJob(job.sid);
     await clearHandles(job.sid);
@@ -1111,7 +1111,7 @@ function planFromJob(plan: NonNullable<UploadJob["plan"]>, c: Collection): Packe
 }
 
 async function resumeJob(job: UploadJob, files?: File[], link?: string) {
-  const api = new ShareApi(job.apiBase, { sid: job.sid, token: job.token });
+  const api = new ShareApi(job.apiBase, { sid: job.sid, token: job.token, ownerKey: job.ownerKey });
   show(4);
   setUploadError(null);
   $("up-tech").textContent = "Continuing the upload";
@@ -1233,7 +1233,7 @@ $("resume-discard").addEventListener("click", async () => {
   offered = null;
   if (job) {
     await clearHandles(job.sid);
-    await new ShareApi(job.apiBase, { sid: job.sid, token: job.token }).deleteShare().catch(() => {});
+    await new ShareApi(job.apiBase, { sid: job.sid, token: job.token, ownerKey: job.ownerKey }).deleteShare().catch(() => {});
     clearJob(job.sid);
     releaseJob(job.sid);
   }
@@ -1246,14 +1246,14 @@ $("resume-discard").addEventListener("click", async () => {
 function renderDone(saved: boolean, hasPasscode: boolean, recipient: string | null) {
   const r = result!;
   const exp = r.link.exp;
-  $("done-sub").textContent = [recipient ? `For ${recipient}` : null, plural(r.studies, "study", "studies"), exp ? `works until ${dateOnly(exp)}` : "works until you revoke it"]
+  $("done-sub").textContent = [recipient, plural(r.studies, "study", "studies"), exp ? `works until ${dateOnly(exp)}` : "works until you revoke it"]
     .filter(Boolean)
     .join(" · ");
   $("qr").innerHTML = qrSvg(r.shlink);
   $("done-link").textContent = r.shlink;
   $<HTMLAnchorElement>("d-open").href = r.shlink;
   const subject = "Imaging shared with you";
-  const body = `${recipient ? `For ${recipient}: ` : ""}I've shared imaging with you. Open this link to view it:\n\n${r.shlink}\n${hasPasscode ? "\nI'll send you the passcode separately.\n" : ""}`;
+  const body = `${recipient ? `${recipient}: ` : ""}I've shared imaging with you. Open this link to view it:\n\n${r.shlink}\n${hasPasscode ? "\nI'll send you the passcode separately.\n" : ""}`;
   $<HTMLAnchorElement>("d-email").href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   $("d-share").classList.toggle("hidden", !("share" in navigator));
   $("done-note").textContent = hasPasscode

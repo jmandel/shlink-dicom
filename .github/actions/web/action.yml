@@ -18,3 +18,6 @@ runs:
         bun viewer-kit/scripts/build.mjs
         bun install --frozen-lockfile
         bun web/build.ts > /dev/null
+    - name: Encrypted label and share creation tests
+      shell: bash
+      run: bun test test/link-labels.test.ts test/start-share.test.ts

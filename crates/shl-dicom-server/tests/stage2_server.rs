@@ -191,45 +191,74 @@ fn golden_file_id() -> String {
 }
 
 #[tokio::test]
-async fn test_link_names_are_owner_only_persistent_and_clearable() {
-    let dir = temp_data_dir("link_names");
+async fn test_labels_are_encrypted_persistent_clearable_and_migrate_atomically() {
+    let dir = temp_data_dir("encrypted_labels");
     let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
     let share: Value = client.post(format!("{base}/api/shares")).send().await.unwrap().json().await.unwrap();
     let sid = share["share"]["id"].as_str().unwrap();
     let token = share["controlToken"].as_str().unwrap();
-    let link: Value = client.post(format!("{base}/api/shares/{sid}/links")).bearer_auth(token)
-        .json(&json!({ "label": "First recipient", "allowedFiles": [], "exp": chrono::Utc::now().timestamp() + 86400 }))
+    let links_url = format!("{base}/api/shares/{sid}/links");
+    // The server validates an opaque envelope; only the browser can decrypt it.
+    let first = json!({ "v": 1, "iv": "AAAAAAAAAAAAAAAA", "ciphertext": "c".repeat(43) });
+    let next = json!({ "v": 1, "iv": "BBBBBBBBBBBBBBBB", "ciphertext": "d".repeat(43) });
+    assert_eq!(client.post(&links_url).bearer_auth(token).json(&json!({ "label": "Do not store me" }))
+        .send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let link: Value = client.post(&links_url).bearer_auth(token)
+        .json(&json!({ "labelEncrypted": first, "allowedFiles": [], "exp": chrono::Utc::now().timestamp() + 86400 }))
         .send().await.unwrap().json().await.unwrap();
     let lid = link["id"].as_str().unwrap();
-    let url = format!("{base}/api/shares/{sid}/links/{lid}");
+    let url = format!("{links_url}/{lid}");
     let stored = || {
         let conn = rusqlite::Connection::open(state.share_db_path(sid)).unwrap();
-        conn.query_row("SELECT label FROM links WHERE lid = ?1", [lid], |r| r.get::<_, Option<String>>(0)).unwrap()
+        let (plain, encrypted): (Option<String>, Option<String>) = conn.query_row(
+            "SELECT label, label_encrypted FROM links WHERE lid = ?1", [lid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!(plain.is_none(), "plaintext label persisted");
+        encrypted.map(|s| serde_json::from_str::<Value>(&s).unwrap())
     };
-    assert_eq!(stored().as_deref(), Some("First recipient"));
-    assert_eq!(client.patch(&url).json(&json!({ "label": "Unauthorized" })).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(client.patch(&url).bearer_auth("wrong token").json(&json!({ "label": "Unauthorized" })).send().await.unwrap().status(), StatusCode::FORBIDDEN);
-    assert_eq!(stored().as_deref(), Some("First recipient"));
+    assert_eq!(stored(), Some(first.clone()));
+    assert!(link.get("label").is_none());
+    assert_eq!(client.patch(&url).json(&json!({ "labelEncrypted": next })).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(client.patch(&url).bearer_auth("wrong token").json(&json!({ "labelEncrypted": next })).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+    for bad in [json!({"label":"Do not store me"}), json!({"label":null}),
+        json!({"labelEncrypted":{"v":2,"iv":"AAAAAAAAAAAAAAAA","ciphertext":"c".repeat(43)}}),
+        json!({"labelEncrypted":{"v":1,"iv":"bad","ciphertext":"bad"}})] {
+        assert_eq!(client.patch(&url).bearer_auth(token).json(&bad).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(stored(), Some(first.clone()));
 
-    // Labels survive a separate database connection and a separate owner's API client.
     for (patch, want) in [
-        (json!({ "label": "Dr. García — wrist review" }), Some("Dr. García — wrist review")),
-        (json!({ "online": true }), Some("Dr. García — wrist review")),
-        (json!({ "label": null }), None),
+        (json!({ "labelEncrypted": next }), Some(next.clone())),
+        (json!({ "online": true }), Some(next.clone())),
+        (json!({ "labelEncrypted": null }), None),
     ] {
         let response = client.patch(&url).bearer_auth(token).json(&patch).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let updated: Value = response.json().await.unwrap();
-        assert_eq!(updated["label"], json!(want));
+        assert_eq!(updated["labelEncrypted"], json!(want));
+        assert!(updated.get("label").is_none());
         for field in ["id", "url", "flag", "exp", "online", "allowedFiles"] {
             assert_eq!(updated[field], link[field], "renaming changed {field}");
         }
-        assert_eq!(stored().as_deref(), want);
-        let from_other_client: Value = reqwest::Client::new().get(format!("{base}/api/shares/{sid}"))
+        assert_eq!(stored(), want);
+        let other: Value = reqwest::Client::new().get(format!("{base}/api/shares/{sid}"))
             .bearer_auth(token).send().await.unwrap().json().await.unwrap();
-        assert_eq!(from_other_client["links"][0]["label"], json!(want));
+        assert_eq!(other["links"][0]["labelEncrypted"], json!(want));
+        assert!(other["links"][0].get("label").is_none());
+    }
+
+    // Simulate a database created before encrypted labels. Migration clears the old value in
+    // the same transaction, and a stale migration never overwrites a later rename or clear.
+    state.open_share_db(sid).unwrap().lock().unwrap().execute(
+        "UPDATE links SET label = 'Legacy recipient' WHERE lid = ?1", [lid]).unwrap();
+    let migrate = json!({ "labelEncrypted": first, "migrateLabel": true });
+    assert_eq!(client.patch(&url).bearer_auth(token).json(&migrate).send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(stored(), Some(first));
+    for value in [next, Value::Null] {
+        client.patch(&url).bearer_auth(token).json(&json!({ "labelEncrypted": value })).send().await.unwrap().error_for_status().unwrap();
+        client.patch(&url).bearer_auth(token).json(&migrate).send().await.unwrap().error_for_status().unwrap();
+        assert_eq!(json!(stored()), value);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -294,7 +323,6 @@ async fn test_zero_knowledge_upload_and_u_mode_range() {
         .post(format!("{base}/api/shares/{sid}/links"))
         .bearer_auth(&token)
         .json(&json!({
-            "label": "Golden U-Mode",
             "allowedFiles": [format!("{file_id}.bin")]
         }))
         .send()

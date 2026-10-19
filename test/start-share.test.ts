@@ -4,6 +4,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ShareApi } from "../web/share/lib/api";
 import { startShare } from "../web/share/lib/upload";
+import { randomKeyB64 } from "../web/core/jwe";
+import { decryptLabel } from "../web/share/lib/labels";
 
 const realFetch = globalThis.fetch;
 let shares: Map<string, { links: any[] }>;
@@ -31,7 +33,8 @@ beforeEach(() => {
       const o = JSON.parse(String(init.body));
       if (failLink) return json(400, { error: "label too long" });
       if (o.allowedFiles.some((f: string) => !held.has(f.replace(/\.bin$/, "")))) return json(400, { error: "FOREIGN KEY constraint failed" });
-      const link = { id: `l${share.links.length}`, passcode: !!o.passcode, allowedFiles: o.allowedFiles };
+      expect(o.label).toBeUndefined();
+      const link = { id: `l${share.links.length}`, passcode: !!o.passcode, allowedFiles: o.allowedFiles, ...(o.labelEncrypted ? { labelEncrypted: o.labelEncrypted } : {}) };
       share.links.push(link);
       return json(200, link);
     }
@@ -54,6 +57,19 @@ describe("making a share for an upload", () => {
     await open("7319", async () => "saved");
     const [share] = [...shares.values()];
     expect(share.links).toEqual([{ id: "l0", passcode: true, allowedFiles: [] }]);
+  });
+  test("the early passcode link stores an encrypted label before the owner Bundle exists", async () => {
+    const ownerKey = randomKeyB64(), label = "Second opinion — Dr. Lee";
+    await startShare(
+      new ShareApi("https://share.example"),
+      (sid, token) => new ShareApi("https://share.example", { sid, token, ownerKey }),
+      { expiresAt: 2e9, passcode: "7319", link: { label, exp: null, longLived: false } },
+      () => {},
+      async () => "saved",
+    );
+    const [sid, share] = [...shares.entries()][0];
+    expect(JSON.stringify(share)).not.toContain(label);
+    expect(await decryptLabel(share.links[0].labelEncrypted, ownerKey, sid)).toBe(label);
   });
   test("without a passcode, no link is made yet", async () => {
     await open("", async () => "saved");

@@ -134,11 +134,32 @@ pub struct ShareQuota {
     pub files_max: Option<usize>,
 }
 
+/// Browser-encrypted label. The owner key is never part of an API request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedLabel {
+    pub v: u8,
+    pub iv: String,
+    pub ciphertext: String,
+}
+
+impl EncryptedLabel {
+    pub fn valid(&self) -> bool {
+        let base64url = |s: &str| s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        self.v == 1 && self.iv.len() == 16 && base64url(&self.iv)
+            && (23..=448).contains(&self.ciphertext.len()) && base64url(&self.ciphertext)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkResource {
     pub id: String,
+    /// Legacy plaintext, returned only until the owner migrates it. Never written by the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default)]
+    pub label_encrypted: Option<EncryptedLabel>,
     pub url: String,
     pub flag: Option<String>,
     pub exp: Option<i64>,
@@ -1248,9 +1269,12 @@ pub fn build_link_resource_from_row(
     };
     let flag = compute_shl_flag(has_passcode, long_lived);
 
+    let encrypted: Option<String> = conn.query_row("SELECT label_encrypted FROM links WHERE lid = ?1", [&lid], |r| r.get(0)).ok()?;
+    let label_encrypted = encrypted.map(|s| serde_json::from_str(&s)).transpose().ok()?;
     Some(LinkResource {
         id: lid,
         label,
+        label_encrypted,
         url,
         flag,
         exp,
@@ -1449,6 +1473,7 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS links (
            lid                 TEXT PRIMARY KEY,
            label               TEXT,
+           label_encrypted     TEXT,
            long_lived          INTEGER NOT NULL,
            online              INTEGER NOT NULL DEFAULT 1,
            exp                 INTEGER,
@@ -1483,6 +1508,10 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS access_ts ON access_log(ts);
          CREATE INDEX IF NOT EXISTS access_lid ON access_log(lid);",
     )?;
+    // Keep old names until a browser with the owner key can encrypt them.
+    if conn.prepare("SELECT label_encrypted FROM links LIMIT 0").is_err() {
+        conn.execute_batch("ALTER TABLE links ADD COLUMN label_encrypted TEXT;")?;
+    }
     // Share databases made before links had refill_attempts.
     if conn.prepare("SELECT refill_attempts FROM links LIMIT 0").is_err() {
         conn.execute_batch("ALTER TABLE links ADD COLUMN refill_attempts INTEGER NOT NULL DEFAULT 0;")?;
@@ -1574,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn an_older_share_database_gains_refill_attempts() {
+    fn an_older_share_database_gains_refill_attempts_and_encrypted_labels() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE links (lid TEXT PRIMARY KEY, label TEXT, long_lived INTEGER NOT NULL, online INTEGER NOT NULL DEFAULT 1,
@@ -1587,6 +1616,8 @@ mod tests {
         super::init_share_db(&conn).unwrap();
         let v: i64 = conn.query_row("SELECT refill_attempts FROM links WHERE lid = 'x'", [], |r| r.get(0)).unwrap();
         assert_eq!(v, 0);
+        let label: Option<String> = conn.query_row("SELECT label_encrypted FROM links WHERE lid = 'x'", [], |r| r.get(0)).unwrap();
+        assert!(label.is_none());
     }
 
     #[test]

@@ -19,7 +19,7 @@
       <ol id="steps">
         <li data-step="1"><span class="dot">1</span><span class="lbl">Add imaging</span></li>
         <li data-step="2"><span class="dot">2</span><span class="lbl">Review</span></li>
-        <li data-step="3"><span class="dot">3</span><span class="lbl">Recipient</span></li>
+        <li data-step="3"><span class="dot">3</span><span class="lbl">Link settings</span></li>
         <li data-step="4"><span class="dot">4</span><span class="lbl">Upload</span></li>
         <li data-step="5"><span class="dot">5</span><span class="lbl">Send</span></li>
       </ol>
@@ -137,12 +137,12 @@
 
     <!-- 3. Who and for how long -->
     <section class="screen hidden" id="s-who" data-step="3">
-      <h1 tabindex="-1">Who is it for, and for how long?</h1>
+      <h1 tabindex="-1">Label your link and choose its settings</h1>
       <form id="who-form" class="stack">
         <div class="field">
-          <label for="in-recipient">Who is it for?</label>
-          <input id="in-recipient" type="text" maxlength="60" placeholder="Dr. Patel, Neurology" autocomplete="off" />
-          <p class="hint">The person who opens the link sees this name, and so do you when you open your owner link.</p>
+          <label for="in-recipient">Link label (optional)</label>
+          <input id="in-recipient" type="text" maxlength="80" placeholder="Dr. Patel, Neurology" autocomplete="off" />
+          <p class="hint">Shown to you and anyone with the shared link. You can change it later from your owner page.</p>
         </div>
         <div id="who-expiry"></div>
         <label class="toggle-row">

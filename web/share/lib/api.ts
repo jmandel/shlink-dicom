@@ -1,13 +1,15 @@
-// Client for the share and link API (PLAN.md §5.2). The server sees only ciphertext, the owner
-// Bundle encrypted under the owner key, and each link's encrypted Bundle.
+// Client for the share and link API (PLAN.md §5.2). Clinical content and link labels are
+// encrypted in the browser; the server also holds access settings and activity metadata.
 import { b64urlDecode, b64urlEncode, utf8 } from "../../core/b64";
 import { encryptJwe } from "../../core/jwe";
 import { decryptBundle } from "../../core/reader";
 import { encodeShlink } from "../../core/shlink";
 import { fromUtf8 } from "../../core/b64";
+import { decryptLabel, encryptLabel, type EncryptedLabel } from "./labels";
 
 export interface LinkResource {
   id: string;
+  /** Decrypted in this browser; never sent as plaintext to the API. */
   label: string | null;
   url: string;
   flag: string | null;
@@ -25,6 +27,10 @@ export interface LinkResource {
   lastOpenedAt?: number | null;
   bytesServed?: number;
 }
+
+/** Wire data never contains a new plaintext label. `label` is read only for legacy migration. */
+type StoredLink = Omit<LinkResource, "label"> & { label?: string | null; labelEncrypted: EncryptedLabel | null };
+type StoredShare = Omit<ShareResource, "links"> & { links: StoredLink[] };
 
 export interface ShareResource {
   id: string;
@@ -67,7 +73,7 @@ export interface OwnerCredential {
 export class ShareApi {
   constructor(
     readonly base: string,
-    readonly cred: { sid: string; token: string } | null = null,
+    readonly cred: { sid: string; token: string; ownerKey?: string } | null = null,
   ) {}
 
   private async req(method: string, path: string, body?: BodyInit | object, type?: string): Promise<Response> {
@@ -105,11 +111,37 @@ export class ShareApi {
   async createShare(expiresAt: number | null): Promise<{ share: ShareResource; controlToken: string }> {
     return (await this.req("POST", "/api/shares", expiresAt ? { expiresAt } : {})).json();
   }
+  private ownerKey(): string {
+    if (!this.cred?.ownerKey) throw new Error("Open the owner link to read or edit link labels.");
+    return this.cred.ownerKey;
+  }
+
+  private async openLink(link: StoredLink): Promise<LinkResource> {
+    const label = link.labelEncrypted
+      ? await decryptLabel(link.labelEncrypted, this.ownerKey(), this.cred!.sid)
+      : link.label ?? null;
+    return { ...link, label };
+  }
+
+  private async openShare(share: StoredShare): Promise<ShareResource> {
+    const legacy = share.links.filter((l) => l.label != null && !l.labelEncrypted);
+    if (legacy.length) {
+      // Verify the owner key before migrating: a mistyped key must never replace a legacy name.
+      await readOwnerBundle(this, this.ownerKey());
+      for (const link of legacy) {
+        const labelEncrypted = await encryptLabel(link.label!, this.ownerKey(), this.cred!.sid);
+        const updated: StoredLink = await (await this.req("PATCH", `${this.s}/links/${link.id}`, { labelEncrypted, migrateLabel: true })).json();
+        share.links = share.links.map((l) => l.id === link.id ? updated : l);
+      }
+    }
+    return { ...share, links: await Promise.all(share.links.map((l) => this.openLink(l))) };
+  }
+
   async getShare(): Promise<ShareResource> {
-    return (await this.req("GET", this.s)).json();
+    return this.openShare(await (await this.req("GET", this.s)).json());
   }
   async setShareExpiry(expiresAt: number | null): Promise<ShareResource> {
-    return (await this.req("PATCH", this.s, { expiresAt })).json();
+    return this.openShare(await (await this.req("PATCH", this.s, { expiresAt })).json());
   }
   async deleteShare(): Promise<void> {
     await this.req("DELETE", this.s);
@@ -121,10 +153,12 @@ export class ShareApi {
     return (await this.req("GET", `${this.s}/owner.jwe`)).text();
   }
   async createLink(o: { label: string | null; passcode?: string; exp: number | null; longLived: boolean; allowedFiles: string[] }): Promise<LinkResource> {
-    return (await this.req("POST", `${this.s}/links`, { ...o, passcode: o.passcode || undefined, exp: o.exp ?? undefined })).json();
+    const { label, ...settings } = o;
+    const labelEncrypted = label?.trim() ? await encryptLabel(label, this.ownerKey(), this.cred!.sid) : null;
+    return this.openLink(await (await this.req("POST", `${this.s}/links`, { ...settings, labelEncrypted, passcode: o.passcode || undefined, exp: o.exp ?? undefined })).json());
   }
   async putLinkBundle(lid: string, jwe: string): Promise<LinkResource> {
-    return (await this.req("PUT", `${this.s}/links/${lid}/bundle.jwe`, jwe, "application/jose")).json();
+    return this.openLink(await (await this.req("PUT", `${this.s}/links/${lid}/bundle.jwe`, jwe, "application/jose")).json());
   }
   /** A link's Bundle JWE as stored, for its owner; null when the link has none. */
   async getLinkBundle(lid: string): Promise<string | null> {
@@ -136,7 +170,9 @@ export class ShareApi {
     }
   }
   async patchLink(lid: string, patch: { label?: string | null; exp?: number | null; online?: boolean; allowedFiles?: string[] }): Promise<LinkResource> {
-    return (await this.req("PATCH", `${this.s}/links/${lid}`, patch)).json();
+    const { label, ...settings } = patch;
+    const body = label === undefined ? settings : { ...settings, labelEncrypted: label?.trim() ? await encryptLabel(label, this.ownerKey(), this.cred!.sid) : null };
+    return this.openLink(await (await this.req("PATCH", `${this.s}/links/${lid}`, body)).json());
   }
   async deleteLink(lid: string) {
     await this.req("DELETE", `${this.s}/links/${lid}`);
@@ -297,7 +333,7 @@ async function linkKey(ownerKey: string, lid: string): Promise<string> {
 /** The label inside the link (shown to the recipient). At most 80 characters, as SHL requires. */
 function payloadLabel(recipient: string | null): string {
   const r = (recipient ?? "").trim();
-  const s = r ? `Imaging for ${r}` : "Shared imaging";
+  const s = r || "Shared imaging";
   return s.length > 80 ? s.slice(0, 79) + "…" : s;
 }
 

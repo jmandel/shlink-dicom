@@ -1115,6 +1115,7 @@ pub async fn delete_share_file(
 #[serde(rename_all = "camelCase")]
 pub struct CreateLinkRequest {
     pub label: Option<String>,
+    pub label_encrypted: Option<crate::state::EncryptedLabel>,
     pub passcode: Option<String>,
     pub exp: Option<i64>,
     #[serde(default)]
@@ -1132,6 +1133,12 @@ pub async fn create_link(
 ) -> Response {
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
+    }
+    if req.label.is_some() {
+        return json_err(StatusCode::BAD_REQUEST, "Link labels must be encrypted. Reload the page and try again.");
+    }
+    if req.label_encrypted.as_ref().is_some_and(|v| !v.valid()) {
+        return json_err(StatusCode::BAD_REQUEST, "Invalid encrypted link label.");
     }
     let Some(conn_arc) = state.open_share_db(&sid) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -1178,11 +1185,11 @@ pub async fn create_link(
             return Err((StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_LINKS_EXCEEDED".into()));
         }
         tx.execute(
-            "INSERT INTO links (lid, label, long_lived, online, exp, passcode_salt, passcode_hash, remaining_attempts, created_at)
+            "INSERT INTO links (lid, label_encrypted, long_lived, online, exp, passcode_salt, passcode_hash, remaining_attempts, created_at)
              VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8)",
             params![
                 lid,
-                req.label,
+                req.label_encrypted.as_ref().map(|v| serde_json::to_string(v).unwrap()),
                 i64::from(req.long_lived),
                 req.exp,
                 salt_opt,
@@ -1326,6 +1333,11 @@ pub async fn get_link_bundle(
 pub struct PatchLinkRequest {
     #[serde(default, deserialize_with = "present_nullable")]
     pub label: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_nullable")]
+    pub label_encrypted: Option<Option<crate::state::EncryptedLabel>>,
+    /// Only replace a legacy value: a concurrent rename must win over migration.
+    #[serde(default)]
+    pub migrate_label: bool,
     pub exp: Option<Option<i64>>,
     pub online: Option<bool>,
     pub allowed_files: Option<Vec<String>>,
@@ -1349,6 +1361,12 @@ pub async fn patch_link(
 ) -> Response {
     if let Err(resp) = require_auth(&state, &sid, &headers) {
         return resp;
+    }
+    if req.label.is_some() {
+        return json_err(StatusCode::BAD_REQUEST, "Link labels must be encrypted. Reload the page and try again.");
+    }
+    if req.label_encrypted.as_ref().and_then(|v| v.as_ref()).is_some_and(|v| !v.valid()) {
+        return json_err(StatusCode::BAD_REQUEST, "Invalid encrypted link label.");
     }
     if !is_valid_lid(&lid) {
         return StatusCode::NOT_FOUND.into_response();
@@ -1379,10 +1397,12 @@ pub async fn patch_link(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    if let Some(label_opt) = req.label {
+    if let Some(value) = req.label_encrypted {
+        let encrypted = value.map(|v| serde_json::to_string(&v).unwrap());
         if let Err(e) = tx.execute(
-            "UPDATE links SET label = ?1 WHERE lid = ?2",
-            params![label_opt, lid],
+            "UPDATE links SET label_encrypted = ?1, label = NULL WHERE lid = ?2
+             AND (?3 = 0 OR (label_encrypted IS NULL AND label IS NOT NULL))",
+            params![encrypted, lid, req.migrate_label],
         ) {
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
