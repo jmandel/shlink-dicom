@@ -21,6 +21,11 @@
 .samples .btn { justify-content: flex-start; text-align: left; }
 .samples .btn[aria-disabled="true"] { opacity: 0.6; pointer-events: none; }
 #sample-note { margin-top: 4px; }
+.developer-tools { margin-top: 24px; padding: 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.developer-tools h2 { font-size: 1.25rem; margin: 0; }
+.developer-tools p { margin: 0; }
+.demo-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.demo-links .btn { max-width: 100%; white-space: normal; text-align: left; }
 @media (max-width: 420px) {
   .open-form { flex-direction: column; }
 }

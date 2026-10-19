@@ -31,7 +31,7 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .step { padding: 32px 0 8px; border-top: 1px solid var(--border); margin-top: 28px; scroll-margin-top: 60px; }
-.step h2 { font-size: 1.375rem; display: flex; align-items: baseline; gap: 10px; }
+.step h2 { font-size: 1.375rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; overflow-wrap: anywhere; }
 .step h2 .n {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
   min-width: 30px; height: 30px; padding: 0 6px; border-radius: 15px;

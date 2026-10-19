@@ -45,7 +45,15 @@
         <p class="muted">Follow the sample link step by step: the key, the encrypted files, and every request your browser makes.</p>
       </a>
     </div>
-    <p class="small muted" style="margin-top:20px">Viewer demos: open the same sample in <a href="demos/ohif/">OHIF</a> or <a href="demos/cornerstone/">Cornerstone3D</a>.</p>
+    <section class="developer-tools card" aria-labelledby="developer-tools-title">
+      <h2 id="developer-tools-title">Developer tools</h2>
+      <p>Try the public sample in two established DICOM viewers. A service worker presents the encrypted SMART Health Link as a DICOMweb endpoint inside your browser. Images are fetched and decrypted as the viewer needs them.</p>
+      <div class="demo-links">
+        <a class="btn" href="demos/ohif/">Open sample in OHIF</a>
+        <a class="btn" href="demos/cornerstone/">Open sample in Cornerstone3D</a>
+      </div>
+      <p class="small muted">Each demo opens the sample automatically. You can also paste your own link and enter a passcode. <a href="https://github.com/jmandel/shlink-dicom/tree/main/web/dicomweb">Read the adapter integration guide</a>.</p>
+    </section>
   </main>
   <script type="module" src="assets/landing.js"></script>
 </body>
