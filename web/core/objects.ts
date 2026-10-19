@@ -94,6 +94,15 @@ add("other", [
 
 const DICOMDIR = "1.2.840.10008.1.3.10";
 
+// Common single-frame IODs: PS3.3 A.2–A.4 and A.8.1. Match exact SOP classes, not
+// modalities or UID prefixes: enhanced CT/MR and multi-frame SC must still be inspected.
+const SINGLE_FRAME_SOPS = new Set(["1", "2", "4", "7"].map((uid) => P + uid));
+
+/** A conservative shortcut; false includes both multi-frame and unknown classes. */
+export function isKnownSingleFrameSopClass(sopClassUid: string): boolean {
+  return SINGLE_FRAME_SOPS.has(sopClassUid);
+}
+
 /** Kind and plain name of a SOP class; unknown classes are "other". */
 export function sopInfo(sopClassUid: string): SopInfo {
   const known = SOP[sopClassUid];

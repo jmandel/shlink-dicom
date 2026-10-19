@@ -26,6 +26,8 @@ export interface DicomHeader {
   seriesDescription: string;
   instanceNumber: string;
   specificCharacterSet: string;
+  /** Present only when a positive Number of Frames was actually read from the header. */
+  numberOfFrames?: number;
 }
 
 export async function readDicomHeader(bytes: Uint8Array): Promise<DicomHeader> {
@@ -34,6 +36,7 @@ export async function readDicomHeader(bytes: Uint8Array): Promise<DicomHeader> {
   }
   const { meta, ds, transferSyntax } = await parseDicom(bytes, { untilPixelData: true });
   const s = (t: number) => ds.str(t) ?? "";
+  const frames = ds.num(T.NumberOfFrames);
   return {
     transferSyntax,
     sopClassUid: meta.str(tag(0x0002, 0x0002)) ?? s(T.SOPClassUID),
@@ -56,5 +59,6 @@ export async function readDicomHeader(bytes: Uint8Array): Promise<DicomHeader> {
     seriesDescription: s(T.SeriesDescription),
     instanceNumber: s(T.InstanceNumber),
     specificCharacterSet: s(T.SpecificCharacterSet),
+    ...(typeof frames === "number" && Number.isInteger(frames) && frames > 0 ? { numberOfFrames: frames } : {}),
   };
 }
