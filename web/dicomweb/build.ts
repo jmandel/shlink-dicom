@@ -17,6 +17,14 @@ export async function buildDicomweb(root: string, out: string, minify = true) {
     cpSync(`${root}/node_modules/@cornerstonejs/${pkg}/dist/${file}`, `${dest}/${file}`);
   }
   cpSync(`${root}/web/dicomweb/demo.css`, `${dest}/demo.css`);
+  const notices = ["Cornerstone3D 5.13.1\n" + readFileSync(`${root}/web/dicomweb/Cornerstone3D-LICENSE.txt`, "utf8")];
+  // Keep the license notices distributed with the bundled runtime and its dependencies.
+  const licenses = new Bun.Glob("**/{LICENSE,LICENSE.*,LICENCE,LICENCE.*,License,License.*,license,license.*,COPYING,COPYING.*,NOTICE,NOTICE.*,Copyright.txt}");
+  for (const file of [...licenses.scanSync({ cwd: `${root}/node_modules`, onlyFiles: true })].sort()) {
+    if (/\.(js|map|ts)$/.test(file)) continue;
+    notices.push(`${file}\n${readFileSync(`${root}/node_modules/${file}`, "utf8")}`);
+  }
+  await Bun.write(`${dest}/THIRD_PARTY_NOTICES.txt`, notices.join("\n\n----------------------------------------\n\n"));
   const template = readFileSync(`${root}/web/dicomweb/demo.html`, "utf8");
   for (const [kind, name] of [["cornerstone", "Cornerstone3D"], ["ohif", "OHIF"]]) {
     mkdirSync(`${dest}/${kind}`, { recursive: true });
