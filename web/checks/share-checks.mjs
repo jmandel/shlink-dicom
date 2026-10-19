@@ -632,7 +632,7 @@ async function flowReshare(dev) {
 
 async function flowManage(dev, files) {
   const P = `manage/${dev}`;
-  const { context, page, errors } = await newPage(dev, { allowErrors: [/404 .*\/shl\//] });
+  const { context, page, errors } = await newPage(dev, { allowErrors: [/404 .*\/shl\//, /503.*\/api\/shares\//, /Failed to load resource:.*503/] });
   await page.goto(files.manage);
   await page.waitForSelector(".link-card", { timeout: 20000 });
   const status = await page.locator(".link-card .lc-status").first().textContent();
@@ -646,8 +646,56 @@ async function flowManage(dev, files) {
   await layout(page, `${P} page`, dev);
   await shot(page, `${dev}-6-manage`);
 
-  // Extend
+  // Rename, cancel, retry after an error, and clear a name without changing the link's access.
   const lid = await page.locator(".link-card").first().getAttribute("data-lid");
+  const firstCard = page.locator(`.link-card[data-lid="${lid}"]`);
+  const initialName = await firstCard.locator("h3").textContent();
+  await firstCard.getByRole("button", { name: "Edit name" }).click();
+  await page.fill("#rename-name", "Unsaved name");
+  await page.click("#rename-cancel");
+  check(`${P}: cancel leaves the name alone`, await firstCard.locator("h3").textContent() === initialName);
+
+  await firstCard.getByRole("button", { name: "Edit name" }).click();
+  const renamed = "Dr. García — wrist review";
+  await page.fill("#rename-name", renamed);
+  // Refresh while editing: polling must not replace the dialog or discard the draft.
+  await page.evaluate(() => [...document.querySelectorAll("#activity button")].find((b) => b.textContent === "Refresh").click());
+  await page.waitForFunction(() => document.querySelector("#activity button")?.textContent === "Updated");
+  check(`${P}: refreshing activity preserves the name draft`, await page.inputValue("#rename-name") === renamed);
+  await layout(page, `${P} edit name`, dev);
+  await shot(page, `${dev}-6-manage-edit-name`);
+  await page.route(`**/api/shares/*/links/${lid}`, (route) => route.fulfill({ status: 503, json: { error: "Name update temporarily unavailable" } }), { times: 1 });
+  await page.click("#rename-save");
+  await page.waitForSelector("#rename-error:not(.hidden)");
+  check(`${P}: failed save keeps the draft and reports the error`, await page.inputValue("#rename-name") === renamed && await firstCard.locator("h3").textContent() === initialName && (await page.textContent("#rename-error")).includes("temporarily unavailable"));
+  await page.click("#rename-save");
+  await page.waitForSelector("#rename-link:not([open])", { state: "attached" });
+  check(`${P}: saved name is shown on the card`, await firstCard.locator("h3").textContent() === renamed);
+  await page.reload();
+  await page.waitForSelector(".link-card");
+  check(`${P}: name survives reload`, await firstCard.locator("h3").textContent() === renamed);
+  const other = await newPage(dev);
+  await other.page.goto(files.manage);
+  await other.page.waitForSelector(".link-card");
+  check(`${P}: name is available in another browser without saved shares`, await other.page.locator(".link-card h3").first().textContent() === renamed);
+  await noErrors(`${P} other owner browser`, other.errors);
+  await other.context.close();
+  await firstCard.getByRole("button", { name: "Show link" }).click();
+  await page.waitForSelector(".lc-qr .mono");
+  const renamedLink = await page.locator(".lc-qr .mono").first().textContent();
+  check(`${P}: newly copied link uses the new label`, verify(renamedLink, [], undefined, ["--index-only"]).label === `Imaging for ${renamed}`);
+  check(`${P}: previously copied link still opens`, verifyFails(files.shlink) === null);
+
+  await firstCard.getByRole("button", { name: "Edit name" }).click();
+  await page.fill("#rename-name", "   ");
+  await page.click("#rename-save");
+  await page.waitForFunction((id) => window.__manage.share.links.find((l) => l.id === id).label === null, lid);
+  check(`${P}: clearing the name restores the unnamed label`, await firstCard.locator("h3").textContent() === "Link without a name");
+  await page.reload();
+  await page.waitForSelector(".link-card");
+  check(`${P}: clearing the name persists`, await firstCard.locator("h3").textContent() === "Link without a name");
+
+  // Extend
   const exp0 = await page.evaluate((id) => window.__manage.share.links.find((l) => l.id === id).exp, lid);
   await page.locator(".link-card").first().getByRole("button", { name: "Extend by a week" }).click();
   await page.waitForFunction(([id, e]) => window.__manage.share.links.find((l) => l.id === id).exp > e, [lid, exp0]);

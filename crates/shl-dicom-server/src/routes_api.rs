@@ -1324,10 +1324,20 @@ pub async fn get_link_bundle(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchLinkRequest {
+    #[serde(default, deserialize_with = "present_nullable")]
     pub label: Option<Option<String>>,
     pub exp: Option<Option<i64>>,
     pub online: Option<bool>,
     pub allowed_files: Option<Vec<String>>,
+}
+
+/// A missing PATCH field leaves the value alone; an explicit null clears it.
+fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// `PATCH /api/shares/{sid}/links/{lid}`
@@ -1370,10 +1380,12 @@ pub async fn patch_link(
     }
 
     if let Some(label_opt) = req.label {
-        let _ = tx.execute(
+        if let Err(e) = tx.execute(
             "UPDATE links SET label = ?1 WHERE lid = ?2",
             params![label_opt, lid],
-        );
+        ) {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
     }
     if let Some(exp_opt) = req.exp {
         let _ = tx.execute(

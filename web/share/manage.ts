@@ -77,8 +77,12 @@ function confirmBox(title: string, text: string, ok: string): Promise<boolean> {
   setInterval(async () => {
     if (document.hidden) return;
     try {
-      share = await api.getShare();
+      const before = share;
+      const latest = await api.getShare();
       await loadEvents();
+      // A completed owner action takes precedence over an older background response.
+      if (share !== before) return;
+      share = latest;
       refreshStatus();
     } catch {}
   }, 15000);
@@ -144,10 +148,14 @@ function render() {
       h("ol", { class: "timeline", id: "timeline" }),
       h("details", { class: "tech-details", id: "techlog" }, h("summary", null, "Show technical log"), h("p", { class: "hint" }, "Every request the server logged for this share, newest first. The server sees which encrypted files and byte ranges were read, not what is in them."), h("div", { class: "log-wrap", id: "log" })),
       h("button", { class: "btn", onclick: async (e: Event) => {
-        share = await api.getShare();
+        const button = e.currentTarget as HTMLElement;
+        const before = share;
+        const latest = await api.getShare();
         await loadEvents();
+        if (share !== before) return;
+        share = latest;
         refreshStatus();
-        flash(e.currentTarget as HTMLElement, "Updated");
+        flash(button, "Updated");
       } }, "Refresh"),
     ),
     h(
@@ -216,6 +224,7 @@ function linkCard(l: LinkResource): HTMLElement {
       "div",
       { class: "lc-actions" },
       h("button", { class: "btn", "aria-expanded": String(openPanels.get(l.id) === "link"), onclick: () => togglePanel(l, "link") }, "Show link"),
+      h("button", { class: "btn edit-link-name", onclick: () => editName(l) }, "Edit name"),
       l.exp ? h("button", { class: "btn", onclick: () => extend(l) }, "Extend by a week") : null,
       h("button", { class: "btn", onclick: () => setOnline(l, !l.online) }, l.online ? "Take offline" : "Bring back online"),
       l.longLived ? h("button", { class: "btn", "aria-expanded": String(openPanels.get(l.id) === "studies"), onclick: () => togglePanel(l, "studies") }, "Change studies") : null,
@@ -249,7 +258,7 @@ async function fillLinkPanel(panel: HTMLElement, l: LinkResource) {
         null,
         h("p", { class: "mono break" }, shlink),
         h("div", { class: "lc-actions" }, h("button", { class: "btn btn-primary", onclick: async (e: Event) => flash(e.currentTarget as HTMLElement, (await copyText(shlink)) ? "Copied" : "Copy failed") }, "Copy link"), h("a", { class: "btn", href: shlink, target: "_blank", rel: "noopener" }, "Open it")),
-        h("p", { class: "hint" }, "This is the same link you sent. It is rebuilt here from your owner link; the server does not have its key."),
+        h("p", { class: "hint" }, "Rebuilt from your owner link with the current name and expiry. Previously copied links keep their original label and still open the same imaging."),
       ),
     ),
   );
@@ -356,6 +365,48 @@ function fillStudiesPanel(panel: HTMLElement, l: LinkResource) {
 }
 
 // ---------------------------------------------------------------------------------- actions
+
+const renameDialog = $<HTMLDialogElement>("rename-link");
+const renameInput = $<HTMLInputElement>("rename-name");
+const renameSave = $<HTMLButtonElement>("rename-save");
+const renameCancel = $<HTMLButtonElement>("rename-cancel");
+let renaming: string | null = null;
+
+function editName(l: LinkResource) {
+  renaming = l.id;
+  renameInput.value = l.label ?? "";
+  $("rename-error").classList.add("hidden");
+  renameDialog.showModal();
+  renameInput.focus();
+  renameInput.select();
+}
+
+renameCancel.addEventListener("click", () => renameDialog.close());
+renameDialog.addEventListener("cancel", (e) => {
+  if (renameSave.disabled) e.preventDefault();
+});
+renameDialog.addEventListener("close", () => {
+  document.querySelector<HTMLButtonElement>(`[data-lid="${renaming}"] .edit-link-name`)?.focus();
+  renaming = null;
+});
+$("rename-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!renaming || renameSave.disabled) return;
+  renameSave.disabled = renameCancel.disabled = renameInput.disabled = true;
+  $("rename-error").classList.add("hidden");
+  try {
+    const updated = await api.patchLink(renaming, { label: renameInput.value.trim() || null });
+    share = { ...share, links: share.links.map((l) => l.id === updated.id ? updated : l) };
+    refreshStatus();
+    renameDialog.close();
+    toast(updated.label ? "Link name saved." : "Link name removed.");
+  } catch (x) {
+    $("rename-error").textContent = (x as Error).message;
+    $("rename-error").classList.remove("hidden");
+  } finally {
+    renameSave.disabled = renameCancel.disabled = renameInput.disabled = false;
+  }
+});
 
 async function ensureShareLasts(until: number | null) {
   const want = until ?? now() + SERVER_MAX_DAYS * 86400;
