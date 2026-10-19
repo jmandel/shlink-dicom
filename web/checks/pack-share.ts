@@ -48,7 +48,7 @@ export function linksFor(base: string, sid: string, token: string) {
         await fetch(`${base}/api/shares/${sid}/links`, {
           method: "POST",
           headers: { ...auth, "Content-Type": "application/json" },
-          body: JSON.stringify({ label: o.label, passcode: o.passcode, exp: o.exp, allowedFiles: await bundleFiles(bundle) }),
+          body: JSON.stringify({ passcode: o.passcode, exp: o.exp, allowedFiles: await bundleFiles(bundle) }),
         }),
       );
       const key = randomKeyB64();

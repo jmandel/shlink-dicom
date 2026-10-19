@@ -182,7 +182,7 @@ function filesNote(): HTMLElement {
 
 function refreshStatus() {
   $("share-tech").textContent = `${plural(index.studies.length, "study", "studies")} · ${plural(share.files.length, "encrypted file")} · ${formatBytes(share.quota.bytesUsed)} stored, all encrypted · kept on the server until ${share.expiresAt ? dateOnly(share.expiresAt) : "deleted"}`;
-  for (const l of share.links) labels.set(l.id, l.label || "Link without a name");
+  for (const l of share.links) labels.set(l.id, l.label || "Link without a label");
   const box = $("links");
   if (!share.links.length) box.replaceChildren(h("p", { class: "muted" }, "No links. Make one below."));
   else box.replaceChildren(...share.links.map(linkCard));
@@ -224,7 +224,7 @@ function linkCard(l: LinkResource): HTMLElement {
       "div",
       { class: "lc-actions" },
       h("button", { class: "btn", "aria-expanded": String(openPanels.get(l.id) === "link"), onclick: () => togglePanel(l, "link") }, "Show link"),
-      h("button", { class: "btn edit-link-name", onclick: () => editName(l) }, "Edit name"),
+      h("button", { class: "btn edit-link-name", onclick: () => editName(l) }, "Edit label"),
       l.exp ? h("button", { class: "btn", onclick: () => extend(l) }, "Extend by a week") : null,
       h("button", { class: "btn", onclick: () => setOnline(l, !l.online) }, l.online ? "Take offline" : "Bring back online"),
       l.longLived ? h("button", { class: "btn", "aria-expanded": String(openPanels.get(l.id) === "studies"), onclick: () => togglePanel(l, "studies") }, "Change studies") : null,
@@ -258,7 +258,7 @@ async function fillLinkPanel(panel: HTMLElement, l: LinkResource) {
         null,
         h("p", { class: "mono break" }, shlink),
         h("div", { class: "lc-actions" }, h("button", { class: "btn btn-primary", onclick: async (e: Event) => flash(e.currentTarget as HTMLElement, (await copyText(shlink)) ? "Copied" : "Copy failed") }, "Copy link"), h("a", { class: "btn", href: shlink, target: "_blank", rel: "noopener" }, "Open it")),
-        h("p", { class: "hint" }, "Rebuilt from your owner link with the current name and expiry. Previously copied links keep their original label and still open the same imaging."),
+        h("p", { class: "hint" }, "Rebuilt from your owner link with the current label and expiry. Previously copied links keep their original label and still open the same imaging."),
       ),
     ),
   );
@@ -399,7 +399,7 @@ $("rename-form").addEventListener("submit", async (e) => {
     share = { ...share, links: share.links.map((l) => l.id === updated.id ? updated : l) };
     refreshStatus();
     renameDialog.close();
-    toast(updated.label ? "Link name saved." : "Link name removed.");
+    toast(updated.label ? "Link label saved." : "Link label removed.");
   } catch (x) {
     $("rename-error").textContent = (x as Error).message;
     $("rename-error").classList.remove("hidden");
@@ -474,7 +474,7 @@ function toggleNewLink() {
   }
   $("new-link-btn").setAttribute("aria-expanded", "true");
   const err = h("p", { class: "error hidden", role: "alert" });
-  const recipient = h("input", { type: "text", id: "nl-recipient", maxlength: 60, placeholder: "Dr. Lee, Orthopedics", autocomplete: "off" }) as HTMLInputElement;
+  const recipient = h("input", { type: "text", id: "nl-recipient", maxlength: 80, placeholder: "Dr. Lee, Orthopedics", autocomplete: "off" }) as HTMLInputElement;
   const pass = h("input", { type: "text", id: "nl-pass", maxlength: 40, autocomplete: "off", spellcheck: "false" }) as HTMLInputElement;
   const updates = h("input", { type: "checkbox", id: "nl-updates" }) as HTMLInputElement;
   const form = h(
@@ -509,7 +509,7 @@ function toggleNewLink() {
     } },
     h("h3", null, "New link"),
     h("p", { class: "hint" }, "It uses the files already uploaded, with its own key, so nothing is encrypted or uploaded again."),
-    h("div", { class: "field" }, h("label", { for: "nl-recipient" }, "Who is it for?"), recipient),
+    h("div", { class: "field" }, h("label", { for: "nl-recipient" }, "Link label (optional)"), recipient, h("p", { class: "hint" }, "Shown to you and anyone with the shared link. You can edit it later.")),
     studyChecks("nl-study", () => true),
     looseReportChecks("nl-report"),
     expiryFieldset("nl-exp", "1w"),

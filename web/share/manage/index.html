@@ -29,16 +29,17 @@
   </dialog>
   <dialog id="rename-link" aria-labelledby="rename-title">
     <form id="rename-form" class="stack">
-      <h2 id="rename-title">Edit link name</h2>
+      <h2 id="rename-title">Edit link label</h2>
       <div class="field">
-        <label for="rename-name">Link name (optional)</label>
-        <input id="rename-name" type="text" maxlength="60" autocomplete="off" aria-describedby="rename-hint" />
-        <p class="hint" id="rename-hint">Use a recipient or a short name to recognize this link. Leave it blank to remove the name.</p>
+        <label for="rename-name">Link label (optional)</label>
+        <input id="rename-name" type="text" maxlength="80" autocomplete="off" aria-describedby="rename-hint" />
+        <p class="hint" id="rename-hint">Shown to you and anyone with the shared link. Leave blank to use “Shared imaging”.</p>
       </div>
+      <p class="hint">New copies use this label. Links already sent keep their original label.</p>
       <p class="error hidden" id="rename-error" role="alert"></p>
       <div class="actions">
         <button class="btn" type="button" id="rename-cancel">Cancel</button>
-        <button class="btn btn-primary" type="submit" id="rename-save">Save name</button>
+        <button class="btn btn-primary" type="submit" id="rename-save">Save label</button>
       </div>
     </form>
   </dialog>

@@ -71,6 +71,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 };
 const made = []; // manage URLs, deleted at the end
+const labelWrites = new WeakMap();
 
 const browser = await launchBrowser();
 
@@ -80,6 +81,14 @@ async function newPage(dev, opts = {}) {
   // Progress bars are watched suite-wide (browser.mjs, progressWatch).
   const errors = [];
   const page = await context.newPage();
+  const writes = [];
+  labelWrites.set(page, writes);
+  page.on("request", (r) => {
+    if (["POST", "PATCH"].includes(r.method()) && /\/api\/shares\/[^/]+\/links(?:\/[^/]+)?$/.test(new URL(r.url()).pathname)) {
+      const text = r.postData() ?? "{}";
+      writes.push({ body: JSON.parse(text), text });
+    }
+  });
   const allowed = (s) => (opts.allowErrors ?? []).some((re) => re.test(s));
   page.on("console", (m) => m.type() === "error" && !allowed(m.text()) && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -145,7 +154,8 @@ async function noErrors(label, errors) {
 async function finish(page, dev, prefix, o = {}) {
   await page.click("#rv-next");
   await page.waitForSelector("#s-who:not(.hidden)");
-  if (o.recipient) await page.fill("#in-recipient", o.recipient);
+  check(`${prefix}: creation has a clearly named link label field`, await page.getByLabel("Link label (optional)", { exact: true }).count() === 1);
+  if (o.recipient) await page.getByLabel("Link label (optional)", { exact: true }).fill(o.recipient);
   if (o.passcode) await page.fill("#in-pass", o.passcode);
   if (o.expiry) await page.click(`input[name=expiry][value="${o.expiry}"]`);
   if (o.updates) await page.click("#in-updates");
@@ -171,6 +181,8 @@ async function finish(page, dev, prefix, o = {}) {
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("shl-dicom-shares") ?? "[]").length);
   check(`${prefix}: owner link saved in this browser`, saved >= 1, `${saved} saved`);
   const box = { h: await page.textContent(".manage-box h2"), copy: await page.textContent("#m-copy") };
+  const writes = labelWrites.get(page);
+  check(`${prefix}: label writes contain ciphertext and no plaintext`, writes.length > 0 && writes.every(({ body, text }) => !Object.hasOwn(body, "label") && (!o.recipient || !text.includes(o.recipient))) && (!o.recipient || writes.some(({ body }) => body.labelEncrypted?.v === 1)));
   check(`${prefix}: hand-over names the owner link`, box.h === "Save your owner link" && box.copy === "Copy owner link", JSON.stringify(box));
   return result;
 }
@@ -247,7 +259,7 @@ async function flowFiles(dev) {
   check(`${P}: link opens with every study`, v.studies.length === FX.studies.length && v.instances === FX.images, JSON.stringify(v.studies.map((s) => s.instances)));
   sameContent(P, v, FX.images, "the files", { reencoded: FX.images });
   check(`${P}: re-encoded as JPEG Lossless by this packer`, v.pixelReport?.transferSyntaxes?.["1.2.840.10008.1.2.4.70"] === FX.images && Object.keys(v.pixelReport?.implementations ?? {}).every((k) => /SHLDICOM/.test(k)), JSON.stringify([v.pixelReport?.transferSyntaxes, v.pixelReport?.implementations]));
-  check(`${P}: label in the link`, v.label === "Imaging for Dr. Patel, Neurology", v.label);
+  check(`${P}: label in the link`, v.label === "Dr. Patel, Neurology", v.label);
   if (canAttach) check(`${P}: attached report is in the Bundle, linked to its study by reference`, v.reports.length === 1 && v.reports[0].hasText && v.reports[0].studyIds[0] === v.studies[0].id && v.reports[0].basis === "reference" && v.reports[0].byFullUrl, JSON.stringify(v.reports));
   const view = await openInView(dev, r.shlink, P, { name: "files" });
   check(`${P}: /view lists ${FX.studies.length} studies`, view.studies === FX.studies.length, `${view.studies}`);
@@ -650,12 +662,12 @@ async function flowManage(dev, files) {
   const lid = await page.locator(".link-card").first().getAttribute("data-lid");
   const firstCard = page.locator(`.link-card[data-lid="${lid}"]`);
   const initialName = await firstCard.locator("h3").textContent();
-  await firstCard.getByRole("button", { name: "Edit name" }).click();
+  await firstCard.getByRole("button", { name: "Edit label" }).click();
   await page.fill("#rename-name", "Unsaved name");
   await page.click("#rename-cancel");
   check(`${P}: cancel leaves the name alone`, await firstCard.locator("h3").textContent() === initialName);
 
-  await firstCard.getByRole("button", { name: "Edit name" }).click();
+  await firstCard.getByRole("button", { name: "Edit label" }).click();
   const renamed = "Dr. García — wrist review";
   await page.fill("#rename-name", renamed);
   // Refresh while editing: polling must not replace the dialog or discard the draft.
@@ -683,17 +695,17 @@ async function flowManage(dev, files) {
   await firstCard.getByRole("button", { name: "Show link" }).click();
   await page.waitForSelector(".lc-qr .mono");
   const renamedLink = await page.locator(".lc-qr .mono").first().textContent();
-  check(`${P}: newly copied link uses the new label`, verify(renamedLink, [], undefined, ["--index-only"]).label === `Imaging for ${renamed}`);
+  check(`${P}: newly copied link uses the new label`, verify(renamedLink, [], undefined, ["--index-only"]).label === renamed);
   check(`${P}: previously copied link still opens`, verifyFails(files.shlink) === null);
 
-  await firstCard.getByRole("button", { name: "Edit name" }).click();
+  await firstCard.getByRole("button", { name: "Edit label" }).click();
   await page.fill("#rename-name", "   ");
   await page.click("#rename-save");
   await page.waitForFunction((id) => window.__manage.share.links.find((l) => l.id === id).label === null, lid);
-  check(`${P}: clearing the name restores the unnamed label`, await firstCard.locator("h3").textContent() === "Link without a name");
+  check(`${P}: clearing the name restores the unnamed label`, await firstCard.locator("h3").textContent() === "Link without a label");
   await page.reload();
   await page.waitForSelector(".link-card");
-  check(`${P}: clearing the name persists`, await firstCard.locator("h3").textContent() === "Link without a name");
+  check(`${P}: clearing the name persists`, await firstCard.locator("h3").textContent() === "Link without a label");
 
   // Extend
   const exp0 = await page.evaluate((id) => window.__manage.share.links.find((l) => l.id === id).exp, lid);
@@ -723,6 +735,12 @@ async function flowManage(dev, files) {
   const v = verify(newLink, FX.files, undefined, ["--pixels"]);
   const rest = FX.studies.slice(1);
   const restImages = rest.reduce((a, s) => a + s.images, 0);
+  check(`${P}: new link uses the entered label exactly`, v.label === "Dr. Lee, Orthopedics", v.label);
+  const writes = labelWrites.get(page);
+  check(`${P}: create and edit never send plaintext labels`, writes.some(({ body }) => body.labelEncrypted?.v === 1) && writes.every(({ body, text }) => !Object.hasOwn(body, "label") && !text.includes(renamed) && !text.includes("Dr. Lee, Orthopedics")));
+  const ownerCredentials = new URLSearchParams(new URL(files.manage).hash.slice(1));
+  const rawShare = await (await fetch(`${BASE}/api/shares/${ownerCredentials.get("share")}`, { headers: { Authorization: `Bearer ${ownerCredentials.get("token")}` } })).json();
+  check(`${P}: server returns encrypted labels only`, rawShare.links.every((l) => !Object.hasOwn(l, "label")) && rawShare.links.some((l) => l.labelEncrypted?.v === 1));
   check(`${P}: new link leaves out ${FX.studies[0].title}`, v.studies.length === rest.length && v.instances === restImages && v.matched + v.reencoded === restImages, JSON.stringify(v.studies));
   await shot(page, `${dev}-6-manage-two-links`);
 

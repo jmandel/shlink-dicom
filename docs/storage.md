@@ -2,6 +2,21 @@
 
 Status: design note for `shl-dicom-server`.
 
+Link labels are encrypted in the owner's browser with the owner key, a fresh 96-bit IV, and
+AES-256-GCM. The authenticated context is `shl-dicom link label v1:<share-id>`; `ciphertext`
+includes the 128-bit tag. The API accepts `labelEncrypted: {v: 1, iv, ciphertext}` (unpadded
+base64url), or `null` to clear it, and rejects plaintext `label` writes. The owner browser
+decrypts this single label for display and for the SHLink's `label` field; the server never
+needs the owner key. Renaming does not alter imaging or invalidate existing links. Copies
+already sent retain the label embedded in them.
+
+Legacy plaintext labels are returned to an authenticated owner only until migration. The
+browser first verifies its owner key by decrypting the owner Bundle, then encrypts each
+legacy label. `PATCH` with `migrateLabel: true` atomically writes the ciphertext and clears
+`label`, only while a legacy value still exists; a concurrent rename or clear takes precedence.
+Shares that have not been opened with an owner key, and existing database backups, may still
+contain old plaintext labels. Public sample labels are intentionally public fixture data.
+
 ## Design
 
 - **`catalog.db`** holds what is needed to route a request to the right share (share ids and expiry, link ids, capability tokens) and the reference counts of the stored files.
@@ -131,7 +146,8 @@ CREATE TABLE upload_parts (
 
 CREATE TABLE links (
   lid                 TEXT PRIMARY KEY,
-  label               TEXT,
+  label               TEXT, -- legacy only; removed when the owner browser migrates it
+  label_encrypted     TEXT, -- {v, iv, ciphertext}; AES-256-GCM under the owner key
   long_lived          INTEGER NOT NULL,
   online              INTEGER NOT NULL DEFAULT 1,
   exp                 INTEGER,
