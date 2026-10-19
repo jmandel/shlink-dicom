@@ -3,7 +3,7 @@
 //! (`shl_dicom_core::offset_tables`) and the rule for which instances the lossless encoder is
 //! offered (`shl_dicom_transcode::is_uncompressed_image`).
 use shl_dicom_core::offset_tables::{
-    offset_table_first_fragment, offset_table_patch, offset_table_patch_from_fragments, FragmentWalk, OffsetTableKind,
+    offset_table_first_fragment, offset_table_probe, offset_table_patch, offset_table_patch_from_fragments, FragmentWalk, OffsetTableKind,
     OffsetTablePatch,
 };
 use wasm_bindgen::prelude::*;
@@ -54,6 +54,19 @@ fn to_wasm(p: OffsetTablePatch) -> WasmOffsetTablePatch {
 #[wasm_bindgen]
 pub fn offset_table_first_fragment_wasm(prefix: &[u8]) -> Option<f64> {
     offset_table_first_fragment(prefix).map(|p| p as f64)
+}
+
+/// A completed header inspection. An absent first_fragment means no table is needed.
+#[wasm_bindgen]
+pub struct WasmOffsetTableProbe {
+    pub first_fragment: Option<f64>,
+}
+
+/// `undefined` when the prefix cannot yet be inspected. A returned probe is conclusive even
+/// when first_fragment is absent, so callers need not download the pixel payload to decide.
+#[wasm_bindgen]
+pub fn offset_table_probe_wasm(prefix: &[u8]) -> Option<WasmOffsetTableProbe> {
+    offset_table_probe(prefix).map(|p| WasmOffsetTableProbe { first_fragment: p.first_fragment.map(|at| at as f64) })
 }
 
 /// Walks one file's fragment items for [`FragmentWalker::patch`], for files too large to hold

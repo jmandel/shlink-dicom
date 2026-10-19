@@ -14,7 +14,7 @@ import {
   Collection, encodingSummary, plainStudyTitle, reportFromFile, reportTitle, type ReportItem, seriesName, sharePatient, studyCounts, studyDisplayDate, studyModalities, type StudyModel,
 } from "./lib/ingest";
 import { applyChoices, buildBundle, looseReports, planStudyFiles, relinkFile, subsetBundle, type PackedFile } from "./lib/pack";
-import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, anyLacksOffsetTable } from "./lib/offset-tables";
+import { ADD_OFFSET_TABLES_DEFAULT, addOffsetTable, addOffsetTables, studiesLackingOffsetTables } from "./lib/offset-tables";
 import { loadShlWasm } from "./lib/shl-wasm";
 import {
   COMPRESS_DEFAULT, ENCODING_NAME, closeCompressPool, compressPool, compressStudies, estimateSeries, isUncompressedImage, restoreCompressed, uncompressedImages, workers,
@@ -111,13 +111,14 @@ function renderChoices() {
 
 function choose(id: string) {
   sourceKind = id as typeof sourceKind;
-  if (id === "sample") return runLoad("Opening the sample", async (c, _st, on) => {
+  if (id === "sample") return runLoad("Opening the sample", async (c, _st, on, signal) => {
     const samples = await fetchSampleLinks(cfg);
     const pub = samples.find((s) => !s.passcodeHint && s.shlink);
     if (!pub) throw new Error("The sample isn't available from this server right now.");
     const share = await openShare(pub.shlink, { recipient: "Share page (sample)" });
+    signal.throwIfAborted();
     sourceInfo = { kind: "sample", link: pub.shlink };
-    await loadLink(share, c, on);
+    await loadLink(share, c, on, signal);
   });
   addPanel(id);
 }
@@ -280,7 +281,7 @@ $("link-form").addEventListener("submit", async (e) => {
     btn.disabled = false;
     sourceKind = "link";
     sourceInfo = { kind: "link", link };
-    runLoad("Opening the link", (c, _st, on) => loadLink(share, c, on));
+    runLoad("Opening the link", (c, _st, on, signal) => loadLink(share, c, on, signal));
   } catch (x) {
     btn.disabled = false;
     if (x instanceof PasscodeError) {
@@ -339,11 +340,12 @@ async function runLoad(title: string, fn: Loader) {
   $("loading-error").classList.add("hidden");
   $("loading-cancel").classList.remove("hidden");
   setBar("loading-bar", undefined, undefined);
-  col = new Collection();
+  const collection = (col = new Collection());
   loadAbort?.abort();
   const ctl = (loadAbort = new AbortController());
   let last = 0;
   const on = (c: Collection, p: Progress) => {
+    if (ctl.signal.aborted) return;
     const now = performance.now();
     if (now - last < 80) return;
     last = now;
@@ -358,21 +360,29 @@ async function runLoad(title: string, fn: Loader) {
   $("doing").textContent = "";
   try {
     await clearStaging(...jobStages());
+    ctl.signal.throwIfAborted();
     stager = await openStager();
+    ctl.signal.throwIfAborted();
     await loadShlWasm();
-    await fn(col, stager, on, ctl.signal);
+    ctl.signal.throwIfAborted();
+    await fn(collection, stager, on, ctl.signal);
     if (ctl.signal.aborted) return;
     sourceInfo.stage = stager.onDisk ? stager.session : undefined;
-    setBar("loading-bar", undefined, undefined);
-    $("doing").textContent = "Checking for frame offset tables";
-    lackingStudies = new Set();
-    for (const st of col.list()) if (await anyLacksOffsetTable(st.series)) lackingStudies.add(st);
-    $("found").textContent = foundLine(col);
+    $("found").textContent = foundLine(collection);
+    const lacking = await studiesLackingOffsetTables(collection.list(), (done, total) => {
+      if (ctl.signal.aborted) return;
+      const text = `Checking for frame offset tables · ${done} of ${total} images`;
+      $("doing").textContent = text;
+      setBar("loading-bar", done, total, text);
+    }, ctl.signal);
+    if (ctl.signal.aborted) return;
+    lackingStudies = lacking;
     if (!col.studies.size) throw new Error(col.skipped.length ? `No DICOM images were found in ${plural(col.skipped.length, "file")}.` : "No imaging was found.");
     renderReview();
     show(2);
   } catch (x) {
     if (ctl.signal.aborted) return;
+    ctl.abort(); // Stop any other header reads still in flight after a failure.
     console.warn(x);
     $("loading-cancel").classList.add("hidden");
     setBar("loading-bar", undefined, undefined);
@@ -550,8 +560,7 @@ function reportsBox(st: StudyModel | null, items: ReportItem[]): HTMLElement {
         );
         return row;
       }),
-      st ? h("button", { class: "btn btn-ghost attach", type: "button", disabled: studyOff, "aria-disabled": studyOff ? "true" : undefined, onclick: () => file.click() }, "Attach a report (PDF or text)") : null,
-      st ? file : null,
+      ...(st ? [h("button", { class: "btn btn-ghost attach", type: "button", disabled: studyOff, "aria-disabled": studyOff ? "true" : undefined, onclick: () => file.click() }, "Attach a report (PDF or text)"), file] : []),
     );
   };
   if (st) reportBoxes.set(st, render);

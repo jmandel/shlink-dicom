@@ -5,7 +5,7 @@
 export interface Bytes {
   readonly size: number;
   /** Bytes [start, end). */
-  read(start: number, end: number): Promise<Uint8Array>;
+  read(start: number, end: number, signal?: AbortSignal): Promise<Uint8Array>;
 }
 
 export class BlobBytes implements Bytes {
@@ -35,8 +35,8 @@ export class SubBytes implements Bytes {
     readonly offset: number,
     readonly size: number,
   ) {}
-  read(a: number, b: number) {
-    return this.base.read(this.offset + a, this.offset + Math.min(b, this.size));
+  read(a: number, b: number, signal?: AbortSignal) {
+    return this.base.read(this.offset + a, this.offset + Math.min(b, this.size), signal);
   }
 }
 
@@ -52,14 +52,15 @@ export class ConcatBytes implements Bytes {
     }
     this.size = n;
   }
-  async read(a: number, b: number) {
+  async read(a: number, b: number, signal?: AbortSignal) {
     b = Math.min(b, this.size);
     const out = new Uint8Array(Math.max(0, b - a));
     let o = 0;
     for (let i = 0; i < this.parts.length && a < b; i++) {
       const s = this.starts[i], e = s + this.parts[i].size;
       if (e <= a) continue;
-      const chunk = await this.parts[i].read(a - s, Math.min(b, e) - s);
+      signal?.throwIfAborted();
+      const chunk = await this.parts[i].read(a - s, Math.min(b, e) - s, signal);
       out.set(chunk, o);
       o += chunk.length;
       a += chunk.length;

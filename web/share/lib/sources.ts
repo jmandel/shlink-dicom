@@ -69,12 +69,13 @@ class LinkSeriesBytes implements Bytes {
     return this.se.bytes;
   }
   /** Bytes [a, b) of the series, which starts at se.offset in its file. */
-  async read(a: number, b: number) {
+  async read(a: number, b: number, signal?: AbortSignal) {
     b = Math.min(b, this.size);
     if (a >= b) return new Uint8Array(0);
     const plan = planBytes(this.se, this.se.offset + a, this.se.offset + b);
     // A read that stalls fails after a minute; the upload waits it out and asks again.
-    const ct = await this.share.resolver.fetchRange(plan, AbortSignal.timeout(60000));
+    const timeout = AbortSignal.timeout(60000);
+    const ct = await this.share.resolver.fetchRange(plan, signal ? AbortSignal.any([signal, timeout]) : timeout);
     return this.share.decryptor.decrypt(this.se, plan, ct);
   }
 }
@@ -83,7 +84,8 @@ class LinkSeriesBytes implements Bytes {
  * Opens a SMART Health Link's studies from its Bundle without downloading them. Images are read
  * when they are shown or packed, as byte ranges of the link's encrypted files.
  */
-export async function loadLink(share: OpenShare, col: Collection, on: OnProgress) {
+export async function loadLink(share: OpenShare, col: Collection, on: OnProgress, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const idx = share.index;
   if (idx.patient.name) {
     const humanName = (idx.bundle.entry ?? []).find((e: any) => e.resource?.resourceType === "Patient")?.resource.name?.[0] ?? { text: idx.patient.name };
@@ -98,11 +100,13 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
   await Promise.all(
     Array.from({ length: Math.min(6, all.length) }, async (_, w) => {
       for (let i = w; i < all.length; i += 6) {
-        syntax.set(all[i], await seriesSyntax(share, all[i]));
+        signal?.throwIfAborted();
+        syntax.set(all[i], await seriesSyntax(share, all[i], signal));
         on(col, { doing: `Reading the link's series: ${++read} of ${all.length}`, done: read, total: all.length });
       }
     }),
   );
+  signal?.throwIfAborted();
   for (const st of idx.studies) {
     for (const se of st.series) {
       const src = new LinkSeriesBytes(share, se);
@@ -147,12 +151,13 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
 }
 
 /** The transfer syntax of a series' first instance, from its file meta ("" when it can't be read). */
-async function seriesSyntax(share: OpenShare, se: SeriesEntry): Promise<string> {
+async function seriesSyntax(share: OpenShare, se: SeriesEntry, signal?: AbortSignal): Promise<string> {
   const inst = se.instances[0];
   try {
-    const head = await new LinkSeriesBytes(share, se).read(inst.offset - se.offset, inst.offset - se.offset + Math.min(inst.length, RECORD_PLAINTEXT));
+    const head = await new LinkSeriesBytes(share, se).read(inst.offset - se.offset, inst.offset - se.offset + Math.min(inst.length, RECORD_PLAINTEXT), signal);
     return parseDicomSync(head, { untilPixelData: true }).meta.str(T.TransferSyntaxUID) ?? "";
   } catch {
+    signal?.throwIfAborted();
     return "";
   }
 }
