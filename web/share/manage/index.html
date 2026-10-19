@@ -27,6 +27,21 @@
       </div>
     </form>
   </dialog>
+  <dialog id="rename-link" aria-labelledby="rename-title">
+    <form id="rename-form" class="stack">
+      <h2 id="rename-title">Edit link name</h2>
+      <div class="field">
+        <label for="rename-name">Link name (optional)</label>
+        <input id="rename-name" type="text" maxlength="60" autocomplete="off" aria-describedby="rename-hint" />
+        <p class="hint" id="rename-hint">Use a recipient or a short name to recognize this link. Leave it blank to remove the name.</p>
+      </div>
+      <p class="error hidden" id="rename-error" role="alert"></p>
+      <div class="actions">
+        <button class="btn" type="button" id="rename-cancel">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="rename-save">Save name</button>
+      </div>
+    </form>
+  </dialog>
   <script type="module" src="../../assets/manage.js"></script>
 </body>
 </html>
