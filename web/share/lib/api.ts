@@ -28,8 +28,8 @@ export interface LinkResource {
   bytesServed?: number;
 }
 
-/** Wire data never contains a new plaintext label. `label` is read only for legacy migration. */
-type StoredLink = Omit<LinkResource, "label"> & { label?: string | null; labelEncrypted: EncryptedLabel | null };
+/** Server state contains only the encrypted representation of a label. */
+type StoredLink = Omit<LinkResource, "label"> & { labelEncrypted: EncryptedLabel | null };
 type StoredShare = Omit<ShareResource, "links"> & { links: StoredLink[] };
 
 export interface ShareResource {
@@ -119,21 +119,11 @@ export class ShareApi {
   private async openLink(link: StoredLink): Promise<LinkResource> {
     const label = link.labelEncrypted
       ? await decryptLabel(link.labelEncrypted, this.ownerKey(), this.cred!.sid)
-      : link.label ?? null;
+      : null;
     return { ...link, label };
   }
 
   private async openShare(share: StoredShare): Promise<ShareResource> {
-    const legacy = share.links.filter((l) => l.label != null && !l.labelEncrypted);
-    if (legacy.length) {
-      // Verify the owner key before migrating: a mistyped key must never replace a legacy name.
-      await readOwnerBundle(this, this.ownerKey());
-      for (const link of legacy) {
-        const labelEncrypted = await encryptLabel(link.label!, this.ownerKey(), this.cred!.sid);
-        const updated: StoredLink = await (await this.req("PATCH", `${this.s}/links/${link.id}`, { labelEncrypted, migrateLabel: true })).json();
-        share.links = share.links.map((l) => l.id === link.id ? updated : l);
-      }
-    }
     return { ...share, links: await Promise.all(share.links.map((l) => this.openLink(l))) };
   }
 

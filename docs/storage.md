@@ -10,12 +10,11 @@ decrypts this single label for display and for the SHLink's `label` field; the s
 needs the owner key. Renaming does not alter imaging or invalidate existing links. Copies
 already sent retain the label embedded in them.
 
-Legacy plaintext labels are returned to an authenticated owner only until migration. The
-browser first verifies its owner key by decrypting the owner Bundle, then encrypts each
-legacy label. `PATCH` with `migrateLabel: true` atomically writes the ciphertext and clears
-`label`, only while a legacy value still exists; a concurrent rename or clear takes precedence.
-Shares that have not been opened with an owner key, and existing database backups, may still
-contain old plaintext labels. Public sample labels are intentionally public fixture data.
+The server discards old plaintext labels at startup, including for shares whose owners do not
+return. The API never returns a plaintext label, and the owner browser has no legacy-name
+migration path. Existing encrypted labels, links, access settings, and imaging are preserved.
+The unused `label` column remains empty for compatibility with older server code. Old backups
+and SHLinks already copied elsewhere may still contain their original names.
 
 ## Design
 
@@ -146,7 +145,7 @@ CREATE TABLE upload_parts (
 
 CREATE TABLE links (
   lid                 TEXT PRIMARY KEY,
-  label               TEXT, -- legacy only; removed when the owner browser migrates it
+  label               TEXT, -- unused; old plaintext values are discarded at startup
   label_encrypted     TEXT, -- {v, iv, ciphertext}; AES-256-GCM under the owner key
   long_lived          INTEGER NOT NULL,
   online              INTEGER NOT NULL DEFAULT 1,
