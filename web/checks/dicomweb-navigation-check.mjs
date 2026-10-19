@@ -13,7 +13,7 @@ const record = (name, value = {}) => { results.push({ name, ...value }); console
 const url = kind => `${base}/demos/${kind}/?api=${encodeURIComponent(api)}`;
 function observe(page) { page.on('pageerror', e => errors.push(e.message)); }
 function pixels() {
-  const source = document.querySelector('.cornerstone-viewport canvas');
+  const source = document.querySelector('.cornerstone-viewport canvas') ?? window.cornerstone?.getEnabledElements().find(e => e.viewport.getCornerstoneImage?.())?.viewport.element.querySelector('canvas');
   if (!source?.width) return { levels: 0, nonBlack: 0 };
   const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
   const ctx = canvas.getContext('2d'); ctx.drawImage(source, 0, 0, 64, 64);
@@ -104,8 +104,11 @@ try {
     await thumb.click(); await page.waitForTimeout(150);
     assert.deepEqual(await frame.evaluate(() => window.cornerstone.getEnabledElements().map(e => e.viewport.getCurrentImageId?.()).filter(Boolean)), beforeClick);
     await thumb.dblclick();
-    await frame.waitForFunction(series => window.cornerstone.getEnabledElements().some(e => e.viewport.getCurrentImageId?.()?.includes(`/series/${series}/`)), ds.series, { timeout: 60_000 });
-    record('OHIF double-click loads study', { description: st.description, series: ds.series });
+    await frame.waitForFunction(series => window.cornerstone.getEnabledElements().some(e => e.viewport.getCornerstoneImage?.()?.imageId.includes(`/series/${series}/`)), ds.series, { timeout: 60_000 });
+    await frame.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await frame.waitForFunction('(' + pixels.toString() + ')().nonBlack > 5');
+    const image = await frame.evaluate(pixels); assert(image.levels > 1);
+    record('OHIF double-click loads study', { description: st.description, series: ds.series, ...image });
   }
   await page.screenshot({ path: `${out}/ohif.png`, fullPage: true });
   assert.deepEqual(errors, []);
