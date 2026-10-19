@@ -48,7 +48,12 @@ export async function buildDicomweb(root: string, out: string, minify = true) {
   const bundle = readdirSync(vendor).find(f => /^app\.bundle\..+\.js$/.test(f))!;
   const js = readFileSync(`${vendor}/${bundle}`, "utf8"), publicPath = '__webpack_require__.p = "/";';
   if (js.split(publicPath).length !== 2) throw new Error("OHIF public-path patch no longer matches its pinned release");
-  await Bun.write(`${vendor}/${bundle}`, js.replace(publicPath, "__webpack_require__.p = window.PUBLIC_URL;"));
+  // StudyItem's uncontrolled Radix state diverges when late display sets expand a
+  // study programmatically after the user closes it. Share the parent's state
+  // with the chevron/content; preserve OHIF's thumbnail and input handlers.
+  const studyExpansion = "defaultValue: isActive ? 'study-item' : undefined";
+  if (js.split(studyExpansion).length !== 2) throw new Error("OHIF study-expansion patch no longer matches its pinned release");
+  await Bun.write(`${vendor}/${bundle}`, js.replace(publicPath, "__webpack_require__.p = window.PUBLIC_URL;").replace(studyExpansion, "value: isExpanded ? 'study-item' : ''"));
   let workerPatches = 0;
   for (const file of readdirSync(vendor)) {
     if (file === bundle) continue;
