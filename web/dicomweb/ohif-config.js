@@ -1,4 +1,4 @@
-// Runs before the unmodified OHIF application starts. This child frame can only
+// Runs before the bundled OHIF application starts. This child frame can only
 // forward requests to its same-origin parent, which owns the SHLink session.
 (() => {
   const base = new URL('../', document.currentScript.src), params = new URLSearchParams(location.search);

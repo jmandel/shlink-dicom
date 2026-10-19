@@ -2,6 +2,10 @@
 
 The standalone [OHIF demo](https://shlink-dicom.exe.xyz/demos/ohif/) and [Cornerstone3D demo](https://shlink-dicom.exe.xyz/demos/cornerstone/) open the server's public sample automatically. Each accepts another SMART Health Link and an optional passcode. The native DICOMweb image loaders and decoders in OHIF 3.13.13 and Cornerstone3D 5.13.1 render the stored images.
 
+OHIF keeps its native interactions: expand a study, then **double-click** a series thumbnail. The pinned bundle has one guarded `StudyItem` fix: the accordion uses the same controlled expansion state as its thumbnails. Without this, closing a study while its metadata loads lets a late display-set update desynchronize the chevron and content; reopening shows an empty panel and collapsing briefly flashes the thumbnails.
+
+Cornerstone shows a study/series browser alongside the viewport and reports the current image number. Native scroll, window/level, pan and zoom bindings are unchanged. Two low-priority requests preload up to ten nearby slices, with a neighborhood budget estimated from the current image's decoded size (32 MiB) and a 128 MiB decoded-image cache. Scrolling or changing series replaces pending prefetch work; already running requests may finish. Non-image series and whole-slide microscopy remain visible in the browser with an explanation when selected; the main SHLink DICOM viewer handles those objects.
+
 Run `bun web/build.ts`, then serve `dist/web` over HTTPS or localhost. The demos are `/demos/ohif/` and `/demos/cornerstone/`. A separate static host can use `?api=https://shlink-dicom.exe.xyz` for the public sample list; upstream encrypted files must allow CORS. The paths work under a site prefix as well as at the origin root. OHIF's release archive is pinned by SHA-512; `build.ts` checks and relocates its application, worker and CSS asset paths. All viewer assets are served locally, with no runtime CDN dependency.
 
 ## Embedding
@@ -56,5 +60,7 @@ bun test test/dicomweb.test.ts
 BASE=http://127.0.0.1:8861 API=https://shlink-dicom.exe.xyz \
   CHECK_OUT=/tmp/dicomweb-check node web/checks/dicomweb-check.mjs
 ```
+
+`web/checks/dicomweb-navigation-check.mjs` uses the same `BASE`, `API` and `CHECK_OUT` variables. It checks every public-sample CT/MR/CR series, rapid series selection, ten wheel steps with actual image IDs, narrow layouts, the OHIF late-metadata expansion race, keyboard expansion and double-click navigation across studies.
 
 The browser check verifies nonblank CT and MR pixels in both actual viewers, stored JPEG Lossless frame retrieval, a stopped and restarted service worker, two-tab isolation, cancellation, passcode links and narrow Cornerstone layouts. It saves screenshots and structured results. OHIF's VTK emits a `zero width color range` diagnostic for the sample's reconstructed dose-report thumbnail, whose original Window Width is 1; the check records that known upstream diagnostic separately without changing the image metadata. The unit suite verifies native pixel bytes, metadata identity, typed sequences, frame boundaries and the port transport's backpressure and failure behavior.
