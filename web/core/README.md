@@ -201,7 +201,7 @@ An enhanced CT or MR, an ultrasound cine or a tomosynthesis is one instance of t
 - `DICOM/ST000001/SE000001/IM000001`… are the shared files, byte for byte (one ST folder per study);
 - `DICOMDIR` holds PATIENT → STUDY → SERIES → IMAGE records.
 
-Series are read in runs targeting 8 MiB, with three runs read ahead; an instance larger than the target forms its own run. This limits the number of source runs held ahead, but the Blob save fallback still retains the complete ZIP. ZIP64 records are added past 4 GiB.
+Small instances are read in runs targeting 8 MiB, with three runs read ahead. An instance larger than the target streams in authenticated chunks with a 4 MiB ciphertext budget and sink backpressure. Its CRC follows the entry in a ZIP data descriptor; ZIP64 handles entries and archives past 4 GiB. `DicomdirHeader` retains only selected top-level attributes as the original passes by, skipping large private values and sequences without retaining the whole header. A direct file destination therefore supports originals above the loader's whole-buffer limit.
 
 **Execution and presentation.** `ExportExecution.run(target, write, signal?)` owns one save target, its pending read consumers, cancellation, writer abort/close and the terminal transition. The picker is invoked synchronously in the click handler, then its promise is passed to `run`; a writer arriving after cancellation is still aborted. The formatting callback receives the execution and its guarded sink. `writePlannedZip` and `writeInstance` provide ZIP and single-image formatting; the public headless `exportZip` uses the same runner. No caller can mark an execution successful: the callback must finish after verification and a successful writer close. Read-ahead or writer failure stops the execution immediately, even if the callback is awaiting another read or catches the writer error. Cleanup settles the owned reads and abort before allowing dismissal.
 
@@ -215,12 +215,15 @@ Progress belongs to each job. Source verification is a diagnostic milestone; suc
 
 **Other exports:**
 - `exportInstance(loader, series, i, onProgress?, signal?)` returns one instance's bytes;
+- `loader.streamInstance(series, i, options?)` yields bounded authenticated chunks for large originals; whole-buffer APIs keep their 2 GiB ciphertext guard;
 - `exportSize(scope)` and `exportBaseName(study, series?)` give the size and a file name;
 - `readDicomHeader(bytes)` reads the DICOMDIR attributes from a Part 10 header;
 - `buildDicomdir(entries)` builds the DICOMDIR;
 - `ZipWriter` writes the ZIP.
 
-**Saving.** `openSaveTarget(name, mime, ext)` streams to a file with `showSaveFilePicker` where the browser has it, and otherwise collects a Blob and saves it with a link. Call it first in the click handler, before any other `await`. It returns null if the user cancels.
+**Saving.** `openSaveTarget(name, mime, ext, expectedBytes?)` streams to a file with `showSaveFilePicker` where the browser has it, and otherwise collects a Blob and saves it with a link. The Blob fallback is capped at 512 MiB, checked before reading a known oversized source and during writing to account for archive overhead. The viewer explains how to use a direct-file browser or a smaller download. Call it first in the click handler, before any other `await`. It returns null if the user cancels.
+
+`bun test test/export-stream.test.ts test/save-target.test.ts` includes the original aligned/unaligned 2 GiB boundary regressions, byte identity, independent ZIP CRC checks, backpressure, corrupt records, cancellation and sink failures. `bun web/checks/large-export-check.ts` writes and independently verifies a real original over 2 GiB and a real ZIP entry over 4 GiB while recording peak RSS and maximum chunk size; it removes the output files after verification by default.
 
 **Checks.** `bun test test/export-execution.test.ts test/read-admission.test.ts test/view-session.test.ts test/export-jobs.test.ts test/bundle.test.ts` covers each core abstraction in isolation and their integration with both reader pumps and ZIP formatting. `node web/checks/downloads-check.mjs` tests the downloads controller in a real browser with controlled executions and a small panel host; it needs no server. With the public demo served locally, `BASE=http://127.0.0.1:8080 node web/checks/export-job-checks.mjs` checks presentation races, progress dismissal/resumption, a complete study export across navigation and resumption, concurrent jobs, cancellation during the picker, and writer failures. `CHECK_OUT` selects its output directory, `CHECK_CASE` selects one named case, and `CHROMIUM` can override the Chromium executable. These are correctness checks, not performance benchmarks.
 

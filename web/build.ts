@@ -159,6 +159,9 @@ await Bun.write(
 const { bakeHow } = await import("./how/bake.ts");
 await bakeHow(root, out);
 
+const { buildDicomweb } = await import("./dicomweb/build.ts");
+await buildDicomweb(root, out, minify);
+
 // Every page names its assets with `?v=<hash>` of their bytes (cached for good; a new build is
 // a new URL; chunks already carry their hash in their names, and are imported by those names), and compressible files get .br and .gz copies, which the server sends to browsers
 // that accept them.
@@ -194,7 +197,7 @@ for (const f of new Bun.Glob("**/*.{js,mjs,css,html,json,wasm,svg,txt}").scanSyn
   const path = `${out}/${f}`;
   const bytes = readFileSync(path);
   if (bytes.length < 1024) continue;
-  const br = brotliCompressSync(bytes, { params: { [constants.BROTLI_PARAM_QUALITY]: bytes.length > 4e6 ? 9 : 11, [constants.BROTLI_PARAM_SIZE_HINT]: bytes.length } });
+  const br = brotliCompressSync(bytes, { params: { [constants.BROTLI_PARAM_QUALITY]: f.startsWith("demos/ohif-viewer/") ? 4 : bytes.length > 4e6 ? 9 : 11, [constants.BROTLI_PARAM_SIZE_HINT]: bytes.length } });
   const gz = gzipSync(bytes, { level: 9 });
   if (br.length < bytes.length * 0.9) await Bun.write(`${path}.br`, br);
   if (gz.length < bytes.length * 0.9) await Bun.write(`${path}.gz`, gz);

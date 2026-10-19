@@ -12,6 +12,11 @@
     "playwright-core": "^1.64.1"
   },
   "dependencies": {
+    "@cornerstonejs/core": "5.13.1",
+    "@cornerstonejs/dicom-image-loader": "5.13.1",
+    "@cornerstonejs/metadata": "5.13.1",
+    "@cornerstonejs/tools": "5.13.1",
+    "dcmjs": "0.45.0",
     "pdfjs-dist": "4.10.38",
     "qrcode-generator": "1.4.4"
   }
