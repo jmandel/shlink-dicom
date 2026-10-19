@@ -221,8 +221,20 @@ pub fn offset_table_patch(bytes: &[u8]) -> Option<OffsetTablePatch> {
 /// Where the first fragment item starts (after the empty BOT item), when the instance needs a
 /// table; `None` when it doesn't, or when `prefix` is too short to tell.
 pub fn offset_table_first_fragment(prefix: &[u8]) -> Option<usize> {
+    offset_table_probe(prefix)?.first_fragment
+}
+
+/// A completed inspection of an encapsulated instance's header.
+pub struct OffsetTableProbe {
+    /// Present only when a multi-frame instance needs a table.
+    pub first_fragment: Option<usize>,
+}
+
+/// Inspect an encapsulated instance's prefix without reading its pixel payload. `None` means
+/// the header could not be read yet (or is unsupported/malformed), not that it needs no table.
+pub fn offset_table_probe(prefix: &[u8]) -> Option<OffsetTableProbe> {
     let h = scan_header(prefix)?;
-    (h.frames >= 2 && !h.has_eot && h.bot_len == 0).then_some(h.bot_pos + 8)
+    Some(OffsetTableProbe { first_fragment: (h.frames >= 2 && !h.has_eot && h.bot_len == 0).then_some(h.bot_pos + 8) })
 }
 
 /// One fragment item, for [`offset_table_patch_from_fragments`]: the position of its item header
@@ -519,6 +531,20 @@ pub(crate) mod tests {
         assert_eq!(&b[at..at + 6], &[0x02, 0x00, 0x01, 0x00, b'O', b'B']);
         b[at + 8..at + 12].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
         assert_eq!(offset_table_status(&b), OffsetTableStatus::NotApplicable);
+    }
+
+    #[test]
+    fn header_probe_distinguishes_incomplete_from_no_table_needed() {
+        let missing = synthetic(7, &[1], true);
+        let bot = add_offset_table(missing.clone()).0;
+        let eot = patch_with_limit(&synthetic(4, &[1], true), 16).unwrap().apply(&synthetic(4, &[1], true));
+        let single = synthetic(1, &[1], false);
+        for (bytes, needs_table) in [(&missing, true), (&bot, false), (&eot, false), (&single, false)] {
+            let end = scan_header(bytes).unwrap().bot_pos + 8;
+            assert!(offset_table_probe(&bytes[..end - 1]).is_none());
+            let probe = offset_table_probe(&bytes[..end]).expect("the BOT header is enough, without pixel bytes");
+            assert_eq!(probe.first_fragment, needs_table.then_some(end));
+        }
     }
 
     #[test]

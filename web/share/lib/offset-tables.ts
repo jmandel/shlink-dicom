@@ -6,29 +6,34 @@
 // the new head followed by the original bytes from where the patch resumes.
 import { NATIVE_SYNTAXES, VIDEO_SYNTAXES } from "../../core/transfer-syntax";
 import { ConcatBytes, MemBytes, SubBytes, WindowReader, type Bytes } from "./bytes";
-import type { Instance, SeriesModel } from "./ingest";
+import type { Instance, SeriesModel, StudyModel } from "./ingest";
 import { loadShlWasm } from "./shl-wasm";
 
 /** Whether the review step's "Add frame offset tables" box starts ticked when it is shown. */
 export const ADD_OFFSET_TABLES_DEFAULT = true;
 
 /** Header bytes read to find the first fragment item. */
-const PREFIX_READS = [256 << 10, 4 << 20, 32 << 20];
+const PREFIX_READS = [4 << 10, 64 << 10, 256 << 10, 4 << 20, 32 << 20];
 
 const firstFragment = new WeakMap<Bytes, { prefix: Uint8Array; at: number } | null>();
 
 /** The file's prefix through the empty BOT item, when the instance needs a table; else null. */
-async function needsTable(inst: Instance): Promise<{ prefix: Uint8Array; at: number } | null> {
+async function needsTable(inst: Instance, signal?: AbortSignal): Promise<{ prefix: Uint8Array; at: number } | null> {
+  signal?.throwIfAborted();
   const ts = inst.h.transferSyntax;
   if (!ts || NATIVE_SYNTAXES.has(ts) || VIDEO_SYNTAXES[ts]) return null;
   if (firstFragment.has(inst.src)) return firstFragment.get(inst.src)!;
   const m = await loadShlWasm();
   let found: { prefix: Uint8Array; at: number } | null = null;
   for (const n of PREFIX_READS) {
-    const prefix = await inst.src.read(0, Math.min(inst.src.size, n));
-    const at = m.offset_table_first_fragment_wasm(prefix);
-    if (at !== undefined) {
-      found = { prefix: prefix.slice(0, at), at };
+    signal?.throwIfAborted();
+    const prefix = await inst.src.read(0, Math.min(inst.src.size, n), signal);
+    signal?.throwIfAborted();
+    const probe = m.offset_table_probe_wasm(prefix);
+    if (probe) {
+      const at = probe.first_fragment;
+      probe.free();
+      if (at !== undefined) found = { prefix: prefix.slice(0, at), at };
       break;
     }
     if (prefix.length >= inst.src.size) break;
@@ -37,10 +42,26 @@ async function needsTable(inst: Instance): Promise<{ prefix: Uint8Array; at: num
   return found;
 }
 
-/** Whether any of these instances is an encapsulated multi-frame file with an empty offset table. */
-export async function anyLacksOffsetTable(series: SeriesModel[]): Promise<boolean> {
-  for (const se of series) for (const inst of se.instances) if (await needsTable(inst)) return true;
-  return false;
+/** Inspect headers with bounded concurrency; stop inspecting a study once a missing table is found. */
+export async function studiesLackingOffsetTables(
+  studies: StudyModel[],
+  onProgress?: (done: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<Set<StudyModel>> {
+  const todo = studies.flatMap((st) => st.series.flatMap((se) => se.instances.map((inst) => ({ st, inst }))));
+  const lacking = new Set<StudyModel>();
+  let next = 0, done = 0;
+  onProgress?.(0, todo.length);
+  await Promise.all(Array.from({ length: Math.min(6, todo.length) }, async () => {
+    while (next < todo.length) {
+      signal?.throwIfAborted();
+      const { st, inst } = todo[next++];
+      if (!lacking.has(st) && await needsTable(inst, signal)) lacking.add(st);
+      signal?.throwIfAborted();
+      onProgress?.(++done, todo.length);
+    }
+  }));
+  return lacking;
 }
 
 /**
