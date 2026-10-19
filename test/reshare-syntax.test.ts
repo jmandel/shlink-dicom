@@ -6,6 +6,7 @@ import { parseIndex } from "../web/core/reader";
 import { RECORD_PLAINTEXT, type RangePlan } from "../web/core/range";
 import { Collection } from "../web/share/lib/ingest";
 import { loadLink } from "../web/share/lib/sources";
+import { studiesLackingOffsetTables } from "../web/share/lib/offset-tables";
 
 beforeAll(async () => {
   const helper = await import("../web/checks/shl-wasm-bun");
@@ -45,6 +46,39 @@ function part10(sopClass: string, sop: string, ts: string, ds: Uint8Array[]): Ui
 const file = (ts: string, sop: string) => part10("1.2.840.10008.5.1.4.1.1.2", sop, ts, [element(0x0008, 0x0018, "UI", sop), element(0x7fe0, 0x0010, "OB", new Uint8Array(100_000))]);
 
 describe("a re-shared link", () => {
+  test("reuses its first header without assuming later instances have the same frames or table", async () => {
+    const sopClass = "1.2.840.10008.5.1.4.1.1.7.2";
+    for (const firstFrames of [1, 20]) {
+      const image = (sop: string, frames: number, table: boolean) => part10(sopClass, sop, "1.2.840.10008.1.2.4.50", [
+        element(0x0028, 0x0008, "IS", String(frames)),
+        new Uint8Array([0xe0, 0x7f, 0x10, 0, 0x4f, 0x42, 0, 0, 255, 255, 255, 255, 0xfe, 0xff, 0, 0xe0, table ? 80 : 0, 0, 0, 0]),
+        new Uint8Array(100_000),
+      ]);
+      const a = image("2.25.11", firstFrames, firstFrames > 1), b = image("2.25.12", 20, false);
+      const bytes = new Uint8Array(a.length + b.length);
+      bytes.set(a); bytes.set(b, a.length);
+      const file = { fileId: "test", plaintextLength: bytes.length, ciphertextLength: bytes.length + 16 * Math.ceil(bytes.length / RECORD_PLAINTEXT) };
+      const series = { uid: "2.25.10", offset: 0, bytes: bytes.length, file, instances: [
+        { uid: "2.25.11", sopClass, offset: 0, length: a.length },
+        { uid: "2.25.12", sopClass, offset: a.length, length: b.length },
+      ] };
+      let reads = 0;
+      const share: any = {
+        index: { patient: {}, reports: [], bundle: { entry: [] }, studies: [{ id: "s", studyInstanceUid: "2.25.1", series: [series] }] },
+        resolver: { fetchRange: async (plan: RangePlan) => { reads++; return bytes.slice(plan.firstRecord * RECORD_PLAINTEXT, Math.min(bytes.length, (plan.lastRecord + 1) * RECORD_PLAINTEXT)); } },
+        decryptor: { decrypt: async (_s: any, plan: RangePlan, ct: Uint8Array) => ct.slice(plan.plaintextStart - plan.firstRecord * RECORD_PLAINTEXT, plan.plaintextEnd - plan.firstRecord * RECORD_PLAINTEXT) },
+      };
+      const col = new Collection();
+      await loadLink(share, col, () => {});
+      expect(reads).toBe(1);
+      const instances = col.list()[0].series[0].instances;
+      expect(instances[0].h.numberOfFrames).toBe(firstFrames);
+      expect(instances[1].h.numberOfFrames).toBeUndefined();
+      expect(await studiesLackingOffsetTables(col.list())).toEqual(new Set(col.list()));
+      expect(reads).toBe(2); // Only the later instance is inspected again.
+    }
+  });
+
   test("names each series' transfer syntax", async () => {
     const a = file("1.2.840.10008.1.2.1", "2.25.11"), b = file("1.2.840.10008.1.2.4.70", "2.25.21");
     const bytes = new Uint8Array(a.length + b.length);

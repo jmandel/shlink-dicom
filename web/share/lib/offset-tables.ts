@@ -5,9 +5,10 @@
 // header and the fragment item headers are read from the byte source, and the rewritten instance is
 // the new head followed by the original bytes from where the patch resumes.
 import { NATIVE_SYNTAXES, VIDEO_SYNTAXES } from "../../core/transfer-syntax";
+import { isKnownSingleFrameSopClass } from "../../core/objects";
 import { ConcatBytes, MemBytes, SubBytes, WindowReader, type Bytes } from "./bytes";
 import type { Instance, SeriesModel, StudyModel } from "./ingest";
-import { loadShlWasm } from "./shl-wasm";
+import { loadShlWasm, shlWasm } from "./shl-wasm";
 
 /** Whether the review step's "Add frame offset tables" box starts ticked when it is shown. */
 export const ADD_OFFSET_TABLES_DEFAULT = true;
@@ -17,29 +18,48 @@ const PREFIX_READS = [4 << 10, 64 << 10, 256 << 10, 4 << 20, 32 << 20];
 
 const firstFragment = new WeakMap<Bytes, { prefix: Uint8Array; at: number } | null>();
 
+function mayNeedTable(inst: Pick<Instance, "h">): boolean {
+  const { transferSyntax: ts, numberOfFrames, sopClassUid } = inst.h;
+  if (!ts || NATIVE_SYNTAXES.has(ts) || VIDEO_SYNTAXES[ts]) return false;
+  // An observed frame count takes precedence over the SOP-class shortcut, including for
+  // non-conformant files that put multiple frames into a single-frame class.
+  if (numberOfFrames !== undefined) return numberOfFrames > 1;
+  return !isKnownSingleFrameSopClass(sopClassUid);
+}
+
+/** Reuse a prefix already read during ingestion. An incomplete probe stays unknown. */
+export function rememberOffsetTableHeader(inst: Pick<Instance, "src" | "h">, prefix: Uint8Array): void {
+  if (!mayNeedTable(inst)) {
+    firstFragment.set(inst.src, null);
+    return;
+  }
+  inspectPrefix(inst.src, prefix);
+}
+
+function inspectPrefix(src: Bytes, prefix: Uint8Array): boolean {
+  const probe = shlWasm().offset_table_probe_wasm(prefix);
+  if (!probe) return false;
+  const at = probe.first_fragment;
+  probe.free();
+  firstFragment.set(src, at === undefined ? null : { prefix: prefix.slice(0, at), at });
+  return true;
+}
+
 /** The file's prefix through the empty BOT item, when the instance needs a table; else null. */
 async function needsTable(inst: Instance, signal?: AbortSignal): Promise<{ prefix: Uint8Array; at: number } | null> {
   signal?.throwIfAborted();
-  const ts = inst.h.transferSyntax;
-  if (!ts || NATIVE_SYNTAXES.has(ts) || VIDEO_SYNTAXES[ts]) return null;
+  if (!mayNeedTable(inst)) return null;
   if (firstFragment.has(inst.src)) return firstFragment.get(inst.src)!;
-  const m = await loadShlWasm();
-  let found: { prefix: Uint8Array; at: number } | null = null;
+  await loadShlWasm();
   for (const n of PREFIX_READS) {
     signal?.throwIfAborted();
     const prefix = await inst.src.read(0, Math.min(inst.src.size, n), signal);
     signal?.throwIfAborted();
-    const probe = m.offset_table_probe_wasm(prefix);
-    if (probe) {
-      const at = probe.first_fragment;
-      probe.free();
-      if (at !== undefined) found = { prefix: prefix.slice(0, at), at };
-      break;
-    }
+    if (inspectPrefix(inst.src, prefix)) return firstFragment.get(inst.src)!;
     if (prefix.length >= inst.src.size) break;
   }
-  firstFragment.set(inst.src, found);
-  return found;
+  firstFragment.set(inst.src, null);
+  return null;
 }
 
 /** Inspect headers with bounded concurrency; stop inspecting a study once a missing table is found. */
@@ -48,8 +68,11 @@ export async function studiesLackingOffsetTables(
   onProgress?: (done: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<Set<StudyModel>> {
-  const todo = studies.flatMap((st) => st.series.flatMap((se) => se.instances.map((inst) => ({ st, inst }))));
+  const todo = studies.flatMap((st) => st.series.flatMap((se) => se.instances
+    .filter((inst) => mayNeedTable(inst) && firstFragment.get(inst.src) !== null)
+    .map((inst) => ({ st, inst }))));
   const lacking = new Set<StudyModel>();
+  if (!todo.length) return lacking;
   let next = 0, done = 0;
   onProgress?.(0, todo.length);
   await Promise.all(Array.from({ length: Math.min(6, todo.length) }, async () => {

@@ -12,6 +12,7 @@ import { SYNTAXES } from "../../core/transfer-syntax";
 import { BlobBytes, ConcatBytes, MemBytes, SubBytes, type Bytes } from "./bytes";
 import { shlWasm } from "./shl-wasm";
 import type { Stager } from "./stage";
+import { rememberOffsetTableHeader } from "./offset-tables";
 
 export interface Instance {
   name: string;
@@ -160,14 +161,15 @@ export class Collection {
       if (h?.sopInstanceUid && h.studyInstanceUid && h.seriesInstanceUid) break;
     }
     if (!h) return this.skip(name, "unreadable DICOM header");
-    this.addWithHeader(name, src, h);
+    this.addWithHeader(name, src, h, head);
   }
 
   /** Adds an instance whose header is already known (link sources, from the Bundle). */
-  addWithHeader(name: string, src: Bytes, h: DicomHeader) {
+  addWithHeader(name: string, src: Bytes, h: DicomHeader, prefix?: Uint8Array) {
     if (h.sopClassUid === DICOMDIR_SOP) return this.skip(name, "DICOMDIR (an index, not an image)");
     if (!h.sopInstanceUid) return this.skip(name, "no SOP Instance UID");
     if (!h.studyInstanceUid || !h.seriesInstanceUid) return this.skip(name, "no Study or Series Instance UID");
+    if (prefix) rememberOffsetTableHeader({ src, h }, prefix);
     let st = this.studies.get(h.studyInstanceUid);
     if (!st) {
       st = {

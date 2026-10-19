@@ -2,9 +2,8 @@
 // link someone gave you, and the public sample link. Each fills a Collection.
 import type { OpenShare } from "../../core/share";
 import { planBytes, RECORD_PLAINTEXT } from "../../core/range";
-import { parseDicomSync, T } from "../../core/dicom";
 import type { SeriesEntry } from "../../core/bundle";
-import type { DicomHeader } from "../../core/dicom-header";
+import { readDicomHeader, type DicomHeader } from "../../core/dicom-header";
 import { linksTakenWhenSharing } from "../../core/reports";
 import { BlobBytes, SubBytes, type Bytes } from "./bytes";
 import { formatBytes, plural } from "../../core/format";
@@ -95,13 +94,13 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
   // Each series' transfer syntax, from its first instance's file meta (the first record of the
   // series): the Bundle doesn't give it, and compression and offset tables need it.
   const all = idx.studies.flatMap((st) => st.series);
-  const syntax = new Map<SeriesEntry, string>();
+  const headers = new Map<SeriesEntry, Awaited<ReturnType<typeof seriesHeader>>>();
   let read = 0;
   await Promise.all(
     Array.from({ length: Math.min(6, all.length) }, async (_, w) => {
       for (let i = w; i < all.length; i += 6) {
         signal?.throwIfAborted();
-        syntax.set(all[i], await seriesSyntax(share, all[i], signal));
+        headers.set(all[i], await seriesHeader(share, all[i], signal));
         on(col, { doing: `Reading the link's series: ${++read} of ${all.length}`, done: read, total: all.length });
       }
     }),
@@ -110,10 +109,11 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
   for (const st of idx.studies) {
     for (const se of st.series) {
       const src = new LinkSeriesBytes(share, se);
+      const first = headers.get(se)!;
       for (const [k, inst] of se.instances.entries()) {
         const h = blankHeader();
         Object.assign(h, {
-          transferSyntax: syntax.get(se) ?? "",
+          transferSyntax: first.transferSyntax,
           sopInstanceUid: inst.uid,
           sopClassUid: inst.sopClass,
           studyInstanceUid: st.studyInstanceUid,
@@ -125,8 +125,10 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
           instanceNumber: inst.number != null ? String(inst.number) : "",
           accessionNumber: st.accession ?? "",
         });
+        // A series' first header says nothing about other instances' frame counts or tables.
+        if (k === 0) h.numberOfFrames = first.numberOfFrames;
         // inst.offset is in the file; the series source starts at se.offset.
-        col.addWithHeader(`${se.description ?? se.uid}/${k + 1}`, new SubBytes(src, inst.offset - se.offset, inst.length), h);
+        col.addWithHeader(`${se.description ?? se.uid}/${k + 1}`, new SubBytes(src, inst.offset - se.offset, inst.length), h, k === 0 ? first.prefix : undefined);
       }
     }
     on(col, { doing: "Reading the link's Bundle" });
@@ -150,15 +152,16 @@ export async function loadLink(share: OpenShare, col: Collection, on: OnProgress
   await col.finish();
 }
 
-/** The transfer syntax of a series' first instance, from its file meta ("" when it can't be read). */
-async function seriesSyntax(share: OpenShare, se: SeriesEntry, signal?: AbortSignal): Promise<string> {
+/** Keep the first instance's header so the offset-table check can reuse bytes already fetched. */
+async function seriesHeader(share: OpenShare, se: SeriesEntry, signal?: AbortSignal): Promise<{ transferSyntax: string; numberOfFrames?: number; prefix?: Uint8Array }> {
   const inst = se.instances[0];
   try {
     const head = await new LinkSeriesBytes(share, se).read(inst.offset - se.offset, inst.offset - se.offset + Math.min(inst.length, RECORD_PLAINTEXT), signal);
-    return parseDicomSync(head, { untilPixelData: true }).meta.str(T.TransferSyntaxUID) ?? "";
+    const { transferSyntax, numberOfFrames } = await readDicomHeader(head);
+    return { transferSyntax, numberOfFrames, prefix: head };
   } catch {
     signal?.throwIfAborted();
-    return "";
+    return { transferSyntax: "" };
   }
 }
 
