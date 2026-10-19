@@ -10,6 +10,7 @@ runs:
         path: |
           ~/.bun/install/cache
           codecs/mpeg2-wasm/dist/ffmpeg-*.tar.xz
+          dist/vendor/ohif-*.tgz
         key: web-inputs-${{ hashFiles('bun.lock', 'codecs/mpeg2-wasm/ffmpeg-source.json') }}
         restore-keys: web-inputs-
     - name: Web app
@@ -21,3 +22,9 @@ runs:
     - name: Share metadata, encrypted label and creation tests
       shell: bash
       run: bun test test/offset-tables.test.ts test/reshare-syntax.test.ts test/link-labels.test.ts test/start-share.test.ts
+    - name: Streaming export and lifecycle regressions
+      shell: bash
+      run: bun test test/export-stream.test.ts test/export-execution.test.ts test/export-jobs.test.ts test/save-target.test.ts
+    - name: DICOMweb metadata, frame and port transport regressions
+      shell: bash
+      run: bun test test/dicomweb.test.ts

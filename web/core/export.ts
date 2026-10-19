@@ -4,12 +4,14 @@
 import type { SeriesEntry, StudyEntry } from "./bundle";
 import { buildDicomdir, type DicomdirEntry } from "./dicomdir";
 import { readDicomHeader } from "./dicom-header";
+import { DicomdirHeader } from "./dicomdir-header";
 import { FetchPriority, type InstanceLoader } from "./loader";
 import { planInstances, planRuns, type RangePlan } from "./range";
 import { ExportExecution } from "./export-execution";
 
 /** Runs (of up to 8 MiB) read ahead of the one being written. */
 const READ_AHEAD = 3;
+const MAX_RUN_BYTES = 8 * 1024 * 1024;
 import { ZipWriter, type ByteSink } from "./zip";
 
 export interface ExportProgress {
@@ -97,6 +99,8 @@ export async function writePlannedZip(
   const start = (k: number) => {
     if (k >= runs.length || ahead[k]) return;
     const run = runs[k];
+    // planRuns groups small instances, but a single large instance must stream within itself.
+    if (run.plan.plaintextEnd - run.plan.plaintextStart > MAX_RUN_BYTES) return;
     ahead[k] = execution.read(loader.resolver, { file: run.series.file, lo: run.plan.firstRecord, hi: run.plan.lastRecord + 1 },
       (signal) => loader.run(run.series, run.plan, { priority: FetchPriority.Background, signal, durable: true }),
       () => { if (++verifiedRuns === runs.length) execution.sourcesVerified(); });
@@ -106,6 +110,29 @@ export async function writePlannedZip(
     execution.check();
     for (let j = k; j < k + READ_AHEAD; j++) start(j);
     const { t, s, plan } = runs[k];
+    if (plan.plaintextEnd - plan.plaintextStart > MAX_RUN_BYTES) {
+      const run = runs[k], i = plan.firstInstance;
+      const id = ["DICOM", `ST${pad(t + 1)}`, `SE${pad(s + 1)}`, `IM${pad(i + 1)}`];
+      const header = new DicomdirHeader();
+      await execution.read(loader.resolver, { file: run.series.file, lo: plan.firstRecord, hi: plan.lastRecord + 1 }, async (signal) => {
+        async function* chunks() {
+          for await (const bytes of loader.streamInstance(run.series, i, { priority: FetchPriority.Background, signal, durable: true })) {
+            await header.feed(bytes);
+            yield bytes;
+            progress.bytes += bytes.length;
+            report();
+          }
+        }
+        try {
+          await zip.addStream(id.join("/"), run.series.instances[i].length, chunks());
+          const collected = await header.finish();
+          if (collected) dir.push({ fileId: id, header: collected });
+        } finally { await header.dispose(); }
+      }, () => { if (++verifiedRuns === runs.length) execution.sourcesVerified(); });
+      progress.files++;
+      report();
+      continue;
+    }
     const files = await ahead[k]!;
     delete ahead[k];
     for (let n = 0; n < files.length; n++) {
@@ -138,12 +165,19 @@ export async function writeInstance(loader: InstanceLoader, series: SeriesEntry,
   const plan = planInstances(series, i);
   const range = { file: series.file, lo: plan.firstRecord, hi: plan.lastRecord + 1 };
   execution.seal(loader.resolver, [range]);
-  const total = plan.ciphertextEnd - plan.ciphertextStart;
-  const bytes = await execution.read(loader.resolver, range,
-    (signal) => exportInstance(loader, series, i, (bytes, totalBytes) => execution.update({ bytes, totalBytes, files: 0, totalFiles: 1 }), signal),
+  const totalBytes = series.instances[i].length;
+  let bytes = 0;
+  execution.update({ bytes, totalBytes, files: 0, totalFiles: 1 });
+  await execution.read(loader.resolver, range,
+    async (signal) => {
+      for await (const chunk of loader.streamInstance(series, i, { priority: FetchPriority.Visible, signal, durable: true })) {
+        await sink.write(chunk);
+        bytes += chunk.length;
+        execution.update({ bytes, totalBytes, files: 0, totalFiles: 1 });
+      }
+    },
     () => execution.sourcesVerified());
-  await sink.write(bytes);
-  execution.update({ bytes: total, totalBytes: total, files: 1, totalFiles: 1 });
+  execution.update({ bytes, totalBytes, files: 1, totalFiles: 1 });
   await sink.close();
 }
 

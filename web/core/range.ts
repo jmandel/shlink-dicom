@@ -54,6 +54,19 @@ export function planInstances(series: SeriesEntry, first: number, last = first):
   return { ...planBytes(series, i0.offset, i1.offset + i1.length), firstInstance: first, lastInstance: last };
 }
 
+/** Bounded reads within a byte range. Interior boundaries fall between authentication records. */
+export function* planChunks(series: SeriesEntry, a: number, b: number, maxCiphertextBytes = 4 * 1024 * 1024): Generator<RangePlan> {
+  if (!Number.isSafeInteger(maxCiphertextBytes) || maxCiphertextBytes < RECORD_CIPHERTEXT) throw new RangeError("chunk budget must hold at least one encrypted record");
+  const records = Math.floor(maxCiphertextBytes / RECORD_CIPHERTEXT);
+  // Validate the complete range even when no chunk has been requested yet.
+  planBytes(series, a, b);
+  while (a < b) {
+    const end = Math.min(b, (Math.floor(a / RECORD_PLAINTEXT) + records) * RECORD_PLAINTEXT);
+    yield planBytes(series, a, end);
+    a = end;
+  }
+}
+
 /** Plans the whole series: [series.offset, series.offset + series.bytes) of its file. */
 export function planSeries(series: SeriesEntry): RangePlan {
   return planInstances(series, 0, series.instances.length - 1);

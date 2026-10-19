@@ -30,6 +30,7 @@ interface CentralEntry {
   crc: number;
   size: number;
   offset: number;
+  flags?: number;
 }
 
 const MAX32 = 0xffffffff;
@@ -80,6 +81,50 @@ export class ZipWriter {
     await this.put(data);
   }
 
+  /** One stored entry from bounded chunks; the CRC follows its data in a ZIP descriptor. */
+  async addStream(path: string, size: number, chunks: AsyncIterable<Uint8Array>) {
+    if (!Number.isSafeInteger(size) || size < 0) throw new RangeError("invalid ZIP entry length");
+    const name = new TextEncoder().encode(path);
+    if (name.length > 0xffff) throw new RangeError("ZIP entry name is too long");
+    const offset = this.offset, zip64 = size >= MAX32 || offset >= MAX32;
+    const extra = zip64 ? 20 : 0, flags = 0x0808; // UTF-8 and trailing CRC/size descriptor
+    const h = new Uint8Array(30 + name.length + extra), v = new DataView(h.buffer);
+    v.setUint32(0, 0x04034b50, true);
+    v.setUint16(4, zip64 ? 45 : 20, true);
+    v.setUint16(6, flags, true);
+    v.setUint16(12, 0x21, true);
+    v.setUint32(18, zip64 ? MAX32 : 0, true);
+    v.setUint32(22, zip64 ? MAX32 : 0, true);
+    v.setUint16(26, name.length, true);
+    v.setUint16(28, extra, true);
+    h.set(name, 30);
+    if (zip64) {
+      v.setUint16(30 + name.length, 0x0001, true);
+      v.setUint16(32 + name.length, 16, true);
+      v.setBigUint64(34 + name.length, BigInt(size), true);
+      v.setBigUint64(42 + name.length, BigInt(size), true);
+    }
+    await this.put(h);
+    let received = 0, crc = 0;
+    for await (const bytes of chunks) {
+      received += bytes.length;
+      if (received > size) throw new Error("ZIP entry exceeds its declared length");
+      crc = crc32(bytes, crc);
+      await this.put(bytes);
+    }
+    if (received !== size) throw new Error("ZIP entry ended before its declared length");
+    const d = new Uint8Array(zip64 ? 24 : 16), dv = new DataView(d.buffer);
+    dv.setUint32(0, 0x08074b50, true);
+    dv.setUint32(4, crc, true);
+    if (zip64) {
+      dv.setBigUint64(8, BigInt(size), true); dv.setBigUint64(16, BigInt(size), true);
+    } else {
+      dv.setUint32(8, size, true); dv.setUint32(12, size, true);
+    }
+    await this.put(d);
+    this.entries.push({ name, crc, size, offset, flags });
+  }
+
   /** Writes the central directory and closes the sink. */
   async finish() {
     const cdStart = this.offset;
@@ -91,7 +136,7 @@ export class ZipWriter {
       v.setUint32(0, 0x02014b50, true);
       v.setUint16(4, 45, true);
       v.setUint16(6, needs64 ? 45 : 20, true);
-      v.setUint16(8, 0x0800, true);
+      v.setUint16(8, e.flags ?? 0x0800, true);
       v.setUint16(10, 0, true);
       v.setUint16(12, 0, true);
       v.setUint16(14, 0x21, true);
@@ -114,7 +159,7 @@ export class ZipWriter {
     }
     const cdSize = this.offset - cdStart;
     const n = this.entries.length;
-    if (cdStart >= MAX32 || n >= 0xffff) {
+    if (cdStart >= MAX32 || cdSize >= MAX32 || n >= 0xffff) {
       const z = new Uint8Array(56 + 20);
       const v = new DataView(z.buffer);
       const eocd64At = this.offset;

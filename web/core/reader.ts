@@ -27,9 +27,10 @@ class InPlace implements Backend {
   private m: Promise<ReaderModule>;
   constructor() {
     this.m = import("../../crates/shl-dicom-reader/pkg/shl_dicom_reader.js").then(async (m) => {
-      const wasm = typeof window === "undefined" ? new URL("../../crates/shl-dicom-reader/pkg/shl_dicom_reader_bg.wasm", import.meta.url) : assetUrl("shl_dicom_reader_bg.wasm");
-      if (typeof window === "undefined") {
-        // Bun: the file itself.
+      const node = !!(globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node;
+      const wasm = node ? new URL("../../crates/shl-dicom-reader/pkg/shl_dicom_reader_bg.wasm", import.meta.url) : assetUrl("shl_dicom_reader_bg.wasm");
+      if (node) {
+        // Bun/Node: the file itself. Browser workers also lack window, but fetch the asset.
         const fs = "node:fs";
         const { readFileSync } = await import(/* @vite-ignore */ fs);
         m.initSync({ module: readFileSync(wasm) });

@@ -37,7 +37,7 @@ import { exportBaseName, exportSize, writePlannedZip, writeInstance, planExport,
 import { ExportJobs } from "../core/export-jobs";
 import { DownloadsController, type DownloadChoice } from "./downloads";
 import { LatestOperation, ViewSession, type ViewOperation } from "./view-session";
-import { openSaveTarget, saveBlob } from "../core/save";
+import { BlobDownloadLimitError, openSaveTarget, saveBlob } from "../core/save";
 import { isSlideSeries } from "../core/wsi";
 import { drawSlideThumbnail, slideHooks, slideSession, SlideView, type SlideSession } from "./wsi-view";
 import { mayHoldMedia, MediaController } from "../core/video-view";
@@ -2273,7 +2273,7 @@ function wireGestures() {
 let openSheetId: string | null = null;
 const downloads = new DownloadsController(exportJobs, {
   open: () => openSheet("sheet-download"), close: closeSheet, isOpen: () => openSheetId === "sheet-download",
-}, (error) => describeError(error).title);
+}, (error) => error instanceof BlobDownloadLimitError ? error.message : describeError(error).title);
 
 function openSheet(id: string) {
   closeSheet();
@@ -2366,7 +2366,7 @@ function runZip(scope: ExportScope) {
   const name = (scope.kind === "all" ? "shared-imaging" : exportBaseName(scope.study, scope.kind === "series" ? scope.series : undefined)) + ".zip";
   const job = exportJobs.create(name);
   // The picker runs in the user gesture. The execution owns its result, even after cancellation.
-  const target = openSaveTarget(name, "application/zip", ".zip");
+  const target = openSaveTarget(name, "application/zip", ".zip", exportSize(scope).bytes);
   downloads.show(job.id, false);
   return job.run(target, (task, sink) => writePlannedZip(planExport(scope), source.loader, sink, task))
     .then(() => { (globalThis as any).__view.lastExport = name; }, () => {}); // failures are rendered from job state
@@ -2375,7 +2375,7 @@ function runZip(scope: ExportScope) {
 function runOne(se: SeriesEntry, i: number) {
   const source = share!, name = `${se.instances[i].uid}.dcm`;
   const job = exportJobs.create(name);
-  const target = openSaveTarget(name, "application/dicom", ".dcm");
+  const target = openSaveTarget(name, "application/dicom", ".dcm", se.instances[i].length);
   downloads.show(job.id, false);
   return job.run(target, (task, sink) => writeInstance(source.loader, se, i, sink, task))
     .then(() => { (globalThis as any).__view.lastExport = name; }, () => {});

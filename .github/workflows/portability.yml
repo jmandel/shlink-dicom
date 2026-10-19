@@ -37,6 +37,12 @@ jobs:
       - uses: ./.github/actions/wasm
       - uses: ./.github/actions/web
 
+      - name: Modal layout regressions in Chromium
+        if: runner.os == 'Linux'
+        run: |
+          bunx playwright-core install --with-deps chromium
+          node web/checks/modal-layout-check.mjs
+
       - name: Rust tests (crates)
         run: cargo test -q --release --workspace
 

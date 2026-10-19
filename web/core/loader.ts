@@ -17,7 +17,7 @@
 // ImageStore (images.ts) instead takes `ciphertext()` and decrypts and decodes in one worker job.
 import type { SeriesEntry } from "./bundle";
 import type { RecordDecryptor } from "./decrypt";
-import { planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCiphertextLength, type RangePlan } from "./range";
+import { planChunks, planInstances, RECORD_CIPHERTEXT, RECORD_PLAINTEXT, recordCiphertextLength, type RangePlan } from "./range";
 import type { LinkResolver } from "./resolver";
 import { AdmissionWakeup, type ReadAdmission } from "./read-admission";
 
@@ -168,6 +168,21 @@ export class InstanceLoader {
   async instance(series: SeriesEntry, i: number, o: LoadOptions = {}): Promise<Uint8Array> {
     const { plan, bytes } = await this.ciphertext(series, i, o);
     return this.decrypt(series, plan, bytes);
+  }
+
+  /**
+   * An original instance, authenticated a bounded chunk at a time. The consumer controls
+   * backpressure: no next chunk is acquired until it asks. Bulk export does not fill the LRU.
+   * The byte budget includes record alignment and authentication tags, not just plaintext.
+   */
+  async *streamInstance(series: SeriesEntry, i: number, o: LoadOptions & { chunkBytes?: number } = {}): AsyncGenerator<Uint8Array> {
+    const whole = planInstances(series, i);
+    for (const plan of planChunks(series, whole.plaintextStart, whole.plaintextEnd, o.chunkBytes)) {
+      const ct = await this.records(series, plan, o, false);
+      const bytes = await this.decrypt(series, plan, ct);
+      if (o.signal?.aborted) throw o.signal.reason ?? abortError();
+      yield bytes;
+    }
   }
 
   /**
