@@ -155,9 +155,6 @@ impl EncryptedLabel {
 #[serde(rename_all = "camelCase")]
 pub struct LinkResource {
     pub id: String,
-    /// Legacy plaintext, returned only until the owner migrates it. Never written by the API.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
     #[serde(default)]
     pub label_encrypted: Option<EncryptedLabel>,
     pub url: String,
@@ -316,6 +313,7 @@ impl AppState {
     /// uploads), which assume no other process is using the data directory.
     pub fn with_store(data_dir: impl AsRef<Path>, quotas: Quotas, store: Arc<dyn BlobStore>) -> Result<Self, String> {
         let state = Self::alongside_server(data_dir, quotas, store)?;
+        state.discard_legacy_labels()?;
         state.run_sweep()?;
         state.sweep_orphan_files();
         state.sweep_stale_uploads();
@@ -518,6 +516,22 @@ impl AppState {
             Some(f) => cat.execute("DELETE FROM reserved WHERE sid = ?1 AND file_id = ?2", params![sid, f]),
             None => cat.execute("DELETE FROM reserved WHERE sid = ?1", params![sid]),
         };
+    }
+
+    /// Labels from the old plaintext API are deliberately discarded. Do this before serving
+    /// any requests, including for shares whose owners never return. Encrypted labels survive.
+    fn discard_legacy_labels(&self) -> Result<(), String> {
+        let cat = self.catalog.lock().unwrap();
+        let mut stmt = cat.prepare("SELECT sid FROM shares").map_err(|e| e.to_string())?;
+        let sids = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for sid in sids {
+            let sid = sid.map_err(|e| e.to_string())?;
+            let path = self.share_db_path(&sid);
+            if !path.exists() { continue; }
+            let conn = open_existing(&path).map_err(|e| e.to_string())?;
+            conn.execute("UPDATE links SET label = NULL WHERE label IS NOT NULL", []).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     /// Startup: access-log rows written before capability tokens were left out of them get the
@@ -1090,7 +1104,7 @@ impl AppState {
         {
             let mut stmt = conn
                 .prepare(
-                    "SELECT lid, label, long_lived, online, exp, passcode_hash IS NOT NULL,
+                    "SELECT lid, long_lived, online, exp, passcode_hash IS NOT NULL,
                             remaining_attempts, bundle IS NOT NULL, created_at
                      FROM links ORDER BY created_at, lid",
                 )
@@ -1099,24 +1113,22 @@ impl AppState {
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, i64>(1)? != 0,
                         r.get::<_, i64>(2)? != 0,
-                        r.get::<_, i64>(3)? != 0,
-                        r.get::<_, Option<i64>>(4)?,
-                        r.get::<_, bool>(5)?,
-                        r.get::<_, Option<i64>>(6)?,
-                        r.get::<_, bool>(7)?,
-                        r.get::<_, i64>(8)?,
+                        r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, bool>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
+                        r.get::<_, bool>(6)?,
+                        r.get::<_, i64>(7)?,
                     ))
                 })
                 .ok()?;
             for row in rows.flatten() {
-                let (lid, label, long_lived, online, exp, has_passcode, remaining_attempts, has_bundle, link_created) = row;
+                let (lid, long_lived, online, exp, has_passcode, remaining_attempts, has_bundle, link_created) = row;
                 if let Some(link_res) = build_link_resource_from_row(
                     &conn,
                     origin,
                     lid,
-                    label,
                     long_lived,
                     online,
                     exp,
@@ -1220,7 +1232,6 @@ pub fn build_link_resource_from_row(
     conn: &Connection,
     origin: &str,
     lid: String,
-    label: Option<String>,
     long_lived: bool,
     online: bool,
     exp: Option<i64>,
@@ -1273,7 +1284,6 @@ pub fn build_link_resource_from_row(
     let label_encrypted = encrypted.map(|s| serde_json::from_str(&s)).transpose().ok()?;
     Some(LinkResource {
         id: lid,
-        label,
         label_encrypted,
         url,
         flag,
@@ -1508,10 +1518,11 @@ fn init_share_db(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS access_ts ON access_log(ts);
          CREATE INDEX IF NOT EXISTS access_lid ON access_log(lid);",
     )?;
-    // Keep old names until a browser with the owner key can encrypt them.
+    // Older databases retain the unused column so a code rollback still opens them.
     if conn.prepare("SELECT label_encrypted FROM links LIMIT 0").is_err() {
         conn.execute_batch("ALTER TABLE links ADD COLUMN label_encrypted TEXT;")?;
     }
+    conn.execute("UPDATE links SET label = NULL WHERE label IS NOT NULL", [])?;
     // Share databases made before links had refill_attempts.
     if conn.prepare("SELECT refill_attempts FROM links LIMIT 0").is_err() {
         conn.execute_batch("ALTER TABLE links ADD COLUMN refill_attempts INTEGER NOT NULL DEFAULT 0;")?;
@@ -1618,6 +1629,34 @@ mod tests {
         assert_eq!(v, 0);
         let label: Option<String> = conn.query_row("SELECT label_encrypted FROM links WHERE lid = 'x'", [], |r| r.get(0)).unwrap();
         assert!(label.is_none());
+    }
+
+    #[test]
+    fn startup_discards_plaintext_labels_but_keeps_encrypted_labels_and_access() {
+        let dir = std::env::temp_dir().join(format!("discard_labels_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = super::AppState::new(&dir).unwrap();
+        let (sid, token) = state.create_share(false, None).unwrap();
+        let lid = "n".repeat(43);
+        let encrypted = r#"{"v":1,"iv":"AAAAAAAAAAAAAAAA","ciphertext":"AAAAAAAAAAAAAAAAAAAAAAA"}"#;
+        state.open_share_db(&sid).unwrap().lock().unwrap().execute(
+            "INSERT INTO links (lid, label, label_encrypted, long_lived, online, created_at) VALUES (?1, 'Old name', ?2, 0, 1, 0)",
+            rusqlite::params![lid, encrypted],
+        ).unwrap();
+        state.register_link_in_catalog(&sid, &lid).unwrap();
+        drop(state);
+        let restarted = super::AppState::new(&dir).unwrap();
+        assert!(restarted.verify_control_token(&sid, &token));
+        let conn = rusqlite::Connection::open(restarted.share_db_path(&sid)).unwrap();
+        let (plain, kept, online): (Option<String>, String, bool) = conn.query_row(
+            "SELECT label, label_encrypted, online FROM links WHERE lid = ?1", [&lid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert!(plain.is_none());
+        assert_eq!(kept, encrypted);
+        assert!(online);
+        assert!(restarted.build_share_resource(&sid, "https://example.org").unwrap().links[0].label_encrypted.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

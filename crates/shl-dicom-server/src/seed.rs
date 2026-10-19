@@ -117,7 +117,6 @@ pub fn seed_sample(state: &AppState, same_patient: bool) -> Result<SeedReport, S
         )
         .map_err(|e| e.to_string())?;
     }
-    let meta = sample_meta(state);
     let all_allowed_files = packed.file_ids.clone();
 
     // Link 1: U-mode Brain MRI + Wrist link
@@ -135,7 +134,6 @@ pub fn seed_sample(state: &AppState, same_patient: bool) -> Result<SeedReport, S
         state,
         &sid,
         &lid_u,
-        &format!("{} (Direct Link)", meta.title),
         false,
         None,
         false,
@@ -158,7 +156,6 @@ pub fn seed_sample(state: &AppState, same_patient: bool) -> Result<SeedReport, S
         state,
         &sid,
         &lid_p,
-        &format!("{} (Passcode: 1234)", meta.title),
         true,
         Some("1234"),
         // Its passcode is published, so wrong guesses must not lock it for everyone.
@@ -256,7 +253,6 @@ fn insert_seeded_link(
     state: &AppState,
     sid: &str,
     lid: &str,
-    label: &str,
     long_lived: bool,
     passcode: Option<&str>,
     refill_attempts: bool,
@@ -284,12 +280,11 @@ fn insert_seeded_link(
         let mut conn = conn_arc.lock().unwrap();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         tx.execute(
-            "INSERT INTO links (lid, label, long_lived, online, exp, passcode_salt, passcode_hash,
+            "INSERT INTO links (lid, long_lived, online, exp, passcode_salt, passcode_hash,
                                 remaining_attempts, refill_attempts, bundle, bundle_etag, bundle_updated_at, created_at)
-             VALUES (?1, ?2, ?3, 1, NULL, ?4, ?5, ?6, ?10, ?7, ?8, ?9, ?9)",
+             VALUES (?1, ?2, 1, NULL, ?3, ?4, ?5, ?9, ?6, ?7, ?8, ?8)",
             params![
                 lid,
-                label,
                 i64::from(long_lived),
                 salt_opt,
                 hash_opt,
@@ -326,8 +321,8 @@ mod tests {
         let (old, _) = state.create_share(true, None).unwrap();
         let (new, _) = state.create_share(true, None).unwrap();
         let (lu, lp) = ("u".repeat(43), "p".repeat(43));
-        super::insert_seeded_link(&state, &new, &lu, "u", false, None, false, "x", &[]).unwrap();
-        super::insert_seeded_link(&state, &new, &lp, "p", true, Some("1234"), true, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &new, &lu, false, None, false, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &new, &lp, true, Some("1234"), true, "x", &[]).unwrap();
         let saved = super::PersistedSeed { version: super::SEED_VERSION, sid: new.clone(), lid_u: lu, key_u: "k".repeat(43), lid_p: lp, key_p: "k".repeat(43), retired: vec![old.clone()] };
         std::fs::write(dir.join("seeded_demos.json"), serde_json::to_string(&saved).unwrap()).unwrap();
         assert!(state.catalog_has_share(&old), "the seed leaves the previous sample in place");
@@ -346,8 +341,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let state = crate::state::AppState::new(&dir).unwrap();
         let (sid, _) = state.create_share(true, None).unwrap();
-        super::insert_seeded_link(&state, &sid, &"a".repeat(43), "u", false, None, false, "x", &[]).unwrap();
-        super::insert_seeded_link(&state, &sid, &"b".repeat(43), "p", true, Some("1234"), true, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &sid, &"a".repeat(43), false, None, false, "x", &[]).unwrap();
+        super::insert_seeded_link(&state, &sid, &"b".repeat(43), true, Some("1234"), true, "x", &[]).unwrap();
         let c = state.open_share_db(&sid).unwrap();
         let conn = c.lock().unwrap();
         let get = |lid: String| -> (i64, Option<i64>) {

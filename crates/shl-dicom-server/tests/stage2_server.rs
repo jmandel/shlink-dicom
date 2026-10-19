@@ -191,7 +191,7 @@ fn golden_file_id() -> String {
 }
 
 #[tokio::test]
-async fn test_labels_are_encrypted_persistent_clearable_and_migrate_atomically() {
+async fn test_labels_are_encrypted_persistent_and_clearable() {
     let dir = temp_data_dir("encrypted_labels");
     let state = test_state(&dir);
     let base = spawn_test_server(state.clone()).await;
@@ -248,18 +248,6 @@ async fn test_labels_are_encrypted_persistent_clearable_and_migrate_atomically()
         assert!(other["links"][0].get("label").is_none());
     }
 
-    // Simulate a database created before encrypted labels. Migration clears the old value in
-    // the same transaction, and a stale migration never overwrites a later rename or clear.
-    state.open_share_db(sid).unwrap().lock().unwrap().execute(
-        "UPDATE links SET label = 'Legacy recipient' WHERE lid = ?1", [lid]).unwrap();
-    let migrate = json!({ "labelEncrypted": first, "migrateLabel": true });
-    assert_eq!(client.patch(&url).bearer_auth(token).json(&migrate).send().await.unwrap().status(), StatusCode::OK);
-    assert_eq!(stored(), Some(first));
-    for value in [next, Value::Null] {
-        client.patch(&url).bearer_auth(token).json(&json!({ "labelEncrypted": value })).send().await.unwrap().error_for_status().unwrap();
-        client.patch(&url).bearer_auth(token).json(&migrate).send().await.unwrap().error_for_status().unwrap();
-        assert_eq!(json!(stored()), value);
-    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

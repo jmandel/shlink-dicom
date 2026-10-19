@@ -1228,7 +1228,6 @@ pub async fn create_link(
         &conn,
         &origin,
         lid,
-        req.label,
         req.long_lived,
         true,
         req.exp,
@@ -1335,9 +1334,6 @@ pub struct PatchLinkRequest {
     pub label: Option<Option<String>>,
     #[serde(default, deserialize_with = "present_nullable")]
     pub label_encrypted: Option<Option<crate::state::EncryptedLabel>>,
-    /// Only replace a legacy value: a concurrent rename must win over migration.
-    #[serde(default)]
-    pub migrate_label: bool,
     pub exp: Option<Option<i64>>,
     pub online: Option<bool>,
     pub allowed_files: Option<Vec<String>>,
@@ -1400,9 +1396,8 @@ pub async fn patch_link(
     if let Some(value) = req.label_encrypted {
         let encrypted = value.map(|v| serde_json::to_string(&v).unwrap());
         if let Err(e) = tx.execute(
-            "UPDATE links SET label_encrypted = ?1, label = NULL WHERE lid = ?2
-             AND (?3 = 0 OR (label_encrypted IS NULL AND label IS NOT NULL))",
-            params![encrypted, lid, req.migrate_label],
+            "UPDATE links SET label_encrypted = ?1 WHERE lid = ?2",
+            params![encrypted, lid],
         ) {
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
@@ -1615,27 +1610,26 @@ fn load_link_resource(
 ) -> Option<crate::state::LinkResource> {
     let row = conn
         .query_row(
-            "SELECT lid, label, long_lived != 0, online != 0, exp, passcode_hash IS NOT NULL,
+            "SELECT lid, long_lived != 0, online != 0, exp, passcode_hash IS NOT NULL,
                     remaining_attempts, bundle IS NOT NULL, created_at
              FROM links WHERE lid = ?1",
             params![lid],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, bool>(1)?,
                     r.get::<_, bool>(2)?,
-                    r.get::<_, bool>(3)?,
-                    r.get::<_, Option<i64>>(4)?,
-                    r.get::<_, bool>(5)?,
-                    r.get::<_, Option<i64>>(6)?,
-                    r.get::<_, bool>(7)?,
-                    r.get::<_, i64>(8)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, bool>(6)?,
+                    r.get::<_, i64>(7)?,
                 ))
             },
         )
         .ok()?;
     build_link_resource_from_row(
-        conn, origin, row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8,
+        conn, origin, row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
     )
 }
 
