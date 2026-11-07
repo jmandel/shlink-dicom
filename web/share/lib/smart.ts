@@ -99,15 +99,20 @@ async function getWithRetry(url: string, headers: Record<string, string>, tries 
   }
 }
 
-/** The portal's token and the two servers it may go to. */
+/**
+ * The portal's token and where it may go: the clinical and imaging servers, and the WADO-RS
+ * endpoints the imaging server designates for a study, which can be on another server.
+ */
 export interface PortalAuth {
   token: string;
   clinicalBase: string;
   imagingBase: string;
+  /** WADO-RS bases from `Endpoint.address` in the imaging server's search results. */
+  wadoBases?: Set<string>;
 }
 
 export function portalAuth(d: Discovery, token: string): PortalAuth {
-  return { token, clinicalBase: d.clinicalBase, imagingBase: d.imagingBase };
+  return { token, clinicalBase: d.clinicalBase, imagingBase: d.imagingBase, wadoBases: new Set() };
 }
 
 /**
@@ -119,6 +124,17 @@ export function portalUrl(a: Pick<PortalAuth, "clinicalBase" | "imagingBase">, u
   const u = new URL(url, a.clinicalBase + "/");
   if (![a.clinicalBase, a.imagingBase].some((b) => new URL(b).origin === u.origin)) throw new Error(`The portal pointed to another server (${u.origin}); its token is not sent there.`);
   return u.toString();
+}
+
+/**
+ * A WADO-RS address under a base the imaging server designated, or on the portal's own servers;
+ * otherwise an Error. SMART Imaging Access: apps present the token at the WADO-RS endpoints the
+ * trusted imaging server designates (`Endpoint.address`), and nowhere else outside the portal.
+ */
+export function wadoUrl(a: Pick<PortalAuth, "clinicalBase" | "imagingBase" | "wadoBases">, url: string): string {
+  const u = new URL(url, a.clinicalBase + "/").toString();
+  for (const base of a.wadoBases ?? []) if (u === base || u.startsWith(base + "/")) return u;
+  return portalUrl(a, u);
 }
 
 export async function fhirGet(url: string, auth: PortalAuth): Promise<any> {
@@ -159,8 +175,13 @@ export interface FoundStudy {
   wadoBase: string;
 }
 
-/** The studies a search Bundle lists, with their WADO-RS bases (resolved against the clinical base). */
-export function studiesFromBundle(bundle: any, auth: Pick<PortalAuth, "clinicalBase" | "imagingBase">): FoundStudy[] {
+/**
+ * The studies an imaging server search Bundle lists, with their WADO-RS bases. A base is the
+ * study's active `dicom-wado-rs` Endpoint, which the imaging server designates and so may be on
+ * another server; it is recorded in `auth.wadoBases` so retrieval may send the token there. It must
+ * use https (or http on this machine). Relative addresses resolve against the clinical base.
+ */
+export function studiesFromBundle(bundle: any, auth: Pick<PortalAuth, "clinicalBase" | "imagingBase" | "wadoBases">): FoundStudy[] {
   const out: FoundStudy[] = [];
   for (const entry of bundle.entry ?? []) {
     const st = entry.resource;
@@ -172,10 +193,11 @@ export function studiesFromBundle(bundle: any, auth: Pick<PortalAuth, "clinicalB
       const ep = resolveInBundle(bundle, entry, ref.reference);
       if (ep?.resourceType === "Endpoint" && ep.connectionType?.code === "dicom-wado-rs" && ep.status === "active") {
         try {
-          wadoBase = portalUrl(auth, String(ep.address)).replace(/\/+$/, "");
+          wadoBase = secureUrl(new URL(String(ep.address), auth.clinicalBase + "/").toString(), "WADO-RS endpoint").replace(/\/+$/, "");
         } catch {
-          continue; // an Endpoint on another server: the token can't go there
+          continue; // not https: the token can't go there
         }
+        auth.wadoBases?.add(wadoBase);
         break;
       }
     }
@@ -246,7 +268,7 @@ export async function inlineAttachments(report: any, auth: PortalAuth): Promise<
  * series is never held whole. Consume each part before asking for the next.
  */
 export async function* wadoRetrieveParts(url: string, auth: PortalAuth, signal?: AbortSignal): AsyncGenerator<WadoPart> {
-  const res = await getWithRetry(portalUrl(auth, url), { authorization: `Bearer ${auth.token}`, accept: DICOM_ACCEPT });
+  const res = await getWithRetry(wadoUrl(auth, url), { authorization: `Bearer ${auth.token}`, accept: DICOM_ACCEPT });
   if (!res.ok || !res.body) throw new Error(`WADO-RS ${res.status} for ${url}`);
   const ct = res.headers.get("content-type") ?? "";
   const m = ct.match(/boundary=("?)([^";]+)\1/i);
