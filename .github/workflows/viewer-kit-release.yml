@@ -1,0 +1,65 @@
+# Builds viewer-kit (the decoder wasm and the API and worker bundles) and publishes it as
+# viewer-kit-<short commit>, for other projects to download and pin by SHA-256. The files are the
+# same for every platform, so one build serves all.
+name: viewer-kit release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - viewer-kit/**
+      - codecs/shl-codec-*/**
+      - codecs/shl-dicom-decode/**
+      - codecs/shl-dicom-decode-wasm/**
+      - codecs/shl-jpeg2000/**
+      - codecs/shl-jpegxl/**
+      - codecs/Cargo.toml
+      - codecs/Cargo.lock
+      - LICENSE
+      - .github/workflows/viewer-kit-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: viewer-kit-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with:
+          cache-key: viewer-kit
+      - name: Build viewer-kit
+        run: node viewer-kit/scripts/build.mjs
+      - name: Pack the release
+        id: pack
+        run: |
+          tag="viewer-kit-${GITHUB_SHA::7}"
+          name="shlink-dicom-$tag"
+          out="$RUNNER_TEMP/release"
+          mkdir -p "$out/$name"
+          cp viewer-kit/dist/viewer-kit.js viewer-kit/dist/decoder-worker.js viewer-kit/dist/shl_dicom_decode.wasm viewer-kit/dist/shl_dicom_decode_jxl.wasm viewer-kit/INTEGRATION.md LICENSE "$out/$name/"
+          (cd "$out/$name" && sha256sum -- * > SHA256SUMS)
+          tar -C "$out" -czf "$out/$name.tar.gz" "$name"
+          (cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          files=$(cd "$out/$name" && for f in *; do printf '"%s":"%s",' "$f" "$(sha256sum "$f" | cut -d' ' -f1)"; done)
+          printf '{"tag":"%s","commit":"%s","files":{%s}}\n' "$tag" "$GITHUB_SHA" "${files%,}" > "$out/$name.json"
+          cat "$out/$name.json"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/publish-release
+        with:
+          prefix: viewer-kit
+          tag: ${{ steps.pack.outputs.tag }}
+          names: ${{ steps.pack.outputs.name }}
+          dir: ${{ runner.temp }}/release
+          product: viewer-kit
+          notes: "viewer-kit at ${{ github.sha }}: the DICOM decoder wasm (with and without JPEG XL), the decoder worker, and the API as one ES module. See INTEGRATION.md in the tarball. Each file's SHA-256 is in SHA256SUMS and in the .json manifest."
