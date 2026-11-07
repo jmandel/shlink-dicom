@@ -1,8 +1,9 @@
 // bun test test/portal-token.test.ts: the portal's token goes only to its clinical and imaging
-// servers (web/share/lib/smart.ts); relative addresses resolve against the clinical base; packed
+// servers and the WADO-RS endpoints the imaging server designates (web/share/lib/smart.ts);
+// relative addresses resolve against the clinical base; packed
 // reports keep attachment data, never attachment URLs (web/share/lib/pack.ts).
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { fhirSearchAll, inlineAttachments, portalUrl, studiesFromBundle, type PortalAuth } from "../web/share/lib/smart";
+import { fhirSearchAll, inlineAttachments, portalUrl, studiesFromBundle, wadoRetrieveParts, wadoUrl, type PortalAuth } from "../web/share/lib/smart";
 import { buildBundle } from "../web/share/lib/pack";
 import { useShlWasm } from "../web/checks/shl-wasm-bun";
 
@@ -51,16 +52,32 @@ describe("the token stays on the portal", () => {
     expect(calls).toEqual([{ url: "https://ehr.example/fhir/Binary/9", token: true }]);
     expect(r.presentedForm).toEqual([{ contentType: "application/pdf", data: "AQID", size: 3 }]);
   });
-  test("an Endpoint on another server gives no WADO-RS base", () => {
-    const bundle = {
-      entry: [
-        { fullUrl: "https://img.example/fhir/ImagingStudy/s", resource: { resourceType: "ImagingStudy", identifier: [{ system: "urn:dicom:uid", value: "urn:oid:1.2.3" }], endpoint: [{ reference: "Endpoint/e" }] } },
-        { fullUrl: "https://img.example/fhir/Endpoint/e", resource: { resourceType: "Endpoint", id: "e", status: "active", connectionType: { code: "dicom-wado-rs" }, address: "https://evil.example/wado" } },
-      ],
-    };
-    expect(studiesFromBundle(bundle, auth)).toEqual([]);
-    bundle.entry[1].resource.address = "https://img.example/dicomweb";
-    expect(studiesFromBundle(bundle, auth).map((s) => s.wadoBase)).toEqual(["https://img.example/dicomweb"]);
+  const studyWith = (address: string, connection = "dicom-wado-rs") => ({
+    entry: [
+      { fullUrl: "https://img.example/fhir/ImagingStudy/s", resource: { resourceType: "ImagingStudy", identifier: [{ system: "urn:dicom:uid", value: "urn:oid:1.2.3" }], endpoint: [{ reference: "Endpoint/e" }] } },
+      { fullUrl: "https://img.example/fhir/Endpoint/e", resource: { resourceType: "Endpoint", id: "e", status: "active", connectionType: { code: connection }, address } },
+    ],
+  });
+  test("a WADO-RS Endpoint the imaging server designates is used, on another server too", () => {
+    const a: PortalAuth = { ...auth, wadoBases: new Set() };
+    expect(studiesFromBundle(studyWith("https://pacs.example/wado/ctx/"), a).map((s) => s.wadoBase)).toEqual(["https://pacs.example/wado/ctx"]);
+    expect([...a.wadoBases!]).toEqual(["https://pacs.example/wado/ctx"]);
+    expect(wadoUrl(a, "https://pacs.example/wado/ctx/studies/1.2.3")).toBe("https://pacs.example/wado/ctx/studies/1.2.3");
+  });
+  test("an Endpoint over plain http elsewhere, or not WADO-RS, gives no base", () => {
+    const a: PortalAuth = { ...auth, wadoBases: new Set() };
+    expect(studiesFromBundle(studyWith("http://pacs.example/wado"), a)).toEqual([]);
+    expect(studiesFromBundle(studyWith("https://viewer.example/launch", "ihe-iid"), a)).toEqual([]);
+    expect(a.wadoBases!.size).toBe(0);
+  });
+  test("the token goes only under a designated base", async () => {
+    const a: PortalAuth = { ...auth, wadoBases: new Set(["https://pacs.example/wado/ctx"]) };
+    expect(() => wadoUrl(a, "https://pacs.example/wado/other/studies/1")).toThrow("another server");
+    expect(() => wadoUrl(a, "https://pacs.example/wado/ctxevil/studies/1")).toThrow("another server");
+    expect(() => wadoUrl(a, "https://evil.example/wado/ctx/studies/1")).toThrow("another server");
+    const calls = recorder(() => new Response("", { status: 404 }));
+    await expect(wadoRetrieveParts("https://evil.example/studies/1", a).next()).rejects.toThrow("another server");
+    expect(calls).toEqual([]);
   });
 });
 
